@@ -1,0 +1,216 @@
+"""Клиент веб-API chat.deepseek.com.
+
+Все эндпоинты, заголовки и форматы запросов взяты из main-бандла
+chat.deepseek.com (fe-static.deepseek.com/chat/static/main.4e922c397f.js).
+"""
+
+from __future__ import annotations
+
+import logging
+import uuid
+from dataclasses import dataclass, field
+from typing import Optional
+
+import httpx
+
+log = logging.getLogger("danyapi.deepseek")
+
+BASE_URL = "https://chat.deepseek.com"
+
+CLIENT_HEADERS = {
+    "x-client-bundle-id": "com.deepseek.chat",
+    "x-client-platform": "web",
+    "x-client-version": "2.3.0",
+    "x-client-locale": "en-US",
+    "x-client-timezone-offset": "0",
+}
+
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+)
+
+
+def new_device_id() -> str:
+    return str(uuid.uuid4())
+
+
+@dataclass
+class DeepSeekSession:
+    id: str
+    title: str = ""
+    last_message_id: Optional[str] = None
+    extra: dict = field(default_factory=dict)
+
+
+class DeepSeekError(Exception):
+    def __init__(self, biz_code: int, biz_msg: str):
+        super().__init__(f"DeepSeek biz error {biz_code}: {biz_msg}")
+        self.biz_code = biz_code
+        self.biz_msg = biz_msg
+
+
+class DeepSeekClient:
+    def __init__(
+        self,
+        token: Optional[str] = None,
+        device_id: Optional[str] = None,
+        timeout: float = 60.0,
+    ) -> None:
+        self.token = token
+        self.device_id = device_id or new_device_id()
+        headers = {
+            "User-Agent": USER_AGENT,
+            "Referer": "https://chat.deepseek.com/",
+            "Origin": "https://chat.deepseek.com",
+            "Accept": "*/*",
+            **CLIENT_HEADERS,
+        }
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        self.http = httpx.AsyncClient(
+            base_url=BASE_URL,
+            headers=headers,
+            timeout=httpx.Timeout(timeout),
+            follow_redirects=True,
+        )
+
+    async def aclose(self) -> None:
+        await self.http.aclose()
+
+    async def _post(self, path: str, json_body: Optional[dict] = None) -> dict:
+        resp = await self.http.post(path, json=json_body)
+        resp.raise_for_status()
+        return resp.json()
+
+    @staticmethod
+    def _biz(resp: dict) -> dict:
+        data = resp.get("data") or {}
+        if data.get("biz_code"):
+            raise DeepSeekError(data["biz_code"], data.get("biz_msg", ""))
+        return data.get("biz_data") or {}
+
+    # ------------------------------------------------------------------ auth
+
+    async def login(
+        self,
+        email: Optional[str] = None,
+        mobile: Optional[str] = None,
+        password: Optional[str] = None,
+        area_code: str = "",
+    ) -> str:
+        body = {
+            "email": email,
+            "mobile": mobile,
+            "password": password,
+            "area_code": area_code,
+            "device_id": self.device_id,
+            "os": "web",
+        }
+        resp = await self._post("/api/v0/users/login", body)
+        biz = self._biz(resp)
+        user = (biz or {}).get("user")
+        if not user or not user.get("token"):
+            raise DeepSeekError(
+                (resp.get("data") or {}).get("biz_code", -1), "login failed: no token"
+            )
+        self.token = user["token"]
+        self.http.headers["Authorization"] = f"Bearer {self.token}"
+        return self.token
+
+    async def get_user(self) -> dict:
+        resp = await self._post("/api/v0/users", None)
+        biz = self._biz(resp)
+        return biz or {}
+
+    # ------------------------------------------------------------------ chat
+
+    async def create_pow_challenge(
+        self, target_path: str = "/api/v0/chat/completion"
+    ) -> dict:
+        resp = await self._post(
+            "/api/v0/chat/create_pow_challenge", {"target_path": target_path}
+        )
+        biz = self._biz(resp)
+        challenge = biz.get("challenge")
+        if not challenge:
+            raise DeepSeekError(-1, "no pow challenge in response")
+        return challenge
+
+    async def create_session(self) -> DeepSeekSession:
+        resp = await self._post("/api/v0/chat_session/create", {})
+        biz = self._biz(resp)
+        raw = biz["chat_session"]
+        return DeepSeekSession(id=raw["id"], title=raw.get("title") or "")
+
+    async def fetch_page(self, pinned: bool = False, count: int = 20) -> list[dict]:
+        body = {"pinned": pinned, "count": count, "mode": "lte"}
+        resp = await self._post("/api/v0/chat_session/fetch_page", body)
+        biz = self._biz(resp)
+        return (biz or {}).get("chat_sessions", []) or []
+
+    async def history_messages(self, chat_session_id: str) -> list[dict]:
+        resp = await self.http.get(
+            "/api/v0/chat/history_messages",
+            params={"chat_session_id": chat_session_id},
+        )
+        resp.raise_for_status()
+        biz = self._biz(resp.json())
+        return (biz or {}).get("chat_messages", [])
+
+    async def rename_session(self, chat_session_id: str, title: str) -> None:
+        await self._post(
+            "/api/v0/chat_session/update_title",
+            {
+                "chat_session_id": chat_session_id,
+                "title": title,
+            },
+        )
+
+    async def delete_session(self, chat_session_id: str) -> None:
+        await self._post(
+            "/api/v0/chat_session/delete", {"chat_session_id": chat_session_id}
+        )
+
+    # ------------------------------------------------------------ completion
+
+    async def completion(
+        self,
+        chat_session_id: str,
+        prompt: str,
+        parent_message_id: Optional[str],
+        model_type: str = "default",
+        thinking_enabled: bool = False,
+        search_enabled: bool = False,
+        ref_file_ids: Optional[list[str]] = None,
+        pow_headers: Optional[dict] = None,
+    ) -> httpx.Response:
+        body = {
+            "chat_session_id": chat_session_id,
+            "parent_message_id": parent_message_id,
+            "model_type": model_type,
+            "prompt": prompt,
+            "ref_file_ids": ref_file_ids or [],
+            "thinking_enabled": thinking_enabled,
+            "search_enabled": search_enabled,
+            "action": None,
+            "preempt": False,
+        }
+        headers = {"Accept": "text/event-stream"}
+        if pow_headers:
+            headers.update(pow_headers)
+        req = self.http.build_request(
+            "POST", "/api/v0/chat/completion", json=body, headers=headers
+        )
+        return await self.http.send(req, stream=True)
+
+    async def stop_stream(
+        self, chat_session_id: str, message_id: Optional[str]
+    ) -> None:
+        await self._post(
+            "/api/v0/chat/stop_stream",
+            {
+                "chat_session_id": chat_session_id,
+                "message_id": message_id,
+            },
+        )

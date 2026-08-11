@@ -1,0 +1,17 @@
+# Secrets / локальная конфигурация
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.ruff_cache/
+.pytest_cache/
+
+# Сборка нативного PoW-солвера (компилируется из pow_solver.c при необходимости)
+*.exe
+
+# Локальные артефакты
+.playwright-mcp/
