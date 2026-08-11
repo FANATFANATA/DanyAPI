@@ -22,7 +22,7 @@ log = logging.getLogger("danyapi.accounts")
 
 
 class DeepSeekAccount:
-    __slots__ = ("index", "client", "pow", "sem", "sessions")
+    __slots__ = ("index", "client", "pow", "sem", "sessions", "broken")
 
     def __init__(self, index: int, client: DeepSeekClient) -> None:
         self.index = index
@@ -30,6 +30,12 @@ class DeepSeekAccount:
         self.pow = PowManager()
         self.sem = asyncio.Semaphore(1)
         self.sessions = SessionRegistry(client)
+        self.broken = False
+
+    def mark_broken(self) -> None:
+        if not self.broken:
+            self.broken = True
+            log.warning("account #%d marked broken (invalid/expired token)", self.index)
 
     @property
     def label(self) -> str:
@@ -42,6 +48,10 @@ class AccountPool:
         self._by_session: dict[str, int] = {}
         self._rr = 0
 
+    @property
+    def healthy(self) -> list[DeepSeekAccount]:
+        return [a for a in self.accounts if not a.broken]
+
     def register(self, account_index: int, session_id: str) -> None:
         self._by_session[session_id] = account_index
 
@@ -50,7 +60,7 @@ class AccountPool:
         if idx is None:
             return None
         acct = self.accounts[idx]
-        return acct if acct is not None else None
+        return acct if acct is not None and not acct.broken else None
 
     async def acquire(
         self, session_id: Optional[str]
@@ -60,19 +70,20 @@ class AccountPool:
         Сем семафора НЕ захватывается - вызывающий берёт `async with acct.sem`
         вокруг всей генерации.
         """
-        if not self.accounts:
-            raise RuntimeError("no deepseek accounts configured")
+        healthy = self.healthy
+        if not healthy:
+            raise RuntimeError("all deepseek accounts are unavailable")
         if session_id:
             acct = self.account_for_session(session_id)
             if acct is not None:
                 return acct, session_id
-        n = len(self.accounts)
+        n = len(healthy)
         start = self._rr % n
         for i in range(n):
             idx = (start + i) % n
-            acct = self.accounts[idx]
+            acct = healthy[idx]
             if not acct.sem.locked():
                 self._rr = (idx + 1) % n
                 return acct, None
-        acct = self.accounts[start]
+        acct = healthy[start]
         return acct, None

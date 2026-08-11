@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field
 
 from ..accounts import AccountPool, DeepSeekAccount
 from ..config import settings
-from ..deepseek.client import DeepSeekClient
+from ..deepseek.client import DeepSeekClient, DeepSeekError
 from ..deepseek.stream import IncrementalSSE, MessageReconstructor
 
 log = logging.getLogger("danyapi.api")
@@ -68,8 +68,12 @@ async def lifespan(app: FastAPI):
         if settings.deepseek_tokens:
             for i, token in enumerate(settings.deepseek_tokens):
                 client = DeepSeekClient(token=token, timeout=settings.timeout)
-                accounts.append(DeepSeekAccount(i, client))
-            log.info("deepseek accounts from tokens: %d", len(accounts))
+                if not await client.check_auth():
+                    log.warning("token #%d invalid/expired, skipping", i)
+                    await client.aclose()
+                    continue
+                accounts.append(DeepSeekAccount(len(accounts), client))
+            log.info("deepseek accounts ready: %d", len(accounts))
         elif settings.deepseek_email:
             client = DeepSeekClient(timeout=settings.timeout)
             await client.login(
@@ -80,7 +84,7 @@ async def lifespan(app: FastAPI):
             log.info("deepseek login ok, device_id=%s", client.device_id)
         if not accounts:
             raise RuntimeError(
-                "no DeepSeek credentials: set DEEPSEEK_TOKENS or DEEPSEEK_EMAIL/DEEPSEEK_PASSWORD"
+                "no valid DeepSeek credentials: set DEEPSEEK_TOKENS or DEEPSEEK_EMAIL/DEEPSEEK_PASSWORD"
             )
         app.state.pool = AccountPool(accounts)
         yield
@@ -171,7 +175,11 @@ async def chat_completions(req: ChatCompletionRequest) -> Any:
     prompt = _extract_prompt(req.messages)
 
     account, existing_sid = await pool.acquire(req.session_id)
-    session, session_key = await account.sessions.obtain(existing_sid)
+    try:
+        session, session_key = await account.sessions.obtain(existing_sid)
+    except DeepSeekError as exc:
+        _handle_account_error(account, exc)
+        raise HTTPException(401, f"DeepSeek auth error: {exc}") from exc
     if existing_sid is None:
         pool.register(account.index, session_key)
     parent_message_id = session.last_message_id
@@ -252,8 +260,22 @@ def _is_retryable_hint(rec: MessageReconstructor) -> bool:
     return bool(hint and hint.get("finish_reason") in RETRYABLE_FINISH_REASONS)
 
 
+def _handle_account_error(account: DeepSeekAccount, exc: Exception) -> None:
+    """Помечает аккаунт битым при ошибке авторизации и логирует остальные."""
+    code = getattr(exc, "biz_code", None)
+    if code in (40001, 40002, 40003, 40012, 40029):
+        account.mark_broken()
+        log.warning("account #%d auth error %s: %s", account.index, code, exc)
+    else:
+        log.warning("account #%d error: %s", account.index, exc)
+
+
 async def _fresh_pow_headers(account) -> dict:
-    return await account.pow.make_header(account.client.create_pow_challenge)
+    try:
+        return await account.pow.make_header(account.client.create_pow_challenge)
+    except DeepSeekError as exc:
+        _handle_account_error(account, exc)
+        raise HTTPException(401, f"DeepSeek auth error: {exc}") from exc
 
 
 async def _collect_non_stream(
@@ -305,7 +327,7 @@ async def _collect_non_stream(
             ):
                 log.warning(
                     "retryable hint (%s), attempt %d/%d",
-                    rec.hint_error.get("finish_reason"),
+                    (rec.hint_error or {}).get("finish_reason"),
                     attempt + 1,
                     MAX_RETRIES,
                 )
@@ -323,7 +345,7 @@ async def _collect_non_stream(
                     "error": {
                         "message": rec.hint_error.get("message")
                         or "DeepSeek server is busy, try again later",
-                        "finish_reason": rec.hint_error.get("finish_reason"),
+                        "finish_reason": (rec.hint_error or {}).get("finish_reason"),
                     }
                 },
                 ensure_ascii=False,
@@ -454,7 +476,7 @@ async def _stream_openai(
             if _is_retryable_hint(rec) and attempt < MAX_RETRIES:
                 log.warning(
                     "retryable hint (%s), attempt %d/%d",
-                    rec.hint_error.get("finish_reason"),
+                    (rec.hint_error or {}).get("finish_reason"),
                     attempt + 1,
                     MAX_RETRIES,
                 )

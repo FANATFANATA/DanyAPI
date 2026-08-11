@@ -85,10 +85,24 @@ class DeepSeekClient:
 
     @staticmethod
     def _biz(resp: dict) -> dict:
+        code = resp.get("code")
+        if code:
+            raise DeepSeekError(code, resp.get("msg") or resp.get("message") or "")
         data = resp.get("data") or {}
         if data.get("biz_code"):
             raise DeepSeekError(data["biz_code"], data.get("biz_msg", ""))
         return data.get("biz_data") or {}
+
+    async def check_auth(self) -> bool:
+        """Проверяет валидность токена через settings-эндпоинт."""
+        try:
+            resp = await self.http.get(
+                "/api/v0/client/settings",
+                params={"did": self.device_id, "scope": "main"},
+            )
+            return resp.json().get("code") == 0
+        except Exception:
+            return False
 
     # ------------------------------------------------------------------ auth
 
