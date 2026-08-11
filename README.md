@@ -43,35 +43,7 @@ export DEEPSEEK_EMAIL="you@example.com"
 export DEEPSEEK_PASSWORD="secret"
 ```
 
-## Деплой
-
-### Hugging Face Spaces (бесплатно)
-
-1. Заведи аккаунт на huggingface.co и создай **новый Space**:
-   SDK выбери **Docker**, Hardware — любой, например "CPU basic / Free".
-2. В настройках Space (Settings -> Variables and secrets) добавь секрет:
-   `DEEPSEEK_TOKENS` = токены через запятую (без коммита в репозиторий).
-3. Запушь код в Space (Space — это git-репозиторий):
-
-```bash
-git clone https://huggingface.co/spaces/<user>/<space-name>
-cp -r danyapi Dockerfile requirements.txt .dockerignore <space>/
-cd <space> && git add -A && git commit -m "DanyAPI" && git push
-```
-
-4. Образ соберётся автоматически и поднимет сервер на порту 7860.
-   API будет доступен по адресу `https://<user>-<space-name>.hf.space`.
-
-### VPS / Docker
-
-```bash
-docker build -t danyapi .
-docker run -d -p 8000:7860 \
-  -e DEEPSEEK_TOKENS="token1,token2" \
-  danyapi
-```
-
-## Запуск локально
+## Запуск
 
 Файл `.env` (в гитигноре, создаётся из `.env.example`) подхватывается
 автоматически при старте:
@@ -82,23 +54,6 @@ python -m danyapi
 # или
 uvicorn danyapi.api.openai:app --host 0.0.0.0 --port 8000
 ```
-
-## Деплой на Android-сервере (Termux)
-
-Для домашнего сервера на телефоне (Termux):
-
-```bash
-cd deploy
-bash termux_setup.sh      # установка: python, clang, зависимости, сборка PoW-солвера
-nano ~/DanyAPI/.env       # вписать DEEPSEEK_TOKENS
-bash termux_service.sh    # автозапуск (termux-services) + cloudflared-туннель
-```
-
-После этого API доступен локально на `http://<ip-телефона>:8000`, а наружу
-открывается публичным https-адресом от cloudflared (печатается при запуске).
-
-
-
 
 ## Использование
 
