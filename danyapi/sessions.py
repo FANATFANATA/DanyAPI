@@ -23,7 +23,7 @@ class SessionRegistry:
             return self._sessions.get(session_id)
 
     async def obtain(self, session_id: Optional[str]) -> tuple[DeepSeekSession, str]:
-        """Возвращает (сессию, её id). Если session_id не задан — создаёт новую."""
+        """Возвращает (сессию, её id). Если session_id не задан - создаёт новую."""
         existing = self.get(session_id)
         if existing is not None:
             return existing, session_id  # type: ignore[return-value]

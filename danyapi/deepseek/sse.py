@@ -21,7 +21,7 @@ def parse_sse(data: str) -> list[SSEEvent]:
     """Разбирает сырой буфер SSE в список событий.
 
     События разделяются пустой строкой; поля `event:` и `data:`.
-    Если имя события отсутствует, но есть data — это delta-событие.
+    Если имя события отсутствует, но есть data - это delta-событие.
     """
     events: list[SSEEvent] = []
     event_name: Optional[str] = None

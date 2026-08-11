@@ -1,4 +1,4 @@
-"""DeepSeekHashV1 — proof-of-work hash chat.deepseek.com (полностью реверснут из sha3_wasm_bg.7b9ca65ddd.wasm).
+"""DeepSeekHashV1 - proof-of-work hash chat.deepseek.com (полностью реверснут из sha3_wasm_bg.7b9ca65ddd.wasm).
 
 Отличия от стандартного SHA3-256:
   * rate = 136 байт, capacity = 64 байта (как у SHA3-256);

@@ -90,7 +90,7 @@ class TestReconstruction(unittest.TestCase):
             )
         )
         self.assertEqual(rec.response_message_id, 2)
-        # первая дельта — без o/p: root-init сообщения
+        # первая дельта - без o/p: root-init сообщения
         rec.handle(
             SSEEvent(
                 None,
@@ -116,10 +116,10 @@ class TestReconstruction(unittest.TestCase):
                 None, {"p": "response/fragments/-1/content", "o": "APPEND", "v": "рави"}
             )
         )
-        # следующие дельты без o/p — наследуют APPEND и путь
-        for token in ("тация", " —", " это"):
+        # следующие дельты без o/p - наследуют APPEND и путь
+        for token in ("тация", " -", " это"):
             rec.handle(SSEEvent(None, {"v": token}))
-        self.assertEqual(rec.content, "Гравитация — это")
+        self.assertEqual(rec.content, "Гравитация - это")
         # BATCH с относительными путями
         rec.handle(
             SSEEvent(

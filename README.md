@@ -3,12 +3,12 @@
 OpenAI-совместимый HTTP API на Python + FastAPI, который вместо платного
 DeepSeek API ходит во внутренний API бесплатного веб-клиента
 [chat.deepseek.com](https://chat.deepseek.com) под одним серверным аккаунтом.
-Пользователям API не нужны ключи — все запросы выполняет серверный аккаунт.
+Пользователям API не нужны ключи - все запросы выполняет серверный аккаунт.
 
 ## Возможности
 
-- `GET /v1/models` — список моделей
-- `POST /v1/chat/completions` — генерация (stream и non-stream)
+- `GET /v1/models` - список моделей
+- `POST /v1/chat/completions` - генерация (stream и non-stream)
 - Модели: `deepseek-chat`, `deepseek-reasoner`, `deepseek-vision`
   (внутренние `model_type`: `default`, `expert`, `vision`)
 - Thinking (рассуждения R1) и web-поиск
@@ -93,9 +93,9 @@ python -m unittest tests.test_pow tests.test_stream -v
 - Генерация: `POST /api/v0/chat/completion`:
   `{chat_session_id, parent_message_id, model_type, prompt, ref_file_ids,
   thinking_enabled, search_enabled, action, preempt}`.
-- Ответ — `text/event-stream`: события `ready`, дельты
+- Ответ - `text/event-stream`: события `ready`, дельты
   (`SET`/`APPEND`/`BATCH`, пути `response/...`), `finish`, `close`.
-- PoW-заголовок `X-DS-PoW-Response` — base64 от
+- PoW-заголовок `X-DS-PoW-Response` - base64 от
   `{algorithm, challenge, salt, answer, signature, target_path}`.
   Чаллендж одноразовый: `answer` = минимальный counter c, при котором
   `DeepSeekHashV1(f"{salt}_{expire_at}_" + str(c))` совпадает с `challenge`
@@ -117,13 +117,13 @@ clang -O2 -o danyapi/deepseek/pow_solver.exe danyapi/deepseek/pow_solver.c
 - Один аккаунт chat.deepseek.com может генерировать **одно сообщение
   одновременно** (иначе сервер отвечает `parallel_chat_limit`). DanyAPI
   держит **пул аккаунтов** и распределяет конкурентные запросы между ними;
-  если все заняты — запросы ждут в очереди. Больше токенов = больше
+  если все заняты - запросы ждут в очереди. Больше токенов = больше
   параллельных генераций.
 - Сессии привязаны к аккаунту, на котором созданы: повторные запросы с тем же
   `session_id` маршрутизируются на тот же аккаунт (история диалога хранится
   серверно на аккаунте).
 - DeepSeek может временно троттлить аккаунты (особенно экспертную модель
-  `deepseek-reasoner` — "limited resource"). При интенсивной нагрузке
+  `deepseek-reasoner` - "limited resource"). При интенсивной нагрузке
   возможны пустые ответы; для продакшена добавьте retry на стороне клиента.
-- Чаллендж PoW одноразовый — на каждый запрос решается новый (префетчится
+- Чаллендж PoW одноразовый - на каждый запрос решается новый (префетчится
   следующий заранее, чтобы не ждать).

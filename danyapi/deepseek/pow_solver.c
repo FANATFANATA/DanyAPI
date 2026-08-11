@@ -1,5 +1,5 @@
 /*
- * pow_solver.c — нативный солвер DeepSeekHashV1 (chat.deepseek.com).
+ * pow_solver.c - нативный солвер DeepSeekHashV1 (chat.deepseek.com).
  *
  * Вход (stdin, JSON): {"challenge":"<64-hex>","salt":"<hex>","expire_at":<ms>,"difficulty":<int>}
  * Выход (stdout, JSON): {"answer":<int>} | {"error":"..."}

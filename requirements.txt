@@ -1,4 +1,4 @@
-# DanyAPI — OpenAI-compatible API поверх бесплатного веб-клиента chat.deepseek.com
+# DanyAPI - OpenAI-compatible API поверх бесплатного веб-клиента chat.deepseek.com
 fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
 httpx>=0.27.0
