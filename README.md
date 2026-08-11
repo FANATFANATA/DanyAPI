@@ -83,6 +83,21 @@ python -m danyapi
 uvicorn danyapi.api.openai:app --host 0.0.0.0 --port 8000
 ```
 
+## Деплой на Android-сервере (Termux)
+
+Для домашнего сервера на телефоне (Termux):
+
+```bash
+cd deploy
+bash termux_setup.sh      # установка: python, clang, зависимости, сборка PoW-солвера
+nano ~/DanyAPI/.env       # вписать DEEPSEEK_TOKENS
+bash termux_service.sh    # автозапуск (termux-services) + cloudflared-туннель
+```
+
+После этого API доступен локально на `http://<ip-телефона>:8000`, а наружу
+открывается публичным https-адресом от cloudflared (печатается при запуске).
+
+
 
 
 ## Использование

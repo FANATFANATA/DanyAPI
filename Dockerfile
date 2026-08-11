@@ -18,8 +18,8 @@ COPY danyapi ./danyapi
 RUN cc -O2 -o danyapi/deepseek/pow_solver danyapi/deepseek/pow_solver.c
 
 ENV DANYAPI_HOST=0.0.0.0
-ENV DANYAPI_PORT=7860
 
 EXPOSE 7860
 
-CMD ["python", "-m", "uvicorn", "danyapi.api.openai:app", "--host", "0.0.0.0", "--port", "7860"]
+# Порт берётся из $PORT (Fly/Cloud), по умолчанию 7860 (HF Spaces)
+CMD ["sh", "-c", "python -m uvicorn danyapi.api.openai:app --host 0.0.0.0 --port ${PORT:-7860}"]
