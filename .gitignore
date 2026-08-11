@@ -1,4 +1,4 @@
-# Secrets / локальная конфигурация
+# Secrets / local config
 .env
 
 # Python
@@ -10,8 +10,8 @@ venv/
 .ruff_cache/
 .pytest_cache/
 
-# Сборка нативного PoW-солвера (компилируется из pow_solver.c при необходимости)
+# Native PoW solver build artifact (compiled from pow_solver.c when needed)
 *.exe
 
-# Локальные артефакты
+# Local artifacts
 .playwright-mcp/
