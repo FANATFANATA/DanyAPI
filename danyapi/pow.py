@@ -132,8 +132,15 @@ def deepseek_hash_v1_hex(data: bytes) -> str:
 # --------------------------------------------------------------------------
 
 _SOLVER_DIR = Path(__file__).resolve().parent / "deepseek"
-_NATIVE_SOLVER = _SOLVER_DIR / "pow_solver.exe"
 _NODE_SOLVER = _SOLVER_DIR / "pow_solver.js"
+
+
+def _find_native_solver() -> Optional[Path]:
+    for name in ("pow_solver.exe", "pow_solver"):
+        p = _SOLVER_DIR / name
+        if p.exists():
+            return p
+    return None
 
 
 def solve_python(
@@ -158,7 +165,10 @@ def _run_solver(
         "expire_at": expire_at,
         "difficulty": int(difficulty),
     }
-    cmd = [str(script)] if script.suffix == ".exe" else ["node", str(script)]
+    if script.suffix == ".js":
+        cmd = ["node", str(script)]
+    else:
+        cmd = [str(script)]
     proc = subprocess.run(
         cmd,
         input=json.dumps(payload),
@@ -177,10 +187,11 @@ def _run_solver(
 def solve_native(
     challenge_hex: str, salt: str, expire_at: int, difficulty: int
 ) -> Optional[int]:
-    """Быстрый солвер через скомпилированный C-экзешник."""
-    if not _NATIVE_SOLVER.exists():
-        raise FileNotFoundError("pow_solver.exe not built")
-    return _run_solver(_NATIVE_SOLVER, challenge_hex, salt, expire_at, difficulty)
+    """Быстрый солвер через скомпилированный C-бинарник."""
+    native = _find_native_solver()
+    if native is None:
+        raise FileNotFoundError("native pow_solver binary not built")
+    return _run_solver(native, challenge_hex, salt, expire_at, difficulty)
 
 
 def solve_node(
