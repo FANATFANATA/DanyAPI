@@ -11,12 +11,9 @@ API users need no keys - all requests are made by the server account.
 - `POST /v1/chat/completions` - generation (stream and non-stream)
 - Models: `deepseek-chat`, `deepseek-reasoner`, `deepseek-vision`
   (internal `model_type`: `default`, `expert`, `vision`)
-- Thinking (R1 reasoning) and web search
+- Thinking and web search
 - Multi-session: the message chain is stored server-side
   (`session_id` in the response), like the web client
-- Built-in reverse-engineered PoW hash **DeepSeekHashV1** (23-round Keccak
-  with rate 136 and shifted round constants) + a fast native C solver
-  (`danyapi/deepseek/pow_solver.c`, compiles with clang)
 
 ## Install
 
