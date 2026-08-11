@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -149,6 +150,17 @@ async def list_models() -> dict:
     return {"object": "list", "data": models}
 
 
+# finish_reason из hint-ошибок DeepSeek, которые стоит ретраить
+RETRYABLE_FINISH_REASONS = {
+    "expert_busy_use_default",
+    "parallel_chat_limit",
+    "server_busy",
+    "busy",
+}
+MAX_RETRIES = 3
+RETRY_BACKOFF_SEC = 1.0
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions(req: ChatCompletionRequest) -> Any:
     pool: AccountPool = app.state.pool
@@ -164,11 +176,8 @@ async def chat_completions(req: ChatCompletionRequest) -> Any:
         pool.register(account.index, session_key)
     parent_message_id = session.last_message_id
 
-    pow_headers = await account.pow.make_header(account.client.create_pow_challenge)
-
     common = dict(
         account=account,
-        pow_headers=pow_headers,
         session_id=session.id,
         session_key=session_key,
         parent_message_id=parent_message_id,
@@ -238,11 +247,19 @@ async def _send_completion(
     return resp
 
 
+def _is_retryable_hint(rec: MessageReconstructor) -> bool:
+    hint = rec.hint_error
+    return bool(hint and hint.get("finish_reason") in RETRYABLE_FINISH_REASONS)
+
+
+async def _fresh_pow_headers(account) -> dict:
+    return await account.pow.make_header(account.client.create_pow_challenge)
+
+
 async def _collect_non_stream(
     account,
     session_key,
     lock,
-    pow_headers,
     session_id,
     parent_message_id,
     prompt,
@@ -252,37 +269,70 @@ async def _collect_non_stream(
     search,
 ):
     async with lock:
-        resp = await _send_completion(
-            account.client,
-            pow_headers,
-            session_id,
-            parent_message_id,
-            prompt,
-            model_type,
-            thinking,
-            search,
-        )
-        try:
-            reconstructor = MessageReconstructor()
+        rec: Optional[MessageReconstructor] = None
+        response_message_id = None
+        for attempt in range(MAX_RETRIES + 1):
+            if attempt:
+                await asyncio.sleep(RETRY_BACKOFF_SEC * (2 ** (attempt - 1)))
+            pow_headers = await _fresh_pow_headers(account)
+            resp = await _send_completion(
+                account.client,
+                pow_headers,
+                session_id,
+                parent_message_id,
+                prompt,
+                model_type,
+                thinking,
+                search,
+            )
+            rec = MessageReconstructor()
             incremental = IncrementalSSE()
             response_message_id = None
-            async for chunk in resp.aiter_bytes():
-                for event in incremental.feed(chunk):
-                    if event.event == "ready" and isinstance(event.data, dict):
-                        response_message_id = event.data.get("response_message_id")
-                    reconstructor.handle(event)
-            for event in incremental.finish():
-                reconstructor.handle(event)
-        finally:
-            await resp.aclose()
+            try:
+                async for chunk in resp.aiter_bytes():
+                    for event in incremental.feed(chunk):
+                        if event.event == "ready" and isinstance(event.data, dict):
+                            response_message_id = event.data.get("response_message_id")
+                        rec.handle(event)
+                for event in incremental.finish():
+                    rec.handle(event)
+            finally:
+                await resp.aclose()
+            if (
+                not (rec.content or rec.reasoning)
+                and _is_retryable_hint(rec)
+                and attempt < MAX_RETRIES
+            ):
+                log.warning(
+                    "retryable hint (%s), attempt %d/%d",
+                    rec.hint_error.get("finish_reason"),
+                    attempt + 1,
+                    MAX_RETRIES,
+                )
+                continue
+            break
 
-    account.sessions.touch_last_message(
-        session_key, reconstructor.id or response_message_id
-    )
+    assert rec is not None
+    account.sessions.touch_last_message(session_key, rec.id or response_message_id)
 
-    content = reconstructor.content
-    reasoning = reconstructor.reasoning
-    finish = _finish_reason(reconstructor.status)
+    if not (rec.content or rec.reasoning) and rec.hint_error:
+        raise HTTPException(
+            429,
+            json.dumps(
+                {
+                    "error": {
+                        "message": rec.hint_error.get("message")
+                        or "DeepSeek server is busy, try again later",
+                        "finish_reason": rec.hint_error.get("finish_reason"),
+                    }
+                },
+                ensure_ascii=False,
+            ),
+        )
+
+    content = rec.content
+    reasoning = rec.reasoning
+    finish = _finish_reason(rec.status)
     message = {"role": "assistant", "content": content}
     if reasoning:
         message["reasoning_content"] = reasoning
@@ -307,7 +357,6 @@ async def _stream_openai(
     account,
     session_key,
     lock,
-    pow_headers,
     session_id,
     parent_message_id,
     prompt,
@@ -323,90 +372,131 @@ async def _stream_openai(
         return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
     async with lock:
-        resp = await _send_completion(
-            account.client,
-            pow_headers,
-            session_id,
-            parent_message_id,
-            prompt,
-            model_type,
-            thinking,
-            search,
-        )
-        reconstructor = MessageReconstructor()
-        incremental = IncrementalSSE()
+        rec: Optional[MessageReconstructor] = None
         response_message_id = None
-        sent_role = False
-        try:
-            async for chunk in resp.aiter_bytes():
-                for event in incremental.feed(chunk):
-                    if event.event == "ready" and isinstance(event.data, dict):
-                        response_message_id = event.data.get("response_message_id")
-                    if event.event in ("toast", "hint"):
-                        continue
-                    reconstructor.handle(event)
-                    if not sent_role:
-                        yield sse(
-                            {
-                                "id": chunk_id,
-                                "object": "chat.completion.chunk",
-                                "created": created,
-                                "model": model,
-                                "choices": [
-                                    {
-                                        "index": 0,
-                                        "delta": {"role": "assistant"},
-                                        "finish_reason": None,
-                                    }
-                                ],
-                            }
-                        )
-                        sent_role = True
-                    c_diff, r_diff = reconstructor.take_diffs()
-                    delta: dict = {}
-                    if c_diff:
-                        delta["content"] = c_diff
-                    if r_diff:
-                        delta["reasoning_content"] = r_diff
-                    if delta:
-                        yield sse(
-                            {
-                                "id": chunk_id,
-                                "object": "chat.completion.chunk",
-                                "created": created,
-                                "model": model,
-                                "choices": [
-                                    {"index": 0, "delta": delta, "finish_reason": None}
-                                ],
-                            }
-                        )
-            for event in incremental.finish():
-                reconstructor.handle(event)
-                c_diff, r_diff = reconstructor.take_diffs()
-                delta: dict = {}
-                if c_diff:
-                    delta["content"] = c_diff
-                if r_diff:
-                    delta["reasoning_content"] = r_diff
-                if delta:
-                    yield sse(
-                        {
-                            "id": chunk_id,
-                            "object": "chat.completion.chunk",
-                            "created": created,
-                            "model": model,
-                            "choices": [
-                                {"index": 0, "delta": delta, "finish_reason": None}
-                            ],
-                        }
-                    )
-        finally:
-            await resp.aclose()
-            account.sessions.touch_last_message(
-                session_key, reconstructor.id or response_message_id
+        for attempt in range(MAX_RETRIES + 1):
+            if attempt:
+                await asyncio.sleep(RETRY_BACKOFF_SEC * (2 ** (attempt - 1)))
+            pow_headers = await _fresh_pow_headers(account)
+            resp = await _send_completion(
+                account.client,
+                pow_headers,
+                session_id,
+                parent_message_id,
+                prompt,
+                model_type,
+                thinking,
+                search,
             )
+            rec = MessageReconstructor()
+            incremental = IncrementalSSE()
+            response_message_id = None
+            got_content = False
+            pending: list[str] = []
+            try:
+                async for chunk in resp.aiter_bytes():
+                    for event in incremental.feed(chunk):
+                        if event.event == "ready" and isinstance(event.data, dict):
+                            response_message_id = event.data.get("response_message_id")
+                        rec.handle(event)
+                        c_diff, r_diff = rec.take_diffs()
+                        if c_diff or r_diff:
+                            got_content = True
+                        if not pending:
+                            pending.append(
+                                sse(
+                                    {
+                                        "id": chunk_id,
+                                        "object": "chat.completion.chunk",
+                                        "created": created,
+                                        "model": model,
+                                        "choices": [
+                                            {
+                                                "index": 0,
+                                                "delta": {"role": "assistant"},
+                                                "finish_reason": None,
+                                            }
+                                        ],
+                                    }
+                                )
+                            )
+                        delta: dict = {}
+                        if c_diff:
+                            delta["content"] = c_diff
+                        if r_diff:
+                            delta["reasoning_content"] = r_diff
+                        if delta:
+                            pending.append(
+                                sse(
+                                    {
+                                        "id": chunk_id,
+                                        "object": "chat.completion.chunk",
+                                        "created": created,
+                                        "model": model,
+                                        "choices": [
+                                            {
+                                                "index": 0,
+                                                "delta": delta,
+                                                "finish_reason": None,
+                                            }
+                                        ],
+                                    }
+                                )
+                            )
+                        if got_content:
+                            for line in pending:
+                                yield line
+                            pending.clear()
+            finally:
+                await resp.aclose()
+            if got_content:
+                break
+            if _is_retryable_hint(rec) and attempt < MAX_RETRIES:
+                log.warning(
+                    "retryable hint (%s), attempt %d/%d",
+                    rec.hint_error.get("finish_reason"),
+                    attempt + 1,
+                    MAX_RETRIES,
+                )
+                continue
+            break
 
-    finish = _finish_reason(reconstructor.status)
+    assert rec is not None
+    if not (rec.content or rec.reasoning) and rec.hint_error:
+        hint = rec.hint_error
+        yield sse(
+            {
+                "id": chunk_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "error": {
+                    "message": hint.get("message")
+                    or "DeepSeek server is busy, try again later",
+                    "finish_reason": hint.get("finish_reason"),
+                },
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": hint.get("finish_reason") or "error",
+                    }
+                ],
+            }
+        )
+        yield sse(
+            {
+                "id": chunk_id,
+                "session_id": session_key,
+                "object": "chat.completion.chunk",
+                "choices": [],
+            }
+        )
+        yield "data: [DONE]\n\n"
+        return
+
+    account.sessions.touch_last_message(session_key, rec.id or response_message_id)
+    finish = _finish_reason(rec.status)
     yield sse(
         {
             "id": chunk_id,

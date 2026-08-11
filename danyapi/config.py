@@ -1,8 +1,16 @@
-"""Конфигурация DanyAPI (env-переменные)."""
+"""Конфигурация DanyAPI (env-переменные + автозагрузка .env)."""
 
 from __future__ import annotations
 
 import os
+from pathlib import Path
+
+try:
+    from dotenv import load_dotenv
+except ImportError:  # pragma: no cover
+    load_dotenv = lambda *a, **k: False  # type: ignore[assignment]
+
+load_dotenv(dotenv_path=Path(__file__).resolve().parents[1] / ".env", override=False)
 
 
 class Settings:
@@ -23,7 +31,6 @@ class Settings:
         # Либо одна учётка email+пароль (логин при старте).
         self.deepseek_email = os.environ.get("DEEPSEEK_EMAIL", "")
         self.deepseek_password = os.environ.get("DEEPSEEK_PASSWORD", "")
-        self.deepseek_device_id = os.environ.get("DEEPSEEK_DEVICE_ID", "")
         # Таймауты
         self.timeout = float(os.environ.get("DANYAPI_TIMEOUT", "60"))
 

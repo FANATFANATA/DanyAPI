@@ -178,11 +178,19 @@ class MessageReconstructor:
         self._prev_content = ""
         self._prev_reasoning = ""
         self.response_message_id: Optional[str] = None
+        self.hint_error: Optional[dict] = None
 
     def handle(self, event: SSEEvent) -> None:
         if event.event == "ready":
             if isinstance(event.data, dict):
                 self.response_message_id = event.data.get("response_message_id")
+            return
+        if event.event in ("toast", "hint"):
+            if isinstance(event.data, dict) and event.data.get("type") == "error":
+                self.hint_error = {
+                    "message": event.data.get("content", ""),
+                    "finish_reason": event.data.get("finish_reason"),
+                }
             return
         if event.event not in (None, "delta"):
             return

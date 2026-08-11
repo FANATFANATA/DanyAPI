@@ -144,14 +144,25 @@ class TestReconstruction(unittest.TestCase):
         """Экспертный режим: после THINK-фрагмента добавляется RESPONSE-фрагмент
         через APPEND к массиву fragments."""
         rec = MessageReconstructor()
-        rec.handle(SSEEvent(None, {"v": {"response": {
-            "message_id": 2,
-            "parent_id": 1,
-            "status": "WIP",
-            "fragments": [{"id": 2, "type": "THINK", "content": "Мы"}],
-        }}}))
         rec.handle(
-            SSEEvent(None, {"p": "response/fragments/-1/elapsed_secs", "o": "SET", "v": 3.5})
+            SSEEvent(
+                None,
+                {
+                    "v": {
+                        "response": {
+                            "message_id": 2,
+                            "parent_id": 1,
+                            "status": "WIP",
+                            "fragments": [{"id": 2, "type": "THINK", "content": "Мы"}],
+                        }
+                    }
+                },
+            )
+        )
+        rec.handle(
+            SSEEvent(
+                None, {"p": "response/fragments/-1/elapsed_secs", "o": "SET", "v": 3.5}
+            )
         )
         rec.handle(
             SSEEvent(
@@ -169,6 +180,42 @@ class TestReconstruction(unittest.TestCase):
             rec.handle(SSEEvent(None, {"v": token}))
         self.assertEqual(rec.reasoning, "Мы")
         self.assertEqual(rec.content, "Если взять четыре")
+
+    def test_hint_error_capture(self):
+        """Hint-ошибки (expert_busy_use_default и т.п.) захватываются реконструктором."""
+        rec = MessageReconstructor()
+        rec.handle(
+            SSEEvent(
+                "ready",
+                {
+                    "request_message_id": 1,
+                    "response_message_id": 2,
+                    "model_type": "expert",
+                },
+            )
+        )
+        rec.handle(
+            SSEEvent(
+                "hint",
+                {
+                    "type": "error",
+                    "content": "Server is busy. Try again later, or use Instant Mode.",
+                    "clear_response": True,
+                    "finish_reason": "expert_busy_use_default",
+                },
+            )
+        )
+        self.assertIsNotNone(rec.hint_error)
+        hint = rec.hint_error
+        assert hint is not None
+        self.assertEqual(hint["finish_reason"], "expert_busy_use_default")
+        self.assertIn("busy", hint["message"].lower())
+        # hint без type=error не считается ошибкой
+        rec2 = MessageReconstructor()
+        rec2.handle(
+            SSEEvent("hint", {"type": "info", "content": "ok", "finish_reason": None})
+        )
+        self.assertIsNone(rec2.hint_error)
 
     def test_apply_deltas(self):
         rec = MessageReconstructor()

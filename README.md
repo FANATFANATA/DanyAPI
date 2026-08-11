@@ -45,7 +45,11 @@ export DEEPSEEK_PASSWORD="secret"
 
 ## Запуск
 
+Файл `.env` (в гитигноре, создаётся из `.env.example`) подхватывается
+автоматически при старте:
+
 ```bash
+cp .env.example .env   # вписать токены
 python -m danyapi
 # или
 uvicorn danyapi.api.openai:app --host 0.0.0.0 --port 8000
@@ -123,7 +127,10 @@ clang -O2 -o danyapi/deepseek/pow_solver.exe danyapi/deepseek/pow_solver.c
   `session_id` маршрутизируются на тот же аккаунт (история диалога хранится
   серверно на аккаунте).
 - DeepSeek может временно троттлить аккаунты (особенно экспертную модель
-  `deepseek-reasoner` - "limited resource"). При интенсивной нагрузке
-  возможны пустые ответы; для продакшена добавьте retry на стороне клиента.
+  `deepseek-reasoner` - "limited resource"). Ответы с `finish_reason`
+  `expert_busy_use_default` / `parallel_chat_limit` автоматически ретраются
+  (до 3 попыток с экспоненциальным backoff). Если заняты все попытки:
+  - non-stream запрос получает HTTP 429 с текстом ошибки DeepSeek;
+  - stream запрос получает SSE-событие с `error` и `finish_reason`.
 - Чаллендж PoW одноразовый - на каждый запрос решается новый (префетчится
   следующий заранее, чтобы не ждать).
