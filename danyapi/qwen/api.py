@@ -9,6 +9,7 @@ import uuid
 import httpx
 from fastapi import HTTPException
 
+from .. import tools as toolemu
 from ..deepseek.stream import IncrementalSSE
 from .client import QwenClient, QwenError
 from .stream import QwenStreamReconstructor, error_code
@@ -137,6 +138,7 @@ async def collect_non_stream(
     model_id,
     thinking,
     search,
+    tool_mode=False,
 ):
     async with lock:
         session, session_key = await _prepare_session(account, pool, existing_sid, model_id)
@@ -171,15 +173,28 @@ async def collect_non_stream(
         if not rec.has_content and rec.error:
             raise HTTPException(_error_status(error_code(rec.error)), _error_body(rec))
 
-        message = {"role": "assistant", "content": rec.content}
-        if rec.reasoning:
-            message["reasoning_content"] = rec.reasoning
+        if tool_mode:
+            parsed = toolemu.parse_tool_calls(rec.content)
+            if parsed is not None:
+                tool_calls, tool_text = parsed
+                message = toolemu.format_tool_message(tool_calls, tool_text, rec.reasoning)
+                finish = "tool_calls"
+            else:
+                message = {"role": "assistant", "content": rec.content}
+                if rec.reasoning:
+                    message["reasoning_content"] = rec.reasoning
+                finish = "stop"
+        else:
+            message = {"role": "assistant", "content": rec.content}
+            if rec.reasoning:
+                message["reasoning_content"] = rec.reasoning
+            finish = "stop"
         return {
             "id": f"chatcmpl-{uuid.uuid4().hex}",
             "object": "chat.completion",
             "created": int(time.time()),
             "model": model,
-            "choices": [{"index": 0, "message": message, "finish_reason": "stop"}],
+            "choices": [{"index": 0, "message": message, "finish_reason": finish}],
             "usage": rec.usage_tokens,
             "session_id": session_key,
         }
@@ -195,6 +210,7 @@ async def stream_openai(
     model_id,
     thinking,
     search,
+    tool_mode=False,
 ):
     chunk_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
@@ -229,6 +245,7 @@ async def stream_openai(
             return
 
         rec: QwenStreamReconstructor | None = None
+        content_buf = ""
         for attempt in range(MAX_RETRIES + 1):
             if attempt:
                 await asyncio.sleep(RETRY_BACKOFF_SEC * (2 ** (attempt - 1)))
@@ -264,7 +281,10 @@ async def stream_openai(
                             )
                         delta: dict = {}
                         if c_diff:
-                            delta["content"] = c_diff
+                            if tool_mode:
+                                content_buf += c_diff
+                            else:
+                                delta["content"] = c_diff
                         if r_diff:
                             delta["reasoning_content"] = r_diff
                         if delta:
@@ -339,13 +359,49 @@ async def stream_openai(
             yield "data: [DONE]\n\n"
             return
 
+        if tool_mode:
+            parsed = toolemu.parse_tool_calls(content_buf)
+            if parsed is not None:
+                tool_calls, tool_text = parsed
+                for delta in toolemu.tool_call_deltas(tool_calls, tool_text):
+                    yield sse(
+                        {
+                            "id": chunk_id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": model,
+                            "choices": [{"index": 0, "delta": delta, "finish_reason": None}],
+                        }
+                    )
+                finish = "tool_calls"
+            else:
+                if content_buf:
+                    yield sse(
+                        {
+                            "id": chunk_id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": model,
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {"content": content_buf},
+                                    "finish_reason": None,
+                                }
+                            ],
+                        }
+                    )
+                finish = "stop"
+        else:
+            finish = "stop"
+
         yield sse(
             {
                 "id": chunk_id,
                 "object": "chat.completion.chunk",
                 "created": created,
                 "model": model,
-                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                "choices": [{"index": 0, "delta": {}, "finish_reason": finish}],
             }
         )
         yield sse(

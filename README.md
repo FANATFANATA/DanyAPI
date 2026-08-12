@@ -152,6 +152,63 @@ Per-model limits: `deepseek-v4-vision` accepts images only;
 `deepseek-v4-flash` accepts images (OCR) and text files; `deepseek-v4-pro`
 accepts no files. Max 50 files, 100 MB each per request.
 
+## Tool calling (emulated)
+
+Neither chat.deepseek.com nor chat.qwen.ai exposes a native function-calling
+API, so DanyAPI emulates it at the proxy layer with prompt injection. The
+OpenAI-compatible `tools`, `tool_choice` and `parallel_tool_calls` request
+fields are accepted:
+
+```bash
+curl http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "deepseek-v4-flash",
+    "messages": [{"role": "user", "content": "What is the weather in Moscow?"}],
+    "tools": [{
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "description": "Get the weather in a city",
+        "parameters": {
+          "type": "object",
+          "properties": {"city": {"type": "string"}},
+          "required": ["city"]
+        }
+      }
+    }],
+    "tool_choice": "auto"
+  }'
+```
+
+How it works:
+
+1. When `tools` are present, the function schema and a strict JSON instruction
+   are injected into the prompt sent to the upstream model.
+2. The model replies with a JSON object like
+   `{"tool_calls": [{"name": "get_weather", "arguments": {"city": "Moscow"}}]}`.
+   DanyAPI parses it and returns a proper OpenAI response:
+   `message.tool_calls` (non-stream) or streamed `delta.tool_calls` chunks,
+   both with `finish_reason: "tool_calls"`. Multiple calls in one reply are
+   supported (`parallel_tool_calls`).
+3. You run the tool, then send back the result:
+   `{"role": "tool", "tool_call_id": "<id>", "content": "22C, sunny"}`.
+   DanyAPI renders the tool results into the prompt and continues the
+   conversation until the model answers (or calls more tools).
+
+Notes:
+
+- `tool_choice`: `"auto"` (default), `"none"` (tools are accepted but no
+  schema is injected), `"required"`, or
+  `{"type": "function", "function": {"name": "<tool>"}}`.
+- Pass the `session_id` from the first response back in the tool-result
+  request to keep the conversation server-side. Without it the whole message
+  history (including tool results) is replayed into the prompt instead, so
+  plain OpenAI-protocol clients work too.
+- While `tools` are present, streamed replies are buffered until the model
+  finishes so the reply can be classified as a tool call or plain text.
+  Reasoning (`reasoning_content`) is streamed live in both cases.
+
 ## Tests
 
 ```bash

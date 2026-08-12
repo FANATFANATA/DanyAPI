@@ -15,6 +15,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from .. import tools as toolemu
 from ..accounts import AccountPool, DeepSeekAccount
 from ..config import settings
 from ..deepseek.client import DeepSeekClient, DeepSeekError, DeepSeekSession
@@ -65,6 +66,9 @@ STATUS_TO_FINISH_REASON = {
 class ChatMessage(BaseModel):
     role: str = "user"
     content: Any = ""
+    tool_calls: list[Any] | None = None
+    tool_call_id: str | None = None
+    name: str | None = None
 
 
 class FileSpec(BaseModel):
@@ -84,6 +88,9 @@ class ChatCompletionRequest(BaseModel):
     session_id: str | None = None
     user: str | None = None
     files: list[FileSpec] | None = None
+    tools: list[Any] | None = None
+    tool_choice: Any = None
+    parallel_tool_calls: bool | None = None
 
 
 @asynccontextmanager
@@ -277,30 +284,10 @@ async def _upload_attachments(account, attachments: list[Attachment], model_type
 
 
 def _extract_prompt(messages: list[ChatMessage]) -> str:
-    if not messages:
-        raise HTTPException(400, "messages is required")
-    last_user: ChatMessage | None = None
-    for msg in reversed(messages):
-        if msg.role in ("user", "system"):
-            last_user = msg
-            break
-    if last_user is None:
-        raise HTTPException(400, "no user message found")
-    content = last_user.content
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts = []
-        for item in content:
-            if isinstance(item, str):
-                parts.append(item)
-            elif isinstance(item, dict):
-                if item.get("type") == "text" and isinstance(item.get("text"), str):
-                    parts.append(item["text"])
-                elif item.get("type") == "image_url":
-                    continue
-        return "".join(parts).strip()
-    raise HTTPException(400, "unsupported message content")
+    try:
+        return toolemu.extract_last_user(messages)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 def _resolve_model(model: str) -> str:
@@ -379,9 +366,18 @@ async def _chat_completions_deepseek(req: ChatCompletionRequest) -> Any:
     model_type = _resolve_model(req.model)
     thinking = req.thinking if req.thinking is not None else (model_type == "expert")
     search = bool(req.search) and model_type == "default"
-    prompt = _extract_prompt(req.messages)
 
     account, existing_sid = await pool.acquire(req.session_id)
+
+    try:
+        prompt, tool_mode = toolemu.build_prompt(
+            req.messages,
+            getattr(req, "tools", None),
+            getattr(req, "tool_choice", None),
+            existing_sid is not None,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
     attachments = _collect_attachments(req)
     _validate_attachments(attachments, model_type)
@@ -399,6 +395,7 @@ async def _chat_completions_deepseek(req: ChatCompletionRequest) -> Any:
         "thinking": thinking,
         "search": search,
         "ref_file_ids": ref_file_ids,
+        "tool_mode": tool_mode,
     }
     if req.stream:
         return StreamingResponse(
@@ -417,9 +414,18 @@ async def _chat_completions_qwen(req: ChatCompletionRequest) -> Any:
 
     thinking = req.thinking if req.thinking is not None else True
     search = bool(req.search)
-    prompt = _extract_prompt(req.messages)
 
     account, existing_sid = await pool.acquire(req.session_id)
+
+    try:
+        prompt, tool_mode = toolemu.build_prompt(
+            req.messages,
+            getattr(req, "tools", None),
+            getattr(req, "tool_choice", None),
+            existing_sid is not None,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
     common = {
         "account": account,
@@ -430,6 +436,7 @@ async def _chat_completions_qwen(req: ChatCompletionRequest) -> Any:
         "model_id": req.model,
         "thinking": thinking,
         "search": search,
+        "tool_mode": tool_mode,
     }
     if req.stream:
         return StreamingResponse(
@@ -569,6 +576,7 @@ async def _collect_non_stream(
     thinking,
     search,
     ref_file_ids=None,
+    tool_mode=False,
 ):
     async with lock:
         session, session_key, parent_message_id = await _prepare_session(account, pool, existing_sid)
@@ -621,10 +629,22 @@ async def _collect_non_stream(
 
         content = rec.content
         reasoning = rec.reasoning
-        finish = _finish_reason(rec.status)
-        message = {"role": "assistant", "content": content}
-        if reasoning:
-            message["reasoning_content"] = reasoning
+        if tool_mode:
+            parsed = toolemu.parse_tool_calls(content)
+            if parsed is not None:
+                tool_calls, tool_text = parsed
+                finish = "tool_calls"
+                message = toolemu.format_tool_message(tool_calls, tool_text, reasoning)
+            else:
+                message = {"role": "assistant", "content": content}
+                if reasoning:
+                    message["reasoning_content"] = reasoning
+                finish = _finish_reason(rec.status)
+        else:
+            finish = _finish_reason(rec.status)
+            message = {"role": "assistant", "content": content}
+            if reasoning:
+                message["reasoning_content"] = reasoning
         return {
             "id": f"chatcmpl-{uuid.uuid4().hex}",
             "object": "chat.completion",
@@ -653,6 +673,7 @@ async def _stream_openai(
     thinking,
     search,
     ref_file_ids=None,
+    tool_mode=False,
 ):
     chunk_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
@@ -688,6 +709,7 @@ async def _stream_openai(
 
         rec: MessageReconstructor | None = None
         response_message_id = None
+        content_buf = ""
         for attempt in range(MAX_RETRIES + 1):
             if attempt:
                 await asyncio.sleep(RETRY_BACKOFF_SEC * (2 ** (attempt - 1)))
@@ -738,7 +760,10 @@ async def _stream_openai(
                             )
                         delta: dict = {}
                         if c_diff:
-                            delta["content"] = c_diff
+                            if tool_mode:
+                                content_buf += c_diff
+                            else:
+                                delta["content"] = c_diff
                         if r_diff:
                             delta["reasoning_content"] = r_diff
                         if delta:
@@ -811,7 +836,43 @@ async def _stream_openai(
             return
 
         account.sessions.touch_last_message(session_key, rec.id or response_message_id)
-        finish = _finish_reason(rec.status)
+
+        if tool_mode:
+            parsed = toolemu.parse_tool_calls(content_buf)
+            if parsed is not None:
+                tool_calls, tool_text = parsed
+                for delta in toolemu.tool_call_deltas(tool_calls, tool_text):
+                    yield sse(
+                        {
+                            "id": chunk_id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": model,
+                            "choices": [{"index": 0, "delta": delta, "finish_reason": None}],
+                        }
+                    )
+                finish = "tool_calls"
+            else:
+                if content_buf:
+                    yield sse(
+                        {
+                            "id": chunk_id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": model,
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {"content": content_buf},
+                                    "finish_reason": None,
+                                }
+                            ],
+                        }
+                    )
+                finish = _finish_reason(rec.status)
+        else:
+            finish = _finish_reason(rec.status)
+
         yield sse(
             {
                 "id": chunk_id,
