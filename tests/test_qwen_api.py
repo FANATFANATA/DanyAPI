@@ -2,6 +2,8 @@ import asyncio
 import unittest
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
+
 import danyapi.qwen.api as qwen_api
 
 OK_SSE = (
@@ -29,6 +31,24 @@ THINK_SSE = (
 )
 
 BUSY_SSE = 'data: {"error": {"code": "Too_Many_Requests", "details": "please slow down"}, "response_id": "r1"}\n\n'
+
+CTX_SSE = 'data: {"error": {"code": "ContextLengthExceeded", "details": "too long"}, "response_id": "r1"}\n\n'
+
+
+class JsonResp:
+    def __init__(self, body):
+        self._b = body.encode()
+        self.status_code = 200
+        self.headers = {"content-type": "application/json"}
+
+    async def aiter_bytes(self):
+        yield self._b
+
+    async def aclose(self):
+        pass
+
+    async def aread(self):
+        return self._b
 
 
 class FakeSession:
@@ -165,6 +185,76 @@ class TestQwenAPI(unittest.TestCase):
         acct = FakeAccount([OK_SSE])
         result = asyncio.run(qwen_api.collect_non_stream(**self._args(acct)))
         self.assertIn("usage", result)
+
+    def test_stream_emits_error_when_completion_fails(self):
+        acct = FakeAccount([])
+        acct.client.completion = AsyncMock(side_effect=httpx.ConnectError("boom"))
+        gen = qwen_api.stream_openai(**self._args(acct))
+        lines = list(asyncio.run(_collect(gen)))
+        joined = "".join(lines)
+        self.assertIn('"error"', joined)
+        self.assertIn("Qwen request failed", joined)
+        self.assertTrue(joined.rstrip().endswith("data: [DONE]"))
+
+    def test_stream_emits_error_when_json_error(self):
+        acct = FakeAccount([])
+        acct.client.completion = AsyncMock(return_value=JsonResp('{"ret":["FAIL_SYS_USER_VALIDATE"]}'))
+        gen = qwen_api.stream_openai(**self._args(acct))
+        lines = list(asyncio.run(_collect(gen)))
+        joined = "".join(lines)
+        self.assertIn('"error"', joined)
+        self.assertTrue(joined.rstrip().endswith("data: [DONE]"))
+
+    def test_non_stream_context_limit_drops_session_and_raises_400(self):
+        acct = FakeAccount([CTX_SSE])
+        pool = MagicMock()
+        with self.assertRaises(Exception) as ctx:
+            asyncio.run(qwen_api.collect_non_stream(**self._args(acct, pool=pool)))
+        exc = ctx.exception
+        assert isinstance(exc, qwen_api.HTTPException)
+        self.assertEqual(exc.status_code, 400)
+        pool.forget.assert_called_once_with("s1")
+        pool.forget_context.assert_called_once_with("s1")
+        acct.sessions.forget.assert_called_once_with("s1")
+
+    def test_stream_context_limit_drops_session_and_emits_length(self):
+        acct = FakeAccount([CTX_SSE])
+        pool = MagicMock()
+        gen = qwen_api.stream_openai(**self._args(acct, pool=pool))
+        lines = list(asyncio.run(_collect(gen)))
+        joined = "".join(lines)
+        self.assertIn('"finish_reason": "length"', joined)
+        self.assertIn("context length exceeded", joined)
+        self.assertTrue(joined.rstrip().endswith("data: [DONE]"))
+        pool.forget.assert_called_once_with("s1")
+        pool.forget_context.assert_called_once_with("s1")
+        acct.sessions.forget.assert_called_once_with("s1")
+
+    def test_non_stream_context_limit_json_raises_400(self):
+        acct = FakeAccount([])
+        acct.client.completion = AsyncMock(return_value=JsonResp('{"error": {"code": "ContextLengthExceeded", "details": "too long"}}'))
+        pool = MagicMock()
+        with self.assertRaises(Exception) as ctx:
+            asyncio.run(qwen_api.collect_non_stream(**self._args(acct, pool=pool)))
+        exc = ctx.exception
+        assert isinstance(exc, qwen_api.HTTPException)
+        self.assertEqual(exc.status_code, 400)
+        pool.forget.assert_called_once_with("s1")
+        pool.forget_context.assert_called_once_with("s1")
+        acct.sessions.forget.assert_called_once_with("s1")
+
+    def test_stream_context_limit_json_emits_length(self):
+        acct = FakeAccount([])
+        acct.client.completion = AsyncMock(return_value=JsonResp('{"error": {"code": "ContextLengthExceeded", "details": "too long"}}'))
+        pool = MagicMock()
+        gen = qwen_api.stream_openai(**self._args(acct, pool=pool))
+        lines = list(asyncio.run(_collect(gen)))
+        joined = "".join(lines)
+        self.assertIn('"finish_reason": "length"', joined)
+        self.assertTrue(joined.rstrip().endswith("data: [DONE]"))
+        pool.forget.assert_called_once_with("s1")
+        pool.forget_context.assert_called_once_with("s1")
+        acct.sessions.forget.assert_called_once_with("s1")
 
 
 async def _collect(agen):

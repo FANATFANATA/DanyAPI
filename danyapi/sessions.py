@@ -41,6 +41,10 @@ class SessionRegistry:
         if session is not None and message_id:
             session.last_message_id = message_id
 
+    def forget(self, session_id: str) -> None:
+        with self._lock:
+            self._sessions.pop(session_id, None)
+
     def close_all(self) -> None:
         with self._lock:
             self._sessions.clear()

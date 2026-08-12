@@ -44,6 +44,29 @@ RATE_LIMIT_ERROR_CODES = {
     "quotaLimited",
 }
 
+CONTEXT_LIMIT_MARKERS = ("context", "maxinput", "toolong", "lengthexceeded", "tokenlimit")
+
+
+class ContextLimitError(Exception):
+    pass
+
+
+def _is_context_limit_code(code) -> bool:
+    if not isinstance(code, str) or not code:
+        return False
+    compact = "".join(ch for ch in code.lower() if ch.isalnum())
+    return any(marker in compact for marker in CONTEXT_LIMIT_MARKERS)
+
+
+def _is_context_limit(rec: QwenStreamReconstructor) -> bool:
+    return _is_context_limit_code(error_code(rec.error))
+
+
+def _drop_session(pool, account, session_key) -> None:
+    pool.forget(session_key)
+    pool.forget_context(session_key)
+    account.sessions.forget(session_key)
+
 
 def _error_status(code) -> int:
     if code in RATE_LIMIT_ERROR_CODES:
@@ -108,9 +131,13 @@ async def _send_completion(client: QwenClient, session, prompt: str, model_id: s
             error = payload.get("error")
             if isinstance(error, dict):
                 code = error.get("code")
+                if _is_context_limit_code(code):
+                    raise ContextLimitError() from None
                 raise HTTPException(_error_status(code), error.get("message") or error.get("details") or "Qwen error")
             data = payload.get("data")
             if isinstance(data, dict) and data.get("code"):
+                if _is_context_limit_code(data["code"]):
+                    raise ContextLimitError() from None
                 raise HTTPException(_error_status(data["code"]), data.get("details") or data.get("message") or "Qwen error")
         raise HTTPException(502, f"Qwen request failed: {text}")
     return resp
@@ -153,7 +180,11 @@ async def collect_non_stream(
         for attempt in range(MAX_RETRIES + 1):
             if attempt:
                 await asyncio.sleep(RETRY_BACKOFF_SEC * (2 ** (attempt - 1)))
-            resp = await _send_completion(account.client, session, prompt, model_id, thinking, search)
+            try:
+                resp = await _send_completion(account.client, session, prompt, model_id, thinking, search)
+            except ContextLimitError:
+                _drop_session(pool, account, session_key)
+                raise HTTPException(400, "context length exceeded: conversation too long, start a new conversation") from None
             rec = QwenStreamReconstructor()
             incremental = IncrementalSSE()
             try:
@@ -175,6 +206,9 @@ async def collect_non_stream(
             break
 
         assert rec is not None
+        if _is_context_limit(rec) and not rec.has_content:
+            _drop_session(pool, account, session_key)
+            raise HTTPException(400, "context length exceeded: conversation too long, start a new conversation")
         account.sessions.touch_last_message(session_key, rec.response_id)
 
         if not rec.has_content and rec.error:
@@ -258,7 +292,61 @@ async def stream_openai(
         for attempt in range(MAX_RETRIES + 1):
             if attempt:
                 await asyncio.sleep(RETRY_BACKOFF_SEC * (2 ** (attempt - 1)))
-            resp = await _send_completion(account.client, session, prompt, model_id, thinking, search)
+            try:
+                resp = await _send_completion(account.client, session, prompt, model_id, thinking, search)
+            except ContextLimitError:
+                _drop_session(pool, account, session_key)
+                yield sse(
+                    {
+                        "id": chunk_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": model,
+                        "error": {
+                            "message": "context length exceeded: conversation too long, start a new conversation",
+                            "code": "context_length_exceeded",
+                        },
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {},
+                                "finish_reason": "length",
+                            }
+                        ],
+                    }
+                )
+                yield sse(
+                    {
+                        "id": chunk_id,
+                        "session_id": session_key,
+                        "object": "chat.completion.chunk",
+                        "choices": [],
+                    }
+                )
+                yield "data: [DONE]\n\n"
+                return
+            except HTTPException as exc:
+                detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+                yield sse(
+                    {
+                        "id": chunk_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": model,
+                        "error": {"message": detail},
+                        "choices": [{"index": 0, "delta": {}, "finish_reason": "error"}],
+                    }
+                )
+                yield sse(
+                    {
+                        "id": chunk_id,
+                        "session_id": session_key,
+                        "object": "chat.completion.chunk",
+                        "choices": [],
+                    }
+                )
+                yield "data: [DONE]\n\n"
+                return
             rec = QwenStreamReconstructor()
             incremental = IncrementalSSE()
             got_content = False
@@ -333,6 +421,37 @@ async def stream_openai(
             break
 
         assert rec is not None
+        if _is_context_limit(rec) and not rec.has_content:
+            _drop_session(pool, account, session_key)
+            yield sse(
+                {
+                    "id": chunk_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model,
+                    "error": {
+                        "message": "context length exceeded: conversation too long, start a new conversation",
+                        "code": "context_length_exceeded",
+                    },
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {},
+                            "finish_reason": "length",
+                        }
+                    ],
+                }
+            )
+            yield sse(
+                {
+                    "id": chunk_id,
+                    "session_id": session_key,
+                    "object": "chat.completion.chunk",
+                    "choices": [],
+                }
+            )
+            yield "data: [DONE]\n\n"
+            return
         account.sessions.touch_last_message(session_key, rec.response_id)
 
         if not rec.has_content and rec.error:

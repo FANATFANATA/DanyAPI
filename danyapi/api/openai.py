@@ -62,6 +62,8 @@ STATUS_TO_FINISH_REASON = {
     "TIMEOUT": "stop",
 }
 
+CONTEXT_LENGTH_STATUS = "CONTEXT_LENGTH_EXCEEDED"
+
 
 class ChatMessage(BaseModel):
     role: str = "user"
@@ -567,6 +569,19 @@ def _is_retryable_hint(rec: MessageReconstructor) -> bool:
     return bool(hint and hint.get("finish_reason") in RETRYABLE_FINISH_REASONS)
 
 
+def _is_context_limit(rec: MessageReconstructor) -> bool:
+    if rec.status == CONTEXT_LENGTH_STATUS:
+        return True
+    hint = rec.hint_error
+    return bool(hint and hint.get("finish_reason") == CONTEXT_LENGTH_STATUS)
+
+
+def _drop_session(pool, account, session_key) -> None:
+    pool.forget(session_key)
+    pool.forget_context(session_key)
+    account.sessions.forget(session_key)
+
+
 def _deepseek_status(exc: DeepSeekError) -> int:
     return 401 if exc.biz_code in DEEPSEEK_AUTH_ERROR_CODES else 502
 
@@ -675,6 +690,9 @@ async def _collect_non_stream(
             break
 
         assert rec is not None
+        if _is_context_limit(rec) and not (rec.content or rec.reasoning):
+            _drop_session(pool, account, session_key)
+            raise HTTPException(400, "context length exceeded: conversation too long, start a new conversation")
         account.sessions.touch_last_message(session_key, rec.id or response_message_id)
 
         if not (rec.content or rec.reasoning) and rec.hint_error:
@@ -768,19 +786,42 @@ async def _stream_openai(
         for attempt in range(MAX_RETRIES + 1):
             if attempt:
                 await asyncio.sleep(RETRY_BACKOFF_SEC * (2 ** (attempt - 1)))
-            pow_headers = await _fresh_pow_headers(account)
-            resp = await _send_with_auth(
-                account,
-                account.client,
-                pow_headers,
-                session.id,
-                parent_message_id,
-                prompt,
-                model_type,
-                thinking,
-                search,
-                ref_file_ids,
-            )
+            try:
+                pow_headers = await _fresh_pow_headers(account)
+                resp = await _send_with_auth(
+                    account,
+                    account.client,
+                    pow_headers,
+                    session.id,
+                    parent_message_id,
+                    prompt,
+                    model_type,
+                    thinking,
+                    search,
+                    ref_file_ids,
+                )
+            except HTTPException as exc:
+                detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+                yield sse(
+                    {
+                        "id": chunk_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": model,
+                        "error": {"message": detail},
+                        "choices": [{"index": 0, "delta": {}, "finish_reason": "error"}],
+                    }
+                )
+                yield sse(
+                    {
+                        "id": chunk_id,
+                        "session_id": session_key,
+                        "object": "chat.completion.chunk",
+                        "choices": [],
+                    }
+                )
+                yield "data: [DONE]\n\n"
+                return
             rec = MessageReconstructor()
             incremental = IncrementalSSE()
             response_message_id = None
@@ -858,6 +899,37 @@ async def _stream_openai(
             break
 
         assert rec is not None
+        if _is_context_limit(rec) and not (rec.content or rec.reasoning):
+            _drop_session(pool, account, session_key)
+            yield sse(
+                {
+                    "id": chunk_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model,
+                    "error": {
+                        "message": "context length exceeded: conversation too long, start a new conversation",
+                        "finish_reason": CONTEXT_LENGTH_STATUS,
+                    },
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {},
+                            "finish_reason": "length",
+                        }
+                    ],
+                }
+            )
+            yield sse(
+                {
+                    "id": chunk_id,
+                    "session_id": session_key,
+                    "object": "chat.completion.chunk",
+                    "choices": [],
+                }
+            )
+            yield "data: [DONE]\n\n"
+            return
         if not (rec.content or rec.reasoning) and rec.hint_error:
             hint = rec.hint_error
             yield sse(

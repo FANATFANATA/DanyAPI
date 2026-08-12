@@ -267,6 +267,13 @@ class TestReconstruction(unittest.TestCase):
         )
         self.assertEqual(rec.usage["completion_tokens"], 0)
 
+    def test_context_length_status(self):
+        rec = MessageReconstructor()
+        rec.handle(SSEEvent(None, {"p": "response/status", "o": "SET", "v": "CONTEXT_LENGTH_EXCEEDED"}))
+        self.assertEqual(rec.status, "CONTEXT_LENGTH_EXCEEDED")
+        self.assertEqual(rec.content, "")
+        self.assertEqual(rec.reasoning, "")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -78,6 +78,14 @@ export QWEN_TOKENS="token1,token2,token3"
 Grab a token in the browser:
 DevTools -> Application -> Local Storage -> https://chat.qwen.ai -> `token`.
 
+For Qwen accounts used by DanyAPI, disable the built-in **Tools** switch
+(code interpreter, image generation, and other Qwen built-ins) in the
+chat.qwen.ai web interface. When it is enabled, Qwen's built-in tools fire
+their own response phases on every request, which DanyAPI cannot parse, and
+the server-side conversation history grows fast (hitting the input token
+limit quickly). With the switch off, DanyAPI's emulated tool calling
+(`tools` / `tool_choice`) and plain chat work as intended.
+
 Or a single email + password account (login happens at startup):
 
 ```bash
@@ -106,6 +114,23 @@ Or with the helper scripts:
 run.bat   # Windows
 ./run.sh  # Linux/macOS
 ```
+
+## Logging
+
+By default logs go to the console. To persist them to a file, set
+`DANYAPI_LOG_FILE` in `.env` (or as an environment variable):
+
+```bash
+DANYAPI_LOG_FILE=/var/log/danyapi.log   # or danyapi.log for the working dir
+DANYAPI_LOG_LEVEL=INFO                  # DEBUG / INFO / WARNING / ERROR
+DANYAPI_LOG_MAX_BYTES=10485760          # rotate at 10 MB per file
+DANYAPI_LOG_BACKUP_COUNT=3              # keep 3 rotated files
+```
+
+The file is rotated by size (`DANYAPI_LOG_MAX_BYTES`, default 10 MB) keeping
+`DANYAPI_LOG_BACKUP_COUNT` backups (default 3). When started via
+`python -m danyapi`, uvicorn's own startup/access logs are routed through the
+same root logger and also land in the file.
 
 ## Docker
 
@@ -172,6 +197,17 @@ client never echoes `session_id`. Pass `session_id` to force an exact
 conversation (or to branch off into an independent chat). The in-memory
 cache is LRU-bounded per provider (`DANYAPI_SESSION_CACHE_SIZE`, default
 128).
+
+No context is ever duplicated or lost:
+
+- A reused chat receives **only the delta**: the new user message, or the
+  tool round tail (tool results) in the case of a tool call. The full
+  conversation history lives server-side in the chat.
+- The tool schema / system prompt are injected **once**, into the first
+  message of a chat, and are not repeated in every follow-up message.
+- If a chat cannot be matched (cache miss or eviction), the whole message
+  history is replayed into a fresh chat, so the model always sees the full
+  conversation.
 
 ## File attachments (DeepSeek)
 
@@ -418,3 +454,10 @@ or the pure-Python fallback. All three produce the same answer.
 - When all accounts are busy, requests wait for a free account. Set
   `DANYAPI_ACQUIRE_TIMEOUT` (seconds) to cap that wait and get an HTTP 429
   ("all accounts are busy") instead of waiting forever.
+- Long server-side conversations eventually exceed the model's context window.
+  When that happens DanyAPI detects the context-limit error, discards the
+  overflowing chat (so it is never reused) and reports the failure: HTTP 400
+  for non-stream requests, or an SSE `error` event with
+  `finish_reason: "length"` for stream requests. The next request automatically
+  starts with a fresh conversation. To avoid hitting the limit often, keep Qwen
+  built-in tools disabled (see above) and rotate long conversations client-side.

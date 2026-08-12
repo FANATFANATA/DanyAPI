@@ -45,6 +45,10 @@ class QwenSessionRegistry:
         if session is not None and message_id:
             session.last_response_id = message_id
 
+    def forget(self, session_id: str) -> None:
+        with self._lock:
+            self._sessions.pop(session_id, None)
+
 
 class QwenAccount:
     __slots__ = ("broken", "client", "index", "sem", "sessions")

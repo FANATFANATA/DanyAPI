@@ -260,6 +260,21 @@ def is_tool_round(messages: list[Any]) -> bool:
     return False
 
 
+def _has_history(messages: list[Any]) -> bool:
+    user_count = 0
+    for msg in messages:
+        role = getattr(msg, "role", None)
+        if role == "user":
+            user_count += 1
+            continue
+        text = _content_text(getattr(msg, "content", ""))
+        if role == "assistant" and (text or getattr(msg, "tool_calls", None)):
+            return True
+        if role in ("tool", "function") and text:
+            return True
+    return user_count > 1
+
+
 def _tail_after_last_user(messages: list[Any]) -> list[Any]:
     index = -1
     for i, msg in enumerate(messages):
@@ -333,39 +348,24 @@ def build_prompt(
             tail_prompt = _render_tool_tail(tail)
             if not tail_prompt.strip():
                 tail_prompt = extract_last_user(messages)
-            blocks = []
-            if schema:
-                blocks.append(schema)
-            blocks.append(tail_prompt)
-            return "\n\n".join(blocks), True
+            return tail_prompt, True
         base = extract_last_user(messages)
         blocks = []
-        if schema:
-            blocks.append(schema)
         if json_block:
             blocks.append(json_block)
         blocks.append(base)
         return "\n\n".join(blocks), tools_present
 
     tool_round_active = is_tool_round(messages)
-    if not (tools_present or tool_round_active):
-        base = extract_last_user(messages)
-        blocks: list[str] = []
-        system = extract_system(messages)
-        if system:
-            blocks.append(system)
-        if json_block:
-            blocks.append(json_block)
-        blocks.append(base)
-        return "\n\n".join(blocks), False
-
-    if tool_round_active:
+    if tool_round_active or _has_history(messages):
         prompt = _render_history(messages)
         if schema:
             prompt = f"{schema}\n\n{prompt}"
+        if json_block:
+            prompt = f"{json_block}\n\n{prompt}"
         if not prompt.strip():
             prompt = schema or extract_last_user(messages)
-        return prompt, True
+        return prompt, tools_present or tool_round_active
 
     base = extract_last_user(messages)
     blocks = []
@@ -377,7 +377,7 @@ def build_prompt(
     if json_block:
         blocks.append(json_block)
     blocks.append(base)
-    return "\n\n".join(blocks), True
+    return "\n\n".join(blocks), tools_present
 
 
 def _strip_fences(text: str) -> str:

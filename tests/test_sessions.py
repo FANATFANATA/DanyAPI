@@ -182,6 +182,15 @@ class TestSessionRegistry(unittest.TestCase):
         reg.touch_last_message(k, "m1")
         self.assertEqual(reg.get(k).last_message_id, "m1")
 
+    def test_forget_removes_session(self):
+        reg = SessionRegistry(FakeSessionClient())
+        _, k = asyncio.run(reg.obtain(None))
+        self.assertIsNotNone(reg.get(k))
+        reg.forget(k)
+        self.assertIsNone(reg.get(k))
+        _, k2 = asyncio.run(reg.obtain(k))
+        self.assertNotEqual(k2, k)
+
 
 class TestQwenSessionRegistry(unittest.TestCase):
     def test_reuses_and_evicts(self):
@@ -201,6 +210,13 @@ class TestQwenSessionRegistry(unittest.TestCase):
         s, k = asyncio.run(reg.obtain(None, "qwen3.8-max"))
         reg.touch_last_message(k, "r1")
         self.assertEqual(s.last_response_id, "r1")
+
+    def test_forget_removes_session(self):
+        reg = QwenSessionRegistry(FakeSessionClient())
+        _, k = asyncio.run(reg.obtain(None, "qwen3.8-max"))
+        self.assertIsNotNone(reg.get(k))
+        reg.forget(k)
+        self.assertIsNone(reg.get(k))
 
 
 class TestAccountPoolContext(unittest.TestCase):
@@ -285,7 +301,7 @@ class TestBuildPromptSession(unittest.TestCase):
         prompt, tool_mode = build_prompt(messages, [WEATHER_TOOL], has_session=True)
         self.assertTrue(tool_mode)
         self.assertIn("And in Rome?", prompt)
-        self.assertIn("get_weather", prompt)
+        self.assertNotIn("get_weather", prompt)
 
     def test_session_skips_system(self):
         messages = [Message("system", "Be concise."), Message("user", "hi")]

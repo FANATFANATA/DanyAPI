@@ -51,6 +51,17 @@ class Settings:
             self.session_cache_size = int(raw_cache)
         except ValueError:
             self.session_cache_size = 128
+        raw_level = os.environ.get("DANYAPI_LOG_LEVEL", "INFO").strip()
+        self.log_level = raw_level or "INFO"
+        self.log_file = os.environ.get("DANYAPI_LOG_FILE", "").strip()
+        try:
+            self.log_max_bytes = int(os.environ.get("DANYAPI_LOG_MAX_BYTES", "10485760"))
+        except ValueError:
+            self.log_max_bytes = 10 * 1024 * 1024
+        try:
+            self.log_backup_count = int(os.environ.get("DANYAPI_LOG_BACKUP_COUNT", "3"))
+        except ValueError:
+            self.log_backup_count = 3
 
 
 settings = Settings()

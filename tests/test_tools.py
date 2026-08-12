@@ -478,6 +478,55 @@ class TestBuildPrompt(unittest.TestCase):
         self.assertIn("22C, sunny", prompt)
         self.assertIn("get_weather", prompt)
 
+    def test_continuation_with_session_skips_schema(self):
+        messages = [
+            Message(role="user", content="What is the weather?"),
+            Message(role="assistant", content="It is 22C."),
+            Message(role="user", content="And in Rome?"),
+        ]
+        prompt, tool_mode = build_prompt(messages, [WEATHER_TOOL], None, has_session=True)
+        self.assertTrue(tool_mode)
+        self.assertIn("And in Rome?", prompt)
+        self.assertNotIn("get_weather", prompt)
+
+    def test_tool_round_with_session_skips_schema(self):
+        messages = [
+            Message(role="user", content="What is the weather?"),
+            Message(
+                role="assistant", tool_calls=[{"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": '{"city": "Moscow"}'}}]
+            ),
+            Message(role="tool", content="22C, sunny", tool_call_id="call_1"),
+        ]
+        prompt, tool_mode = build_prompt(messages, [WEATHER_TOOL], None, has_session=True)
+        self.assertTrue(tool_mode)
+        self.assertIn("22C, sunny", prompt)
+        self.assertNotIn("You have access to the following functions", prompt)
+
+    def test_new_chat_with_history_renders_full_context(self):
+        messages = [
+            Message(role="user", content="What is the weather?"),
+            Message(role="assistant", content="It is 22C."),
+            Message(role="user", content="And in Rome?"),
+        ]
+        prompt, tool_mode = build_prompt(messages, None, None, has_session=False)
+        self.assertFalse(tool_mode)
+        self.assertIn("What is the weather?", prompt)
+        self.assertIn("It is 22C.", prompt)
+        self.assertIn("And in Rome?", prompt)
+
+    def test_new_chat_with_history_and_tools_renders_full_context(self):
+        messages = [
+            Message(role="user", content="What is the weather?"),
+            Message(role="assistant", content="It is 22C."),
+            Message(role="user", content="And in Rome?"),
+        ]
+        prompt, tool_mode = build_prompt(messages, [WEATHER_TOOL], None, has_session=False)
+        self.assertTrue(tool_mode)
+        self.assertIn("get_weather", prompt)
+        self.assertIn("What is the weather?", prompt)
+        self.assertIn("It is 22C.", prompt)
+        self.assertIn("And in Rome?", prompt)
+
 
 if __name__ == "__main__":
     unittest.main()

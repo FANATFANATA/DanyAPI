@@ -30,6 +30,14 @@ OK_SSE = (
     "\n"
 )
 
+CTX_SSE = (
+    "event: ready\n"
+    'data: {"request_message_id":1,"response_message_id":2,"model_type":"default"}\n'
+    "\n"
+    'data: {"p":"response/status","o":"SET","v":"CONTEXT_LENGTH_EXCEEDED"}\n'
+    "\n"
+)
+
 
 class FakeSession:
     def __init__(self, sid: str = "c1", last_message_id: str | None = None) -> None:
@@ -202,6 +210,53 @@ class TestRetry(unittest.TestCase):
         assert isinstance(exc, openai_mod.HTTPException)
         self.assertEqual(exc.status_code, 401)
         self.assertTrue(acct.broken)
+
+    def test_stream_emits_error_when_completion_fails(self):
+        acct = FakeAccount([])
+        acct.client.completion = AsyncMock(side_effect=openai_mod.HTTPException(502, "boom"))
+        gen = _stream_openai(**self._args(acct))
+        lines = list(asyncio.run(_collect(gen)))
+        joined = "".join(lines)
+        self.assertIn('"error"', joined)
+        self.assertIn("boom", joined)
+        self.assertTrue(joined.rstrip().endswith("data: [DONE]"))
+
+    def test_stream_emits_error_when_pow_header_fails(self):
+        from danyapi.deepseek.client import DeepSeekError
+
+        acct = FakeAccount([])
+        acct.pow.make_header = AsyncMock(side_effect=DeepSeekError(5000, "pow boom"))
+        gen = _stream_openai(**self._args(acct))
+        lines = list(asyncio.run(_collect(gen)))
+        joined = "".join(lines)
+        self.assertIn('"error"', joined)
+        self.assertIn("pow boom", joined)
+        self.assertTrue(joined.rstrip().endswith("data: [DONE]"))
+
+    def test_non_stream_context_limit_drops_session_and_raises_400(self):
+        acct = FakeAccount([CTX_SSE])
+        pool = MagicMock()
+        with self.assertRaises(Exception) as ctx:
+            asyncio.run(_collect_non_stream(**self._args(acct, pool=pool)))
+        exc = ctx.exception
+        assert isinstance(exc, openai_mod.HTTPException)
+        self.assertEqual(exc.status_code, 400)
+        pool.forget.assert_called_once_with("s1")
+        pool.forget_context.assert_called_once_with("s1")
+        acct.sessions.forget.assert_called_once_with("s1")
+
+    def test_stream_context_limit_drops_session_and_emits_length(self):
+        acct = FakeAccount([CTX_SSE])
+        pool = MagicMock()
+        gen = _stream_openai(**self._args(acct, pool=pool))
+        lines = list(asyncio.run(_collect(gen)))
+        joined = "".join(lines)
+        self.assertIn('"finish_reason": "length"', joined)
+        self.assertIn("context length exceeded", joined)
+        self.assertTrue(joined.rstrip().endswith("data: [DONE]"))
+        pool.forget.assert_called_once_with("s1")
+        pool.forget_context.assert_called_once_with("s1")
+        acct.sessions.forget.assert_called_once_with("s1")
 
 
 class TestModelConfig(unittest.TestCase):
