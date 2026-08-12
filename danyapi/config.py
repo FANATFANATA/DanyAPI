@@ -19,7 +19,10 @@ load_dotenv(dotenv_path=Path(__file__).resolve().parents[1] / ".env", override=F
 class Settings:
     def __init__(self) -> None:
         self.host = os.environ.get("DANYAPI_HOST", "0.0.0.0")
-        self.port = int(os.environ.get("DANYAPI_PORT", "8000"))
+        try:
+            self.port = int(os.environ.get("DANYAPI_PORT", "8000"))
+        except ValueError:
+            self.port = 8000
         tokens = [t.strip() for t in os.environ.get("DEEPSEEK_TOKENS", "").split(",") if t.strip()]
         single = os.environ.get("DEEPSEEK_TOKEN", "").strip()
         if not tokens and single:
@@ -34,7 +37,10 @@ class Settings:
         self.qwen_tokens = qwen_tokens
         self.qwen_email = os.environ.get("QWEN_EMAIL", "")
         self.qwen_password = os.environ.get("QWEN_PASSWORD", "")
-        self.timeout = float(os.environ.get("DANYAPI_TIMEOUT", "60"))
+        try:
+            self.timeout = float(os.environ.get("DANYAPI_TIMEOUT", "60"))
+        except ValueError:
+            self.timeout = 60.0
 
 
 settings = Settings()

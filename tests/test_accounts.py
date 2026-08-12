@@ -35,6 +35,19 @@ class TestAccountPool(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_broken_account_releases_session(self):
+        async def run():
+            a0, a1 = make_acct(0), make_acct(1)
+            a0.broken = True
+            pool = AccountPool([a0, a1])
+            pool.register(0, "sess-broken")
+            acct, sid = await pool.acquire("sess-broken")
+            self.assertIs(acct, a1)
+            self.assertIsNone(sid)
+            self.assertNotIn("sess-broken", pool._by_session)
+
+        asyncio.run(run())
+
     def test_round_robin_frees_first(self):
         async def run():
             a0, a1, a2 = make_acct(0), make_acct(1), make_acct(2)

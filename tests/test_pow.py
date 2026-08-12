@@ -1,3 +1,4 @@
+import asyncio
 import shutil
 import unittest
 
@@ -7,6 +8,44 @@ from danyapi.pow import (
     solve_native,
     solve_node,
 )
+
+
+class TestPowManagerValidation(unittest.TestCase):
+    def test_missing_fields_raise(self):
+        from danyapi.pow import PowManager
+
+        async def run():
+            pm = PowManager()
+
+            async def fetch_missing():
+                return {"challenge": "x", "algorithm": "a", "signature": "s", "target_path": "t"}
+
+            with self.assertRaises(RuntimeError):
+                await pm.make_header(fetch_missing)
+
+        asyncio.run(run())
+
+    def test_invalid_expire_at_raises(self):
+        from danyapi.pow import PowManager
+
+        async def run():
+            pm = PowManager()
+
+            async def fetch_bad():
+                return {
+                    "challenge": "x",
+                    "salt": "s",
+                    "algorithm": "a",
+                    "signature": "s",
+                    "target_path": "t",
+                    "expire_at": None,
+                    "difficulty": 5,
+                }
+
+            with self.assertRaises(RuntimeError):
+                await pm.make_header(fetch_bad)
+
+        asyncio.run(run())
 
 
 def _challenge(counter: int) -> tuple[str, str, int]:
@@ -35,6 +74,16 @@ class TestSolvers(unittest.TestCase):
             self.skipTest("native pow_solver not built")
         target, salt, expire_at = _challenge(42)
         self.assertEqual(solve_native(target, salt, expire_at, 200000), 42)
+
+    def test_native_matches_python_multiblock(self):
+        if _find_native_solver() is None:
+            self.skipTest("native pow_solver not built")
+        for slen in (100, 121, 127, 128, 129, 200, 300, 500, 1000):
+            salt = "S" * slen
+            expire_at = 1700000000000
+            prefix = f"{salt}_{expire_at}_".encode()
+            target = deepseek_hash_v1_hex(prefix + b"42")
+            self.assertEqual(solve_native(target, salt, expire_at, 200000), 42)
 
     def test_node_matches_python(self):
         if shutil.which("node") is None:

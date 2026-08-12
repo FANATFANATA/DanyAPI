@@ -11,12 +11,13 @@ log = logging.getLogger("danyapi.accounts")
 
 
 class DeepSeekAccount:
-    __slots__ = ("broken", "client", "index", "pow", "sem", "sessions")
+    __slots__ = ("broken", "client", "index", "pow", "pow_upload", "sem", "sessions")
 
     def __init__(self, index: int, client: DeepSeekClient) -> None:
         self.index = index
         self.client = client
         self.pow = PowManager()
+        self.pow_upload = PowManager()
         self.sem = asyncio.Semaphore(1)
         self.sessions = SessionRegistry(client)
         self.broken = False
@@ -50,7 +51,10 @@ class AccountPool:
         if idx is None:
             return None
         acct = self.accounts[idx]
-        return acct if acct is not None and not acct.broken else None
+        if acct is None or acct.broken:
+            self._by_session.pop(session_id, None)
+            return None
+        return acct
 
     async def acquire(self, session_id: str | None) -> tuple[DeepSeekAccount, str | None]:
         healthy = self.healthy

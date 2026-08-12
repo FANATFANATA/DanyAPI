@@ -50,26 +50,45 @@ static void keccak_f(uint64_t *st) {
 
 static void absorb_prefix(uint64_t st[25], const uint8_t *prefix, size_t len) {
     memset(st, 0, 25 * sizeof(uint64_t));
-    for (size_t i = 0; i < len; i++)
-        st[i / 8] ^= (uint64_t)prefix[i] << (8 * (i % 8));
+    size_t off = 0;
+    while (len - off >= RATE) {
+        for (size_t i = 0; i < RATE; i += 8) {
+            uint64_t w = 0;
+            for (int b = 0; b < 8; b++)
+                w |= (uint64_t)prefix[off + i + b] << (8 * b);
+            st[i / 8] ^= w;
+        }
+        keccak_f(st);
+        off += RATE;
+    }
+    for (size_t i = 0; i < len - off; i++)
+        st[i / 8] ^= (uint64_t)prefix[off + i] << (8 * (i % 8));
 }
 
 static int check_counter(const uint64_t base[25], size_t prefix_len, uint64_t c,
                          const uint8_t target[32]) {
     char digits[24];
     int dlen = snprintf(digits, sizeof(digits), "%llu", (unsigned long long)c);
-    size_t total = prefix_len + (size_t)dlen;
-    if (total >= RATE) return 0;
 
     uint64_t st[25];
     memcpy(st, base, sizeof(st));
 
-    size_t off = prefix_len;
+    size_t off = prefix_len % RATE;
     for (int i = 0; i < dlen; i++) {
         st[off / 8] ^= (uint64_t)(uint8_t)digits[i] << (8 * (off % 8));
         off++;
+        if (off == RATE) {
+            keccak_f(st);
+            off = 0;
+        }
     }
+
     st[off / 8] ^= (uint64_t)0x06 << (8 * (off % 8));
+    off++;
+    if (off == RATE) {
+        keccak_f(st);
+        off = 0;
+    }
     st[16] ^= (uint64_t)0x80 << (8 * 7);
 
     keccak_f(st);
@@ -130,7 +149,7 @@ int main(void) {
     size_t n = fread(input, 1, sizeof(input) - 1, stdin);
     input[n] = '\0';
 
-    char challenge[128] = {0}, salt[128] = {0};
+    char challenge[128] = {0}, salt[4096] = {0};
     if (!find_json_str(input, "challenge", challenge, sizeof(challenge)) ||
         !find_json_str(input, "salt", salt, sizeof(salt))) {
         puts("{\"error\":\"missing challenge/salt\"}");
@@ -149,7 +168,7 @@ int main(void) {
         return 1;
     }
 
-    char prefix[300];
+    char prefix[4120];
     int plen = snprintf(prefix, sizeof(prefix), "%s_%lld_", salt, expire_at);
 
     uint64_t base[25];

@@ -184,12 +184,20 @@ class PowManager:
 
     async def _build(self, fetch) -> dict:
         challenge = await fetch()
+        missing = [k for k in ("challenge", "salt", "algorithm", "signature", "target_path") if not challenge.get(k)]
+        if missing:
+            raise RuntimeError(f"pow challenge missing fields: {', '.join(missing)}")
         expire_at = challenge.get("expire_at")
+        difficulty = challenge.get("difficulty")
+        if isinstance(expire_at, bool) or not isinstance(expire_at, (int, float)):
+            raise RuntimeError("pow challenge has invalid expire_at")
+        if isinstance(difficulty, bool) or not isinstance(difficulty, (int, float)) or difficulty <= 0:
+            raise RuntimeError("pow challenge has invalid difficulty")
         answer = await solve_challenge(
             challenge["challenge"],
             challenge["salt"],
-            expire_at,
-            challenge["difficulty"],
+            int(expire_at),
+            int(difficulty),
         )
         if answer is None:
             raise RuntimeError("pow solver returned no answer")

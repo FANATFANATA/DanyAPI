@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import time
 import uuid
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -24,9 +26,9 @@ from ..qwen.client import QwenClient, QwenError
 log = logging.getLogger("danyapi.api")
 
 MODEL_TYPE_BY_NAME = {
-    "deepseek-chat": "default",
-    "deepseek-reasoner": "expert",
-    "deepseek-vision": "vision",
+    "deepseek-v4-flash": "default",
+    "deepseek-v4-pro": "expert",
+    "deepseek-v4-vision": "vision",
 }
 
 QWEN_DEFAULT_MODELS = [
@@ -65,6 +67,12 @@ class ChatMessage(BaseModel):
     content: Any = ""
 
 
+class FileSpec(BaseModel):
+    name: str
+    content: str
+    content_type: str = "application/octet-stream"
+
+
 class ChatCompletionRequest(BaseModel):
     model: str = Field(default="deepseek-chat")
     messages: list[ChatMessage] = Field(default_factory=list)
@@ -75,6 +83,7 @@ class ChatCompletionRequest(BaseModel):
     search: bool | None = None
     session_id: str | None = None
     user: str | None = None
+    files: list[FileSpec] | None = None
 
 
 @asynccontextmanager
@@ -168,6 +177,105 @@ async def _fetch_qwen_models(client: QwenClient) -> list[dict]:
 app = FastAPI(title="DanyAPI", lifespan=lifespan)
 
 
+MAX_FILES_PER_REQUEST = 50
+MAX_FILE_SIZE = 100 * 1024 * 1024
+
+
+@dataclass
+class Attachment:
+    data: bytes
+    name: str
+    content_type: str
+    is_image: bool
+
+
+def _split_data_uri(uri: str) -> tuple[str, bytes]:
+    if not uri.startswith("data:"):
+        raise HTTPException(400, "image_url must be a data URI (data:<mime>;base64,...)")
+    meta, _, payload = uri[5:].partition(",")
+    content_type = meta.split(";", 1)[0] or "application/octet-stream"
+    try:
+        data = base64.b64decode(payload)
+    except ValueError as exc:
+        raise HTTPException(400, "invalid base64 in image_url") from exc
+    return content_type, data
+
+
+def _collect_attachments(req: ChatCompletionRequest) -> list[Attachment]:
+    attachments: list[Attachment] = []
+    for msg in req.messages:
+        if not isinstance(msg.content, list):
+            continue
+        for item in msg.content:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "image_url":
+                image_url = item.get("image_url")
+                if isinstance(image_url, str):
+                    uri = image_url
+                elif isinstance(image_url, dict) and isinstance(image_url.get("url"), str):
+                    uri = image_url["url"]
+                else:
+                    raise HTTPException(400, "invalid image_url value")
+                content_type, data = _split_data_uri(uri)
+                name = f"image_{len(attachments)}.{content_type.split('/')[-1] or 'bin'}"
+                attachments.append(Attachment(data, name, content_type, True))
+    for f in req.files or []:
+        if not f.name or not f.content:
+            raise HTTPException(400, "each file needs name and base64 content")
+        try:
+            data = base64.b64decode(f.content)
+        except ValueError as exc:
+            raise HTTPException(400, f"invalid base64 in file {f.name}") from exc
+        attachments.append(Attachment(data, f.name, f.content_type or "application/octet-stream", f.content_type.startswith("image/")))
+    return attachments
+
+
+def _validate_attachments(attachments: list[Attachment], model_type: str) -> None:
+    if not attachments:
+        return
+    if len(attachments) > MAX_FILES_PER_REQUEST:
+        raise HTTPException(400, f"too many files: max {MAX_FILES_PER_REQUEST} per request")
+    for att in attachments:
+        if len(att.data) > MAX_FILE_SIZE:
+            raise HTTPException(400, f"file {att.name} exceeds 100 MB limit")
+    if model_type == "expert":
+        raise HTTPException(400, "deepseek-v4-pro does not support file attachments")
+    if model_type == "vision" and any(not att.is_image for att in attachments):
+        raise HTTPException(400, "deepseek-v4-vision accepts images only")
+
+
+async def _fresh_pow_upload_headers(account) -> dict:
+    try:
+        return await account.pow_upload.make_header(lambda: account.client.create_pow_challenge("/api/v0/file/upload_file"))
+    except DeepSeekError as exc:
+        _handle_account_error(account, exc)
+        raise HTTPException(_deepseek_status(exc), _deepseek_error_detail(exc)) from exc
+
+
+async def _upload_attachments(account, attachments: list[Attachment], model_type: str, thinking: bool) -> list[str]:
+    file_ids: list[str] = []
+    for att in attachments:
+        pow_headers = await _fresh_pow_upload_headers(account)
+        try:
+            info = await account.client.upload_file(
+                att.data,
+                att.name,
+                att.content_type,
+                model_type,
+                thinking_enabled=thinking,
+                pow_headers=pow_headers,
+            )
+        except DeepSeekError as exc:
+            _handle_account_error(account, exc)
+            raise HTTPException(_deepseek_status(exc), f"file upload failed: {exc}") from exc
+        file_id = info.get("id")
+        if not file_id:
+            raise HTTPException(502, f"file upload failed for {att.name}: no file id")
+        file_ids.append(file_id)
+    return file_ids
+
+
 def _extract_prompt(messages: list[ChatMessage]) -> str:
     if not messages:
         raise HTTPException(400, "messages is required")
@@ -190,10 +298,7 @@ def _extract_prompt(messages: list[ChatMessage]) -> str:
                 if item.get("type") == "text" and isinstance(item.get("text"), str):
                     parts.append(item["text"])
                 elif item.get("type") == "image_url":
-                    raise HTTPException(
-                        400,
-                        "image_url input requires file upload support, not implemented yet",
-                    )
+                    continue
         return "".join(parts).strip()
     raise HTTPException(400, "unsupported message content")
 
@@ -247,6 +352,8 @@ RETRYABLE_FINISH_REASONS = {
 MAX_RETRIES = 3
 RETRY_BACKOFF_SEC = 1.0
 
+DEEPSEEK_AUTH_ERROR_CODES = {40001, 40002, 40003, 40012, 40029}
+
 
 def _resolve_provider(model: str) -> str:
     if model.startswith("qwen"):
@@ -271,10 +378,16 @@ async def _chat_completions_deepseek(req: ChatCompletionRequest) -> Any:
 
     model_type = _resolve_model(req.model)
     thinking = req.thinking if req.thinking is not None else (model_type == "expert")
-    search = bool(req.search)
+    search = bool(req.search) and model_type == "default"
     prompt = _extract_prompt(req.messages)
 
     account, existing_sid = await pool.acquire(req.session_id)
+
+    attachments = _collect_attachments(req)
+    _validate_attachments(attachments, model_type)
+    ref_file_ids = None
+    if attachments:
+        ref_file_ids = await _upload_attachments(account, attachments, model_type, thinking)
 
     common = {
         "account": account,
@@ -285,6 +398,7 @@ async def _chat_completions_deepseek(req: ChatCompletionRequest) -> Any:
         "model_type": model_type,
         "thinking": thinking,
         "search": search,
+        "ref_file_ids": ref_file_ids,
     }
     if req.stream:
         return StreamingResponse(
@@ -332,7 +446,7 @@ async def _prepare_session(account: DeepSeekAccount, pool: AccountPool, existing
         session, session_key = await account.sessions.obtain(existing_sid)
     except DeepSeekError as exc:
         _handle_account_error(account, exc)
-        raise HTTPException(401, f"DeepSeek auth error: {exc}") from exc
+        raise HTTPException(_deepseek_status(exc), _deepseek_error_detail(exc)) from exc
     if existing_sid is None:
         pool.register(account.index, session_key)
     return session, session_key, session.last_message_id
@@ -347,6 +461,7 @@ async def _send_completion(
     model_type,
     thinking,
     search,
+    ref_file_ids=None,
 ):
     try:
         resp = await client.completion(
@@ -356,6 +471,7 @@ async def _send_completion(
             model_type=model_type,
             thinking_enabled=thinking,
             search_enabled=search,
+            ref_file_ids=ref_file_ids,
             pow_headers=pow_headers,
         )
     except httpx.HTTPStatusError as exc:
@@ -393,9 +509,28 @@ def _is_retryable_hint(rec: MessageReconstructor) -> bool:
     return bool(hint and hint.get("finish_reason") in RETRYABLE_FINISH_REASONS)
 
 
+def _deepseek_status(exc: DeepSeekError) -> int:
+    return 401 if exc.biz_code in DEEPSEEK_AUTH_ERROR_CODES else 502
+
+
+async def _send_with_auth(account, *args, **kwargs):
+    try:
+        return await _send_completion(*args, **kwargs)
+    except HTTPException as exc:
+        if exc.status_code in (401, 403):
+            account.mark_broken()
+        raise
+
+
+def _deepseek_error_detail(exc: DeepSeekError) -> str:
+    if exc.biz_code in DEEPSEEK_AUTH_ERROR_CODES:
+        return f"DeepSeek auth error: {exc}"
+    return f"DeepSeek error: {exc}"
+
+
 def _handle_account_error(account: DeepSeekAccount, exc: Exception) -> None:
     code = getattr(exc, "biz_code", None)
-    if code in (40001, 40002, 40003, 40012, 40029):
+    if code in DEEPSEEK_AUTH_ERROR_CODES:
         account.mark_broken()
         log.warning("account #%d auth error %s: %s", account.index, code, exc)
     else:
@@ -407,7 +542,7 @@ async def _fresh_pow_headers(account) -> dict:
         return await account.pow.make_header(account.client.create_pow_challenge)
     except DeepSeekError as exc:
         _handle_account_error(account, exc)
-        raise HTTPException(401, f"DeepSeek auth error: {exc}") from exc
+        raise HTTPException(_deepseek_status(exc), _deepseek_error_detail(exc)) from exc
 
 
 def _busy_error_body(rec: MessageReconstructor) -> str:
@@ -433,6 +568,7 @@ async def _collect_non_stream(
     model_type,
     thinking,
     search,
+    ref_file_ids=None,
 ):
     async with lock:
         session, session_key, parent_message_id = await _prepare_session(account, pool, existing_sid)
@@ -442,7 +578,8 @@ async def _collect_non_stream(
             if attempt:
                 await asyncio.sleep(RETRY_BACKOFF_SEC * (2 ** (attempt - 1)))
             pow_headers = await _fresh_pow_headers(account)
-            resp = await _send_completion(
+            resp = await _send_with_auth(
+                account,
                 account.client,
                 pow_headers,
                 session.id,
@@ -451,6 +588,7 @@ async def _collect_non_stream(
                 model_type,
                 thinking,
                 search,
+                ref_file_ids,
             )
             rec = MessageReconstructor()
             incremental = IncrementalSSE()
@@ -514,6 +652,7 @@ async def _stream_openai(
     model_type,
     thinking,
     search,
+    ref_file_ids=None,
 ):
     chunk_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
@@ -553,7 +692,8 @@ async def _stream_openai(
             if attempt:
                 await asyncio.sleep(RETRY_BACKOFF_SEC * (2 ** (attempt - 1)))
             pow_headers = await _fresh_pow_headers(account)
-            resp = await _send_completion(
+            resp = await _send_with_auth(
+                account,
                 account.client,
                 pow_headers,
                 session.id,
@@ -562,6 +702,7 @@ async def _stream_openai(
                 model_type,
                 thinking,
                 search,
+                ref_file_ids,
             )
             rec = MessageReconstructor()
             incremental = IncrementalSSE()

@@ -1,7 +1,4 @@
-# Secrets / local config
 .env
-
-# Python
 __pycache__/
 *.py[cod]
 *.egg-info/
@@ -9,10 +6,7 @@ __pycache__/
 venv/
 .ruff_cache/
 .pytest_cache/
-
-# Native PoW solver build artifact (compiled from pow_solver.c when needed)
 *.exe
 pow_solver
-
-# Local artifacts
 .playwright-mcp/
+.opencode/

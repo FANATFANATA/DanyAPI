@@ -10,8 +10,14 @@ API users need no keys - all requests are made by the server accounts.
 
 - `GET /v1/models` - model list
 - `POST /v1/chat/completions` - generation (stream and non-stream)
-- DeepSeek models: `deepseek-chat`, `deepseek-reasoner`, `deepseek-vision`
-  (internal `model_type`: `default`, `expert`, `vision`)
+- DeepSeek models: `deepseek-v4-flash` (default), `deepseek-v4-pro`
+  (expert), `deepseek-v4-vision` (vision). Internal `model_type`: `default`,
+  `expert`, `vision`.
+- Thinking is available for all DeepSeek models; web search works only for
+  `deepseek-v4-flash`.
+- Attachments: `deepseek-v4-vision` accepts images only; `deepseek-v4-flash`
+  accepts images (OCR) and text files; `deepseek-v4-pro` accepts no files.
+  Per request: max 50 files, 100 MB each.
 - Qwen models: fetched from the account at startup
   (`qwen3.8-max`, `qwen3.7-plus`, ...)
 - Thinking and web search (DeepSeek); thinking and search (Qwen)
@@ -89,7 +95,7 @@ uvicorn danyapi.api.openai:app --host 0.0.0.0 --port 8000
 ```bash
 curl http://127.0.0.1:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model": "deepseek-chat", "messages": [{"role": "user", "content": "Hello!"}]}'
+  -d '{"model": "deepseek-v4-flash", "messages": [{"role": "user", "content": "Hello!"}]}'
 ```
 
 Or with a Qwen model:
@@ -114,10 +120,42 @@ to continue the same conversation.
 }
 ```
 
+## File attachments (DeepSeek)
+
+Send files as base64 in the `files` field, or as `image_url` (data URI) parts
+inside a message:
+
+```bash
+curl http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "deepseek-v4-flash",
+    "messages": [{"role": "user", "content": "What magic number is in the file?"}],
+    "files": [{"name": "secret.txt", "content": "<base64>", "content_type": "text/plain"}]
+  }'
+```
+
+```json
+{
+  "model": "deepseek-v4-vision",
+  "messages": [{
+    "role": "user",
+    "content": [
+      {"type": "text", "text": "Describe the image."},
+      {"type": "image_url", "image_url": {"url": "data:image/png;base64,<base64>"}}
+    ]
+  }]
+}
+```
+
+Per-model limits: `deepseek-v4-vision` accepts images only;
+`deepseek-v4-flash` accepts images (OCR) and text files; `deepseek-v4-pro`
+accepts no files. Max 50 files, 100 MB each per request.
+
 ## Tests
 
 ```bash
-python -m unittest tests.test_pow tests.test_stream tests.test_accounts tests.test_retry -v
+python -m unittest tests.test_pow tests.test_stream tests.test_accounts tests.test_retry tests.test_qwen_stream tests.test_qwen_api -v
 ```
 
 Lint and format (ruff):
@@ -203,7 +241,7 @@ or the pure-Python fallback. All three produce the same answer.
   the same `session_id` route to the same account (conversation history is
   stored server-side on the account).
 - DeepSeek may throttle accounts (especially the expert model
-  `deepseek-reasoner` - "limited resource"). Responses with `finish_reason`
+  `deepseek-v4-pro` - "limited resource"). Responses with `finish_reason`
   `expert_busy_use_default` / `parallel_chat_limit` are retried automatically
   (up to 3 attempts with exponential backoff). If all attempts are exhausted:
   - non-stream requests get HTTP 429 with the DeepSeek error text;
