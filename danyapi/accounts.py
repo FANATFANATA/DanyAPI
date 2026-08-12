@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 
 from .deepseek.client import DeepSeekClient
@@ -15,16 +16,70 @@ class AccountPoolBusy(Exception):
     pass
 
 
+class ContextIndex:
+    def __init__(self, maxsize: int = 128) -> None:
+        self._seqs: dict[str, tuple[str, ...]] = {}
+        self._recency: dict[str, int] = {}
+        self._lock = threading.Lock()
+        self._maxsize = max(1, maxsize)
+        self._tick = 0
+
+    def lookup(self, sequence: tuple[str, ...]) -> str | None:
+        if not sequence:
+            return None
+        with self._lock:
+            if not self._seqs:
+                return None
+            best_sid: str | None = None
+            best_key = (-1, -1)
+            for sid, seq in self._seqs.items():
+                if not seq or len(seq) > len(sequence):
+                    continue
+                if sequence[: len(seq)] != seq:
+                    continue
+                key = (len(seq), self._recency.get(sid, 0))
+                if key > best_key:
+                    best_key = key
+                    best_sid = sid
+            if best_sid is not None:
+                self._touch(best_sid)
+            return best_sid
+
+    def index(self, session_id: str, sequence: tuple[str, ...]) -> None:
+        if not session_id or not sequence:
+            return
+        with self._lock:
+            current = self._seqs.get(session_id)
+            if current is not None and len(current) >= len(sequence) and sequence == current[: len(sequence)]:
+                self._touch(session_id)
+                return
+            self._seqs[session_id] = sequence
+            self._touch(session_id)
+            while len(self._seqs) > self._maxsize:
+                oldest = min(self._recency, key=lambda sid: self._recency[sid])
+                self._seqs.pop(oldest, None)
+                self._recency.pop(oldest, None)
+
+    def forget(self, session_id: str) -> None:
+        with self._lock:
+            self._seqs.pop(session_id, None)
+            self._recency.pop(session_id, None)
+
+    def _touch(self, session_id: str) -> None:
+        self._recency[session_id] = self._tick
+        self._tick += 1
+
+
 class DeepSeekAccount:
     __slots__ = ("broken", "client", "index", "pow", "pow_upload", "sem", "sessions")
 
-    def __init__(self, index: int, client: DeepSeekClient) -> None:
+    def __init__(self, index: int, client: DeepSeekClient, session_cache_size: int = 128) -> None:
         self.index = index
         self.client = client
         self.pow = PowManager()
         self.pow_upload = PowManager()
         self.sem = asyncio.Semaphore(1)
-        self.sessions = SessionRegistry(client)
+        self.sessions = SessionRegistry(client, session_cache_size)
         self.broken = False
 
     def mark_broken(self) -> None:
@@ -38,11 +93,12 @@ class DeepSeekAccount:
 
 
 class AccountPool:
-    def __init__(self, accounts: list, label: str = "deepseek") -> None:
+    def __init__(self, accounts: list, label: str = "deepseek", session_cache_size: int = 128) -> None:
         self.accounts = accounts
         self.label = label
         self._by_session: dict[str, int] = {}
         self._rr = 0
+        self._contexts = ContextIndex(session_cache_size)
 
     @property
     def healthy(self) -> list[DeepSeekAccount]:
@@ -51,6 +107,18 @@ class AccountPool:
     def register(self, account_index: int, session_id: str) -> None:
         self._by_session[session_id] = account_index
 
+    def forget(self, session_id: str) -> None:
+        self._by_session.pop(session_id, None)
+
+    def resolve_context(self, sequence: tuple[str, ...]) -> str | None:
+        return self._contexts.lookup(sequence)
+
+    def index_context(self, session_id: str, sequence: tuple[str, ...]) -> None:
+        self._contexts.index(session_id, sequence)
+
+    def forget_context(self, session_id: str) -> None:
+        self._contexts.forget(session_id)
+
     def account_for_session(self, session_id: str) -> DeepSeekAccount | None:
         idx = self._by_session.get(session_id)
         if idx is None:
@@ -58,6 +126,7 @@ class AccountPool:
         acct = self.accounts[idx]
         if acct is None or acct.broken:
             self._by_session.pop(session_id, None)
+            self._contexts.forget(session_id)
             return None
         return acct
 

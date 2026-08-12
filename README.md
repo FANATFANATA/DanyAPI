@@ -29,7 +29,10 @@ API users need no keys - all requests are made by the server accounts.
   `stream_options.include_usage`
 - `GET /health` - readiness probe
 - Multi-session: the message chain is stored server-side
-  (`session_id` in the response), like the web clients
+  (`session_id` in the response), like the web clients. Stateless requests
+  (no `session_id`) reuse the same server-side chat automatically based on
+  the message context, so plain OpenAI-protocol clients keep their
+  conversation too.
 
 ## Install
 
@@ -160,6 +163,16 @@ to continue the same conversation.
 }
 ```
 
+Stateless clients (no `session_id`) don't lose context either: the server
+derives a fingerprint from the `system`/`user` messages and reuses the
+matching server-side chat. If the message context is identical - the same
+chat is used; if the context is a continuation of a previously seen one -
+that chat is continued, so multi-turn conversations work even when the
+client never echoes `session_id`. Pass `session_id` to force an exact
+conversation (or to branch off into an independent chat). The in-memory
+cache is LRU-bounded per provider (`DANYAPI_SESSION_CACHE_SIZE`, default
+128).
+
 ## File attachments (DeepSeek)
 
 Send files as base64 in the `files` field, or as `image_url` (data URI) parts
@@ -224,13 +237,20 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 How it works:
 
 1. When `tools` are present, the function schema and a strict JSON instruction
-   are injected into the prompt sent to the upstream model.
-2. The model replies with a JSON object like
-   `{"tool_calls": [{"name": "get_weather", "arguments": {"city": "Moscow"}}]}`.
-   DanyAPI parses it and returns a proper OpenAI response:
-   `message.tool_calls` (non-stream) or streamed `delta.tool_calls` chunks,
-   both with `finish_reason: "tool_calls"`. Multiple calls in one reply are
-   supported (`parallel_tool_calls`).
+   (with a concrete example, no template placeholders) are injected into the
+   prompt sent to the upstream model.
+2. The model replies with a tool call - DanyAPI understands several formats
+   and normalizes them all to a proper OpenAI response:
+   - JSON `{"tool_calls": [{"name": "...", "arguments": {...}}]}`;
+   - legacy `{"function_call": {...}}`;
+   - a bare dict `{"name": "...", "arguments": {...}}` (Qwen/DeepSeek style)
+     or a bare array `[...]` of them;
+   - XML/Anthropic style `<tool_calls><invoke name="...">...</invoke></tool_calls>`
+     (arguments as child tags, `<parameter name="...">`, or inline JSON).
+   The result is `message.tool_calls` (non-stream) or streamed
+   `delta.tool_calls` chunks, both with `finish_reason: "tool_calls"`.
+   Any number of calls in one reply are supported (`parallel_tool_calls`),
+   so clients that ship many tools (e.g. opencode) work out of the box.
 3. You run the tool, then send back the result:
    `{"role": "tool", "tool_call_id": "<id>", "content": "22C, sunny"}`.
    DanyAPI renders the tool results into the prompt and continues the
@@ -242,9 +262,13 @@ Notes:
   schema is injected), `"required"`, or
   `{"type": "function", "function": {"name": "<tool>"}}`.
 - Pass the `session_id` from the first response back in the tool-result
-  request to keep the conversation server-side. Without it the whole message
-  history (including tool results) is replayed into the prompt instead, so
-  plain OpenAI-protocol clients work too.
+  request to keep the conversation server-side. Stateless clients work too:
+  the context cache reuses the chat from the previous round, so the tool
+  results are sent as the continuation of the same server-side conversation
+  instead of replaying the whole history into a brand-new chat. If a session
+  cannot be matched (e.g. the cache was evicted), the whole message history
+  (including tool results) is replayed into the prompt instead, so plain
+  OpenAI-protocol clients keep working.
 - While `tools` are present, streamed replies are buffered until the model
   finishes so the reply can be classified as a tool call or plain text.
   Reasoning (`reasoning_content`) is streamed live in both cases.
@@ -291,7 +315,7 @@ schema-valid - validate on the client side.
 ## Tests
 
 ```bash
-python -m unittest tests.test_pow tests.test_stream tests.test_accounts tests.test_retry tests.test_qwen_stream tests.test_qwen_api tests.test_tools tests.test_tools_api -v
+python -m unittest tests.test_pow tests.test_stream tests.test_accounts tests.test_retry tests.test_qwen_stream tests.test_qwen_api tests.test_tools tests.test_tools_api tests.test_sessions -v
 ```
 
 Lint and format (ruff):
@@ -374,8 +398,12 @@ or the pure-Python fallback. All three produce the same answer.
   generations. The same applies to chat.qwen.ai accounts (Qwen uses its own
   pool, so DeepSeek and Qwen parallel generations are independent).
 - Sessions are tied to the account they were created on: repeat requests with
-  the same `session_id` route to the same account (conversation history is
-  stored server-side on the account).
+  the same `session_id` (or the same cached message context) route to the
+  same account, so the conversation history stays intact server-side.
+- The in-memory session/context cache is LRU-bounded per account and per
+  provider. When an entry is evicted, the corresponding chat is no longer
+  reused and a new one is created on the next request; the explicit
+  `session_id` remains the reliable way to pin a conversation.
 - DeepSeek may throttle accounts (especially the expert model
   `deepseek-v4-pro` - "limited resource"). Responses with `finish_reason`
   `expert_busy_use_default` / `parallel_chat_limit` are retried automatically

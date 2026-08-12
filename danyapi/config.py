@@ -46,6 +46,11 @@ class Settings:
             self.acquire_timeout = float(raw_acquire) if raw_acquire else None
         except ValueError:
             self.acquire_timeout = None
+        raw_cache = os.environ.get("DANYAPI_SESSION_CACHE_SIZE", "128")
+        try:
+            self.session_cache_size = int(raw_cache)
+        except ValueError:
+            self.session_cache_size = 128
 
 
 settings = Settings()

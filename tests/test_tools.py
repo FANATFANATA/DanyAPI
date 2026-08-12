@@ -1,3 +1,4 @@
+import json
 import unittest
 from typing import Any
 
@@ -181,6 +182,178 @@ class TestParseToolCalls(unittest.TestCase):
         self.assertIsNone(parse_tool_calls('{"answer": 42}'))
         self.assertIsNone(parse_tool_calls(""))
         self.assertIsNone(parse_tool_calls("   "))
+
+
+class TestParseXmlToolCalls(unittest.TestCase):
+    def test_bash_invoke(self):
+        text = '<tool_calls>\n<invoke name="bash">\n<command>Get-ChildItem -Name</command>\n</invoke>\n</tool_calls>'
+        parsed = parse_tool_calls(text)
+        self.assertIsNotNone(parsed)
+        assert parsed is not None
+        calls, wrapper = parsed
+        assert calls is not None
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0].name, "bash")
+        self.assertEqual(json.loads(calls[0].arguments), {"command": "Get-ChildItem -Name"})
+        self.assertEqual(wrapper, "")
+
+    def test_multiple_invokes(self):
+        text = '<tool_calls><invoke name="a"><x>1</x></invoke><invoke name="b"><y>2</y></invoke></tool_calls>'
+        parsed = parse_tool_calls(text)
+        assert parsed is not None
+        calls, _ = parsed
+        assert calls is not None
+        self.assertEqual([c.name for c in calls], ["a", "b"])
+        self.assertEqual(json.loads(calls[0].arguments), {"x": "1"})
+        self.assertEqual(json.loads(calls[1].arguments), {"y": "2"})
+
+    def test_parameter_tag(self):
+        text = '<tool_calls><invoke name="get_weather"><parameter name="city">Moscow</parameter></invoke></tool_calls>'
+        parsed = parse_tool_calls(text)
+        assert parsed is not None
+        calls, _ = parsed
+        assert calls is not None
+        self.assertEqual(json.loads(calls[0].arguments), {"city": "Moscow"})
+
+    def test_xml_entities(self):
+        text = '<tool_calls><invoke name="bash"><command>echo &quot;a&quot; &amp; b</command></invoke></tool_calls>'
+        parsed = parse_tool_calls(text)
+        assert parsed is not None
+        calls, _ = parsed
+        assert calls is not None
+        self.assertEqual(json.loads(calls[0].arguments), {"command": 'echo "a" & b'})
+
+    def test_prose_wrapper(self):
+        text = 'Let me check.\n\n<tool_calls><invoke name="bash"><command>ls</command></invoke></tool_calls>'
+        parsed = parse_tool_calls(text)
+        assert parsed is not None
+        calls, wrapper = parsed
+        assert calls is not None
+        self.assertEqual(calls[0].name, "bash")
+        self.assertEqual(wrapper, "Let me check.")
+
+    def test_unquoted_name(self):
+        text = "<tool_calls><invoke name=bash><command>pwd</command></invoke></tool_calls>"
+        parsed = parse_tool_calls(text)
+        assert parsed is not None
+        calls, _ = parsed
+        assert calls is not None
+        self.assertEqual(calls[0].name, "bash")
+
+    def test_plain_text_invoke(self):
+        text = '<tool_calls><invoke name="bash">Get-ChildItem</invoke></tool_calls>'
+        parsed = parse_tool_calls(text)
+        assert parsed is not None
+        calls, _ = parsed
+        assert calls is not None
+        self.assertEqual(json.loads(calls[0].arguments), {"content": "Get-ChildItem"})
+
+    def test_fenced_xml(self):
+        text = '```\n<tool_calls>\n<invoke name="bash">\n<command>dir</command>\n</invoke>\n</tool_calls>\n```'
+        parsed = parse_tool_calls(text)
+        assert parsed is not None
+        calls, _ = parsed
+        assert calls is not None
+        self.assertEqual(calls[0].name, "bash")
+
+
+class TestParseBareArrayCalls(unittest.TestCase):
+    def test_bare_array(self):
+        text = '[{"name": "bash", "arguments": {"command": "ls"}}, {"name": "get_weather", "arguments": {"city": "Moscow"}}]'
+        parsed = parse_tool_calls(text)
+        assert parsed is not None
+        calls, _ = parsed
+        assert calls is not None
+        self.assertEqual([c.name for c in calls], ["bash", "get_weather"])
+        self.assertEqual(json.loads(calls[1].arguments), {"city": "Moscow"})
+
+    def test_fenced_array(self):
+        text = '```json\n[{"name": "bash", "arguments": {"command": "pwd"}}]\n```'
+        parsed = parse_tool_calls(text)
+        assert parsed is not None
+        calls, _ = parsed
+        assert calls is not None
+        self.assertEqual(calls[0].name, "bash")
+
+
+class TestParseBareDictCall(unittest.TestCase):
+    def test_bare_name_arguments(self):
+        text = '{"name": "bash", "arguments": {"command": "Get-ChildItem -Name"}}'
+        parsed = parse_tool_calls(text)
+        assert parsed is not None
+        calls, _ = parsed
+        assert calls is not None
+        self.assertEqual(calls[0].name, "bash")
+        self.assertEqual(json.loads(calls[0].arguments), {"command": "Get-ChildItem -Name"})
+
+    def test_many_tools_prose(self):
+        text = (
+            "I need to look at the code first.\n\n"
+            '{"name": "bash", "arguments": {"command": "git status"}}\n\n'
+            'Then I will read the file: {"name": "read", "arguments": {"filePath": "src/main.py"}}\n\n'
+            "After that I will fix it."
+        )
+        parsed = parse_tool_calls(text)
+        assert parsed is not None
+        calls, wrapper = parsed
+        assert calls is not None
+        self.assertEqual(calls[0].name, "bash")
+        self.assertIn("git status", json.loads(calls[0].arguments)["command"])
+        self.assertEqual(calls[1].name, "read")
+        self.assertEqual(json.loads(calls[1].arguments)["filePath"], "src/main.py")
+        self.assertIn("I need to look at the code first", wrapper)
+
+
+class TestParseJsonInXml(unittest.TestCase):
+    def test_json_inside_invoke(self):
+        text = '<tool_calls><invoke name="bash">\n{"command": "Get-ChildItem -Name"}\n</invoke></tool_calls>'
+        parsed = parse_tool_calls(text)
+        assert parsed is not None
+        calls, _ = parsed
+        assert calls is not None
+        self.assertEqual(calls[0].name, "bash")
+        self.assertEqual(json.loads(calls[0].arguments), {"command": "Get-ChildItem -Name"})
+
+    def test_json_inside_tool_call_block(self):
+        text = '<tool_call>{"name": "edit", "arguments": {"filePath": "a.py", "oldString": "x", "newString": "y"}}</tool_call>'
+        parsed = parse_tool_calls(text)
+        assert parsed is not None
+        calls, _ = parsed
+        assert calls is not None
+        self.assertEqual(calls[0].name, "edit")
+        args = json.loads(calls[0].arguments)
+        self.assertEqual(args["filePath"], "a.py")
+
+    def test_many_xml_tools(self):
+        text = (
+            "<tool_calls>\n"
+            '<invoke name="bash">\n<command>Get-ChildItem -Name</command>\n</invoke>\n'
+            '<invoke name="read">\n<filePath>README.md</filePath>\n</invoke>\n'
+            '<invoke name="write">\n<filePath>note.txt</filePath>\n<content>hello</content>\n</invoke>\n'
+            "</tool_calls>"
+        )
+        parsed = parse_tool_calls(text)
+        assert parsed is not None
+        calls, _ = parsed
+        assert calls is not None
+        self.assertEqual([c.name for c in calls], ["bash", "read", "write"])
+        self.assertEqual(json.loads(calls[1].arguments), {"filePath": "README.md"})
+        self.assertEqual(json.loads(calls[2].arguments), {"filePath": "note.txt", "content": "hello"})
+
+    def test_parameter_style_xml(self):
+        text = (
+            '<tool_calls><invoke name="edit">'
+            '<parameter name="filePath">a.py</parameter>'
+            '<parameter name="oldString">1</parameter>'
+            '<parameter name="newString">2</parameter>'
+            "</invoke></tool_calls>"
+        )
+        parsed = parse_tool_calls(text)
+        assert parsed is not None
+        calls, _ = parsed
+        assert calls is not None
+        self.assertEqual(calls[0].name, "edit")
+        self.assertEqual(json.loads(calls[0].arguments), {"filePath": "a.py", "oldString": "1", "newString": "2"})
 
 
 class TestFormatting(unittest.TestCase):

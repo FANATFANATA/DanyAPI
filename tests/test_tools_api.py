@@ -33,6 +33,17 @@ DS_PLAIN_SSE = (
     "\n"
 )
 
+DS_XML_SSE = (
+    "event: ready\n"
+    'data: {"request_message_id":1,"response_message_id":2,"model_type":"default"}\n'
+    "\n"
+    'data: {"v":{"response":{"message_id":2,"parent_id":1,"status":"WIP","fragments":['
+    '{"id":2,"type":"RESPONSE","content":"<tool_calls>\\n<invoke name=\\"bash\\">\\n<command>Get-ChildItem -Name</command>\\n</invoke>\\n</tool_calls>"}]}}}\n'
+    "\n"
+    'data: {"p":"response/status","o":"SET","v":"FINISHED"}\n'
+    "\n"
+)
+
 QWEN_TOOL_SSE = (
     'data: {"response.created":{"chat_id":"c1","parent_id":"p0","response_id":"r1","response_index":"0"}} \n'
     "\n"

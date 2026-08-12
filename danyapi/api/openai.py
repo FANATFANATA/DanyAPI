@@ -107,7 +107,7 @@ async def lifespan(app: FastAPI):
                     log.warning("deepseek token #%d invalid/expired, skipping", i)
                     await client.aclose()
                     continue
-                accounts.append(DeepSeekAccount(len(accounts), client))
+                accounts.append(DeepSeekAccount(len(accounts), client, session_cache_size=settings.session_cache_size))
             log.info("deepseek accounts ready: %d", len(accounts))
         elif settings.deepseek_email:
             client = DeepSeekClient(timeout=settings.timeout)
@@ -124,7 +124,7 @@ async def lifespan(app: FastAPI):
                     log.warning("qwen token #%d invalid/expired, skipping", i)
                     await client.aclose()
                     continue
-                qwen_accounts.append(QwenAccount(len(qwen_accounts), client))
+                qwen_accounts.append(QwenAccount(len(qwen_accounts), client, session_cache_size=settings.session_cache_size))
             log.info("qwen accounts ready: %d", len(qwen_accounts))
         elif settings.qwen_email:
             client = QwenClient(timeout=settings.timeout)
@@ -135,11 +135,11 @@ async def lifespan(app: FastAPI):
             qwen_accounts.append(QwenAccount(0, client))
             log.info("qwen login ok")
         if accounts:
-            app.state.pool = AccountPool(accounts)
+            app.state.pool = AccountPool(accounts, session_cache_size=settings.session_cache_size)
         else:
             app.state.pool = None
         if qwen_accounts:
-            app.state.qwen_pool = AccountPool(qwen_accounts, label="qwen")
+            app.state.qwen_pool = AccountPool(qwen_accounts, label="qwen", session_cache_size=settings.session_cache_size)
             app.state.qwen_models = await _fetch_qwen_models(qwen_accounts[0].client)
         else:
             app.state.qwen_pool = None
@@ -392,7 +392,12 @@ async def _chat_completions_deepseek(req: ChatCompletionRequest) -> Any:
     thinking = req.thinking if req.thinking is not None else (model_type == "expert")
     search = bool(req.search) and model_type == "default"
 
-    account, existing_sid = await _acquire_account(pool, req.session_id)
+    context_seq = toolemu.context_sequence(req.messages)
+    if req.session_id:
+        account, existing_sid = await _acquire_account(pool, req.session_id)
+    else:
+        cached_sid = pool.resolve_context(context_seq) if context_seq else None
+        account, existing_sid = await _acquire_account(pool, cached_sid)
 
     try:
         prompt, tool_mode = toolemu.build_prompt(
@@ -423,6 +428,7 @@ async def _chat_completions_deepseek(req: ChatCompletionRequest) -> Any:
         "ref_file_ids": ref_file_ids,
         "tool_mode": tool_mode,
         "include_usage": _include_usage(req),
+        "context_seq": context_seq,
     }
     if req.stream:
         return StreamingResponse(
@@ -442,7 +448,12 @@ async def _chat_completions_qwen(req: ChatCompletionRequest) -> Any:
     thinking = req.thinking if req.thinking is not None else True
     search = bool(req.search)
 
-    account, existing_sid = await _acquire_account(pool, req.session_id)
+    context_seq = toolemu.context_sequence(req.messages)
+    if req.session_id:
+        account, existing_sid = await _acquire_account(pool, req.session_id)
+    else:
+        cached_sid = pool.resolve_context(context_seq) if context_seq else None
+        account, existing_sid = await _acquire_account(pool, cached_sid)
 
     try:
         prompt, tool_mode = toolemu.build_prompt(
@@ -466,6 +477,7 @@ async def _chat_completions_qwen(req: ChatCompletionRequest) -> Any:
         "search": search,
         "tool_mode": tool_mode,
         "include_usage": _include_usage(req),
+        "context_seq": context_seq,
     }
     if req.stream:
         return StreamingResponse(
@@ -477,14 +489,24 @@ async def _chat_completions_qwen(req: ChatCompletionRequest) -> Any:
     return await qwen_api.collect_non_stream(lock=account.sem, **common)
 
 
-async def _prepare_session(account: DeepSeekAccount, pool: AccountPool, existing_sid: str | None) -> tuple[DeepSeekSession, str, str | None]:
+async def _prepare_session(
+    account: DeepSeekAccount,
+    pool: AccountPool,
+    existing_sid: str | None,
+    context_seq: tuple[str, ...] | None = None,
+) -> tuple[DeepSeekSession, str, str | None]:
     try:
         session, session_key = await account.sessions.obtain(existing_sid)
     except DeepSeekError as exc:
         _handle_account_error(account, exc)
         raise HTTPException(_deepseek_status(exc), _deepseek_error_detail(exc)) from exc
-    if existing_sid is None:
+    if session_key != existing_sid:
         pool.register(account.index, session_key)
+        if existing_sid:
+            pool.forget(existing_sid)
+            pool.forget_context(existing_sid)
+    if context_seq:
+        pool.index_context(session_key, context_seq)
     return session, session_key, session.last_message_id
 
 
@@ -606,9 +628,11 @@ async def _collect_non_stream(
     search,
     ref_file_ids=None,
     tool_mode=False,
+    include_usage=False,
+    context_seq: tuple[str, ...] | None = None,
 ):
     async with lock:
-        session, session_key, parent_message_id = await _prepare_session(account, pool, existing_sid)
+        session, session_key, parent_message_id = await _prepare_session(account, pool, existing_sid, context_seq)
         rec: MessageReconstructor | None = None
         response_message_id = None
         for attempt in range(MAX_RETRIES + 1):
@@ -704,6 +728,7 @@ async def _stream_openai(
     ref_file_ids=None,
     tool_mode=False,
     include_usage=False,
+    context_seq: tuple[str, ...] | None = None,
 ):
     chunk_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
@@ -713,7 +738,7 @@ async def _stream_openai(
 
     async with lock:
         try:
-            session, session_key, parent_message_id = await _prepare_session(account, pool, existing_sid)
+            session, session_key, parent_message_id = await _prepare_session(account, pool, existing_sid, context_seq)
         except HTTPException as exc:
             detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
             yield sse(

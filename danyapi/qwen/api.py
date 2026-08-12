@@ -62,14 +62,19 @@ def _handle_account_error(account, exc: Exception) -> None:
         log.warning("qwen account #%d error: %s", account.index, exc)
 
 
-async def _prepare_session(account, pool, existing_sid: str | None, model_id: str):
+async def _prepare_session(account, pool, existing_sid: str | None, model_id: str, context_seq: tuple[str, ...] | None = None):
     try:
         session, session_key = await account.sessions.obtain(existing_sid, model_id)
     except QwenError as exc:
         _handle_account_error(account, exc)
         raise HTTPException(_error_status(exc.code), f"Qwen error: {exc}") from exc
-    if existing_sid is None:
+    if session_key != existing_sid:
         pool.register(account.index, session_key)
+        if existing_sid:
+            pool.forget(existing_sid)
+            pool.forget_context(existing_sid)
+    if context_seq:
+        pool.index_context(session_key, context_seq)
     return session, session_key
 
 
@@ -139,9 +144,11 @@ async def collect_non_stream(
     thinking,
     search,
     tool_mode=False,
+    include_usage=False,
+    context_seq: tuple[str, ...] | None = None,
 ):
     async with lock:
-        session, session_key = await _prepare_session(account, pool, existing_sid, model_id)
+        session, session_key = await _prepare_session(account, pool, existing_sid, model_id, context_seq)
         rec: QwenStreamReconstructor | None = None
         for attempt in range(MAX_RETRIES + 1):
             if attempt:
@@ -212,6 +219,7 @@ async def stream_openai(
     search,
     tool_mode=False,
     include_usage=False,
+    context_seq: tuple[str, ...] | None = None,
 ):
     chunk_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
@@ -221,7 +229,7 @@ async def stream_openai(
 
     async with lock:
         try:
-            session, session_key = await _prepare_session(account, pool, existing_sid, model_id)
+            session, session_key = await _prepare_session(account, pool, existing_sid, model_id, context_seq)
         except HTTPException as exc:
             detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
             yield sse(
