@@ -87,12 +87,14 @@ def render_tool_schema(tools: list[Any] | None, tool_choice: Any = None) -> str 
         lines.append(f"{i}. name: {fn['name']}")
         if fn.get("description"):
             lines.append(f"   description: {fn['description']}")
+        if fn.get("strict"):
+            lines.append("   strict: true (output arguments must match the schema exactly)")
         params = fn.get("parameters")
         if params is not None:
             if isinstance(params, str):
                 params_json = params
             else:
-                params_json = json.dumps(params, ensure_ascii=False)
+                params_json = json.dumps(params, ensure_ascii=False, separators=(",", ":"))
             lines.append(f"   parameters (JSON Schema): {params_json}")
     if choice in CHOICE_INSTRUCTIONS:
         choice_line = CHOICE_INSTRUCTIONS[choice]
@@ -141,8 +143,9 @@ def _content_fingerprint(content: Any) -> str:
     return ""
 
 
-def context_sequence(messages: list[Any]) -> tuple[str, ...]:
+def context_sequence(messages: list[Any], user: str | None = None) -> tuple[str, ...]:
     sequence: list[str] = []
+    scope = f"\0{user or ''}"
     for msg in messages:
         role = getattr(msg, "role", "user")
         if role not in ("system", "user"):
@@ -150,7 +153,7 @@ def context_sequence(messages: list[Any]) -> tuple[str, ...]:
         content = _content_fingerprint(getattr(msg, "content", ""))
         if not content.strip():
             continue
-        digest = hashlib.sha256(f"{role}\0{content}".encode()).hexdigest()
+        digest = hashlib.sha256(f"{role}\0{content}{scope}".encode()).hexdigest()
         sequence.append(digest)
     return tuple(sequence)
 
@@ -183,6 +186,13 @@ def render_message(msg: Any) -> str:
             mention = _render_tool_call_mention(call)
             if mention:
                 parts.append(mention)
+        content = getattr(msg, "content", None)
+        if isinstance(content, list):
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "tool_call":
+                    mention = _render_tool_call_mention(item)
+                    if mention:
+                        parts.append(mention)
         return "; ".join(parts)
     if role == "tool":
         tool_call_id = getattr(msg, "tool_call_id", None) or ""
@@ -209,10 +219,6 @@ def _render_tool_tail(messages: list[Any]) -> str:
     for msg in messages:
         role = getattr(msg, "role", None)
         if role in ("tool", "function"):
-            text = render_message(msg)
-            if text:
-                parts.append(text)
-        elif role == "assistant" and getattr(msg, "tool_calls", None):
             text = render_message(msg)
             if text:
                 parts.append(text)
@@ -338,8 +344,8 @@ def build_prompt(
     has_session: bool = False,
     response_format: Any = None,
 ) -> tuple[str, bool]:
-    tools_present = bool(tools)
     schema = render_tool_schema(tools, tool_choice)
+    tools_present = schema is not None
     json_block = render_json_mode(response_format)
 
     if has_session:
@@ -624,34 +630,35 @@ def _iter_json_objects(text: str):
 def parse_tool_calls(text: str) -> tuple[list[ToolCall], str] | None:
     if not text or not text.strip():
         return None
-    extracted = _extract_json_object(text)
+    stripped = _strip_fences(text)
+    extracted = _extract_json_object(stripped)
     if extracted is not None:
         obj, start, end = extracted
         wrapped_calls = _extract_wrapped_calls(obj)
         if wrapped_calls is not None:
             wrapper_parts = []
-            surrounding = (text[:start].strip() + " " + text[end + 1 :].strip()).strip()
+            surrounding = (stripped[:start].strip() + " " + stripped[end + 1 :].strip()).strip()
             if surrounding:
                 wrapper_parts.append(surrounding)
             inner = obj.get("content")
             if isinstance(inner, str) and inner.strip():
                 wrapper_parts.append(inner.strip())
             return wrapped_calls, " ".join(wrapper_parts).strip()
-    array_calls = _parse_bare_array_calls(text)
+    array_calls = _parse_bare_array_calls(stripped)
     if array_calls:
         return array_calls, ""
-    xml_calls, wrapper = _parse_xml_tool_calls(text)
+    xml_calls, wrapper = _parse_xml_tool_calls(stripped)
     if xml_calls:
         return xml_calls, wrapper
     calls: list[ToolCall] = []
-    removed = bytearray(len(text))
-    for obj, start, end in _iter_json_objects(text):
+    removed = bytearray(len(stripped))
+    for obj, start, end in _iter_json_objects(stripped):
         found = _extract_calls(obj)
         if found:
             calls.extend(found)
             removed[start : end + 1] = b" " * (end - start + 1)
     if calls:
-        wrapper = "".join((text[i] if removed[i] == 0 else " ") for i in range(len(text)))
+        wrapper = "".join((stripped[i] if removed[i] == 0 else " ") for i in range(len(stripped)))
         return calls, " ".join(wrapper.split())
     return None
 

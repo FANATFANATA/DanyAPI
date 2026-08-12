@@ -51,6 +51,11 @@ class Settings:
             self.session_cache_size = int(raw_cache)
         except ValueError:
             self.session_cache_size = 128
+        raw_ttl = os.environ.get("DANYAPI_SESSION_TTL_SECONDS", "3600")
+        try:
+            self.session_ttl = float(raw_ttl)
+        except ValueError:
+            self.session_ttl = 3600.0
         raw_level = os.environ.get("DANYAPI_LOG_LEVEL", "INFO").strip()
         self.log_level = raw_level or "INFO"
         self.log_file = os.environ.get("DANYAPI_LOG_FILE", "").strip()

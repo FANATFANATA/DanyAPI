@@ -256,6 +256,57 @@ class TestQwenAPI(unittest.TestCase):
         pool.forget_context.assert_called_once_with("s1")
         acct.sessions.forget.assert_called_once_with("s1")
 
+    def test_stream_disconnect_stops_upstream(self):
+        acct = FakeAccount([OK_SSE])
+        acct.client.stop_stream = AsyncMock()
+        gen = qwen_api.stream_openai(**self._args(acct))
+
+        async def run():
+            first = await gen.__anext__()
+            self.assertTrue(first.startswith("data: "))
+            await gen.aclose()
+            acct.client.stop_stream.assert_awaited_once()
+            args, _ = acct.client.stop_stream.call_args
+            self.assertEqual(args[0], "c1")
+            self.assertEqual(args[1], "r1")
+
+        asyncio.run(run())
+
+    def test_non_stream_cancel_stops_upstream(self):
+        acct = FakeAccount([])
+        started = asyncio.Event()
+
+        class BlockingResp(FakeResp):
+            async def aiter_bytes(self):
+                yield (b'data: {"response.created":{"chat_id":"c1","parent_id":"p0","response_id":"r1","response_index":"0"}} \n\n')
+                started.set()
+                await asyncio.Event().wait()
+                yield b""
+
+        acct.client.completion = AsyncMock(return_value=BlockingResp(OK_SSE))
+        acct.client.stop_stream = AsyncMock()
+
+        async def run():
+            task = asyncio.create_task(qwen_api.collect_non_stream(**self._args(acct)))
+            await started.wait()
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            acct.client.stop_stream.assert_awaited_once()
+            args, _ = acct.client.stop_stream.call_args
+            self.assertEqual(args[0], "c1")
+            self.assertEqual(args[1], "r1")
+
+        asyncio.run(run())
+
+    def test_stream_full_consumption_does_not_stop_upstream(self):
+        acct = FakeAccount([OK_SSE])
+        acct.client.stop_stream = AsyncMock()
+        gen = qwen_api.stream_openai(**self._args(acct))
+        lines = list(asyncio.run(_collect(gen)))
+        self.assertTrue(any(line.startswith("data: ") for line in lines))
+        acct.client.stop_stream.assert_not_awaited()
+
 
 async def _collect(agen):
     out = []

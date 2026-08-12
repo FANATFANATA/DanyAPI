@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 import logging
+import sys
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -109,7 +110,14 @@ async def lifespan(app: FastAPI):
                     log.warning("deepseek token #%d invalid/expired, skipping", i)
                     await client.aclose()
                     continue
-                accounts.append(DeepSeekAccount(len(accounts), client, session_cache_size=settings.session_cache_size))
+                accounts.append(
+                    DeepSeekAccount(
+                        len(accounts),
+                        client,
+                        session_cache_size=settings.session_cache_size,
+                        ttl=settings.session_ttl,
+                    )
+                )
             log.info("deepseek accounts ready: %d", len(accounts))
         elif settings.deepseek_email:
             client = DeepSeekClient(timeout=settings.timeout)
@@ -126,7 +134,14 @@ async def lifespan(app: FastAPI):
                     log.warning("qwen token #%d invalid/expired, skipping", i)
                     await client.aclose()
                     continue
-                qwen_accounts.append(QwenAccount(len(qwen_accounts), client, session_cache_size=settings.session_cache_size))
+                qwen_accounts.append(
+                    QwenAccount(
+                        len(qwen_accounts),
+                        client,
+                        session_cache_size=settings.session_cache_size,
+                        ttl=settings.session_ttl,
+                    )
+                )
             log.info("qwen accounts ready: %d", len(qwen_accounts))
         elif settings.qwen_email:
             client = QwenClient(timeout=settings.timeout)
@@ -137,11 +152,20 @@ async def lifespan(app: FastAPI):
             qwen_accounts.append(QwenAccount(0, client))
             log.info("qwen login ok")
         if accounts:
-            app.state.pool = AccountPool(accounts, session_cache_size=settings.session_cache_size)
+            app.state.pool = AccountPool(
+                accounts,
+                session_cache_size=settings.session_cache_size,
+                ttl=settings.session_ttl,
+            )
         else:
             app.state.pool = None
         if qwen_accounts:
-            app.state.qwen_pool = AccountPool(qwen_accounts, label="qwen", session_cache_size=settings.session_cache_size)
+            app.state.qwen_pool = AccountPool(
+                qwen_accounts,
+                label="qwen",
+                session_cache_size=settings.session_cache_size,
+                ttl=settings.session_ttl,
+            )
             app.state.qwen_models = await _fetch_qwen_models(qwen_accounts[0].client)
         else:
             app.state.qwen_pool = None
@@ -307,12 +331,25 @@ def _finish_reason(status: Any) -> str:
     return "stop"
 
 
+def _pool_stats(pool) -> dict | None:
+    if pool is None:
+        return None
+    try:
+        return pool.stats()
+    except Exception:
+        return None
+
+
 @app.get("/health")
 async def health() -> dict:
+    pool = getattr(app.state, "pool", None)
+    qwen_pool = getattr(app.state, "qwen_pool", None)
     return {
         "status": "ok",
-        "deepseek": getattr(app.state, "pool", None) is not None,
-        "qwen": getattr(app.state, "qwen_pool", None) is not None,
+        "deepseek": pool is not None,
+        "qwen": qwen_pool is not None,
+        "deepseek_stats": _pool_stats(pool),
+        "qwen_stats": _pool_stats(qwen_pool),
     }
 
 
@@ -394,7 +431,7 @@ async def _chat_completions_deepseek(req: ChatCompletionRequest) -> Any:
     thinking = req.thinking if req.thinking is not None else (model_type == "expert")
     search = bool(req.search) and model_type == "default"
 
-    context_seq = toolemu.context_sequence(req.messages)
+    context_seq = toolemu.context_sequence(req.messages, user=getattr(req, "user", None))
     if req.session_id:
         account, existing_sid = await _acquire_account(pool, req.session_id)
     else:
@@ -450,7 +487,7 @@ async def _chat_completions_qwen(req: ChatCompletionRequest) -> Any:
     thinking = req.thinking if req.thinking is not None else True
     search = bool(req.search)
 
-    context_seq = toolemu.context_sequence(req.messages)
+    context_seq = toolemu.context_sequence(req.messages, user=getattr(req, "user", None))
     if req.session_id:
         account, existing_sid = await _acquire_account(pool, req.session_id)
     else:
@@ -569,6 +606,13 @@ def _is_retryable_hint(rec: MessageReconstructor) -> bool:
     return bool(hint and hint.get("finish_reason") in RETRYABLE_FINISH_REASONS)
 
 
+RETRYABLE_HTTP_STATUSES = {408, 425, 429, 500, 502, 503, 504}
+
+
+def _is_retryable_http(exc: HTTPException) -> bool:
+    return exc.status_code in RETRYABLE_HTTP_STATUSES
+
+
 def _is_context_limit(rec: MessageReconstructor) -> bool:
     if rec.status == CONTEXT_LENGTH_STATUS:
         return True
@@ -631,6 +675,15 @@ def _busy_error_body(rec: MessageReconstructor) -> str:
     )
 
 
+async def _try_stop_stream(client, session_id: str, message_id: str | None) -> None:
+    if not session_id or not message_id:
+        return
+    try:
+        await client.stop_stream(session_id, message_id)
+    except Exception as exc:
+        log.debug("stop_stream failed for %s: %s", session_id, exc)
+
+
 async def _collect_non_stream(
     account,
     pool,
@@ -648,46 +701,66 @@ async def _collect_non_stream(
 ):
     async with lock:
         session, session_key, parent_message_id = await _prepare_session(account, pool, existing_sid, context_seq)
-        rec: MessageReconstructor | None = None
-        response_message_id = None
-        for attempt in range(MAX_RETRIES + 1):
-            if attempt:
-                await asyncio.sleep(RETRY_BACKOFF_SEC * (2 ** (attempt - 1)))
-            pow_headers = await _fresh_pow_headers(account)
-            resp = await _send_with_auth(
-                account,
-                account.client,
-                pow_headers,
-                session.id,
-                parent_message_id,
-                prompt,
-                model_type,
-                thinking,
-                search,
-                ref_file_ids,
-            )
-            rec = MessageReconstructor()
-            incremental = IncrementalSSE()
+        stop_message_id: str | None = None
+        try:
+            rec: MessageReconstructor | None = None
             response_message_id = None
-            try:
-                async for chunk in resp.aiter_bytes():
-                    for event in incremental.feed(chunk):
-                        if event.event == "ready" and isinstance(event.data, dict):
-                            response_message_id = event.data.get("response_message_id")
+            for attempt in range(MAX_RETRIES + 1):
+                if attempt:
+                    await asyncio.sleep(RETRY_BACKOFF_SEC * (2 ** (attempt - 1)))
+                try:
+                    pow_headers = await _fresh_pow_headers(account)
+                    resp = await _send_with_auth(
+                        account,
+                        account.client,
+                        pow_headers,
+                        session.id,
+                        parent_message_id,
+                        prompt,
+                        model_type,
+                        thinking,
+                        search,
+                        ref_file_ids,
+                    )
+                except HTTPException as exc:
+                    if _is_retryable_http(exc) and attempt < MAX_RETRIES:
+                        log.warning(
+                            "deepseek provider error (%s), attempt %d/%d",
+                            exc.status_code,
+                            attempt + 1,
+                            MAX_RETRIES,
+                        )
+                        continue
+                    raise
+                rec = MessageReconstructor()
+                incremental = IncrementalSSE()
+                response_message_id = None
+                try:
+                    async for chunk in resp.aiter_bytes():
+                        for event in incremental.feed(chunk):
+                            if event.event == "ready" and isinstance(event.data, dict):
+                                response_message_id = event.data.get("response_message_id")
+                                if response_message_id:
+                                    stop_message_id = response_message_id
+                            rec.handle(event)
+                    for event in incremental.finish():
                         rec.handle(event)
-                for event in incremental.finish():
-                    rec.handle(event)
-            finally:
-                await resp.aclose()
-            if not (rec.content or rec.reasoning) and _is_retryable_hint(rec) and attempt < MAX_RETRIES:
-                log.warning(
-                    "retryable hint (%s), attempt %d/%d",
-                    (rec.hint_error or {}).get("finish_reason"),
-                    attempt + 1,
-                    MAX_RETRIES,
-                )
-                continue
-            break
+                finally:
+                    await resp.aclose()
+                if rec.id:
+                    stop_message_id = rec.id
+                if not (rec.content or rec.reasoning) and _is_retryable_hint(rec) and attempt < MAX_RETRIES:
+                    log.warning(
+                        "retryable hint (%s), attempt %d/%d",
+                        (rec.hint_error or {}).get("finish_reason"),
+                        attempt + 1,
+                        MAX_RETRIES,
+                    )
+                    continue
+                break
+        except asyncio.CancelledError:
+            await _try_stop_stream(account.client, session.id, stop_message_id)
+            raise
 
         assert rec is not None
         if _is_context_limit(rec) and not (rec.content or rec.reasoning):
@@ -782,6 +855,7 @@ async def _stream_openai(
 
         rec: MessageReconstructor | None = None
         response_message_id = None
+        stop_message_id: str | None = None
         content_buf = ""
         for attempt in range(MAX_RETRIES + 1):
             if attempt:
@@ -801,6 +875,14 @@ async def _stream_openai(
                     ref_file_ids,
                 )
             except HTTPException as exc:
+                if _is_retryable_http(exc) and attempt < MAX_RETRIES:
+                    log.warning(
+                        "deepseek provider error (%s), attempt %d/%d",
+                        exc.status_code,
+                        attempt + 1,
+                        MAX_RETRIES,
+                    )
+                    continue
                 detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
                 yield sse(
                     {
@@ -832,6 +914,8 @@ async def _stream_openai(
                     for event in incremental.feed(chunk):
                         if event.event == "ready" and isinstance(event.data, dict):
                             response_message_id = event.data.get("response_message_id")
+                            if response_message_id:
+                                stop_message_id = response_message_id
                         rec.handle(event)
                         c_diff, r_diff = rec.take_diffs()
                         if c_diff or r_diff:
@@ -885,6 +969,10 @@ async def _stream_openai(
                                 yield line
                             pending.clear()
             finally:
+                if rec.id:
+                    stop_message_id = rec.id
+                if sys.exc_info()[0] is not None:
+                    await _try_stop_stream(account.client, session.id, stop_message_id)
                 await resp.aclose()
             if got_content:
                 break

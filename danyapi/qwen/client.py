@@ -48,6 +48,7 @@ class QwenSession:
     id: str
     title: str = ""
     last_response_id: str | None = None
+    model: str | None = None
     extra: dict = field(default_factory=dict)
 
 

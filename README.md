@@ -198,6 +198,14 @@ conversation (or to branch off into an independent chat). The in-memory
 cache is LRU-bounded per provider (`DANYAPI_SESSION_CACHE_SIZE`, default
 128).
 
+The context fingerprint is scoped by the `user` field when the client sends
+it: two different `user` values never share a server-side chat even for
+identical messages, so stateless multi-tenant clients stay isolated. Cache
+entries expire after `DANYAPI_SESSION_TTL_SECONDS` (default 3600, `0`
+disables expiry) so stale chats are dropped instead of being reused.
+Qwen chats are also model-aware: a `session_id` created for one Qwen model
+is automatically migrated to a new chat if a request switches models.
+
 No context is ever duplicated or lost:
 
 - A reused chat receives **only the delta**: the new user message, or the
@@ -343,8 +351,13 @@ schema-valid - validate on the client side.
 - `system` messages are collected and injected as the model's system prompt
   in front of the first user turn (upstream web APIs have no dedicated
   `system` field).
-- `GET /health` returns `{"status": "ok", "deepseek": true, "qwen": true}` -
+- `GET /health` returns `{"status": "ok", "deepseek": true, "qwen": true}`
+  plus per-provider cache stats (`deepseek_stats` / `qwen_stats`: account
+  health, session-affinity count, context-cache size and hit/miss counters) -
   useful for readiness probes and load balancers.
+- When the client disconnects mid-generation, DanyAPI tells the upstream
+  provider to stop the stream, so the server-side chat does not keep a
+  partial response.
 - Streaming usage: pass `"stream_options": {"include_usage": true}` and the
   final SSE chunk carries real `usage` (like the official API).
 
@@ -439,7 +452,10 @@ or the pure-Python fallback. All three produce the same answer.
 - The in-memory session/context cache is LRU-bounded per account and per
   provider. When an entry is evicted, the corresponding chat is no longer
   reused and a new one is created on the next request; the explicit
-  `session_id` remains the reliable way to pin a conversation.
+  `session_id` remains the reliable way to pin a conversation. Unused
+  entries also expire after `DANYAPI_SESSION_TTL_SECONDS`, and session-id ->
+  account affinity is cleaned up together with the cache, so memory stays
+  bounded on long-running instances.
 - DeepSeek may throttle accounts (especially the expert model
   `deepseek-v4-pro` - "limited resource"). Responses with `finish_reason`
   `expert_busy_use_default` / `parallel_chat_limit` are retried automatically

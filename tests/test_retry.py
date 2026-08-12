@@ -258,6 +258,57 @@ class TestRetry(unittest.TestCase):
         pool.forget_context.assert_called_once_with("s1")
         acct.sessions.forget.assert_called_once_with("s1")
 
+    def test_non_stream_cancel_stops_upstream(self):
+        acct = FakeAccount([])
+        started = asyncio.Event()
+
+        class BlockingResp(FakeResp):
+            async def aiter_bytes(self):
+                yield (b'event: ready\ndata: {"request_message_id":1,"response_message_id":2,"model_type":"default"}\n\n')
+                started.set()
+                await asyncio.Event().wait()
+                yield b""
+
+        acct.client.completion = AsyncMock(return_value=BlockingResp(OK_SSE))
+        acct.client.stop_stream = AsyncMock()
+
+        async def run():
+            task = asyncio.create_task(_collect_non_stream(**self._args(acct)))
+            await started.wait()
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            acct.client.stop_stream.assert_awaited_once()
+            args, _ = acct.client.stop_stream.call_args
+            self.assertEqual(args[0], "c1")
+            self.assertEqual(args[1], 2)
+
+        asyncio.run(run())
+
+    def test_stream_disconnect_stops_upstream(self):
+        acct = FakeAccount([OK_SSE])
+        acct.client.stop_stream = AsyncMock()
+        gen = _stream_openai(**self._args(acct))
+
+        async def run():
+            first = await gen.__anext__()
+            self.assertTrue(first.startswith("data: "))
+            await gen.aclose()
+            acct.client.stop_stream.assert_awaited_once()
+            args, _ = acct.client.stop_stream.call_args
+            self.assertEqual(args[0], "c1")
+            self.assertEqual(args[1], 2)
+
+        asyncio.run(run())
+
+    def test_stream_full_consumption_does_not_stop_upstream(self):
+        acct = FakeAccount([OK_SSE])
+        acct.client.stop_stream = AsyncMock()
+        gen = _stream_openai(**self._args(acct))
+        lines = list(asyncio.run(_collect(gen)))
+        self.assertTrue(any(line.startswith("data: ") for line in lines))
+        acct.client.stop_stream.assert_not_awaited()
+
 
 class TestModelConfig(unittest.TestCase):
     def test_model_type_mapping(self):

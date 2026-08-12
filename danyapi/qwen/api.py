@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import sys
 import time
 import uuid
 
@@ -18,6 +19,13 @@ log = logging.getLogger("danyapi.qwen.api")
 
 MAX_RETRIES = 3
 RETRY_BACKOFF_SEC = 1.0
+
+RETRYABLE_HTTP_STATUSES = {408, 425, 429, 500, 502, 503, 504}
+
+
+def _is_retryable_http(exc: HTTPException) -> bool:
+    return exc.status_code in RETRYABLE_HTTP_STATUSES
+
 
 RETRYABLE_ERROR_CODES = {
     "Too_Many_Requests",
@@ -116,6 +124,11 @@ async def _send_completion(client: QwenClient, session, prompt: str, model_id: s
     except httpx.HTTPError as exc:
         raise HTTPException(502, f"Qwen request failed: {exc}") from exc
 
+    if resp.status_code != 200:
+        body = await resp.aread()
+        await resp.aclose()
+        raise HTTPException(resp.status_code, body[:500].decode("utf-8", errors="replace"))
+
     content_type = resp.headers.get("content-type", "")
     if "text/event-stream" not in content_type:
         body = await resp.aread()
@@ -160,6 +173,15 @@ def _error_body(rec: QwenStreamReconstructor) -> str:
     )
 
 
+async def _try_stop_stream(client, session_id: str, message_id: str | None) -> None:
+    if not session_id or not message_id:
+        return
+    try:
+        await client.stop_stream(session_id, message_id)
+    except Exception as exc:
+        log.debug("stop_stream failed for %s: %s", session_id, exc)
+
+
 async def collect_non_stream(
     account,
     pool,
@@ -176,34 +198,51 @@ async def collect_non_stream(
 ):
     async with lock:
         session, session_key = await _prepare_session(account, pool, existing_sid, model_id, context_seq)
-        rec: QwenStreamReconstructor | None = None
-        for attempt in range(MAX_RETRIES + 1):
-            if attempt:
-                await asyncio.sleep(RETRY_BACKOFF_SEC * (2 ** (attempt - 1)))
-            try:
-                resp = await _send_completion(account.client, session, prompt, model_id, thinking, search)
-            except ContextLimitError:
-                _drop_session(pool, account, session_key)
-                raise HTTPException(400, "context length exceeded: conversation too long, start a new conversation") from None
-            rec = QwenStreamReconstructor()
-            incremental = IncrementalSSE()
-            try:
-                async for chunk in resp.aiter_bytes():
-                    for event in incremental.feed(chunk):
+        stop_response_id: str | None = None
+        try:
+            rec: QwenStreamReconstructor | None = None
+            for attempt in range(MAX_RETRIES + 1):
+                if attempt:
+                    await asyncio.sleep(RETRY_BACKOFF_SEC * (2 ** (attempt - 1)))
+                try:
+                    resp = await _send_completion(account.client, session, prompt, model_id, thinking, search)
+                except ContextLimitError:
+                    _drop_session(pool, account, session_key)
+                    raise HTTPException(400, "context length exceeded: conversation too long, start a new conversation") from None
+                except HTTPException as exc:
+                    if _is_retryable_http(exc) and attempt < MAX_RETRIES:
+                        log.warning(
+                            "qwen provider error (%s), attempt %d/%d",
+                            exc.status_code,
+                            attempt + 1,
+                            MAX_RETRIES,
+                        )
+                        continue
+                    raise
+                rec = QwenStreamReconstructor()
+                incremental = IncrementalSSE()
+                try:
+                    async for chunk in resp.aiter_bytes():
+                        for event in incremental.feed(chunk):
+                            rec.handle(event)
+                    for event in incremental.finish():
                         rec.handle(event)
-                for event in incremental.finish():
-                    rec.handle(event)
-            finally:
-                await resp.aclose()
-            if _is_retryable_error(rec) and attempt < MAX_RETRIES:
-                log.warning(
-                    "qwen retryable error (%s), attempt %d/%d",
-                    error_code(rec.error),
-                    attempt + 1,
-                    MAX_RETRIES,
-                )
-                continue
-            break
+                finally:
+                    if rec.response_id:
+                        stop_response_id = rec.response_id
+                    await resp.aclose()
+                if _is_retryable_error(rec) and attempt < MAX_RETRIES:
+                    log.warning(
+                        "qwen retryable error (%s), attempt %d/%d",
+                        error_code(rec.error),
+                        attempt + 1,
+                        MAX_RETRIES,
+                    )
+                    continue
+                break
+        except asyncio.CancelledError:
+            await _try_stop_stream(account.client, session.id, stop_response_id)
+            raise
 
         assert rec is not None
         if _is_context_limit(rec) and not rec.has_content:
@@ -289,6 +328,7 @@ async def stream_openai(
 
         rec: QwenStreamReconstructor | None = None
         content_buf = ""
+        stop_response_id: str | None = None
         for attempt in range(MAX_RETRIES + 1):
             if attempt:
                 await asyncio.sleep(RETRY_BACKOFF_SEC * (2 ** (attempt - 1)))
@@ -326,6 +366,14 @@ async def stream_openai(
                 yield "data: [DONE]\n\n"
                 return
             except HTTPException as exc:
+                if _is_retryable_http(exc) and attempt < MAX_RETRIES:
+                    log.warning(
+                        "qwen provider error (%s), attempt %d/%d",
+                        exc.status_code,
+                        attempt + 1,
+                        MAX_RETRIES,
+                    )
+                    continue
                 detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
                 yield sse(
                     {
@@ -407,6 +455,10 @@ async def stream_openai(
                                 yield line
                             pending.clear()
             finally:
+                if rec.response_id:
+                    stop_response_id = rec.response_id
+                if sys.exc_info()[0] is not None:
+                    await _try_stop_stream(account.client, session.id, stop_response_id)
                 await resp.aclose()
             if got_content:
                 break

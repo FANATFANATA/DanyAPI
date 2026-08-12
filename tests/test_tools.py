@@ -11,6 +11,7 @@ from danyapi.tools import (
     is_tool_round,
     parse_tool_calls,
     render_json_mode,
+    render_message,
     render_tool_schema,
     tool_call_deltas,
 )
@@ -66,6 +67,22 @@ class TestRenderToolSchema(unittest.TestCase):
         assert schema is not None
         self.assertIn("get_weather", schema)
 
+    def test_strict_flag_rendered(self):
+        tool = {
+            "type": "function",
+            "function": {"name": "calc", "strict": True, "parameters": {"type": "object", "properties": {"x": {"type": "number"}}}},
+        }
+        schema = render_tool_schema([tool])
+        self.assertIsNotNone(schema)
+        assert schema is not None
+        self.assertIn("strict", schema)
+
+    def test_compact_parameters_json(self):
+        schema = render_tool_schema([WEATHER_TOOL])
+        self.assertIsNotNone(schema)
+        assert schema is not None
+        self.assertIn('{"type":"object"', schema)
+
 
 class TestIsToolRound(unittest.TestCase):
     def test_plain_user(self):
@@ -81,6 +98,13 @@ class TestIsToolRound(unittest.TestCase):
         msg = Message(
             role="assistant",
             tool_calls=[{"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": "{}"}}],
+        )
+        self.assertTrue(is_tool_round([msg]))
+
+    def test_assistant_content_list_tool_call(self):
+        msg = Message(
+            role="assistant",
+            content=[{"type": "tool_call", "id": "c1", "function": {"name": "bash", "arguments": '{"command": "ls"}'}}],
         )
         self.assertTrue(is_tool_round([msg]))
 
@@ -376,6 +400,15 @@ class TestFormatting(unittest.TestCase):
         self.assertEqual(deltas[0]["tool_calls"][0]["function"]["name"], "get_weather")
         arguments = "".join(d["tool_calls"][0]["function"]["arguments"] for d in deltas[1:])
         self.assertEqual(arguments, '{"city": "Moscow"}')
+
+    def test_render_message_content_list_tool_call(self):
+        msg = Message(
+            role="assistant",
+            content=[{"type": "tool_call", "id": "c1", "function": {"name": "bash", "arguments": '{"command": "ls"}'}}],
+        )
+        text = render_message(msg)
+        self.assertIn("bash", text)
+        self.assertIn("ls", text)
 
 
 class TestRenderJsonMode(unittest.TestCase):

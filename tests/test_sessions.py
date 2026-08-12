@@ -95,6 +95,18 @@ class TestContextSequence(unittest.TestCase):
         self.assertEqual(context_sequence([]), ())
         self.assertEqual(context_sequence([Message("assistant", "a")]), ())
 
+    def test_user_scopes_fingerprint(self):
+        base = [Message("user", "hello")]
+        self.assertEqual(context_sequence(base), context_sequence(base))
+        self.assertNotEqual(context_sequence(base, user="alice"), context_sequence(base, user="bob"))
+        self.assertEqual(context_sequence(base, user="alice"), context_sequence(base, user="alice"))
+
+    def test_user_keeps_continuation_prefix(self):
+        one = context_sequence([Message("user", "hi")], user="alice")
+        two = context_sequence([Message("user", "hi"), Message("assistant", "yo"), Message("user", "next")], user="alice")
+        self.assertEqual(one, two[:1])
+        self.assertNotEqual(context_sequence([Message("user", "hi")], user="alice"), context_sequence([Message("user", "hi")], user="bob"))
+
 
 class TestContextIndex(unittest.TestCase):
     def test_exact_match_reuses(self):
@@ -149,6 +161,23 @@ class TestContextIndex(unittest.TestCase):
         idx.index("s2", ("a",))
         self.assertEqual(idx.lookup(("a",)), "s2")
 
+    def test_ttl_expires_entries(self):
+        idx = ContextIndex(16, ttl=0.1)
+        idx.index("s1", ("a",))
+        self.assertEqual(idx.lookup(("a",)), "s1")
+        import time
+
+        idx._ts["s1"] = time.monotonic() - 10
+        self.assertIsNone(idx.lookup(("a",)))
+
+    def test_stats_counters(self):
+        idx = ContextIndex(16)
+        idx.index("s1", ("a",))
+        self.assertIsNone(idx.lookup(("x",)))
+        self.assertEqual(idx.lookup(("a",)), "s1")
+        self.assertEqual(idx.hits, 1)
+        self.assertEqual(idx.misses, 1)
+
 
 class TestSessionRegistry(unittest.TestCase):
     def test_reuses_explicit_session(self):
@@ -191,6 +220,17 @@ class TestSessionRegistry(unittest.TestCase):
         _, k2 = asyncio.run(reg.obtain(k))
         self.assertNotEqual(k2, k)
 
+    def test_ttl_expires_session(self):
+        import time
+
+        reg = SessionRegistry(FakeSessionClient(), maxsize=16, ttl=0.1)
+        s, k = asyncio.run(reg.obtain(None))
+        self.assertIsNotNone(reg.get(k))
+        reg._sessions[k] = (s, time.monotonic() - 10)
+        self.assertIsNone(reg.get(k))
+        _, k2 = asyncio.run(reg.obtain(k))
+        self.assertNotEqual(k2, k)
+
 
 class TestQwenSessionRegistry(unittest.TestCase):
     def test_reuses_and_evicts(self):
@@ -217,6 +257,15 @@ class TestQwenSessionRegistry(unittest.TestCase):
         self.assertIsNotNone(reg.get(k))
         reg.forget(k)
         self.assertIsNone(reg.get(k))
+
+    def test_model_switch_creates_new_chat(self):
+        reg = QwenSessionRegistry(FakeSessionClient())
+        _, k1 = asyncio.run(reg.obtain(None, "qwen3.8-max"))
+        _, k2 = asyncio.run(reg.obtain(k1, "qwen3.7-plus"))
+        self.assertNotEqual(k2, k1)
+        s, k3 = asyncio.run(reg.obtain(k1, "qwen3.8-max"))
+        self.assertEqual(k3, k1)
+        self.assertEqual(s.model, "qwen3.8-max")
 
 
 class TestAccountPoolContext(unittest.TestCase):
@@ -254,6 +303,18 @@ class TestAccountPoolContext(unittest.TestCase):
         self.assertEqual(pool.account_for_session("s1").index, 0)
         pool.forget("s1")
         self.assertIsNone(pool.account_for_session("s1"))
+
+    def test_stats_reports_cache_state(self):
+        pool = AccountPool([make_acct(0), make_acct(1)])
+        pool.register(0, "s1")
+        pool.index_context("s1", ("a",))
+        stats = pool.stats()
+        self.assertEqual(stats["accounts"], 2)
+        self.assertEqual(stats["healthy"], 2)
+        self.assertEqual(stats["session_affinities"], 1)
+        self.assertEqual(stats["context_entries"], 1)
+        pool.resolve_context(("a",))
+        self.assertEqual(pool.stats()["context_hits"], 1)
 
 
 class TestBuildPromptSession(unittest.TestCase):
