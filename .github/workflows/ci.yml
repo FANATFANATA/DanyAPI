@@ -28,7 +28,7 @@ jobs:
         run: pip install -r requirements-dev.txt
 
       - name: Run unit tests
-        run: python -m unittest tests.test_pow tests.test_stream tests.test_accounts tests.test_retry -v
+        run: python -m unittest tests.test_pow tests.test_stream tests.test_accounts tests.test_retry tests.test_qwen_stream tests.test_qwen_api -v
 
   lint:
     runs-on: ubuntu-latest

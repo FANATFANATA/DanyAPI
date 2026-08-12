@@ -17,6 +17,9 @@ from ..accounts import AccountPool, DeepSeekAccount
 from ..config import settings
 from ..deepseek.client import DeepSeekClient, DeepSeekError, DeepSeekSession
 from ..deepseek.stream import IncrementalSSE, MessageReconstructor
+from ..qwen import api as qwen_api
+from ..qwen.accounts import QwenAccount
+from ..qwen.client import QwenClient, QwenError
 
 log = logging.getLogger("danyapi.api")
 
@@ -25,6 +28,27 @@ MODEL_TYPE_BY_NAME = {
     "deepseek-reasoner": "expert",
     "deepseek-vision": "vision",
 }
+
+QWEN_DEFAULT_MODELS = [
+    {
+        "id": "qwen3.8-max",
+        "name": "Qwen3.8-Max",
+        "owned_by": "qwen",
+        "model_type": "chat",
+    },
+    {
+        "id": "qwen3.7-plus",
+        "name": "Qwen3.7-Plus",
+        "owned_by": "qwen",
+        "model_type": "chat",
+    },
+    {
+        "id": "qwen3.7-max",
+        "name": "Qwen3.7-Max",
+        "owned_by": "qwen",
+        "model_type": "chat",
+    },
+]
 
 STATUS_TO_FINISH_REASON = {
     "FINISHED": "stop",
@@ -56,12 +80,13 @@ class ChatCompletionRequest(BaseModel):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     accounts: list[DeepSeekAccount] = []
+    qwen_accounts: list[QwenAccount] = []
     try:
         if settings.deepseek_tokens:
             for i, token in enumerate(settings.deepseek_tokens):
                 client = DeepSeekClient(token=token, timeout=settings.timeout)
                 if not await client.check_auth():
-                    log.warning("token #%d invalid/expired, skipping", i)
+                    log.warning("deepseek token #%d invalid/expired, skipping", i)
                     await client.aclose()
                     continue
                 accounts.append(DeepSeekAccount(len(accounts), client))
@@ -74,13 +99,70 @@ async def lifespan(app: FastAPI):
             )
             accounts.append(DeepSeekAccount(0, client))
             log.info("deepseek login ok, device_id=%s", client.device_id)
-        if not accounts:
-            raise RuntimeError("no valid DeepSeek credentials: set DEEPSEEK_TOKENS or DEEPSEEK_EMAIL/DEEPSEEK_PASSWORD")
-        app.state.pool = AccountPool(accounts)
+        if settings.qwen_tokens:
+            for i, token in enumerate(settings.qwen_tokens):
+                client = QwenClient(token=token, timeout=settings.timeout)
+                if not await client.check_auth():
+                    log.warning("qwen token #%d invalid/expired, skipping", i)
+                    await client.aclose()
+                    continue
+                qwen_accounts.append(QwenAccount(len(qwen_accounts), client))
+            log.info("qwen accounts ready: %d", len(qwen_accounts))
+        elif settings.qwen_email:
+            client = QwenClient(timeout=settings.timeout)
+            await client.login(
+                email=settings.qwen_email,
+                password=settings.qwen_password,
+            )
+            qwen_accounts.append(QwenAccount(0, client))
+            log.info("qwen login ok")
+        if accounts:
+            app.state.pool = AccountPool(accounts)
+        else:
+            app.state.pool = None
+        if qwen_accounts:
+            app.state.qwen_pool = AccountPool(qwen_accounts, label="qwen")
+            app.state.qwen_models = await _fetch_qwen_models(qwen_accounts[0].client)
+        else:
+            app.state.qwen_pool = None
+            app.state.qwen_models = []
+        if not accounts and not qwen_accounts:
+            raise RuntimeError("no valid credentials: set DEEPSEEK_TOKENS/DEEPSEEK_EMAIL or QWEN_TOKENS/QWEN_EMAIL")
         yield
     finally:
         for acct in accounts:
             await acct.client.aclose()
+        for acct in qwen_accounts:
+            await acct.client.aclose()
+
+
+async def _fetch_qwen_models(client: QwenClient) -> list[dict]:
+    try:
+        raw = await client.fetch_models()
+    except QwenError as exc:
+        log.warning("qwen models fetch failed, using defaults: %s", exc)
+        return QWEN_DEFAULT_MODELS
+    models = []
+    for model in raw:
+        if not isinstance(model, dict) or not model.get("id"):
+            continue
+        info = model.get("info")
+        meta = (info or {}).get("meta") if isinstance(info, dict) else None
+        chat_types = (meta or {}).get("chat_type") if isinstance(meta, dict) else None
+        if chat_types is not None and "t2t" not in chat_types:
+            continue
+        models.append(
+            {
+                "id": model["id"],
+                "name": model.get("name") or model["id"],
+                "owned_by": "qwen",
+                "model_type": "chat",
+            }
+        )
+    if not models:
+        log.warning("qwen models fetch returned nothing, using defaults")
+        return QWEN_DEFAULT_MODELS
+    return models
 
 
 app = FastAPI(title="DanyAPI", lifespan=lifespan)
@@ -141,6 +223,18 @@ async def list_models() -> dict:
         }
         for name, model_type in MODEL_TYPE_BY_NAME.items()
     ]
+    qwen_models: list[dict] = getattr(app.state, "qwen_models", [])
+    for model in qwen_models:
+        models.append(
+            {
+                "id": model["id"],
+                "object": "model",
+                "created": 0,
+                "owned_by": model.get("owned_by", "qwen"),
+                "name": model.get("name"),
+                "model_type": model.get("model_type", "chat"),
+            }
+        )
     return {"object": "list", "data": models}
 
 
@@ -154,9 +248,26 @@ MAX_RETRIES = 3
 RETRY_BACKOFF_SEC = 1.0
 
 
+def _resolve_provider(model: str) -> str:
+    if model.startswith("qwen"):
+        return "qwen"
+    if model in MODEL_TYPE_BY_NAME or model.startswith("deepseek"):
+        return "deepseek"
+    raise HTTPException(404, f"Unknown model: {model}")
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions(req: ChatCompletionRequest) -> Any:
+    provider = _resolve_provider(req.model)
+    if provider == "qwen":
+        return await _chat_completions_qwen(req)
+    return await _chat_completions_deepseek(req)
+
+
+async def _chat_completions_deepseek(req: ChatCompletionRequest) -> Any:
     pool: AccountPool = app.state.pool
+    if pool is None:
+        raise HTTPException(503, "deepseek provider is not configured")
 
     model_type = _resolve_model(req.model)
     thinking = req.thinking if req.thinking is not None else (model_type == "expert")
@@ -183,6 +294,37 @@ async def chat_completions(req: ChatCompletionRequest) -> Any:
         )
 
     return await _collect_non_stream(lock=account.sem, **common)
+
+
+async def _chat_completions_qwen(req: ChatCompletionRequest) -> Any:
+    pool: AccountPool = app.state.qwen_pool
+    if pool is None:
+        raise HTTPException(503, "qwen provider is not configured")
+
+    thinking = req.thinking if req.thinking is not None else True
+    search = bool(req.search)
+    prompt = _extract_prompt(req.messages)
+
+    account, existing_sid = await pool.acquire(req.session_id)
+
+    common = {
+        "account": account,
+        "pool": pool,
+        "existing_sid": existing_sid,
+        "prompt": prompt,
+        "model": req.model,
+        "model_id": req.model,
+        "thinking": thinking,
+        "search": search,
+    }
+    if req.stream:
+        return StreamingResponse(
+            qwen_api.stream_openai(lock=account.sem, **common),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    return await qwen_api.collect_non_stream(lock=account.sem, **common)
 
 
 async def _prepare_session(account: DeepSeekAccount, pool: AccountPool, existing_sid: str | None) -> tuple[DeepSeekSession, str, str | None]:

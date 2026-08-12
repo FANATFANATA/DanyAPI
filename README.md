@@ -1,19 +1,22 @@
 # DanyAPI
 
 OpenAI-compatible HTTP API built on Python + FastAPI. Instead of the paid
-DeepSeek API it talks to the internal API of the free web client
-[chat.deepseek.com](https://chat.deepseek.com) using a server-side account.
-API users need no keys - all requests are made by the server account.
+APIs it talks to the internal APIs of the free web clients
+[chat.deepseek.com](https://chat.deepseek.com) and
+[chat.qwen.ai](https://chat.qwen.ai) using server-side accounts.
+API users need no keys - all requests are made by the server accounts.
 
 ## Features
 
 - `GET /v1/models` - model list
 - `POST /v1/chat/completions` - generation (stream and non-stream)
-- Models: `deepseek-chat`, `deepseek-reasoner`, `deepseek-vision`
+- DeepSeek models: `deepseek-chat`, `deepseek-reasoner`, `deepseek-vision`
   (internal `model_type`: `default`, `expert`, `vision`)
-- Thinking and web search
+- Qwen models: fetched from the account at startup
+  (`qwen3.8-max`, `qwen3.7-plus`, ...)
+- Thinking and web search (DeepSeek); thinking and search (Qwen)
 - Multi-session: the message chain is stored server-side
-  (`session_id` in the response), like the web client
+  (`session_id` in the response), like the web clients
 
 ## Install
 
@@ -28,6 +31,8 @@ pip install -r requirements-dev.txt
 ```
 
 ## Account setup
+
+### DeepSeek
 
 Set a pool of tokens (from different accounts), comma-separated:
 
@@ -45,6 +50,27 @@ Or a single email + password account (login happens at startup):
 export DEEPSEEK_EMAIL="you@example.com"
 export DEEPSEEK_PASSWORD="secret"
 ```
+
+### Qwen
+
+Same model, different token location:
+
+```bash
+export QWEN_TOKENS="token1,token2,token3"
+```
+
+Grab a token in the browser:
+DevTools -> Application -> Local Storage -> https://chat.qwen.ai -> `token`.
+
+Or a single email + password account (login happens at startup):
+
+```bash
+export QWEN_EMAIL="you@example.com"
+export QWEN_PASSWORD="secret"
+```
+
+Both providers are optional. Run at least one of them (or both) - requests
+are routed to the right provider by the model name (`deepseek-*` / `qwen*`).
 
 ## Run
 
@@ -64,6 +90,14 @@ uvicorn danyapi.api.openai:app --host 0.0.0.0 --port 8000
 curl http://127.0.0.1:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model": "deepseek-chat", "messages": [{"role": "user", "content": "Hello!"}]}'
+```
+
+Or with a Qwen model:
+
+```bash
+curl http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "qwen3.8-max", "messages": [{"role": "user", "content": "Hello!"}]}'
 ```
 
 Multi-turn: the response includes `session_id`; pass it in the next request
@@ -98,6 +132,8 @@ Tests, lint and the native solver build also run in CI on every push
 
 ## How it works
 
+### DeepSeek
+
 Protocol reverse-engineered from the chat.deepseek.com main bundle
 (`fe-static.deepseek.com/chat/static/main.4e922c397f.js`) and the wasm module
 `sha3_wasm_bg.7b9ca65ddd.wasm`:
@@ -118,6 +154,31 @@ Protocol reverse-engineered from the chat.deepseek.com main bundle
   `DeepSeekHashV1(f"{salt}_{expire_at}_" + str(c))` matches `challenge`
   (32 bytes). The server iterates c in `[0, difficulty)`.
 
+### Qwen
+
+Protocol reverse-engineered from the chat.qwen.ai frontend bundle
+(`assets.alicdn.com/g/qwenweb/qwen-chat-fe/0.2.83/js/main.js`):
+
+- Auth: `POST /api/v2/auths/signin` with `{email, password}` where the
+  password is SHA-256 hex of the plain text -> `data.token` (JWT).
+  Requests send it as `Authorization: Bearer <token>` and the `token` cookie.
+- Headers: `source: web`, `version: 0.2.83`, `X-Request-Id`, `Timezone`,
+  browser `sec-ch-ua`/`User-Agent`/`Origin`/`Referer`.
+- Session: `POST /api/v2/chats/new` (`{chatId, models, chat_type: "t2t",
+  chat_mode: "normal", timestamp}`) -> `data.id` (the chat id).
+- Generation: `POST /api/v2/chat/completions?chat_id=<id>` with
+  `{stream, version: "2.1", incremental_output, chat_id, model, parent_id,
+  messages: [{fid, parentId, role, content, chat_type: "t2t", feature_config:
+  {thinking_enabled, output_schema: "phase", ...}}]}`.
+  The chat history lives server-side; `parent_id` points at the last assistant
+  response id, so the next turn continues the same conversation.
+- Response - `text/event-stream` of OpenAI-style JSON chunks:
+  `{"choices": [{"delta": {"role", "content", "phase", "status"}}],
+  "response_id", "usage"}`. The `response.created` chunk opens the stream with
+  the assistant `response_id`; content is streamed in the `answer` phase,
+  thinking in `think`/`DeepThinking`/`thinking_summary` phases, and the stream
+  ends with a chunk whose `delta.status` is `finished`.
+
 ## Native PoW solver (optional)
 
 If you have a C compiler, build the binary for maximum speed:
@@ -136,7 +197,8 @@ or the pure-Python fallback. All three produce the same answer.
   (otherwise the server replies `parallel_chat_limit`). DanyAPI keeps an
   **account pool** and distributes concurrent requests across accounts;
   if all are busy, requests wait in a queue. More tokens = more parallel
-  generations.
+  generations. The same applies to chat.qwen.ai accounts (Qwen uses its own
+  pool, so DeepSeek and Qwen parallel generations are independent).
 - Sessions are tied to the account they were created on: repeat requests with
   the same `session_id` route to the same account (conversation history is
   stored server-side on the account).
@@ -146,5 +208,8 @@ or the pure-Python fallback. All three produce the same answer.
   (up to 3 attempts with exponential backoff). If all attempts are exhausted:
   - non-stream requests get HTTP 429 with the DeepSeek error text;
   - stream requests get an SSE `error` event with `finish_reason`.
-- The PoW challenge is single-use - a new one is solved per request (the next
-  one is prefetched in advance so you don't wait).
+- Qwen may reply `Too_Many_Requests` / `RateLimited` / `quotaLimited`;
+  those are retried automatically the same way (up to 3 attempts), then
+  reported as HTTP 429 or an SSE `error` event.
+- The DeepSeek PoW challenge is single-use - a new one is solved per request
+  (the next one is prefetched in advance so you don't wait).

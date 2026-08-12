@@ -32,8 +32,9 @@ class DeepSeekAccount:
 
 
 class AccountPool:
-    def __init__(self, accounts: list[DeepSeekAccount]) -> None:
+    def __init__(self, accounts: list, label: str = "deepseek") -> None:
         self.accounts = accounts
+        self.label = label
         self._by_session: dict[str, int] = {}
         self._rr = 0
 
@@ -54,7 +55,7 @@ class AccountPool:
     async def acquire(self, session_id: str | None) -> tuple[DeepSeekAccount, str | None]:
         healthy = self.healthy
         if not healthy:
-            raise RuntimeError("all deepseek accounts are unavailable")
+            raise RuntimeError(f"all {self.label} accounts are unavailable")
         if session_id:
             acct = self.account_for_session(session_id)
             if acct is not None:
