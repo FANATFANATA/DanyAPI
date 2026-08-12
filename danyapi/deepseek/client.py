@@ -1,15 +1,8 @@
-"""Клиент веб-API chat.deepseek.com.
-
-Все эндпоинты, заголовки и форматы запросов взяты из main-бандла
-chat.deepseek.com (fe-static.deepseek.com/chat/static/main.4e922c397f.js).
-"""
-
 from __future__ import annotations
 
 import logging
 import uuid
 from dataclasses import dataclass, field
-from typing import Optional
 
 import httpx
 
@@ -25,10 +18,7 @@ CLIENT_HEADERS = {
     "x-client-timezone-offset": "0",
 }
 
-USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
-)
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 
 
 def new_device_id() -> str:
@@ -39,7 +29,7 @@ def new_device_id() -> str:
 class DeepSeekSession:
     id: str
     title: str = ""
-    last_message_id: Optional[str] = None
+    last_message_id: str | None = None
     extra: dict = field(default_factory=dict)
 
 
@@ -53,8 +43,8 @@ class DeepSeekError(Exception):
 class DeepSeekClient:
     def __init__(
         self,
-        token: Optional[str] = None,
-        device_id: Optional[str] = None,
+        token: str | None = None,
+        device_id: str | None = None,
         timeout: float = 60.0,
     ) -> None:
         self.token = token
@@ -78,9 +68,15 @@ class DeepSeekClient:
     async def aclose(self) -> None:
         await self.http.aclose()
 
-    async def _post(self, path: str, json_body: Optional[dict] = None) -> dict:
-        resp = await self.http.post(path, json=json_body)
-        resp.raise_for_status()
+    async def _post(self, path: str, json_body: dict | None = None) -> dict:
+        try:
+            resp = await self.http.post(path, json=json_body)
+        except httpx.HTTPError as exc:
+            raise DeepSeekError(-1, f"http request failed: {exc}") from exc
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise DeepSeekError(exc.response.status_code, exc.response.text[:300]) from exc
         return resp.json()
 
     @staticmethod
@@ -94,23 +90,20 @@ class DeepSeekClient:
         return data.get("biz_data") or {}
 
     async def check_auth(self) -> bool:
-        """Проверяет валидность токена через settings-эндпоинт."""
         try:
             resp = await self.http.get(
                 "/api/v0/client/settings",
                 params={"did": self.device_id, "scope": "main"},
             )
             return resp.json().get("code") == 0
-        except Exception:
+        except (httpx.HTTPError, ValueError):
             return False
-
-    # ------------------------------------------------------------------ auth
 
     async def login(
         self,
-        email: Optional[str] = None,
-        mobile: Optional[str] = None,
-        password: Optional[str] = None,
+        email: str | None = None,
+        mobile: str | None = None,
+        password: str | None = None,
         area_code: str = "",
     ) -> str:
         body = {
@@ -125,9 +118,7 @@ class DeepSeekClient:
         biz = self._biz(resp)
         user = (biz or {}).get("user")
         if not user or not user.get("token"):
-            raise DeepSeekError(
-                (resp.get("data") or {}).get("biz_code", -1), "login failed: no token"
-            )
+            raise DeepSeekError((resp.get("data") or {}).get("biz_code", -1), "login failed: no token")
         self.token = user["token"]
         self.http.headers["Authorization"] = f"Bearer {self.token}"
         return self.token
@@ -137,14 +128,8 @@ class DeepSeekClient:
         biz = self._biz(resp)
         return biz or {}
 
-    # ------------------------------------------------------------------ chat
-
-    async def create_pow_challenge(
-        self, target_path: str = "/api/v0/chat/completion"
-    ) -> dict:
-        resp = await self._post(
-            "/api/v0/chat/create_pow_challenge", {"target_path": target_path}
-        )
+    async def create_pow_challenge(self, target_path: str = "/api/v0/chat/completion") -> dict:
+        resp = await self._post("/api/v0/chat/create_pow_challenge", {"target_path": target_path})
         biz = self._biz(resp)
         challenge = biz.get("challenge")
         if not challenge:
@@ -164,11 +149,14 @@ class DeepSeekClient:
         return (biz or {}).get("chat_sessions", []) or []
 
     async def history_messages(self, chat_session_id: str) -> list[dict]:
-        resp = await self.http.get(
-            "/api/v0/chat/history_messages",
-            params={"chat_session_id": chat_session_id},
-        )
-        resp.raise_for_status()
+        try:
+            resp = await self.http.get(
+                "/api/v0/chat/history_messages",
+                params={"chat_session_id": chat_session_id},
+            )
+            resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise DeepSeekError(-1, f"http request failed: {exc}") from exc
         biz = self._biz(resp.json())
         return (biz or {}).get("chat_messages", [])
 
@@ -182,22 +170,18 @@ class DeepSeekClient:
         )
 
     async def delete_session(self, chat_session_id: str) -> None:
-        await self._post(
-            "/api/v0/chat_session/delete", {"chat_session_id": chat_session_id}
-        )
-
-    # ------------------------------------------------------------ completion
+        await self._post("/api/v0/chat_session/delete", {"chat_session_id": chat_session_id})
 
     async def completion(
         self,
         chat_session_id: str,
         prompt: str,
-        parent_message_id: Optional[str],
+        parent_message_id: str | None,
         model_type: str = "default",
         thinking_enabled: bool = False,
         search_enabled: bool = False,
-        ref_file_ids: Optional[list[str]] = None,
-        pow_headers: Optional[dict] = None,
+        ref_file_ids: list[str] | None = None,
+        pow_headers: dict | None = None,
     ) -> httpx.Response:
         body = {
             "chat_session_id": chat_session_id,
@@ -213,14 +197,10 @@ class DeepSeekClient:
         headers = {"Accept": "text/event-stream"}
         if pow_headers:
             headers.update(pow_headers)
-        req = self.http.build_request(
-            "POST", "/api/v0/chat/completion", json=body, headers=headers
-        )
+        req = self.http.build_request("POST", "/api/v0/chat/completion", json=body, headers=headers)
         return await self.http.send(req, stream=True)
 
-    async def stop_stream(
-        self, chat_session_id: str, message_id: Optional[str]
-    ) -> None:
+    async def stop_stream(self, chat_session_id: str, message_id: str | None) -> None:
         await self._post(
             "/api/v0/chat/stop_stream",
             {

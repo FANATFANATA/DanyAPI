@@ -26,12 +26,10 @@ class TestAccountPool(unittest.TestCase):
         async def run():
             a0, a1 = make_acct(0), make_acct(1)
             pool = AccountPool([a0, a1])
-            # сессия на аккаунте 1
             pool.register(1, "sess-abc")
             acct, sid = await pool.acquire("sess-abc")
             self.assertIs(acct, a1)
             self.assertEqual(sid, "sess-abc")
-            # неизвестная сессия -> round-robin, без existing sid
             acct, sid = await pool.acquire("sess-zzz")
             self.assertIsNone(sid)
 
@@ -41,22 +39,19 @@ class TestAccountPool(unittest.TestCase):
         async def run():
             a0, a1, a2 = make_acct(0), make_acct(1), make_acct(2)
             pool = AccountPool([a0, a1, a2])
-            # a1 занят
             await a1.sem.acquire()
             await asyncio.sleep(0)
             self.assertTrue(a1.sem.locked())
             acct, _ = await pool.acquire(None)
-            self.assertIs(acct, a0)  # первый свободный
+            self.assertIs(acct, a0)
             await a0.sem.acquire()
             await asyncio.sleep(0)
             acct, _ = await pool.acquire(None)
             self.assertIs(acct, a2)
             await a2.sem.acquire()
             await asyncio.sleep(0)
-            # все заняты -> вернёт стартовый аккаунт (acquire семафора будет ждать)
             acct, _ = await pool.acquire(None)
             self.assertIsNotNone(acct)
-            # отпускаем, чтобы не висеть
             a1.sem.release()
             a0.sem.release()
             a2.sem.release()

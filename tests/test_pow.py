@@ -1,10 +1,20 @@
-"""Тесты DeepSeekHashV1 против контрольных векторов, снятых с wasm-экспорта
-`wasm_deepseek_hash_v1` из sha3_wasm_bg.7b9ca65ddd.wasm.
-"""
-
+import shutil
 import unittest
 
-from danyapi.pow import deepseek_hash_v1_hex
+from danyapi.pow import (
+    _find_native_solver,
+    deepseek_hash_v1_hex,
+    solve_native,
+    solve_node,
+)
+
+
+def _challenge(counter: int) -> tuple[str, str, int]:
+    salt = "chk"
+    expire_at = 1700000000000
+    prefix = f"{salt}_{expire_at}_".encode()
+    target = deepseek_hash_v1_hex(prefix + str(counter).encode())
+    return target, salt, expire_at
 
 
 class TestDeepSeekHashV1(unittest.TestCase):
@@ -17,6 +27,20 @@ class TestDeepSeekHashV1(unittest.TestCase):
         }
         for data, expected in vectors.items():
             self.assertEqual(deepseek_hash_v1_hex(data), expected)
+
+
+class TestSolvers(unittest.TestCase):
+    def test_native_matches_python(self):
+        if _find_native_solver() is None:
+            self.skipTest("native pow_solver not built")
+        target, salt, expire_at = _challenge(42)
+        self.assertEqual(solve_native(target, salt, expire_at, 200000), 42)
+
+    def test_node_matches_python(self):
+        if shutil.which("node") is None:
+            self.skipTest("node not available")
+        target, salt, expire_at = _challenge(42)
+        self.assertEqual(solve_node(target, salt, expire_at, 200000), 42)
 
 
 if __name__ == "__main__":

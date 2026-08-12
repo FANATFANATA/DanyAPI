@@ -1,29 +1,15 @@
-"""Реконструкция сообщения из SSE-дельт /api/v0/chat/completion.
-
-Формат дельт (из main-бандла chat.deepseek.com):
-  {"o": "SET",   "p": "response/<path>", "v": <value>}
-  {"o": "BATCH", "v": [<delta>, ...]}
-
-Пути лежат под префиксом "response/"; "response/message_id" маппится в "id".
-SET-операции несут накопительное значение - финальное состояние собирается
-применением всех дельт по порядку.
-"""
-
 from __future__ import annotations
 
-import json
-from typing import Any, Iterator, Optional
+from collections.abc import Iterator
+from typing import Any
 
 from .sse import SSEEvent, parse_sse
 
 MAIN_RESPONSE_TYPES = ("RESPONSE", "TEMPLATE_RESPONSE")
 THINK_TYPES = ("THINK",)
-ALL_CONTENT_TYPES = MAIN_RESPONSE_TYPES + THINK_TYPES
 
 
 class IncrementalSSE:
-    """Поточный парсер SSE: кормим байты, получаем завершённые события."""
-
     def __init__(self) -> None:
         self._buffer = b""
 
@@ -32,9 +18,14 @@ class IncrementalSSE:
         while True:
             idx = self._buffer.find(b"\n\n")
             if idx == -1:
-                break
-            block = self._buffer[:idx].decode("utf-8", errors="replace")
-            self._buffer = self._buffer[idx + 2 :]
+                idx = self._buffer.find(b"\r\n\r\n")
+                if idx == -1:
+                    break
+                block = self._buffer[:idx].decode("utf-8", errors="replace")
+                self._buffer = self._buffer[idx + 4 :]
+            else:
+                block = self._buffer[:idx].decode("utf-8", errors="replace")
+                self._buffer = self._buffer[idx + 2 :]
             yield from parse_sse(block)
 
     def finish(self) -> Iterator[SSEEvent]:
@@ -44,16 +35,13 @@ class IncrementalSSE:
 
 
 def _normalise_key(key: str) -> str:
-    if key == "message_id":
-        return "id"
-    return key
+    return "id" if key == "message_id" else key
 
 
 def _navigate(node: Any, parts: list[str]) -> Any:
-    """Проходит по пути (кроме последнего сегмента) и возвращает контейнер."""
     cur: Any = node
-    for part in parts:
-        part = _normalise_key(part)
+    for raw_part in parts:
+        part = _normalise_key(raw_part)
         if isinstance(cur, list):
             idx = int(part)
             cur = cur[idx]
@@ -66,8 +54,8 @@ def _navigate(node: Any, parts: list[str]) -> Any:
 
 def _set_path(target: dict, parts: list[str], value: Any) -> None:
     node: Any = target
-    for i, part in enumerate(parts):
-        part = _normalise_key(part)
+    for i, raw_part in enumerate(parts):
+        part = _normalise_key(raw_part)
         if i == len(parts) - 1:
             if isinstance(node, dict):
                 node[part] = value
@@ -164,21 +152,14 @@ def _fragment_text(fragment: Any) -> str:
 
 
 class MessageReconstructor:
-    """Собирает сообщение из дельт и отдаёт инкрементальные разности текста.
-
-    Парсер дельт в бандле сайта хранит состояние: если в дельте нет полей
-    `o`/`p`, используются значения из предыдущей дельты. Это воспроизводится
-    здесь через _last_op/_last_path.
-    """
-
     def __init__(self) -> None:
         self.message: dict = {}
         self._last_op = "SET"
         self._last_path = ""
         self._prev_content = ""
         self._prev_reasoning = ""
-        self.response_message_id: Optional[str] = None
-        self.hint_error: Optional[dict] = None
+        self.response_message_id: str | None = None
+        self.hint_error: dict | None = None
 
     def handle(self, event: SSEEvent) -> None:
         if event.event == "ready":
@@ -221,30 +202,15 @@ class MessageReconstructor:
 
     def take_diffs(self) -> tuple[str, str]:
         content, reasoning = self.content, self.reasoning
-        c_diff = (
-            content[len(self._prev_content) :]
-            if content.startswith(self._prev_content)
-            else content
-        )
-        r_diff = (
-            reasoning[len(self._prev_reasoning) :]
-            if reasoning.startswith(self._prev_reasoning)
-            else reasoning
-        )
+        c_diff = content.removeprefix(self._prev_content)
+        r_diff = reasoning.removeprefix(self._prev_reasoning)
         self._prev_content, self._prev_reasoning = content, reasoning
         return c_diff, r_diff
 
     @property
-    def status(self) -> Optional[str]:
+    def status(self) -> str | None:
         return self.message.get("status")
 
     @property
-    def id(self) -> Optional[str]:
+    def id(self) -> str | None:
         return self.message.get("id")
-
-
-def delta_from_json(raw: str) -> SSEEvent:
-    try:
-        return SSEEvent(None, json.loads(raw))
-    except json.JSONDecodeError:
-        return SSEEvent(None, raw)

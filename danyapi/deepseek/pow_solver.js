@@ -1,13 +1,3 @@
-// PoW-солвер chat.deepseek.com (DeepSeekHashV1).
-// Запуск: node pow_solver.js   (challenge JSON подаётся на stdin)
-// Вход:  {"challenge":"<hex>","salt":"<hex>","expire_at":<ms>,"difficulty":<int>}
-// Выход: {"answer":<int>} или {"error":"..."}
-//
-// Выполняет тот же wasm (sha3_wasm_bg.wasm), что и сам сайт:
-//   wasm_solve(retptr, challenge, len, prefix, len, difficulty)
-//   prefix = f"{salt}_{expire_at}_"
-//   status != 0  -> answer = int(значение)
-
 const fs = require('fs');
 const path = require('path');
 const wasmPath = path.join(__dirname, 'sha3_wasm_bg.wasm');

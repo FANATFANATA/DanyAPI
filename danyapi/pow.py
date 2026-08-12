@@ -1,31 +1,12 @@
-"""DeepSeekHashV1 - proof-of-work hash chat.deepseek.com (полностью реверснут из sha3_wasm_bg.7b9ca65ddd.wasm).
-
-Отличия от стандартного SHA3-256:
-  * rate = 136 байт, capacity = 64 байта (как у SHA3-256);
-  * padding: msg || 0x06 || 0x00... || 0x80 (последний байт блока);
-  * ровно 23 раунда Keccak-f вместо 24;
-  * round constants сдвинуты: round i использует RC[i+1] (i = 0..22).
-
-Алгоритм верифицирован против wasm-экспортов `wasm_deepseek_hash_v1`
-и `wasm_solve` (см. danyapi/tests/test_pow.py).
-
-Правило решения чалленджа (подтверждено эмпирически):
-  prefix = f"{salt}_{expire_at}_"
-  answer = минимальный counter c >= 0, для которого
-           hex(DeepSeekHashV1(prefix + str(c))) == challenge
-  Сервер сам выбирает c из [0, difficulty) и присылает его хэш как challenge,
-  клиент перебирает c пока хэш не совпадёт.
-"""
-
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import struct
 import subprocess
 from pathlib import Path
-from typing import Optional
 
 log = logging.getLogger("danyapi.pow")
 
@@ -77,10 +58,7 @@ def _rol(x: int, n: int) -> int:
 
 def _keccak_f(state: list[int]) -> list[int]:
     for rc in _ROUND_CONSTANTS:
-        c = [
-            state[x] ^ state[x + 5] ^ state[x + 10] ^ state[x + 15] ^ state[x + 20]
-            for x in range(5)
-        ]
+        c = [state[x] ^ state[x + 5] ^ state[x + 10] ^ state[x + 15] ^ state[x + 20] for x in range(5)]
         d = [c[(x - 1) % 5] ^ _rol(c[(x + 1) % 5], 1) for x in range(5)]
         for x in range(5):
             for y in range(5):
@@ -91,9 +69,7 @@ def _keccak_f(state: list[int]) -> list[int]:
                 b[y + 5 * ((2 * x + 3 * y) % 5)] = _rol(state[x + 5 * y], _ROT[x][y])
         for x in range(5):
             for y in range(5):
-                state[x + 5 * y] = b[x + 5 * y] ^ (
-                    (~b[(x + 1) % 5 + 5 * y]) & b[(x + 2) % 5 + 5 * y]
-                )
+                state[x + 5 * y] = b[x + 5 * y] ^ ((~b[(x + 1) % 5 + 5 * y]) & b[(x + 2) % 5 + 5 * y])
         state[0] ^= rc
     return state
 
@@ -127,15 +103,11 @@ def deepseek_hash_v1_hex(data: bytes) -> str:
     return deepseek_hash_v1(data).hex()
 
 
-# --------------------------------------------------------------------------
-# Решение чалленджа
-# --------------------------------------------------------------------------
-
 _SOLVER_DIR = Path(__file__).resolve().parent / "deepseek"
 _NODE_SOLVER = _SOLVER_DIR / "pow_solver.js"
 
 
-def _find_native_solver() -> Optional[Path]:
+def _find_native_solver() -> Path | None:
     for name in ("pow_solver.exe", "pow_solver"):
         p = _SOLVER_DIR / name
         if p.exists():
@@ -143,10 +115,7 @@ def _find_native_solver() -> Optional[Path]:
     return None
 
 
-def solve_python(
-    challenge_hex: str, salt: str, expire_at: int, difficulty: int
-) -> Optional[int]:
-    """Чисто-питоновский fallback-солвер (медленный, только для аварий)."""
+def solve_python(challenge_hex: str, salt: str, expire_at: int, difficulty: int) -> int | None:
     prefix = f"{salt}_{expire_at}_".encode()
     target = challenge_hex
     limit = max(0, min(int(difficulty), 2_000_000))
@@ -156,9 +125,7 @@ def solve_python(
     return None
 
 
-def _run_solver(
-    script: Path, challenge_hex: str, salt: str, expire_at: int, difficulty: int
-) -> Optional[int]:
+def _run_solver(script: Path, challenge_hex: str, salt: str, expire_at: int, difficulty: int) -> int | None:
     payload = {
         "challenge": challenge_hex,
         "salt": salt,
@@ -175,6 +142,7 @@ def _run_solver(
         capture_output=True,
         text=True,
         timeout=60,
+        check=False,
     )
     if proc.returncode != 0:
         raise RuntimeError(f"{script.name} failed: {proc.stderr[:300]}")
@@ -184,33 +152,23 @@ def _run_solver(
     return out.get("answer")
 
 
-def solve_native(
-    challenge_hex: str, salt: str, expire_at: int, difficulty: int
-) -> Optional[int]:
-    """Быстрый солвер через скомпилированный C-бинарник."""
+def solve_native(challenge_hex: str, salt: str, expire_at: int, difficulty: int) -> int | None:
     native = _find_native_solver()
     if native is None:
         raise FileNotFoundError("native pow_solver binary not built")
     return _run_solver(native, challenge_hex, salt, expire_at, difficulty)
 
 
-def solve_node(
-    challenge_hex: str, salt: str, expire_at: int, difficulty: int
-) -> Optional[int]:
-    """Солвер через Node + оригинальный wasm-модуль сайта."""
+def solve_node(challenge_hex: str, salt: str, expire_at: int, difficulty: int) -> int | None:
     if not _NODE_SOLVER.exists():
         raise FileNotFoundError("pow_solver.js not found")
     return _run_solver(_NODE_SOLVER, challenge_hex, salt, expire_at, difficulty)
 
 
-async def solve_challenge(
-    challenge_hex: str, salt: str, expire_at: int, difficulty: int
-) -> Optional[int]:
+async def solve_challenge(challenge_hex: str, salt: str, expire_at: int, difficulty: int) -> int | None:
     for solver in (solve_native, solve_node, solve_python):
         try:
-            answer = await asyncio.to_thread(
-                solver, challenge_hex, salt, expire_at, difficulty
-            )
+            answer = await asyncio.to_thread(solver, challenge_hex, salt, expire_at, difficulty)
             if answer is not None:
                 return answer
         except Exception as exc:
@@ -219,18 +177,10 @@ async def solve_challenge(
 
 
 class PowManager:
-    """Раздаёт заголовок X-DS-PoW-Response.
-
-    Чаллендж DeepSeek ОДНОРАЗОВЫЙ: после использования сервер его инвалидирует
-    (сайт сам вызывает clear у store после retrieveAnswer). Поэтому после
-    выдачи заголовка сразу префетчится и решается следующий чаллендж, чтобы
-    следующий запрос не ждал (~120мс через нативный солвер).
-    """
-
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
-        self._header: Optional[dict] = None
-        self._refill: Optional[asyncio.Task] = None
+        self._header: dict | None = None
+        self._refill: asyncio.Task | None = None
 
     async def _build(self, fetch) -> dict:
         challenge = await fetch()
@@ -252,8 +202,6 @@ class PowManager:
             "target_path": challenge["target_path"],
         }
         raw = json.dumps(payload, separators=(",", ":")).encode()
-        import base64
-
         return {"X-DS-PoW-Response": base64.b64encode(raw).decode()}
 
     async def _refill_if_empty(self, fetch) -> None:

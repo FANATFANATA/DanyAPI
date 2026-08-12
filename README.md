@@ -21,6 +21,12 @@ API users need no keys - all requests are made by the server account.
 pip install -r requirements.txt
 ```
 
+For development (tests + linting) install the dev extras:
+
+```bash
+pip install -r requirements-dev.txt
+```
+
 ## Account setup
 
 Set a pool of tokens (from different accounts), comma-separated:
@@ -77,8 +83,18 @@ to continue the same conversation.
 ## Tests
 
 ```bash
-python -m unittest tests.test_pow tests.test_stream -v
+python -m unittest tests.test_pow tests.test_stream tests.test_accounts tests.test_retry -v
 ```
+
+Lint and format (ruff):
+
+```bash
+ruff check .
+ruff format .
+```
+
+Tests, lint and the native solver build also run in CI on every push
+(`.github/workflows/ci.yml`).
 
 ## How it works
 
@@ -107,7 +123,8 @@ Protocol reverse-engineered from the chat.deepseek.com main bundle
 If you have a C compiler, build the binary for maximum speed:
 
 ```bash
-clang -O2 -o danyapi/deepseek/pow_solver.exe danyapi/deepseek/pow_solver.c
+clang -O2 -o danyapi/deepseek/pow_solver.exe danyapi/deepseek/pow_solver.c  # Windows
+clang -O2 -o danyapi/deepseek/pow_solver danyapi/deepseek/pow_solver.c      # Linux/macOS
 ```
 
 Without it the server falls back to the Node solver (the site's wasm module)

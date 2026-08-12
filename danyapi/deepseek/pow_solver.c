@@ -1,19 +1,3 @@
-/*
- * pow_solver.c - нативный солвер DeepSeekHashV1 (chat.deepseek.com).
- *
- * Вход (stdin, JSON): {"challenge":"<64-hex>","salt":"<hex>","expire_at":<ms>,"difficulty":<int>}
- * Выход (stdout, JSON): {"answer":<int>} | {"error":"..."}
- *
- * Алгоритм полностью реверснут из sha3_wasm_bg.wasm:
- *   prefix = f"{salt}_{expire_at}_"
- *   answer = минимальный c из [0, difficulty), где
- *            hex(DeepSeekHashV1(prefix + str(c))) == challenge
- *
- * DeepSeekHashV1 = Keccak-f[1600] с rate 136 (capacity 64),
- *   padding msg||0x06, последний байт блока |= 0x80,
- *   23 раунда, round constant для раунда i = RC[i+1] (стандартная таблица).
- */
-
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -64,36 +48,32 @@ static void keccak_f(uint64_t *st) {
     }
 }
 
-/* Состояние после поглощения prefix (до < 136 байт). */
 static void absorb_prefix(uint64_t st[25], const uint8_t *prefix, size_t len) {
     memset(st, 0, 25 * sizeof(uint64_t));
     for (size_t i = 0; i < len; i++)
         st[i / 8] ^= (uint64_t)prefix[i] << (8 * (i % 8));
 }
 
-/* Проверка хэша при данном counter: DSHash(prefix || str(c))[0:32] == target */
 static int check_counter(const uint64_t base[25], size_t prefix_len, uint64_t c,
                          const uint8_t target[32]) {
     char digits[24];
     int dlen = snprintf(digits, sizeof(digits), "%llu", (unsigned long long)c);
     size_t total = prefix_len + (size_t)dlen;
-    if (total >= RATE) return 0; /* не поддерживаем много-блочный вход */
+    if (total >= RATE) return 0;
 
     uint64_t st[25];
     memcpy(st, base, sizeof(st));
 
-    /* tail: str(c) || 0x06 || zeros || 0x80@135 */
     size_t off = prefix_len;
     for (int i = 0; i < dlen; i++) {
         st[off / 8] ^= (uint64_t)(uint8_t)digits[i] << (8 * (off % 8));
         off++;
     }
     st[off / 8] ^= (uint64_t)0x06 << (8 * (off % 8));
-    st[16] ^= (uint64_t)0x80 << (8 * 7); /* byte 135 */
+    st[16] ^= (uint64_t)0x80 << (8 * 7);
 
     keccak_f(st);
 
-    /* вывод: первые 32 байта = st[0] (LE) */
     for (int i = 0; i < 32; i++) {
         if (((st[i / 8] >> (8 * (i % 8))) & 0xff) != target[i])
             return 0;
@@ -118,7 +98,6 @@ static int hex_to_bytes(const char *hex, uint8_t *out) {
     return (int)(n / 2);
 }
 
-/* Мини-парсер: достаём строковые/числовые поля из JSON (только нужные ключи). */
 static const char *find_json_str(const char *json, const char *key, char *buf, size_t bufsz) {
     char pat[64];
     snprintf(pat, sizeof(pat), "\"%s\"", key);

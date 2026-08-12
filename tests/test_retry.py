@@ -1,5 +1,3 @@
-"""Тесты ретраев при hint-ошибках DeepSeek (expert_busy_use_default и т.п.)."""
-
 import asyncio
 import unittest
 from unittest.mock import AsyncMock, MagicMock
@@ -32,6 +30,12 @@ OK_SSE = (
 )
 
 
+class FakeSession:
+    def __init__(self, sid: str = "c1", last_message_id: str | None = None) -> None:
+        self.id = sid
+        self.last_message_id = last_message_id
+
+
 class FakeResp:
     def __init__(self, sse_text):
         self._b = sse_text.encode()
@@ -50,6 +54,7 @@ class FakeResp:
 
 class FakeAccount:
     def __init__(self, sse_list):
+        self.index = 0
         self.client = MagicMock()
         self.client.completion = AsyncMock(side_effect=[FakeResp(s) for s in sse_list])
         self.client.create_pow_challenge = AsyncMock(return_value={})
@@ -57,6 +62,7 @@ class FakeAccount:
         self.pow.make_header = AsyncMock(return_value={})
         self.sem = asyncio.Semaphore(1)
         self.sessions = MagicMock()
+        self.sessions.obtain = AsyncMock(return_value=(FakeSession(), "s1"))
         self.sessions.touch_last_message = MagicMock()
 
 
@@ -70,22 +76,22 @@ class TestRetry(unittest.TestCase):
     def tearDownClass(cls):
         openai_mod.RETRY_BACKOFF_SEC = cls._orig_backoff
 
+    def _args(self, acct, pool=None, existing_sid: str | None = "s1"):
+        return {
+            "account": acct,
+            "pool": pool or MagicMock(),
+            "existing_sid": existing_sid,
+            "lock": acct.sem,
+            "prompt": "x",
+            "model": "deepseek-chat",
+            "model_type": "default",
+            "thinking": False,
+            "search": False,
+        }
+
     def test_non_stream_retries_then_success(self):
         acct = FakeAccount([BUSY_SSE, OK_SSE])
-        result = asyncio.run(
-            _collect_non_stream(
-                account=acct,
-                session_key="s1",
-                lock=acct.sem,
-                session_id="c1",
-                parent_message_id=None,
-                prompt="x",
-                model="deepseek-chat",
-                model_type="default",
-                thinking=False,
-                search=False,
-            )
-        )
+        result = asyncio.run(_collect_non_stream(**self._args(acct)))
         self.assertEqual(result["choices"][0]["message"]["content"], "Привет")
         self.assertEqual(acct.pow.make_header.await_count, 2)
         self.assertEqual(acct.client.completion.await_count, 2)
@@ -93,20 +99,7 @@ class TestRetry(unittest.TestCase):
     def test_non_stream_raises_429_after_retries(self):
         acct = FakeAccount([BUSY_SSE] * (openai_mod.MAX_RETRIES + 1))
         with self.assertRaises(Exception) as ctx:
-            asyncio.run(
-                _collect_non_stream(
-                    account=acct,
-                    session_key="s1",
-                    lock=acct.sem,
-                    session_id="c1",
-                    parent_message_id=None,
-                    prompt="x",
-                    model="deepseek-chat",
-                    model_type="default",
-                    thinking=False,
-                    search=False,
-                )
-            )
+            asyncio.run(_collect_non_stream(**self._args(acct)))
         exc = ctx.exception
         assert isinstance(exc, openai_mod.HTTPException)
         self.assertEqual(exc.status_code, 429)
@@ -114,18 +107,7 @@ class TestRetry(unittest.TestCase):
 
     def test_stream_emits_error_event_after_retries(self):
         acct = FakeAccount([BUSY_SSE] * (openai_mod.MAX_RETRIES + 1))
-        gen = _stream_openai(
-            account=acct,
-            session_key="s1",
-            lock=acct.sem,
-            session_id="c1",
-            parent_message_id=None,
-            prompt="x",
-            model="deepseek-chat",
-            model_type="default",
-            thinking=False,
-            search=False,
-        )
+        gen = _stream_openai(**self._args(acct))
         lines = list(asyncio.run(_collect(gen)))
         self.assertEqual(acct.client.completion.await_count, openai_mod.MAX_RETRIES + 1)
         joined = "".join(lines)
@@ -135,24 +117,32 @@ class TestRetry(unittest.TestCase):
 
     def test_stream_success_streams_content(self):
         acct = FakeAccount([OK_SSE])
-        gen = _stream_openai(
-            account=acct,
-            session_key="s1",
-            lock=acct.sem,
-            session_id="c1",
-            parent_message_id=None,
-            prompt="x",
-            model="deepseek-chat",
-            model_type="default",
-            thinking=False,
-            search=False,
-        )
+        gen = _stream_openai(**self._args(acct))
         lines = list(asyncio.run(_collect(gen)))
         joined = "".join(lines)
         self.assertIn('"content": "При"', joined)
         self.assertIn('"content": "вет"', joined)
         self.assertIn('"finish_reason": "stop"', joined)
         self.assertTrue(joined.rstrip().endswith("data: [DONE]"))
+
+    def test_obtain_waits_for_lock(self):
+        acct = FakeAccount([OK_SSE])
+        state = {"under_lock": False}
+
+        async def fake_obtain(sid):
+            state["under_lock"] = acct.sem.locked()
+            return FakeSession(), "s1"
+
+        acct.sessions.obtain = fake_obtain
+        asyncio.run(_collect_non_stream(**self._args(acct)))
+        self.assertTrue(state["under_lock"])
+
+    def test_new_session_registered(self):
+        acct = FakeAccount([OK_SSE])
+        pool = MagicMock()
+        acct.sessions.obtain = AsyncMock(return_value=(FakeSession(sid="new1"), "new1"))
+        asyncio.run(_collect_non_stream(**self._args(acct, pool=pool, existing_sid=None)))
+        pool.register.assert_called_once_with(0, "new1")
 
 
 async def _collect(agen):

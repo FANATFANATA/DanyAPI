@@ -1,42 +1,33 @@
-"""Минимальный парсер Server-Sent Events для стрима /api/v0/chat/completion."""
-
 from __future__ import annotations
 
 import json
-from typing import Any, Optional
+from typing import Any
 
 
 class SSEEvent:
-    __slots__ = ("event", "data")
+    __slots__ = ("data", "event")
 
-    def __init__(self, event: Optional[str], data: Any) -> None:
+    def __init__(self, event: str | None, data: Any) -> None:
         self.event = event
         self.data = data
 
-    def __repr__(self) -> str:  # pragma: no cover
-        return f"SSEEvent({self.event!r}, {self.data!r})"
+
+def _decode(raw_data: str) -> Any:
+    try:
+        return json.loads(raw_data)
+    except json.JSONDecodeError:
+        return raw_data
 
 
 def parse_sse(data: str) -> list[SSEEvent]:
-    """Разбирает сырой буфер SSE в список событий.
-
-    События разделяются пустой строкой; поля `event:` и `data:`.
-    Если имя события отсутствует, но есть data - это delta-событие.
-    """
     events: list[SSEEvent] = []
-    event_name: Optional[str] = None
+    event_name: str | None = None
     data_lines: list[str] = []
     for raw_line in data.split("\n"):
         line = raw_line.strip("\r")
         if line == "":
             if data_lines:
-                raw_data = "\n".join(data_lines)
-                payload: Any
-                try:
-                    payload = json.loads(raw_data)
-                except json.JSONDecodeError:
-                    payload = raw_data
-                events.append(SSEEvent(event_name, payload))
+                events.append(SSEEvent(event_name, _decode("\n".join(data_lines))))
                 event_name = None
                 data_lines = []
             continue
@@ -45,10 +36,5 @@ def parse_sse(data: str) -> list[SSEEvent]:
         elif line.startswith("data:"):
             data_lines.append(line[len("data:") :].strip())
     if data_lines:
-        raw_data = "\n".join(data_lines)
-        try:
-            payload = json.loads(raw_data)
-        except json.JSONDecodeError:
-            payload = raw_data
-        events.append(SSEEvent(event_name, payload))
+        events.append(SSEEvent(event_name, _decode("\n".join(data_lines))))
     return events

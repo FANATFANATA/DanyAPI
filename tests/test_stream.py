@@ -1,5 +1,3 @@
-"""Тесты реконструкции сообщения из SSE-дельт."""
-
 import unittest
 
 from danyapi.deepseek.sse import SSEEvent, parse_sse
@@ -58,13 +56,7 @@ class TestSSEParser(unittest.TestCase):
         self.assertEqual(events[2].event, "finish")
 
     def test_incremental_split(self):
-        raw = (
-            "event: ready\n"
-            'data: {"a":1}\n'
-            "\n"
-            'data: {"o":"SET","p":"response/x","v":1}\n'
-            "\n"
-        )
+        raw = 'event: ready\ndata: {"a":1}\n\ndata: {"o":"SET","p":"response/x","v":1}\n\n'
         inc = IncrementalSSE()
         collected = []
         mid = len(raw) // 2
@@ -74,10 +66,17 @@ class TestSSEParser(unittest.TestCase):
         self.assertEqual(len(collected), 2)
         self.assertEqual(collected[0].event, "ready")
 
+    def test_crlf_separators(self):
+        raw = 'event: ready\r\ndata: {"a":1}\r\n\r\ndata: {"o":"SET","p":"response/x","v":1}\r\n\r\n'
+        inc = IncrementalSSE()
+        collected = list(inc.feed(raw.encode())) + list(inc.finish())
+        self.assertEqual(len(collected), 2)
+        self.assertEqual(collected[0].event, "ready")
+        self.assertEqual(collected[1].data["v"], 1)
+
 
 class TestReconstruction(unittest.TestCase):
     def test_real_stream_pattern(self):
-        """Воспроизводит реальный поток из живого ответа completion."""
         rec = MessageReconstructor()
         rec.handle(
             SSEEvent(
@@ -90,7 +89,6 @@ class TestReconstruction(unittest.TestCase):
             )
         )
         self.assertEqual(rec.response_message_id, 2)
-        # первая дельта - без o/p: root-init сообщения
         rec.handle(
             SSEEvent(
                 None,
@@ -101,26 +99,17 @@ class TestReconstruction(unittest.TestCase):
                             "parent_id": 1,
                             "role": "ASSISTANT",
                             "status": "WIP",
-                            "fragments": [
-                                {"id": 2, "type": "RESPONSE", "content": "Г"}
-                            ],
+                            "fragments": [{"id": 2, "type": "RESPONSE", "content": "Г"}],
                         }
                     }
                 },
             )
         )
         self.assertEqual(rec.message["id"], 2)
-        # APPEND к последнему фрагменту
-        rec.handle(
-            SSEEvent(
-                None, {"p": "response/fragments/-1/content", "o": "APPEND", "v": "рави"}
-            )
-        )
-        # следующие дельты без o/p - наследуют APPEND и путь
+        rec.handle(SSEEvent(None, {"p": "response/fragments/-1/content", "o": "APPEND", "v": "рави"}))
         for token in ("тация", " -", " это"):
             rec.handle(SSEEvent(None, {"v": token}))
         self.assertEqual(rec.content, "Гравитация - это")
-        # BATCH с относительными путями
         rec.handle(
             SSEEvent(
                 None,
@@ -134,15 +123,11 @@ class TestReconstruction(unittest.TestCase):
                 },
             )
         )
-        rec.handle(
-            SSEEvent(None, {"p": "response/status", "o": "SET", "v": "FINISHED"})
-        )
+        rec.handle(SSEEvent(None, {"p": "response/status", "o": "SET", "v": "FINISHED"}))
         self.assertEqual(rec.status, "FINISHED")
         self.assertEqual(rec.message.get("accumulated_token_usage"), 103)
 
     def test_thinking_then_response_fragment(self):
-        """Экспертный режим: после THINK-фрагмента добавляется RESPONSE-фрагмент
-        через APPEND к массиву fragments."""
         rec = MessageReconstructor()
         rec.handle(
             SSEEvent(
@@ -159,11 +144,7 @@ class TestReconstruction(unittest.TestCase):
                 },
             )
         )
-        rec.handle(
-            SSEEvent(
-                None, {"p": "response/fragments/-1/elapsed_secs", "o": "SET", "v": 3.5}
-            )
-        )
+        rec.handle(SSEEvent(None, {"p": "response/fragments/-1/elapsed_secs", "o": "SET", "v": 3.5}))
         rec.handle(
             SSEEvent(
                 None,
@@ -174,7 +155,6 @@ class TestReconstruction(unittest.TestCase):
                 },
             )
         )
-        # сервер явно переставляет путь на новый фрагмент, op наследуется (APPEND)
         rec.handle(SSEEvent(None, {"p": "response/fragments/-1/content", "v": " вз"}))
         for token in ("ять", " четыре"):
             rec.handle(SSEEvent(None, {"v": token}))
@@ -182,7 +162,6 @@ class TestReconstruction(unittest.TestCase):
         self.assertEqual(rec.content, "Если взять четыре")
 
     def test_hint_error_capture(self):
-        """Hint-ошибки (expert_busy_use_default и т.п.) захватываются реконструктором."""
         rec = MessageReconstructor()
         rec.handle(
             SSEEvent(
@@ -210,11 +189,8 @@ class TestReconstruction(unittest.TestCase):
         assert hint is not None
         self.assertEqual(hint["finish_reason"], "expert_busy_use_default")
         self.assertIn("busy", hint["message"].lower())
-        # hint без type=error не считается ошибкой
         rec2 = MessageReconstructor()
-        rec2.handle(
-            SSEEvent("hint", {"type": "info", "content": "ok", "finish_reason": None})
-        )
+        rec2.handle(SSEEvent("hint", {"type": "info", "content": "ok", "finish_reason": None}))
         self.assertIsNone(rec2.hint_error)
 
     def test_apply_deltas(self):

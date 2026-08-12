@@ -12,6 +12,7 @@ venv/
 
 # Native PoW solver build artifact (compiled from pow_solver.c when needed)
 *.exe
+pow_solver
 
 # Local artifacts
 .playwright-mcp/

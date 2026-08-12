@@ -1,10 +1,3 @@
-"""OpenAI-совместимый HTTP API поверх DeepSeek web-клиента.
-
-Эндпоинты:
-  GET  /v1/models
-  POST /v1/chat/completions
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -13,7 +6,7 @@ import logging
 import time
 import uuid
 from contextlib import asynccontextmanager
-from typing import Any, Optional
+from typing import Any
 
 import httpx
 from fastapi import FastAPI, HTTPException
@@ -22,7 +15,7 @@ from pydantic import BaseModel, Field
 
 from ..accounts import AccountPool, DeepSeekAccount
 from ..config import settings
-from ..deepseek.client import DeepSeekClient, DeepSeekError
+from ..deepseek.client import DeepSeekClient, DeepSeekError, DeepSeekSession
 from ..deepseek.stream import IncrementalSSE, MessageReconstructor
 
 log = logging.getLogger("danyapi.api")
@@ -32,7 +25,6 @@ MODEL_TYPE_BY_NAME = {
     "deepseek-reasoner": "expert",
     "deepseek-vision": "vision",
 }
-NAME_BY_MODEL_TYPE = {v: k for k, v in MODEL_TYPE_BY_NAME.items()}
 
 STATUS_TO_FINISH_REASON = {
     "FINISHED": "stop",
@@ -53,12 +45,12 @@ class ChatCompletionRequest(BaseModel):
     model: str = Field(default="deepseek-chat")
     messages: list[ChatMessage] = Field(default_factory=list)
     stream: bool = False
-    temperature: Optional[float] = None
-    top_p: Optional[float] = None
-    thinking: Optional[bool] = None
-    search: Optional[bool] = None
-    session_id: Optional[str] = None
-    user: Optional[str] = None
+    temperature: float | None = None
+    top_p: float | None = None
+    thinking: bool | None = None
+    search: bool | None = None
+    session_id: str | None = None
+    user: str | None = None
 
 
 @asynccontextmanager
@@ -83,9 +75,7 @@ async def lifespan(app: FastAPI):
             accounts.append(DeepSeekAccount(0, client))
             log.info("deepseek login ok, device_id=%s", client.device_id)
         if not accounts:
-            raise RuntimeError(
-                "no valid DeepSeek credentials: set DEEPSEEK_TOKENS or DEEPSEEK_EMAIL/DEEPSEEK_PASSWORD"
-            )
+            raise RuntimeError("no valid DeepSeek credentials: set DEEPSEEK_TOKENS or DEEPSEEK_EMAIL/DEEPSEEK_PASSWORD")
         app.state.pool = AccountPool(accounts)
         yield
     finally:
@@ -99,7 +89,7 @@ app = FastAPI(title="DanyAPI", lifespan=lifespan)
 def _extract_prompt(messages: list[ChatMessage]) -> str:
     if not messages:
         raise HTTPException(400, "messages is required")
-    last_user: Optional[ChatMessage] = None
+    last_user: ChatMessage | None = None
     for msg in reversed(messages):
         if msg.role in ("user", "system"):
             last_user = msg
@@ -154,7 +144,6 @@ async def list_models() -> dict:
     return {"object": "list", "data": models}
 
 
-# finish_reason из hint-ошибок DeepSeek, которые стоит ретраить
 RETRYABLE_FINISH_REASONS = {
     "expert_busy_use_default",
     "parallel_chat_limit",
@@ -175,26 +164,17 @@ async def chat_completions(req: ChatCompletionRequest) -> Any:
     prompt = _extract_prompt(req.messages)
 
     account, existing_sid = await pool.acquire(req.session_id)
-    try:
-        session, session_key = await account.sessions.obtain(existing_sid)
-    except DeepSeekError as exc:
-        _handle_account_error(account, exc)
-        raise HTTPException(401, f"DeepSeek auth error: {exc}") from exc
-    if existing_sid is None:
-        pool.register(account.index, session_key)
-    parent_message_id = session.last_message_id
 
-    common = dict(
-        account=account,
-        session_id=session.id,
-        session_key=session_key,
-        parent_message_id=parent_message_id,
-        prompt=prompt,
-        model=req.model,
-        model_type=model_type,
-        thinking=thinking,
-        search=search,
-    )
+    common = {
+        "account": account,
+        "pool": pool,
+        "existing_sid": existing_sid,
+        "prompt": prompt,
+        "model": req.model,
+        "model_type": model_type,
+        "thinking": thinking,
+        "search": search,
+    }
     if req.stream:
         return StreamingResponse(
             _stream_openai(lock=account.sem, **common),
@@ -203,6 +183,17 @@ async def chat_completions(req: ChatCompletionRequest) -> Any:
         )
 
     return await _collect_non_stream(lock=account.sem, **common)
+
+
+async def _prepare_session(account: DeepSeekAccount, pool: AccountPool, existing_sid: str | None) -> tuple[DeepSeekSession, str, str | None]:
+    try:
+        session, session_key = await account.sessions.obtain(existing_sid)
+    except DeepSeekError as exc:
+        _handle_account_error(account, exc)
+        raise HTTPException(401, f"DeepSeek auth error: {exc}") from exc
+    if existing_sid is None:
+        pool.register(account.index, session_key)
+    return session, session_key, session.last_message_id
 
 
 async def _send_completion(
@@ -227,25 +218,25 @@ async def _send_completion(
         )
     except httpx.HTTPStatusError as exc:
         raise HTTPException(exc.response.status_code, exc.response.text[:500]) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(502, f"DeepSeek request failed: {exc}") from exc
 
     if resp.status_code != 200:
         body = await resp.aread()
-        raise HTTPException(
-            resp.status_code, body[:500].decode("utf-8", errors="replace")
-        )
+        await resp.aclose()
+        raise HTTPException(resp.status_code, body[:500].decode("utf-8", errors="replace"))
 
     content_type = resp.headers.get("content-type", "")
     if "text/event-stream" not in content_type:
         body = await resp.aread()
+        await resp.aclose()
         try:
             payload = json.loads(body)
-        except json.JSONDecodeError:
-            raise HTTPException(502, body[:500].decode("utf-8", errors="replace"))
+        except json.JSONDecodeError as exc:
+            raise HTTPException(502, body[:500].decode("utf-8", errors="replace")) from exc
         data = payload.get("data") or {}
         if data.get("biz_code"):
-            raise HTTPException(
-                502, f"DeepSeek error {data['biz_code']}: {data.get('biz_msg')}"
-            )
+            raise HTTPException(502, f"DeepSeek error {data['biz_code']}: {data.get('biz_msg')}")
         if payload.get("code"):
             raise HTTPException(
                 502,
@@ -261,7 +252,6 @@ def _is_retryable_hint(rec: MessageReconstructor) -> bool:
 
 
 def _handle_account_error(account: DeepSeekAccount, exc: Exception) -> None:
-    """Помечает аккаунт битым при ошибке авторизации и логирует остальные."""
     code = getattr(exc, "biz_code", None)
     if code in (40001, 40002, 40003, 40012, 40029):
         account.mark_broken()
@@ -278,12 +268,24 @@ async def _fresh_pow_headers(account) -> dict:
         raise HTTPException(401, f"DeepSeek auth error: {exc}") from exc
 
 
+def _busy_error_body(rec: MessageReconstructor) -> str:
+    hint = rec.hint_error or {}
+    return json.dumps(
+        {
+            "error": {
+                "message": hint.get("message") or "DeepSeek server is busy, try again later",
+                "finish_reason": hint.get("finish_reason"),
+            }
+        },
+        ensure_ascii=False,
+    )
+
+
 async def _collect_non_stream(
     account,
-    session_key,
+    pool,
+    existing_sid,
     lock,
-    session_id,
-    parent_message_id,
     prompt,
     model,
     model_type,
@@ -291,7 +293,8 @@ async def _collect_non_stream(
     search,
 ):
     async with lock:
-        rec: Optional[MessageReconstructor] = None
+        session, session_key, parent_message_id = await _prepare_session(account, pool, existing_sid)
+        rec: MessageReconstructor | None = None
         response_message_id = None
         for attempt in range(MAX_RETRIES + 1):
             if attempt:
@@ -300,7 +303,7 @@ async def _collect_non_stream(
             resp = await _send_completion(
                 account.client,
                 pow_headers,
-                session_id,
+                session.id,
                 parent_message_id,
                 prompt,
                 model_type,
@@ -320,11 +323,7 @@ async def _collect_non_stream(
                     rec.handle(event)
             finally:
                 await resp.aclose()
-            if (
-                not (rec.content or rec.reasoning)
-                and _is_retryable_hint(rec)
-                and attempt < MAX_RETRIES
-            ):
+            if not (rec.content or rec.reasoning) and _is_retryable_hint(rec) and attempt < MAX_RETRIES:
                 log.warning(
                     "retryable hint (%s), attempt %d/%d",
                     (rec.hint_error or {}).get("finish_reason"),
@@ -334,53 +333,40 @@ async def _collect_non_stream(
                 continue
             break
 
-    assert rec is not None
-    account.sessions.touch_last_message(session_key, rec.id or response_message_id)
+        assert rec is not None
+        account.sessions.touch_last_message(session_key, rec.id or response_message_id)
 
-    if not (rec.content or rec.reasoning) and rec.hint_error:
-        raise HTTPException(
-            429,
-            json.dumps(
+        if not (rec.content or rec.reasoning) and rec.hint_error:
+            raise HTTPException(429, _busy_error_body(rec))
+
+        content = rec.content
+        reasoning = rec.reasoning
+        finish = _finish_reason(rec.status)
+        message = {"role": "assistant", "content": content}
+        if reasoning:
+            message["reasoning_content"] = reasoning
+        return {
+            "id": f"chatcmpl-{uuid.uuid4().hex}",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": model,
+            "choices": [
                 {
-                    "error": {
-                        "message": rec.hint_error.get("message")
-                        or "DeepSeek server is busy, try again later",
-                        "finish_reason": (rec.hint_error or {}).get("finish_reason"),
-                    }
-                },
-                ensure_ascii=False,
-            ),
-        )
-
-    content = rec.content
-    reasoning = rec.reasoning
-    finish = _finish_reason(rec.status)
-    message = {"role": "assistant", "content": content}
-    if reasoning:
-        message["reasoning_content"] = reasoning
-    return {
-        "id": f"chatcmpl-{uuid.uuid4().hex}",
-        "object": "chat.completion",
-        "created": int(time.time()),
-        "model": model,
-        "choices": [
-            {
-                "index": 0,
-                "message": message,
-                "finish_reason": finish,
-            }
-        ],
-        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
-        "session_id": session_key,
-    }
+                    "index": 0,
+                    "message": message,
+                    "finish_reason": finish,
+                }
+            ],
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            "session_id": session_key,
+        }
 
 
 async def _stream_openai(
     account,
-    session_key,
+    pool,
+    existing_sid,
     lock,
-    session_id,
-    parent_message_id,
     prompt,
     model,
     model_type,
@@ -394,7 +380,32 @@ async def _stream_openai(
         return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
     async with lock:
-        rec: Optional[MessageReconstructor] = None
+        try:
+            session, session_key, parent_message_id = await _prepare_session(account, pool, existing_sid)
+        except HTTPException as exc:
+            detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+            yield sse(
+                {
+                    "id": chunk_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model,
+                    "error": {"message": detail},
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "error"}],
+                }
+            )
+            yield sse(
+                {
+                    "id": chunk_id,
+                    "session_id": None,
+                    "object": "chat.completion.chunk",
+                    "choices": [],
+                }
+            )
+            yield "data: [DONE]\n\n"
+            return
+
+        rec: MessageReconstructor | None = None
         response_message_id = None
         for attempt in range(MAX_RETRIES + 1):
             if attempt:
@@ -403,7 +414,7 @@ async def _stream_openai(
             resp = await _send_completion(
                 account.client,
                 pow_headers,
-                session_id,
+                session.id,
                 parent_message_id,
                 prompt,
                 model_type,
@@ -483,27 +494,48 @@ async def _stream_openai(
                 continue
             break
 
-    assert rec is not None
-    if not (rec.content or rec.reasoning) and rec.hint_error:
-        hint = rec.hint_error
+        assert rec is not None
+        if not (rec.content or rec.reasoning) and rec.hint_error:
+            hint = rec.hint_error
+            yield sse(
+                {
+                    "id": chunk_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model,
+                    "error": {
+                        "message": hint.get("message") or "DeepSeek server is busy, try again later",
+                        "finish_reason": hint.get("finish_reason"),
+                    },
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {},
+                            "finish_reason": hint.get("finish_reason") or "error",
+                        }
+                    ],
+                }
+            )
+            yield sse(
+                {
+                    "id": chunk_id,
+                    "session_id": session_key,
+                    "object": "chat.completion.chunk",
+                    "choices": [],
+                }
+            )
+            yield "data: [DONE]\n\n"
+            return
+
+        account.sessions.touch_last_message(session_key, rec.id or response_message_id)
+        finish = _finish_reason(rec.status)
         yield sse(
             {
                 "id": chunk_id,
                 "object": "chat.completion.chunk",
                 "created": created,
                 "model": model,
-                "error": {
-                    "message": hint.get("message")
-                    or "DeepSeek server is busy, try again later",
-                    "finish_reason": hint.get("finish_reason"),
-                },
-                "choices": [
-                    {
-                        "index": 0,
-                        "delta": {},
-                        "finish_reason": hint.get("finish_reason") or "error",
-                    }
-                ],
+                "choices": [{"index": 0, "delta": {}, "finish_reason": finish}],
             }
         )
         yield sse(
@@ -515,25 +547,3 @@ async def _stream_openai(
             }
         )
         yield "data: [DONE]\n\n"
-        return
-
-    account.sessions.touch_last_message(session_key, rec.id or response_message_id)
-    finish = _finish_reason(rec.status)
-    yield sse(
-        {
-            "id": chunk_id,
-            "object": "chat.completion.chunk",
-            "created": created,
-            "model": model,
-            "choices": [{"index": 0, "delta": {}, "finish_reason": finish}],
-        }
-    )
-    yield sse(
-        {
-            "id": chunk_id,
-            "session_id": session_key,
-            "object": "chat.completion.chunk",
-            "choices": [],
-        }
-    )
-    yield "data: [DONE]\n\n"
