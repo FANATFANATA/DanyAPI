@@ -21,6 +21,8 @@ API users need no keys - all requests are made by the server accounts.
 - Qwen models: fetched from the account at startup
   (`qwen3.8-max`, `qwen3.7-plus`, ...)
 - Thinking and web search (DeepSeek); thinking and search (Qwen)
+- Tool calling (emulated): `tools` / `tool_choice` / `parallel_tool_calls`
+  with proper `finish_reason: "tool_calls"` responses
 - Multi-session: the message chain is stored server-side
   (`session_id` in the response), like the web clients
 
