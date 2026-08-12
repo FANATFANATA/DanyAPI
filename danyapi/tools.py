@@ -21,6 +21,9 @@ CHOICE_INSTRUCTIONS = {
     "function": "You MUST call exactly the function specified below and no other functions.",
 }
 
+JSON_MODE_INSTRUCTION = """You must reply with ONLY a valid JSON object, no markdown fences, no extra text, no explanations, no comments inside the JSON.
+{constraints}"""
+
 
 @dataclass
 class ToolCall:
@@ -219,15 +222,57 @@ def is_tool_round(messages: list[Any]) -> bool:
     return False
 
 
+def extract_system(messages: list[Any]) -> str:
+    parts = []
+    for msg in messages:
+        if getattr(msg, "role", None) == "system":
+            text = _content_text(getattr(msg, "content", "")).strip()
+            if text:
+                parts.append(text)
+    return "\n".join(parts)
+
+
+def render_json_mode(response_format: Any) -> str | None:
+    if response_format is None:
+        return None
+    constraints = "The JSON object must be the only thing in your reply."
+    schema: Any = None
+    if isinstance(response_format, str):
+        if response_format != "json_object":
+            return None
+    elif isinstance(response_format, dict):
+        rtype = response_format.get("type")
+        if rtype == "json_schema":
+            raw = response_format.get("json_schema")
+            schema = raw.get("schema") if isinstance(raw, dict) else None
+        elif rtype != "json_object":
+            return None
+    else:
+        return None
+    if schema is not None:
+        constraints = f"The JSON object must match this JSON Schema:\n{json.dumps(schema, ensure_ascii=False)}"
+    return JSON_MODE_INSTRUCTION.format(constraints=constraints)
+
+
 def build_prompt(
     messages: list[Any],
     tools: list[Any] | None = None,
     tool_choice: Any = None,
     has_session: bool = False,
+    response_format: Any = None,
 ) -> tuple[str, bool]:
     tool_mode = bool(tools) or is_tool_round(messages)
     if not tool_mode:
-        return extract_last_user(messages), False
+        base = extract_last_user(messages)
+        blocks: list[str] = []
+        system = extract_system(messages)
+        if system:
+            blocks.append(system)
+        json_block = render_json_mode(response_format)
+        if json_block:
+            blocks.append(json_block)
+        blocks.append(base)
+        return "\n\n".join(blocks), False
     schema = render_tool_schema(tools, tool_choice)
     if is_tool_round(messages):
         if has_session:
@@ -240,10 +285,17 @@ def build_prompt(
             prompt = schema or extract_last_user(messages)
         return prompt, True
     base = extract_last_user(messages)
+    blocks = []
+    system = extract_system(messages)
+    if system:
+        blocks.append(system)
     if schema:
-        prompt = f"{schema}\n\n{base}"
-    else:
-        prompt = base
+        blocks.append(schema)
+    json_block = render_json_mode(response_format)
+    if json_block:
+        blocks.append(json_block)
+    blocks.append(base)
+    prompt = "\n\n".join(blocks)
     return prompt, True
 
 

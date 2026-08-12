@@ -214,3 +214,9 @@ class MessageReconstructor:
     @property
     def id(self) -> str | None:
         return self.message.get("id")
+
+    @property
+    def usage(self) -> dict:
+        value = self.message.get("accumulated_token_usage")
+        total = int(value) if isinstance(value, (int, float)) and value > 0 else 0
+        return {"prompt_tokens": 0, "completion_tokens": total, "total_tokens": total}

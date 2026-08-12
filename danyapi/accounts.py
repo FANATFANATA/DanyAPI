@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 
 from .deepseek.client import DeepSeekClient
 from .pow import PowManager
 from .sessions import SessionRegistry
 
 log = logging.getLogger("danyapi.accounts")
+
+
+class AccountPoolBusy(Exception):
+    pass
 
 
 class DeepSeekAccount:
@@ -56,13 +61,15 @@ class AccountPool:
             return None
         return acct
 
-    async def acquire(self, session_id: str | None) -> tuple[DeepSeekAccount, str | None]:
+    async def acquire(self, session_id: str | None, max_wait: float | None = None) -> tuple[DeepSeekAccount, str | None]:
         healthy = self.healthy
         if not healthy:
             raise RuntimeError(f"all {self.label} accounts are unavailable")
         if session_id:
             acct = self.account_for_session(session_id)
             if acct is not None:
+                if acct.sem.locked() and max_wait is not None:
+                    return await self._wait_free(acct, max_wait, session_id)
                 return acct, session_id
         n = len(healthy)
         start = self._rr % n
@@ -72,5 +79,29 @@ class AccountPool:
             if not acct.sem.locked():
                 self._rr = (idx + 1) % n
                 return acct, None
+        if max_wait is not None:
+            return await self._wait_free(None, max_wait, None)
         acct = healthy[start]
         return acct, None
+
+    async def _wait_free(
+        self,
+        preferred: DeepSeekAccount | None,
+        max_wait: float,
+        session_id: str | None,
+    ) -> tuple[DeepSeekAccount, str | None]:
+        deadline = time.monotonic() + max_wait
+        while True:
+            if preferred is not None:
+                candidates = [preferred]
+            else:
+                candidates = self.healthy
+            for acct in candidates:
+                if not acct.sem.locked():
+                    if session_id is not None:
+                        return acct, session_id
+                    self._rr = (acct.index + 1) % len(self.healthy)
+                    return acct, None
+            if time.monotonic() >= deadline:
+                raise AccountPoolBusy()
+            await asyncio.sleep(0.05)

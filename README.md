@@ -23,6 +23,11 @@ API users need no keys - all requests are made by the server accounts.
 - Thinking and web search (DeepSeek); thinking and search (Qwen)
 - Tool calling (emulated): `tools` / `tool_choice` / `parallel_tool_calls`
   with proper `finish_reason: "tool_calls"` responses
+- JSON mode (emulated): `response_format` with `json_object` / `json_schema`
+- `system` messages are injected as the model's system prompt
+- Real token usage in responses; streaming usage via
+  `stream_options.include_usage`
+- `GET /health` - readiness probe
 - Multi-session: the message chain is stored server-side
   (`session_id` in the response), like the web clients
 
@@ -92,7 +97,40 @@ python -m danyapi
 uvicorn danyapi.api.openai:app --host 0.0.0.0 --port 8000
 ```
 
+Or with the helper scripts:
+
+```bash
+run.bat   # Windows
+./run.sh  # Linux/macOS
+```
+
+## Docker
+
+```bash
+docker build -t danyapi .
+docker run -d -p 8000:8000 \
+  -e DEEPSEEK_TOKENS="token1,token2" \
+  -e QWEN_TOKENS="token3" \
+  danyapi
+```
+
+The `.env` file is not baked into the image; pass credentials as environment
+variables or mount your `.env` as a volume (`-v /path/to/.env:/app/.env`).
+
 ## Usage
+
+OpenAI SDK usage (drop-in replacement for the official API):
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="dummy")
+r = client.chat.completions.create(
+    model="deepseek-v4-flash",
+    messages=[{"role": "user", "content": "Hello!"}],
+)
+print(r.choices[0].message.content)
+```
 
 ```bash
 curl http://127.0.0.1:8000/v1/chat/completions \
@@ -211,10 +249,49 @@ Notes:
   finishes so the reply can be classified as a tool call or plain text.
   Reasoning (`reasoning_content`) is streamed live in both cases.
 
+## JSON mode (emulated)
+
+`response_format` is emulated the same way as tool calling - the JSON
+constraint (and an optional schema) is injected into the prompt:
+
+```bash
+curl http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "deepseek-v4-flash",
+    "messages": [{"role": "user", "content": "Extract the city and temperature."}],
+    "response_format": {
+      "type": "json_schema",
+      "json_schema": {
+        "schema": {
+          "type": "object",
+          "properties": {"city": {"type": "string"}, "temperature": {"type": "number"}},
+          "required": ["city", "temperature"]
+        }
+      }
+    }
+  }'
+```
+
+`response_format` accepts `"json_object"`, `{"type": "json_object"}` and
+`{"type": "json_schema", "json_schema": {...}}`. As with tool calling this is
+prompt-level emulation: replies are JSON in practice but not guaranteed
+schema-valid - validate on the client side.
+
+## System prompt and health
+
+- `system` messages are collected and injected as the model's system prompt
+  in front of the first user turn (upstream web APIs have no dedicated
+  `system` field).
+- `GET /health` returns `{"status": "ok", "deepseek": true, "qwen": true}` -
+  useful for readiness probes and load balancers.
+- Streaming usage: pass `"stream_options": {"include_usage": true}` and the
+  final SSE chunk carries real `usage` (like the official API).
+
 ## Tests
 
 ```bash
-python -m unittest tests.test_pow tests.test_stream tests.test_accounts tests.test_retry tests.test_qwen_stream tests.test_qwen_api -v
+python -m unittest tests.test_pow tests.test_stream tests.test_accounts tests.test_retry tests.test_qwen_stream tests.test_qwen_api tests.test_tools tests.test_tools_api -v
 ```
 
 Lint and format (ruff):
@@ -310,3 +387,6 @@ or the pure-Python fallback. All three produce the same answer.
   reported as HTTP 429 or an SSE `error` event.
 - The DeepSeek PoW challenge is single-use - a new one is solved per request
   (the next one is prefetched in advance so you don't wait).
+- When all accounts are busy, requests wait for a free account. Set
+  `DANYAPI_ACQUIRE_TIMEOUT` (seconds) to cap that wait and get an HTTP 429
+  ("all accounts are busy") instead of waiting forever.

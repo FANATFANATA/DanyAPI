@@ -211,6 +211,7 @@ async def stream_openai(
     thinking,
     search,
     tool_mode=False,
+    include_usage=False,
 ):
     chunk_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
@@ -404,6 +405,17 @@ async def stream_openai(
                 "choices": [{"index": 0, "delta": {}, "finish_reason": finish}],
             }
         )
+        if include_usage:
+            yield sse(
+                {
+                    "id": chunk_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model,
+                    "choices": [],
+                    "usage": rec.usage_tokens,
+                }
+            )
         yield sse(
             {
                 "id": chunk_id,

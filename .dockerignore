@@ -1,0 +1,15 @@
+.git
+.github
+.env
+tests
+__pycache__
+*.py[cod]
+*.egg-info
+.venv
+venv
+.ruff_cache
+.pytest_cache
+*.exe
+pow_solver
+run.bat
+run.sh

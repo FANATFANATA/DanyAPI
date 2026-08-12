@@ -16,7 +16,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from .. import tools as toolemu
-from ..accounts import AccountPool, DeepSeekAccount
+from ..accounts import AccountPool, AccountPoolBusy, DeepSeekAccount
 from ..config import settings
 from ..deepseek.client import DeepSeekClient, DeepSeekError, DeepSeekSession
 from ..deepseek.stream import IncrementalSSE, MessageReconstructor
@@ -91,6 +91,8 @@ class ChatCompletionRequest(BaseModel):
     tools: list[Any] | None = None
     tool_choice: Any = None
     parallel_tool_calls: bool | None = None
+    response_format: Any = None
+    stream_options: Any = None
 
 
 @asynccontextmanager
@@ -303,6 +305,15 @@ def _finish_reason(status: Any) -> str:
     return "stop"
 
 
+@app.get("/health")
+async def health() -> dict:
+    return {
+        "status": "ok",
+        "deepseek": getattr(app.state, "pool", None) is not None,
+        "qwen": getattr(app.state, "qwen_pool", None) is not None,
+    }
+
+
 @app.get("/v1/models")
 async def list_models() -> dict:
     models = [
@@ -358,6 +369,20 @@ async def chat_completions(req: ChatCompletionRequest) -> Any:
     return await _chat_completions_deepseek(req)
 
 
+async def _acquire_account(pool: AccountPool, session_id: str | None):
+    try:
+        return await pool.acquire(session_id, settings.acquire_timeout)
+    except AccountPoolBusy:
+        raise HTTPException(429, "all accounts are busy, try again later") from None
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
+
+
+def _include_usage(req: ChatCompletionRequest) -> bool:
+    opts = getattr(req, "stream_options", None)
+    return bool((opts or {}).get("include_usage"))
+
+
 async def _chat_completions_deepseek(req: ChatCompletionRequest) -> Any:
     pool: AccountPool = app.state.pool
     if pool is None:
@@ -367,7 +392,7 @@ async def _chat_completions_deepseek(req: ChatCompletionRequest) -> Any:
     thinking = req.thinking if req.thinking is not None else (model_type == "expert")
     search = bool(req.search) and model_type == "default"
 
-    account, existing_sid = await pool.acquire(req.session_id)
+    account, existing_sid = await _acquire_account(pool, req.session_id)
 
     try:
         prompt, tool_mode = toolemu.build_prompt(
@@ -375,6 +400,7 @@ async def _chat_completions_deepseek(req: ChatCompletionRequest) -> Any:
             getattr(req, "tools", None),
             getattr(req, "tool_choice", None),
             existing_sid is not None,
+            getattr(req, "response_format", None),
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
@@ -396,6 +422,7 @@ async def _chat_completions_deepseek(req: ChatCompletionRequest) -> Any:
         "search": search,
         "ref_file_ids": ref_file_ids,
         "tool_mode": tool_mode,
+        "include_usage": _include_usage(req),
     }
     if req.stream:
         return StreamingResponse(
@@ -415,7 +442,7 @@ async def _chat_completions_qwen(req: ChatCompletionRequest) -> Any:
     thinking = req.thinking if req.thinking is not None else True
     search = bool(req.search)
 
-    account, existing_sid = await pool.acquire(req.session_id)
+    account, existing_sid = await _acquire_account(pool, req.session_id)
 
     try:
         prompt, tool_mode = toolemu.build_prompt(
@@ -423,6 +450,7 @@ async def _chat_completions_qwen(req: ChatCompletionRequest) -> Any:
             getattr(req, "tools", None),
             getattr(req, "tool_choice", None),
             existing_sid is not None,
+            getattr(req, "response_format", None),
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
@@ -437,6 +465,7 @@ async def _chat_completions_qwen(req: ChatCompletionRequest) -> Any:
         "thinking": thinking,
         "search": search,
         "tool_mode": tool_mode,
+        "include_usage": _include_usage(req),
     }
     if req.stream:
         return StreamingResponse(
@@ -657,7 +686,7 @@ async def _collect_non_stream(
                     "finish_reason": finish,
                 }
             ],
-            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            "usage": rec.usage,
             "session_id": session_key,
         }
 
@@ -674,6 +703,7 @@ async def _stream_openai(
     search,
     ref_file_ids=None,
     tool_mode=False,
+    include_usage=False,
 ):
     chunk_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
@@ -882,6 +912,17 @@ async def _stream_openai(
                 "choices": [{"index": 0, "delta": {}, "finish_reason": finish}],
             }
         )
+        if include_usage:
+            yield sse(
+                {
+                    "id": chunk_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model,
+                    "choices": [],
+                    "usage": rec.usage,
+                }
+            )
         yield sse(
             {
                 "id": chunk_id,

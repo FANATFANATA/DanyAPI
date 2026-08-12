@@ -144,6 +144,16 @@ class TestQwenAPI(unittest.TestCase):
         self.assertIn("reasoning_content", joined)
         self.assertIn('"content": "Answer"', joined)
 
+    def test_stream_emits_usage_when_requested(self):
+        acct = FakeAccount([OK_SSE])
+        args = self._args(acct)
+        args["include_usage"] = True
+        gen = qwen_api.stream_openai(**args)
+        lines = list(asyncio.run(_collect(gen)))
+        joined = "".join(lines)
+        self.assertIn('"usage"', joined)
+        self.assertIn('"completion_tokens"', joined)
+
     def test_new_session_registered(self):
         acct = FakeAccount([OK_SSE])
         pool = MagicMock()

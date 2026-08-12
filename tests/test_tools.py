@@ -5,9 +5,11 @@ from danyapi.tools import (
     ToolCall,
     build_prompt,
     extract_last_user,
+    extract_system,
     format_tool_message,
     is_tool_round,
     parse_tool_calls,
+    render_json_mode,
     render_tool_schema,
     tool_call_deltas,
 )
@@ -203,11 +205,70 @@ class TestFormatting(unittest.TestCase):
         self.assertEqual(arguments, '{"city": "Moscow"}')
 
 
+class TestRenderJsonMode(unittest.TestCase):
+    def test_none(self):
+        self.assertIsNone(render_json_mode(None))
+
+    def test_string(self):
+        block = render_json_mode("json_object")
+        self.assertIsNotNone(block)
+        assert block is not None
+        self.assertIn("valid JSON object", block)
+
+    def test_unknown_type(self):
+        self.assertIsNone(render_json_mode("text"))
+        self.assertIsNone(render_json_mode({"type": "text"}))
+
+    def test_schema(self):
+        block = render_json_mode({"type": "json_schema", "json_schema": {"schema": {"type": "object"}}})
+        self.assertIsNotNone(block)
+        assert block is not None
+        self.assertIn("JSON Schema", block)
+        self.assertIn('"type": "object"', block)
+
+
+class TestExtractSystem(unittest.TestCase):
+    def test_collects_system(self):
+        messages = [
+            Message(role="system", content="one"),
+            Message(role="user", content="x"),
+            Message(role="system", content="two"),
+        ]
+        self.assertEqual(extract_system(messages), "one\ntwo")
+
+    def test_no_system(self):
+        self.assertEqual(extract_system([Message(role="user", content="x")]), "")
+
+
 class TestBuildPrompt(unittest.TestCase):
     def test_plain(self):
         prompt, tool_mode = build_prompt([Message(role="user", content="hello")])
         self.assertEqual(prompt, "hello")
         self.assertFalse(tool_mode)
+
+    def test_system_injected(self):
+        messages = [Message(role="system", content="Be concise."), Message(role="user", content="Explain X")]
+        prompt, tool_mode = build_prompt(messages)
+        self.assertFalse(tool_mode)
+        self.assertTrue(prompt.startswith("Be concise."))
+        self.assertIn("Explain X", prompt)
+        self.assertGreater(prompt.index("Explain X"), prompt.index("Be concise."))
+
+    def test_json_mode(self):
+        messages = [Message(role="user", content="Extract JSON")]
+        prompt, tool_mode = build_prompt(messages, response_format="json_object")
+        self.assertFalse(tool_mode)
+        self.assertIn("valid JSON object", prompt)
+        self.assertIn("Extract JSON", prompt)
+
+    def test_system_and_tools_and_json(self):
+        messages = [Message(role="system", content="sys"), Message(role="user", content="q")]
+        prompt, tool_mode = build_prompt(messages, [WEATHER_TOOL], None, False, {"type": "json_schema", "json_schema": {"schema": {"type": "object"}}})
+        self.assertTrue(tool_mode)
+        self.assertTrue(prompt.startswith("sys"))
+        self.assertIn("get_weather", prompt)
+        self.assertIn("JSON Schema", prompt)
+        self.assertIn("q", prompt)
 
     def test_first_tool_round(self):
         messages = [Message(role="user", content="What is the weather?")]

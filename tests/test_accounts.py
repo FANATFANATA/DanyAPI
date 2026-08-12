@@ -2,7 +2,7 @@ import asyncio
 import unittest
 from unittest.mock import MagicMock
 
-from danyapi.accounts import AccountPool, DeepSeekAccount
+from danyapi.accounts import AccountPool, AccountPoolBusy, DeepSeekAccount
 from danyapi.deepseek.client import DeepSeekClient
 
 
@@ -68,6 +68,60 @@ class TestAccountPool(unittest.TestCase):
             a1.sem.release()
             a0.sem.release()
             a2.sem.release()
+
+        asyncio.run(run())
+
+    def test_acquire_waits_for_free_account(self):
+        async def run():
+            a0, a1 = make_acct(0), make_acct(1)
+            pool = AccountPool([a0, a1])
+            await a0.sem.acquire()
+            await a1.sem.acquire()
+
+            async def acquire():
+                return await pool.acquire(None, max_wait=5)
+
+            task = asyncio.create_task(acquire())
+            await asyncio.sleep(0.1)
+            self.assertFalse(task.done())
+            a1.sem.release()
+            acct, sid = await asyncio.wait_for(task, timeout=2)
+            self.assertIs(acct, a1)
+            self.assertIsNone(sid)
+            a0.sem.release()
+
+        asyncio.run(run())
+
+    def test_acquire_times_out_when_busy(self):
+        async def run():
+            a0, a1 = make_acct(0), make_acct(1)
+            pool = AccountPool([a0, a1])
+            await a0.sem.acquire()
+            await a1.sem.acquire()
+            with self.assertRaises(AccountPoolBusy):
+                await pool.acquire(None, max_wait=0.2)
+            a0.sem.release()
+            a1.sem.release()
+
+        asyncio.run(run())
+
+    def test_session_affinity_waits_for_its_account(self):
+        async def run():
+            a0, a1 = make_acct(0), make_acct(1)
+            pool = AccountPool([a0, a1])
+            pool.register(1, "sess-x")
+            await a1.sem.acquire()
+
+            async def acquire():
+                return await pool.acquire("sess-x", max_wait=5)
+
+            task = asyncio.create_task(acquire())
+            await asyncio.sleep(0.1)
+            self.assertFalse(task.done())
+            a1.sem.release()
+            acct, sid = await asyncio.wait_for(task, timeout=2)
+            self.assertIs(acct, a1)
+            self.assertEqual(sid, "sess-x")
 
         asyncio.run(run())
 

@@ -239,6 +239,34 @@ class TestReconstruction(unittest.TestCase):
         self.assertEqual(rec.content, "Hello world")
         self.assertEqual(rec.status, "FINISHED")
 
+    def test_usage_from_accumulated_token_usage(self):
+        rec = MessageReconstructor()
+        rec.handle(first_set_delta())
+        self.assertEqual(rec.usage, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
+        rec.handle(
+            SSEEvent(
+                None,
+                {
+                    "o": "BATCH",
+                    "v": [{"p": "accumulated_token_usage", "v": 103}],
+                },
+            )
+        )
+        self.assertEqual(rec.usage, {"prompt_tokens": 0, "completion_tokens": 103, "total_tokens": 103})
+
+    def test_usage_ignores_invalid_values(self):
+        rec = MessageReconstructor()
+        rec.handle(
+            SSEEvent(
+                None,
+                {
+                    "o": "BATCH",
+                    "v": [{"p": "accumulated_token_usage", "v": -5}],
+                },
+            )
+        )
+        self.assertEqual(rec.usage["completion_tokens"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

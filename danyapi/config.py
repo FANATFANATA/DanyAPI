@@ -41,6 +41,11 @@ class Settings:
             self.timeout = float(os.environ.get("DANYAPI_TIMEOUT", "60"))
         except ValueError:
             self.timeout = 60.0
+        raw_acquire = os.environ.get("DANYAPI_ACQUIRE_TIMEOUT", "")
+        try:
+            self.acquire_timeout = float(raw_acquire) if raw_acquire else None
+        except ValueError:
+            self.acquire_timeout = None
 
 
 settings = Settings()

@@ -132,6 +132,22 @@ class TestRetry(unittest.TestCase):
         self.assertIn('"finish_reason": "stop"', joined)
         self.assertTrue(joined.rstrip().endswith("data: [DONE]"))
 
+    def test_stream_emits_usage_when_requested(self):
+        acct = FakeAccount([OK_SSE])
+        args = self._args(acct)
+        args["include_usage"] = True
+        gen = _stream_openai(**args)
+        lines = list(asyncio.run(_collect(gen)))
+        joined = "".join(lines)
+        self.assertIn('"usage"', joined)
+        self.assertIn('"completion_tokens"', joined)
+
+    def test_stream_omits_usage_by_default(self):
+        acct = FakeAccount([OK_SSE])
+        gen = _stream_openai(**self._args(acct))
+        lines = list(asyncio.run(_collect(gen)))
+        self.assertNotIn('"usage"', "".join(lines))
+
     def test_obtain_waits_for_lock(self):
         acct = FakeAccount([OK_SSE])
         state = {"under_lock": False}
