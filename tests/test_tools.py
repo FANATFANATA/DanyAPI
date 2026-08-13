@@ -207,6 +207,35 @@ class TestParseToolCalls(unittest.TestCase):
         self.assertIsNone(parse_tool_calls(""))
         self.assertIsNone(parse_tool_calls("   "))
 
+    def test_trailing_comma(self):
+        text = '{"tool_calls": [{"name": "f", "arguments": {"x": 1},}]}'
+        parsed = parse_tool_calls(text)
+        self.assertIsNotNone(parsed)
+        assert parsed is not None
+        calls, _ = parsed
+        assert calls is not None
+        self.assertEqual(calls[0].name, "f")
+        self.assertEqual(json.loads(calls[0].arguments), {"x": 1})
+
+    def test_single_quotes(self):
+        text = '{"tool_calls": [{"name": "f", "arguments": {"x": "it\'s"}}]}'
+        parsed = parse_tool_calls(text)
+        self.assertIsNotNone(parsed)
+        assert parsed is not None
+        calls, _ = parsed
+        assert calls is not None
+        self.assertEqual(calls[0].name, "f")
+        self.assertEqual(json.loads(calls[0].arguments), {"x": "it's"})
+
+    def test_bare_dict_trailing_comma(self):
+        text = '{"name": "f", "arguments": {"x": 1,}}'
+        parsed = parse_tool_calls(text)
+        self.assertIsNotNone(parsed)
+        assert parsed is not None
+        calls, _ = parsed
+        assert calls is not None
+        self.assertEqual(json.loads(calls[0].arguments), {"x": 1})
+
 
 class TestParseXmlToolCalls(unittest.TestCase):
     def test_bash_invoke(self):

@@ -394,6 +394,98 @@ def _strip_fences(text: str) -> str:
     return stripped
 
 
+def _strip_trailing_commas(text: str) -> str:
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    in_string = False
+    escaped = False
+    while i < n:
+        ch = text[i]
+        if in_string:
+            out.append(ch)
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            i += 1
+            continue
+        if ch == '"':
+            in_string = True
+            out.append(ch)
+            i += 1
+            continue
+        if ch == ",":
+            j = i + 1
+            while j < n and text[j] in " \t\r\n":
+                j += 1
+            if j < n and text[j] in "}]":
+                i += 1
+                continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _normalize_single_quotes(text: str) -> str:
+    out: list[str] = []
+    in_double = False
+    in_single = False
+    escaped = False
+    for ch in text:
+        if in_double:
+            out.append(ch)
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_double = False
+            continue
+        if in_single:
+            if escaped:
+                out.append(ch)
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == "'":
+                out.append('"')
+                in_single = False
+            else:
+                out.append(ch)
+            continue
+        if ch == '"':
+            in_double = True
+            out.append(ch)
+        elif ch == "'":
+            in_single = True
+            out.append('"')
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def _loads_lenient(text: str) -> Any:
+    text = text.strip()
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        pass
+    try:
+        return json.loads(_strip_trailing_commas(text))
+    except (json.JSONDecodeError, TypeError, ValueError):
+        pass
+    normalized = _normalize_single_quotes(_strip_trailing_commas(text))
+    if normalized != text:
+        try:
+            return json.loads(normalized)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
+    raise ValueError("invalid json")
+
+
 def _balanced_json(text: str) -> tuple[int, int] | None:
     start = text.find("{")
     if start == -1:
@@ -427,12 +519,11 @@ def _extract_json_object(text: str) -> tuple[dict, int, int] | None:
     bounds = _balanced_json(stripped)
     if bounds is not None:
         start, end = bounds
-        candidate = stripped[start : end + 1]
         try:
-            obj = json.loads(candidate)
+            obj = _loads_lenient(stripped[start : end + 1])
             if isinstance(obj, dict):
                 return obj, start, end
-        except (json.JSONDecodeError, TypeError, ValueError):
+        except ValueError:
             pass
     start = stripped.find("{")
     end = stripped.rfind("}")
@@ -441,10 +532,10 @@ def _extract_json_object(text: str) -> tuple[dict, int, int] | None:
     candidate = stripped[start : end + 1]
     for cut in range(len(candidate), 0, -1):
         try:
-            obj = json.loads(candidate[:cut])
+            obj = _loads_lenient(candidate[:cut])
             if isinstance(obj, dict):
                 return obj, start, start + cut - 1
-        except (json.JSONDecodeError, TypeError, ValueError):
+        except ValueError:
             continue
     return None
 
@@ -512,10 +603,10 @@ def _xml_invoke_arguments(body: str) -> dict[str, Any] | None:
     stripped = body.strip()
     if stripped.startswith("{"):
         try:
-            parsed = json.loads(stripped)
+            parsed = _loads_lenient(stripped)
             if isinstance(parsed, dict):
                 return parsed
-        except (json.JSONDecodeError, TypeError, ValueError):
+        except ValueError:
             pass
     params: dict[str, str] = {}
     for match in re.finditer(r'<parameter\s+name=["\']([^"\']+)["\']\s*>(.*?)</parameter>', body, re.DOTALL | re.IGNORECASE):
@@ -575,8 +666,8 @@ def _parse_bare_array_calls(text: str) -> list[ToolCall] | None:
     if not stripped.startswith("["):
         return None
     try:
-        items = json.loads(stripped)
-    except (json.JSONDecodeError, TypeError, ValueError):
+        items = _loads_lenient(stripped)
+    except ValueError:
         return None
     if not isinstance(items, list):
         return None
@@ -617,10 +708,10 @@ def _iter_json_objects(text: str):
                 if depth == 0:
                     candidate = text[start : end + 1]
                     try:
-                        obj = json.loads(candidate)
+                        obj = _loads_lenient(candidate)
                         if isinstance(obj, dict):
                             yield obj, start, end
-                    except (json.JSONDecodeError, TypeError, ValueError):
+                    except ValueError:
                         pass
                     break
             end += 1
