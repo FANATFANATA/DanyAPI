@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 import uuid
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -640,19 +641,14 @@ def _parse_xml_tool_calls(text: str) -> tuple[list[ToolCall] | None, str]:
         remainder = remainder.replace(match.group(0), " ")
     block_pattern = re.compile(r"<(?:tool_call|function_call)>(.*?)</(?:tool_call|function_call)>", re.DOTALL | re.IGNORECASE)
     for match in block_pattern.finditer(text):
-        block = match.group(1)
-        inner_calls, _ = _parse_xml_tool_calls(block)
-        if inner_calls:
-            calls.extend(inner_calls)
-            remainder = remainder.replace(match.group(0), " ")
+        parsed = _extract_json_object(match.group(1))
+        if parsed is None:
             continue
-        parsed = _extract_json_object(block)
-        if parsed is not None:
-            obj, _, _ = parsed
-            extracted = _extract_calls(obj)
-            if extracted:
-                calls.extend(extracted)
-                remainder = remainder.replace(match.group(0), " ")
+        obj, _, _ = parsed
+        extracted = _extract_calls(obj)
+        if extracted:
+            calls.extend(extracted)
+            remainder = remainder.replace(match.group(0), " ")
     if not calls:
         return None, ""
     remainder = re.sub(r"<(?:tool_calls|function_calls|tool_call|function_call)>", " ", remainder, flags=re.IGNORECASE)
@@ -679,7 +675,7 @@ def _parse_bare_array_calls(text: str) -> list[ToolCall] | None:
     return calls or None
 
 
-def _iter_json_objects(text: str):
+def _iter_json_objects(text: str) -> Iterator[tuple[dict, int, int]]:
     i = 0
     length = len(text)
     while True:

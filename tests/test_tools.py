@@ -309,6 +309,14 @@ class TestParseXmlToolCalls(unittest.TestCase):
         assert calls is not None
         self.assertEqual(calls[0].name, "bash")
 
+    def test_invoke_inside_tool_call_not_duplicated(self):
+        text = '<tool_call><invoke name="bash"><command>ls</command></invoke></tool_call>'
+        parsed = parse_tool_calls(text)
+        assert parsed is not None
+        calls, _ = parsed
+        assert calls is not None
+        self.assertEqual([c.name for c in calls], ["bash"])
+
 
 class TestParseBareArrayCalls(unittest.TestCase):
     def test_bare_array(self):
