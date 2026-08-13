@@ -28,16 +28,22 @@ class QwenSessionRegistry(SessionRegistry):
             "title": session.title,
             "last_response_id": session.last_response_id,
             "model": session.model,
+            "accumulated_input_tokens": getattr(session, "accumulated_input_tokens", 0),
+            "accumulated_output_tokens": getattr(session, "accumulated_output_tokens", 0),
         }
 
     def _deserialize(self, record: Any) -> QwenSession:
         if not isinstance(record, dict) or not record.get("id"):
             raise ValueError("invalid session record")
+        input_tokens = record.get("accumulated_input_tokens")
+        output_tokens = record.get("accumulated_output_tokens")
         return QwenSession(
             id=record["id"],
             title=record.get("title") or "",
             last_response_id=record.get("last_response_id"),
             model=record.get("model"),
+            accumulated_input_tokens=int(input_tokens) if isinstance(input_tokens, (int, float)) else 0,
+            accumulated_output_tokens=int(output_tokens) if isinstance(output_tokens, (int, float)) else 0,
         )
 
     async def _create(self, **kwargs) -> QwenSession:

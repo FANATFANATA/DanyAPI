@@ -224,8 +224,3 @@ class MessageReconstructor:
     def usage(self) -> dict:
         total = self.accumulated_tokens
         return {"prompt_tokens": 0, "completion_tokens": total, "total_tokens": total}
-
-    def usage_delta(self, previous: int = 0) -> dict:
-        total = self.accumulated_tokens
-        delta = max(0, total - max(0, int(previous or 0)))
-        return {"prompt_tokens": 0, "completion_tokens": delta, "total_tokens": delta}

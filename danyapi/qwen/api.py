@@ -183,6 +183,21 @@ async def _try_stop_stream(client, session_id: str, message_id: str | None) -> N
         log.debug("stop_stream failed for %s: %s", session_id, exc)
 
 
+def _accumulate_usage(session, rec: QwenStreamReconstructor) -> dict:
+    current = rec.usage_tokens
+    prev_input = int(getattr(session, "accumulated_input_tokens", 0) or 0)
+    prev_output = int(getattr(session, "accumulated_output_tokens", 0) or 0)
+    input_tokens = prev_input + current["prompt_tokens"]
+    output_tokens = prev_output + current["completion_tokens"]
+    session.accumulated_input_tokens = input_tokens
+    session.accumulated_output_tokens = output_tokens
+    return {
+        "prompt_tokens": input_tokens,
+        "completion_tokens": output_tokens,
+        "total_tokens": input_tokens + output_tokens,
+    }
+
+
 async def collect_non_stream(
     account,
     pool,
@@ -250,6 +265,7 @@ async def collect_non_stream(
         if _is_context_limit(rec) and not rec.has_content:
             _drop_session(pool, account, session_key)
             raise HTTPException(400, "context length exceeded: conversation too long, start a new conversation")
+        usage = _accumulate_usage(session, rec)
         account.sessions.touch_last_message(session_key, rec.response_id)
 
         if not rec.has_content and rec.error:
@@ -277,7 +293,7 @@ async def collect_non_stream(
             "created": int(time.time()),
             "model": model,
             "choices": [{"index": 0, "message": message, "finish_reason": finish}],
-            "usage": rec.usage_tokens,
+            "usage": usage,
             "session_id": session_key,
         }
 
@@ -507,6 +523,7 @@ async def stream_openai(
             )
             yield "data: [DONE]\n\n"
             return
+        usage = _accumulate_usage(session, rec)
         account.sessions.touch_last_message(session_key, rec.response_id)
 
         if not rec.has_content and rec.error:
@@ -595,7 +612,7 @@ async def stream_openai(
                     "created": created,
                     "model": model,
                     "choices": [],
-                    "usage": rec.usage_tokens,
+                    "usage": usage,
                 }
             )
         yield sse(

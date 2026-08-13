@@ -50,6 +50,8 @@ class QwenSession:
     title: str = ""
     last_response_id: str | None = None
     model: str | None = None
+    accumulated_input_tokens: int = 0
+    accumulated_output_tokens: int = 0
     extra: dict = field(default_factory=dict)
 
 

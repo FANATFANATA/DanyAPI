@@ -716,7 +716,6 @@ async def _collect_non_stream(
 ):
     async with lock:
         session, session_key, parent_message_id = await _prepare_session(account, pool, existing_sid, context_seq)
-        previous_accumulated = getattr(session, "accumulated_tokens", 0)
         stop_message_id: str | None = None
         started = time.monotonic()
         try:
@@ -820,7 +819,7 @@ async def _collect_non_stream(
                     "finish_reason": finish,
                 }
             ],
-            "usage": rec.usage_delta(previous_accumulated),
+            "usage": rec.usage,
             "session_id": session_key,
         }
 
@@ -850,7 +849,6 @@ async def _stream_openai(
     async with lock:
         try:
             session, session_key, parent_message_id = await _prepare_session(account, pool, existing_sid, context_seq)
-            previous_accumulated = getattr(session, "accumulated_tokens", 0)
         except HTTPException as exc:
             detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
             yield sse(
@@ -1129,7 +1127,7 @@ async def _stream_openai(
                     "created": created,
                     "model": model,
                     "choices": [],
-                    "usage": rec.usage_delta(previous_accumulated),
+                    "usage": rec.usage,
                 }
             )
         yield sse(
