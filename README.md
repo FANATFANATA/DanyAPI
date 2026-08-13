@@ -154,6 +154,18 @@ docker run -d -p 8000:8000 \
 The `.env` file is not baked into the image; pass credentials as environment
 variables or mount your `.env` as a volume (`-v /path/to/.env:/app/.env`).
 
+### Prebuilt image (GHCR)
+
+CI builds and pushes the image to the GitHub Container Registry on every push
+to `main` (`latest` and `sha-*` tags) and on version tags (`v1.2.3`):
+
+```bash
+docker run -d -p 8000:8000 \
+  -e DEEPSEEK_TOKENS="token1,token2" \
+  -e QWEN_TOKENS="token3" \
+  ghcr.io/fanatfanata/danyapi:latest
+```
+
 ## Environment variables
 
 All configuration is environment-driven (`.env` or exported vars). Provider
