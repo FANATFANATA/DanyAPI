@@ -51,6 +51,8 @@ _ROUNDS = 23
 
 _ROUND_CONSTANTS = _RC[1:24]
 
+_PYTHON_SOLVE_LIMIT = 2_000_000
+
 
 def _rol(x: int, n: int) -> int:
     return ((x << n) | (x >> (64 - n))) & _MASK64
@@ -118,7 +120,7 @@ def _find_native_solver() -> Path | None:
 def solve_python(challenge_hex: str, salt: str, expire_at: int, difficulty: int) -> int | None:
     prefix = f"{salt}_{expire_at}_".encode()
     target = challenge_hex
-    limit = max(0, min(int(difficulty), 2_000_000))
+    limit = max(0, min(int(difficulty), _PYTHON_SOLVE_LIMIT))
     for c in range(limit):
         if deepseek_hash_v1_hex(prefix + str(c).encode()) == target:
             return c

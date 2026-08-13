@@ -393,8 +393,9 @@ RETRYABLE_FINISH_REASONS = {
     "server_busy",
     "busy",
 }
-MAX_RETRIES = 3
+MAX_RETRIES = 5
 RETRY_BACKOFF_SEC = 1.0
+RETRY_BACKOFF_MAX_SEC = 8.0
 
 DEEPSEEK_AUTH_ERROR_CODES = {40001, 40002, 40003, 40012, 40029}
 
@@ -472,6 +473,7 @@ async def _chat_completions_deepseek(req: ChatCompletionRequest) -> Any:
         "thinking": thinking,
         "search": search,
         "ref_file_ids": ref_file_ids,
+        "tool_schemas": toolemu.tool_schema_map(getattr(req, "tools", None)),
         "tool_mode": tool_mode,
         "include_usage": _include_usage(req),
         "context_seq": context_seq,
@@ -521,6 +523,7 @@ async def _chat_completions_qwen(req: ChatCompletionRequest) -> Any:
         "model_id": req.model,
         "thinking": thinking,
         "search": search,
+        "tool_schemas": toolemu.tool_schema_map(getattr(req, "tools", None)),
         "tool_mode": tool_mode,
         "include_usage": _include_usage(req),
         "context_seq": context_seq,
@@ -598,11 +601,15 @@ async def _send_completion(
             raise HTTPException(502, body[:500].decode("utf-8", errors="replace")) from exc
         data = payload.get("data") or {}
         if data.get("biz_code"):
-            raise HTTPException(502, f"DeepSeek error {data['biz_code']}: {data.get('biz_msg')}")
+            code = data["biz_code"]
+            status = 401 if code in DEEPSEEK_AUTH_ERROR_CODES else 502
+            raise HTTPException(status, f"DeepSeek error {code}: {data.get('biz_msg')}")
         if payload.get("code"):
+            code = payload["code"]
+            status = 401 if code in DEEPSEEK_AUTH_ERROR_CODES else 502
             raise HTTPException(
-                502,
-                f"DeepSeek error {payload['code']}: {payload.get('msg') or payload.get('message')}",
+                status,
+                f"DeepSeek error {code}: {payload.get('msg') or payload.get('message')}",
             )
         raise HTTPException(502, "unexpected non-stream response")
     return resp
@@ -703,6 +710,7 @@ async def _collect_non_stream(
     search,
     ref_file_ids=None,
     tool_mode=False,
+    tool_schemas=None,
     include_usage=False,
     context_seq: tuple[str, ...] | None = None,
 ):
@@ -715,7 +723,7 @@ async def _collect_non_stream(
             response_message_id = None
             for attempt in range(MAX_RETRIES + 1):
                 if attempt:
-                    await asyncio.sleep(RETRY_BACKOFF_SEC * (2 ** (attempt - 1)))
+                    await asyncio.sleep(min(RETRY_BACKOFF_SEC * (2 ** (attempt - 1)), RETRY_BACKOFF_MAX_SEC))
                 try:
                     pow_headers = await _fresh_pow_headers(account)
                     resp = await _send_with_auth(
@@ -783,7 +791,7 @@ async def _collect_non_stream(
         content = rec.content
         reasoning = rec.reasoning
         if tool_mode:
-            parsed = toolemu.parse_tool_calls(content)
+            parsed = toolemu.parse_tool_calls(content, tool_schemas)
             if parsed is not None:
                 tool_calls, tool_text = parsed
                 finish = "tool_calls"
@@ -827,6 +835,7 @@ async def _stream_openai(
     search,
     ref_file_ids=None,
     tool_mode=False,
+    tool_schemas=None,
     include_usage=False,
     context_seq: tuple[str, ...] | None = None,
 ):
@@ -869,7 +878,7 @@ async def _stream_openai(
         started = time.monotonic()
         for attempt in range(MAX_RETRIES + 1):
             if attempt:
-                await asyncio.sleep(RETRY_BACKOFF_SEC * (2 ** (attempt - 1)))
+                await asyncio.sleep(min(RETRY_BACKOFF_SEC * (2 ** (attempt - 1)), RETRY_BACKOFF_MAX_SEC))
             try:
                 pow_headers = await _fresh_pow_headers(account)
                 resp = await _send_with_auth(
@@ -1064,7 +1073,7 @@ async def _stream_openai(
         log.info("deepseek completion OK (%.0fms)", (time.monotonic() - started) * 1000)
 
         if tool_mode:
-            parsed = toolemu.parse_tool_calls(content_buf)
+            parsed = toolemu.parse_tool_calls(content_buf, tool_schemas)
             if parsed is not None:
                 tool_calls, tool_text = parsed
                 for delta in toolemu.tool_call_deltas(tool_calls, tool_text):

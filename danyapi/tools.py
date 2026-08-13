@@ -600,7 +600,65 @@ def _unescape_xml(text: str) -> str:
     return text.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", '"').replace("&apos;", "'").replace("&amp;", "&")
 
 
-def _xml_invoke_arguments(body: str) -> dict[str, Any] | None:
+def _coerce_scalar(value: str, json_type: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    if json_type in ("integer", "number"):
+        try:
+            return int(value)
+        except ValueError:
+            pass
+        try:
+            return float(value)
+        except ValueError:
+            return value
+    if json_type == "boolean":
+        low = value.strip().lower()
+        if low == "true":
+            return True
+        if low == "false":
+            return False
+        return value
+    if json_type == "null":
+        return None
+    return value
+
+
+def tool_schema_map(tools: list[Any] | None) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    if not tools:
+        return result
+    for tool in tools:
+        fn = _tool_function(tool)
+        if not fn:
+            continue
+        name = fn.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        params = fn.get("parameters")
+        if not isinstance(params, dict):
+            continue
+        properties = params.get("properties")
+        if not isinstance(properties, dict):
+            continue
+        prop_types: dict[str, Any] = {}
+        for prop, spec in properties.items():
+            if not isinstance(spec, dict):
+                continue
+            typ = spec.get("type")
+            if isinstance(typ, list):
+                for candidate in ("integer", "number", "boolean", "null", "string"):
+                    if candidate in typ:
+                        typ = candidate
+                        break
+            if typ:
+                prop_types[prop] = typ
+        if prop_types:
+            result[name] = prop_types
+    return result
+
+
+def _xml_invoke_arguments(body: str, param_types: dict[str, Any] | None = None) -> dict[str, Any] | None:
     stripped = body.strip()
     if stripped.startswith("{"):
         try:
@@ -609,14 +667,14 @@ def _xml_invoke_arguments(body: str) -> dict[str, Any] | None:
                 return parsed
         except ValueError:
             pass
-    params: dict[str, str] = {}
+    params: dict[str, Any] = {}
     for match in re.finditer(r'<parameter\s+name=["\']([^"\']+)["\']\s*>(.*?)</parameter>', body, re.DOTALL | re.IGNORECASE):
-        params[match.group(1).strip()] = _unescape_xml(match.group(2).strip())
+        params[match.group(1).strip()] = _coerce_scalar(_unescape_xml(match.group(2).strip()), (param_types or {}).get(match.group(1).strip()))
     if params:
         return params
     has_children = False
     for match in re.finditer(r"<([a-zA-Z_][a-zA-Z0-9_-]*)\s*>([^<]*)</\1>", body, re.DOTALL | re.IGNORECASE):
-        params[match.group(1).strip()] = _unescape_xml(match.group(2).strip())
+        params[match.group(1).strip()] = _coerce_scalar(_unescape_xml(match.group(2).strip()), (param_types or {}).get(match.group(1).strip()))
         has_children = True
     if has_children:
         return params
@@ -626,7 +684,7 @@ def _xml_invoke_arguments(body: str) -> dict[str, Any] | None:
     return None
 
 
-def _parse_xml_tool_calls(text: str) -> tuple[list[ToolCall] | None, str]:
+def _parse_xml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | None = None) -> tuple[list[ToolCall] | None, str]:
     calls: list[ToolCall] = []
     remainder = text
     invoke_pattern = re.compile(
@@ -634,10 +692,11 @@ def _parse_xml_tool_calls(text: str) -> tuple[list[ToolCall] | None, str]:
         re.DOTALL | re.IGNORECASE,
     )
     for match in invoke_pattern.finditer(text):
-        arguments = _xml_invoke_arguments(match.group(3))
+        tool_name = match.group(2)
+        arguments = _xml_invoke_arguments(match.group(3), (tool_schemas or {}).get(tool_name))
         if arguments is None:
             continue
-        calls.append(ToolCall.create(match.group(2), arguments))
+        calls.append(ToolCall.create(tool_name, arguments))
         remainder = remainder.replace(match.group(0), " ")
     block_pattern = re.compile(r"<(?:tool_call|function_call)>(.*?)</(?:tool_call|function_call)>", re.DOTALL | re.IGNORECASE)
     for match in block_pattern.finditer(text):
@@ -714,7 +773,7 @@ def _iter_json_objects(text: str) -> Iterator[tuple[dict, int, int]]:
         i = end + 1
 
 
-def parse_tool_calls(text: str) -> tuple[list[ToolCall], str] | None:
+def parse_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | None = None) -> tuple[list[ToolCall], str] | None:
     if not text or not text.strip():
         return None
     stripped = _strip_fences(text)
@@ -734,7 +793,7 @@ def parse_tool_calls(text: str) -> tuple[list[ToolCall], str] | None:
     array_calls = _parse_bare_array_calls(stripped)
     if array_calls:
         return array_calls, ""
-    xml_calls, wrapper = _parse_xml_tool_calls(stripped)
+    xml_calls, wrapper = _parse_xml_tool_calls(stripped, tool_schemas)
     if xml_calls:
         return xml_calls, wrapper
     calls: list[ToolCall] = []

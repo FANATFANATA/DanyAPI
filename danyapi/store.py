@@ -8,13 +8,15 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from .config import settings
+
 log = logging.getLogger("danyapi.store")
 
 DEFAULT_CACHE_SUBDIR = "danyapi"
 
 
 def cache_root() -> Path:
-    override = os.environ.get("DANYAPI_CACHE_DIR", "").strip()
+    override = settings.cache_dir
     if override:
         root = Path(override)
     else:

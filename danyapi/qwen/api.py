@@ -17,8 +17,9 @@ from .stream import QwenStreamReconstructor, error_code
 
 log = logging.getLogger("danyapi.qwen.api")
 
-MAX_RETRIES = 3
+MAX_RETRIES = 5
 RETRY_BACKOFF_SEC = 1.0
+RETRY_BACKOFF_MAX_SEC = 8.0
 
 RETRYABLE_HTTP_STATUSES = {408, 425, 429, 500, 502, 503, 504}
 
@@ -193,6 +194,7 @@ async def collect_non_stream(
     thinking,
     search,
     tool_mode=False,
+    tool_schemas=None,
     include_usage=False,
     context_seq: tuple[str, ...] | None = None,
 ):
@@ -203,7 +205,7 @@ async def collect_non_stream(
             rec: QwenStreamReconstructor | None = None
             for attempt in range(MAX_RETRIES + 1):
                 if attempt:
-                    await asyncio.sleep(RETRY_BACKOFF_SEC * (2 ** (attempt - 1)))
+                    await asyncio.sleep(min(RETRY_BACKOFF_SEC * (2 ** (attempt - 1)), RETRY_BACKOFF_MAX_SEC))
                 try:
                     resp = await _send_completion(account.client, session, prompt, model_id, thinking, search)
                 except ContextLimitError:
@@ -254,7 +256,7 @@ async def collect_non_stream(
             raise HTTPException(_error_status(error_code(rec.error)), _error_body(rec))
 
         if tool_mode:
-            parsed = toolemu.parse_tool_calls(rec.content)
+            parsed = toolemu.parse_tool_calls(rec.content, tool_schemas)
             if parsed is not None:
                 tool_calls, tool_text = parsed
                 message = toolemu.format_tool_message(tool_calls, tool_text, rec.reasoning)
@@ -291,6 +293,7 @@ async def stream_openai(
     thinking,
     search,
     tool_mode=False,
+    tool_schemas=None,
     include_usage=False,
     context_seq: tuple[str, ...] | None = None,
 ):
@@ -331,7 +334,7 @@ async def stream_openai(
         stop_response_id: str | None = None
         for attempt in range(MAX_RETRIES + 1):
             if attempt:
-                await asyncio.sleep(RETRY_BACKOFF_SEC * (2 ** (attempt - 1)))
+                await asyncio.sleep(min(RETRY_BACKOFF_SEC * (2 ** (attempt - 1)), RETRY_BACKOFF_MAX_SEC))
             try:
                 resp = await _send_completion(account.client, session, prompt, model_id, thinking, search)
             except ContextLimitError:
@@ -540,7 +543,7 @@ async def stream_openai(
             return
 
         if tool_mode:
-            parsed = toolemu.parse_tool_calls(content_buf)
+            parsed = toolemu.parse_tool_calls(content_buf, tool_schemas)
             if parsed is not None:
                 tool_calls, tool_text = parsed
                 for delta in toolemu.tool_call_deltas(tool_calls, tool_text):
