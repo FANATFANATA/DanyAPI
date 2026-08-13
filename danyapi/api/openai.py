@@ -24,6 +24,7 @@ from ..deepseek.stream import IncrementalSSE, MessageReconstructor
 from ..qwen import api as qwen_api
 from ..qwen.accounts import QwenAccount
 from ..qwen.client import QwenClient, QwenError
+from ..store import JsonStore
 
 log = logging.getLogger("danyapi.api")
 
@@ -81,7 +82,7 @@ class FileSpec(BaseModel):
 
 
 class ChatCompletionRequest(BaseModel):
-    model: str = Field(default="deepseek-chat")
+    model: str = Field(default="deepseek-v4-flash")
     messages: list[ChatMessage] = Field(default_factory=list)
     stream: bool = False
     temperature: float | None = None
@@ -102,6 +103,13 @@ class ChatCompletionRequest(BaseModel):
 async def lifespan(app: FastAPI):
     accounts: list[DeepSeekAccount] = []
     qwen_accounts: list[QwenAccount] = []
+    cache_enabled = settings.cache_enabled
+    deepseek_session_store = JsonStore("deepseek-sessions", "default" if cache_enabled else None)
+    qwen_session_store = JsonStore("qwen-sessions", "default" if cache_enabled else None)
+    deepseek_context_store = JsonStore("deepseek-contexts", "default" if cache_enabled else None)
+    qwen_context_store = JsonStore("qwen-contexts", "default" if cache_enabled else None)
+    deepseek_affinity_store = JsonStore("deepseek-affinities", "default" if cache_enabled else None)
+    qwen_affinity_store = JsonStore("qwen-affinities", "default" if cache_enabled else None)
     try:
         if settings.deepseek_tokens:
             for i, token in enumerate(settings.deepseek_tokens):
@@ -116,6 +124,7 @@ async def lifespan(app: FastAPI):
                         client,
                         session_cache_size=settings.session_cache_size,
                         ttl=settings.session_ttl,
+                        store=deepseek_session_store,
                     )
                 )
             log.info("deepseek accounts ready: %d", len(accounts))
@@ -140,6 +149,7 @@ async def lifespan(app: FastAPI):
                         client,
                         session_cache_size=settings.session_cache_size,
                         ttl=settings.session_ttl,
+                        store=qwen_session_store,
                     )
                 )
             log.info("qwen accounts ready: %d", len(qwen_accounts))
@@ -156,6 +166,8 @@ async def lifespan(app: FastAPI):
                 accounts,
                 session_cache_size=settings.session_cache_size,
                 ttl=settings.session_ttl,
+                context_store=deepseek_context_store,
+                affinity_store=deepseek_affinity_store,
             )
         else:
             app.state.pool = None
@@ -165,6 +177,8 @@ async def lifespan(app: FastAPI):
                 label="qwen",
                 session_cache_size=settings.session_cache_size,
                 ttl=settings.session_ttl,
+                context_store=qwen_context_store,
+                affinity_store=qwen_affinity_store,
             )
             app.state.qwen_models = await _fetch_qwen_models(qwen_accounts[0].client)
         else:
@@ -309,13 +323,6 @@ async def _upload_attachments(account, attachments: list[Attachment], model_type
             raise HTTPException(502, f"file upload failed for {att.name}: no file id")
         file_ids.append(file_id)
     return file_ids
-
-
-def _extract_prompt(messages: list[ChatMessage]) -> str:
-    try:
-        return toolemu.extract_last_user(messages)
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
 
 
 def _resolve_model(model: str) -> str:
@@ -702,6 +709,7 @@ async def _collect_non_stream(
     async with lock:
         session, session_key, parent_message_id = await _prepare_session(account, pool, existing_sid, context_seq)
         stop_message_id: str | None = None
+        started = time.monotonic()
         try:
             rec: MessageReconstructor | None = None
             response_message_id = None
@@ -767,6 +775,7 @@ async def _collect_non_stream(
             _drop_session(pool, account, session_key)
             raise HTTPException(400, "context length exceeded: conversation too long, start a new conversation")
         account.sessions.touch_last_message(session_key, rec.id or response_message_id)
+        log.info("deepseek completion OK (%.0fms)", (time.monotonic() - started) * 1000)
 
         if not (rec.content or rec.reasoning) and rec.hint_error:
             raise HTTPException(429, _busy_error_body(rec))
@@ -857,6 +866,7 @@ async def _stream_openai(
         response_message_id = None
         stop_message_id: str | None = None
         content_buf = ""
+        started = time.monotonic()
         for attempt in range(MAX_RETRIES + 1):
             if attempt:
                 await asyncio.sleep(RETRY_BACKOFF_SEC * (2 ** (attempt - 1)))
@@ -1051,6 +1061,7 @@ async def _stream_openai(
             return
 
         account.sessions.touch_last_message(session_key, rec.id or response_message_id)
+        log.info("deepseek completion OK (%.0fms)", (time.monotonic() - started) * 1000)
 
         if tool_mode:
             parsed = toolemu.parse_tool_calls(content_buf)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 from dataclasses import dataclass, field
 
@@ -134,13 +135,17 @@ class DeepSeekClient:
         challenge = biz.get("challenge")
         if not challenge:
             raise DeepSeekError(-1, "no pow challenge in response")
+        log.debug("deepseek pow challenge OK (%s)", target_path)
         return challenge
 
     async def create_session(self) -> DeepSeekSession:
+        started = time.monotonic()
         resp = await self._post("/api/v0/chat_session/create", {})
         biz = self._biz(resp)
         raw = biz["chat_session"]
-        return DeepSeekSession(id=raw["id"], title=raw.get("title") or "")
+        session = DeepSeekSession(id=raw["id"], title=raw.get("title") or "")
+        log.info("deepseek create session OK (%.0fms)", (time.monotonic() - started) * 1000)
+        return session
 
     async def fetch_page(self, pinned: bool = False, count: int = 20) -> list[dict]:
         body = {"pinned": pinned, "count": count, "mode": "lte"}
@@ -157,6 +162,7 @@ class DeepSeekClient:
         thinking_enabled: bool = False,
         pow_headers: dict | None = None,
     ) -> dict:
+        started = time.monotonic()
         headers = {
             "X-File-Size": str(len(data)),
             "X-Model-Type": model_type,
@@ -184,6 +190,7 @@ class DeepSeekClient:
         file_info = biz.get("id") if isinstance(biz, dict) else None
         if not isinstance(biz, dict) or not file_info:
             raise DeepSeekError(-1, "file upload failed: no file id in response")
+        log.info("deepseek upload file OK: %s (%.0fms)", filename, (time.monotonic() - started) * 1000)
         return biz
 
     async def fetch_files(self, file_ids: list[str]) -> list[dict]:

@@ -24,6 +24,9 @@ def _has_handler(root: logging.Logger, name: str) -> bool:
 def configure() -> None:
     from danyapi.config import settings
 
+    for noisy in ("httpx", "httpcore"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
     root = logging.getLogger()
     root.setLevel(settings.log_level.upper())
     if not _has_handler(root, CONSOLE_HANDLER_NAME):

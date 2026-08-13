@@ -8,6 +8,7 @@ import time
 from .deepseek.client import DeepSeekClient
 from .pow import PowManager
 from .sessions import SessionRegistry
+from .store import JsonStore
 
 log = logging.getLogger("danyapi.accounts")
 
@@ -17,7 +18,12 @@ class AccountPoolBusy(Exception):
 
 
 class ContextIndex:
-    def __init__(self, maxsize: int = 128, ttl: float = 0.0) -> None:
+    def __init__(
+        self,
+        maxsize: int = 128,
+        ttl: float = 0.0,
+        store: JsonStore | None = None,
+    ) -> None:
         self._seqs: dict[str, tuple[str, ...]] = {}
         self._recency: dict[str, int] = {}
         self._ts: dict[str, float] = {}
@@ -27,6 +33,23 @@ class ContextIndex:
         self._tick = 0
         self.hits = 0
         self.misses = 0
+        self._store = store
+        self._restore()
+
+    def _restore(self) -> None:
+        if self._store is None:
+            return
+        now = time.monotonic()
+        for session_id, record in self._store.items():
+            if not isinstance(session_id, str) or not session_id:
+                continue
+            if not isinstance(record, list):
+                continue
+            sequence = tuple(item for item in record if isinstance(item, str))
+            if not sequence:
+                continue
+            self._seqs[session_id] = sequence
+            self._touch(session_id, now)
 
     def _expired(self, session_id: str, now: float) -> bool:
         ts = self._ts.get(session_id)
@@ -59,6 +82,8 @@ class ContextIndex:
                 self._seqs.pop(sid, None)
                 self._recency.pop(sid, None)
                 self._ts.pop(sid, None)
+                if self._store is not None:
+                    self._store.discard(sid)
             if best_sid is not None:
                 self.hits += 1
                 self._touch(best_sid, now)
@@ -82,12 +107,18 @@ class ContextIndex:
                 self._seqs.pop(oldest, None)
                 self._recency.pop(oldest, None)
                 self._ts.pop(oldest, None)
+                if self._store is not None:
+                    self._store.discard(oldest)
+            if self._store is not None:
+                self._store.set(session_id, list(sequence))
 
     def forget(self, session_id: str) -> None:
         with self._lock:
             self._seqs.pop(session_id, None)
             self._recency.pop(session_id, None)
             self._ts.pop(session_id, None)
+        if self._store is not None:
+            self._store.discard(session_id)
 
     def _touch(self, session_id: str, now: float) -> None:
         self._recency[session_id] = self._tick
@@ -98,13 +129,20 @@ class ContextIndex:
 class DeepSeekAccount:
     __slots__ = ("broken", "client", "index", "pow", "pow_upload", "sem", "sessions")
 
-    def __init__(self, index: int, client: DeepSeekClient, session_cache_size: int = 128, ttl: float = 0.0) -> None:
+    def __init__(
+        self,
+        index: int,
+        client: DeepSeekClient,
+        session_cache_size: int = 128,
+        ttl: float = 0.0,
+        store: JsonStore | None = None,
+    ) -> None:
         self.index = index
         self.client = client
         self.pow = PowManager()
         self.pow_upload = PowManager()
         self.sem = asyncio.Semaphore(1)
-        self.sessions = SessionRegistry(client, session_cache_size, ttl)
+        self.sessions = SessionRegistry(client, session_cache_size, ttl, store=store, key_prefix=f"{index}:")
         self.broken = False
 
     def mark_broken(self) -> None:
@@ -124,13 +162,32 @@ class AccountPool:
         label: str = "deepseek",
         session_cache_size: int = 128,
         ttl: float = 0.0,
+        context_store: JsonStore | None = None,
+        affinity_store: JsonStore | None = None,
     ) -> None:
         self.accounts = accounts
         self.label = label
         self._by_session: dict[str, tuple[int, float]] = {}
         self._rr = 0
         self._ttl = max(0.0, ttl)
-        self._contexts = ContextIndex(session_cache_size, ttl)
+        self._affinity_store = affinity_store
+        self._contexts = ContextIndex(session_cache_size, ttl, store=context_store)
+        self._restore_affinities()
+
+    def _restore_affinities(self) -> None:
+        if self._affinity_store is None:
+            return
+        now = time.monotonic()
+        for session_id, record in self._affinity_store.items():
+            if not isinstance(session_id, str) or not session_id:
+                continue
+            idx = record
+            if isinstance(record, list) and record:
+                idx = record[0]
+            if isinstance(idx, bool) or not isinstance(idx, int):
+                continue
+            if 0 <= idx < len(self.accounts):
+                self._by_session[session_id] = (idx, now)
 
     @property
     def healthy(self) -> list[DeepSeekAccount]:
@@ -139,13 +196,19 @@ class AccountPool:
     def register(self, account_index: int, session_id: str) -> None:
         now = time.monotonic()
         self._by_session[session_id] = (account_index, now)
+        if self._affinity_store is not None:
+            self._affinity_store.set(session_id, account_index)
         if self._ttl > 0 and len(self._by_session) > max(4096, len(self.accounts) * 1024):
             stale = [sid for sid, (_, ts) in self._by_session.items() if now - ts > self._ttl]
             for sid in stale:
                 self._by_session.pop(sid, None)
+                if self._affinity_store is not None:
+                    self._affinity_store.discard(sid)
 
     def forget(self, session_id: str) -> None:
         self._by_session.pop(session_id, None)
+        if self._affinity_store is not None:
+            self._affinity_store.discard(session_id)
 
     def resolve_context(self, sequence: tuple[str, ...]) -> str | None:
         return self._contexts.lookup(sequence)
@@ -164,11 +227,15 @@ class AccountPool:
         if self._ttl > 0 and time.monotonic() - ts > self._ttl:
             self._by_session.pop(session_id, None)
             self._contexts.forget(session_id)
+            if self._affinity_store is not None:
+                self._affinity_store.discard(session_id)
             return None
         acct = self.accounts[idx]
         if acct is None or acct.broken:
             self._by_session.pop(session_id, None)
             self._contexts.forget(session_id)
+            if self._affinity_store is not None:
+                self._affinity_store.discard(session_id)
             return None
         return acct
 

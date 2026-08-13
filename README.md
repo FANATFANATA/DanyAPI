@@ -179,7 +179,7 @@ to continue the same conversation.
 
 ```json
 {
-  "model": "deepseek-reasoner",
+  "model": "deepseek-v4-flash",
   "messages": [{"role": "user", "content": "2+2?"}],
   "session_id": "<id from the previous response>",
   "thinking": true,

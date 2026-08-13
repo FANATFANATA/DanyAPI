@@ -67,6 +67,8 @@ class Settings:
             self.log_backup_count = int(os.environ.get("DANYAPI_LOG_BACKUP_COUNT", "3"))
         except ValueError:
             self.log_backup_count = 3
+        self.cache_dir = os.environ.get("DANYAPI_CACHE_DIR", "").strip()
+        self.cache_enabled = os.environ.get("DANYAPI_CACHE_DISABLED", "").strip().lower() not in ("1", "true", "yes", "on")
 
 
 settings = Settings()

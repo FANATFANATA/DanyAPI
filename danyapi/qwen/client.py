@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime
 import hashlib
 import logging
+import time
 import uuid
 from dataclasses import dataclass, field
 
@@ -152,6 +153,7 @@ class QwenClient:
         return models if isinstance(models, list) else []
 
     async def create_chat(self, model: str, chat_mode: str = "normal", chat_type: str = "t2t") -> str:
+        started = time.monotonic()
         body = {
             "chatId": "",
             "models": [model],
@@ -164,6 +166,7 @@ class QwenClient:
         chat_id = biz.get("id")
         if not chat_id:
             raise QwenError(-1, "create chat failed: no chat id in response")
+        log.info("qwen create chat OK (%.0fms)", (time.monotonic() - started) * 1000)
         return chat_id
 
     async def completion(
@@ -175,6 +178,7 @@ class QwenClient:
         thinking: bool = False,
         search: bool = False,
     ) -> httpx.Response:
+        log.debug("qwen completion start session=%s model=%s", chat_session_id, model)
         ts = int(datetime.datetime.now().timestamp())
         user_fid = new_uuid()
         response_fid = new_uuid()
