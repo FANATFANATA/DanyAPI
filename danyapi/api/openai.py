@@ -716,6 +716,7 @@ async def _collect_non_stream(
 ):
     async with lock:
         session, session_key, parent_message_id = await _prepare_session(account, pool, existing_sid, context_seq)
+        previous_accumulated = getattr(session, "accumulated_tokens", 0)
         stop_message_id: str | None = None
         started = time.monotonic()
         try:
@@ -782,6 +783,7 @@ async def _collect_non_stream(
         if _is_context_limit(rec) and not (rec.content or rec.reasoning):
             _drop_session(pool, account, session_key)
             raise HTTPException(400, "context length exceeded: conversation too long, start a new conversation")
+        session.accumulated_tokens = rec.accumulated_tokens
         account.sessions.touch_last_message(session_key, rec.id or response_message_id)
         log.info("deepseek completion OK (%.0fms)", (time.monotonic() - started) * 1000)
 
@@ -818,7 +820,7 @@ async def _collect_non_stream(
                     "finish_reason": finish,
                 }
             ],
-            "usage": rec.usage,
+            "usage": rec.usage_delta(previous_accumulated),
             "session_id": session_key,
         }
 
@@ -848,6 +850,7 @@ async def _stream_openai(
     async with lock:
         try:
             session, session_key, parent_message_id = await _prepare_session(account, pool, existing_sid, context_seq)
+            previous_accumulated = getattr(session, "accumulated_tokens", 0)
         except HTTPException as exc:
             detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
             yield sse(
@@ -1069,6 +1072,7 @@ async def _stream_openai(
             yield "data: [DONE]\n\n"
             return
 
+        session.accumulated_tokens = rec.accumulated_tokens
         account.sessions.touch_last_message(session_key, rec.id or response_message_id)
         log.info("deepseek completion OK (%.0fms)", (time.monotonic() - started) * 1000)
 
@@ -1125,7 +1129,7 @@ async def _stream_openai(
                     "created": created,
                     "model": model,
                     "choices": [],
-                    "usage": rec.usage,
+                    "usage": rec.usage_delta(previous_accumulated),
                 }
             )
         yield sse(

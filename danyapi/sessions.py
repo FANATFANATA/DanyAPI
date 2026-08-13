@@ -40,6 +40,7 @@ class SessionRegistry:
             "id": session.id,
             "title": getattr(session, "title", ""),
             "last_message_id": getattr(session, "last_message_id", None),
+            "accumulated_tokens": getattr(session, "accumulated_tokens", 0),
         }
 
     def _deserialize(self, record: Any) -> Any:
@@ -47,10 +48,13 @@ class SessionRegistry:
             raise ValueError("invalid session record")
         from .deepseek.client import DeepSeekSession
 
+        accumulated = record.get("accumulated_tokens")
+        accumulated_tokens = int(accumulated) if isinstance(accumulated, (int, float)) else 0
         return DeepSeekSession(
             id=record["id"],
             title=record.get("title") or "",
             last_message_id=record.get("last_message_id"),
+            accumulated_tokens=accumulated_tokens,
         )
 
     def _restore(self) -> None:

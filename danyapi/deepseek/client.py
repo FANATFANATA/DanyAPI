@@ -31,6 +31,7 @@ class DeepSeekSession:
     id: str
     title: str = ""
     last_message_id: str | None = None
+    accumulated_tokens: int = 0
     extra: dict = field(default_factory=dict)
 
 
