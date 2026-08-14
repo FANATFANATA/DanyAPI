@@ -693,6 +693,17 @@ def _xml_invoke_arguments(body: str, param_types: dict[str, Any] | None = None) 
     return None
 
 
+def _xml_tag_attrs(body: str, param_types: dict[str, Any] | None = None) -> dict[str, Any]:
+    attrs: dict[str, Any] = {}
+    pattern = re.compile(r"([a-zA-Z_][a-zA-Z0-9_.-]*)\s*=\s*(\"[^\"]*\"|'[^']*')", re.IGNORECASE)
+    for match in pattern.finditer(body):
+        key = match.group(1)
+        raw = match.group(2)
+        value = raw[1:-1]
+        attrs[key] = _coerce_scalar(_unescape_xml(value), (param_types or {}).get(key))
+    return attrs
+
+
 def _parse_xml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | None = None) -> tuple[list[ToolCall] | None, str]:
     calls: list[ToolCall] = []
     remainder = text
@@ -722,13 +733,25 @@ def _parse_xml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | N
             consumed.append(match.span())
     for tool_name, param_types in (tool_schemas or {}).items():
         escaped = re.escape(tool_name)
-        tool_tag_pattern = re.compile(rf"<{escaped}(?:\s+[^>]*)?>(.*?)</{escaped}>", re.DOTALL | re.IGNORECASE)
-        for match in tool_tag_pattern.finditer(text):
+        open_pattern = re.compile(rf"<{escaped}(?=[\s/>])([^>]*?)>(.*?)</{escaped}>", re.DOTALL | re.IGNORECASE)
+        selfclose_pattern = re.compile(rf"<{escaped}(?=[\s/>])([^>]*?)/>", re.DOTALL | re.IGNORECASE)
+        for match in open_pattern.finditer(text):
             start, end = match.span()
             if any(s <= start and end <= e for s, e in consumed):
                 continue
-            arguments = _xml_invoke_arguments(match.group(1), param_types)
-            if arguments is None:
+            merged = _xml_tag_attrs(match.group(1), param_types)
+            merged.update(_xml_invoke_arguments(match.group(2), param_types) or {})
+            if not merged:
+                continue
+            calls.append(ToolCall.create(tool_name, merged))
+            consumed.append((start, end))
+            remainder = remainder.replace(match.group(0), " ")
+        for match in selfclose_pattern.finditer(text):
+            start, end = match.span()
+            if any(s <= start and end <= e for s, e in consumed):
+                continue
+            arguments = _xml_tag_attrs(match.group(1), param_types)
+            if not arguments:
                 continue
             calls.append(ToolCall.create(tool_name, arguments))
             consumed.append((start, end))
