@@ -38,6 +38,8 @@ API users need no keys - all requests are made by the server accounts.
 
 ## Install
 
+Requires Python 3.13+.
+
 ```bash
 pip install -r requirements.txt
 ```
@@ -52,10 +54,13 @@ pip install -r requirements-dev.txt
 
 ### DeepSeek
 
-Set a pool of tokens (from different accounts), comma-separated:
+Set a pool of tokens (from different accounts), comma-separated, or a single
+token via `DEEPSEEK_TOKEN`:
 
 ```bash
 export DEEPSEEK_TOKENS="token1,token2,token3"
+# or
+export DEEPSEEK_TOKEN="token1"
 ```
 
 Each account can generate **one** message at a time, so a pool of N tokens
@@ -71,10 +76,12 @@ export DEEPSEEK_PASSWORD="secret"
 
 ### Qwen
 
-Same model, different token location:
+Same model, different token location (single token via `QWEN_TOKEN`):
 
 ```bash
 export QWEN_TOKENS="token1,token2,token3"
+# or
+export QWEN_TOKEN="token1"
 ```
 
 Grab a token in the browser:
@@ -555,12 +562,15 @@ Protocol reverse-engineered from the chat.qwen.ai frontend bundle
 
 ## Native PoW solver (optional)
 
-If you have a C compiler, build the binary for maximum speed:
+If you have a C compiler (`clang` or `gcc`), build the binary for maximum speed:
 
 ```bash
 clang -O2 -o danyapi/deepseek/pow_solver.exe danyapi/deepseek/pow_solver.c  # Windows
 clang -O2 -o danyapi/deepseek/pow_solver danyapi/deepseek/pow_solver.c      # Linux/macOS
 ```
+
+The prebuilt Docker image compiles this binary at build time, so container
+users get the native solver out of the box.
 
 Solvers are tried in order until one succeeds: native binary -> Node solver
 (the site's wasm module) -> pure-Python Keccak fallback (capped at 2M
