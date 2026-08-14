@@ -30,6 +30,34 @@ class TestLoggingHelpers(unittest.TestCase):
             self.assertIsInstance(handler, logging.handlers.RotatingFileHandler)
             handler.close()
 
+    def test_resolve_level_valid(self):
+        self.assertEqual(dlog._resolve_level("DEBUG"), "DEBUG")
+        self.assertEqual(dlog._resolve_level(" debug "), "DEBUG")
+
+    def test_resolve_level_invalid(self):
+        self.assertEqual(dlog._resolve_level("NOPE"), dlog.DEFAULT_LOG_LEVEL)
+        self.assertEqual(dlog._resolve_level(""), dlog.DEFAULT_LOG_LEVEL)
+        self.assertEqual(dlog._resolve_level(None), dlog.DEFAULT_LOG_LEVEL)
+
+    def test_coerce_max_bytes(self):
+        self.assertEqual(dlog._coerce_max_bytes(2048), 2048)
+        self.assertEqual(dlog._coerce_max_bytes(0), dlog.DEFAULT_MAX_BYTES)
+        self.assertEqual(dlog._coerce_max_bytes(-5), dlog.DEFAULT_MAX_BYTES)
+
+    def test_coerce_backup_count(self):
+        self.assertEqual(dlog._coerce_backup_count(5), 5)
+        self.assertEqual(dlog._coerce_backup_count(0), 0)
+        self.assertEqual(dlog._coerce_backup_count(-1), dlog.DEFAULT_BACKUP_COUNT)
+
+    def test_uvicorn_log_config(self):
+        cfg = dlog.uvicorn_log_config()
+        self.assertFalse(cfg["disable_existing_loggers"])
+        for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+            logger_cfg = cfg["loggers"][name]
+            self.assertEqual(logger_cfg["handlers"], [])
+            self.assertTrue(logger_cfg["propagate"])
+            self.assertEqual(logger_cfg["level"], "INFO")
+
 
 class TestConfigure(unittest.TestCase):
     def setUp(self):
@@ -81,6 +109,15 @@ class TestConfigure(unittest.TestCase):
                 if getattr(handler, "name", None) == dlog.FILE_HANDLER_NAME:
                     root.removeHandler(handler)
                     handler.close()
+
+    def test_configure_skips_directory_log_file(self):
+        root = logging.getLogger()
+        with tempfile.TemporaryDirectory() as tmp:
+            settings.log_file = tmp
+            settings.log_max_bytes = 1024
+            settings.log_backup_count = 1
+            dlog.configure()
+            self.assertEqual(_root_handler_names(root).count(dlog.FILE_HANDLER_NAME), 0)
 
 
 if __name__ == "__main__":
