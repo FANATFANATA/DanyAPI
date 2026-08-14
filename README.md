@@ -489,7 +489,7 @@ See [Account limits](#account-limits).
 ## Tests
 
 ```bash
-python -m unittest tests.test_pow tests.test_stream tests.test_accounts tests.test_retry tests.test_qwen_stream tests.test_qwen_api tests.test_tools tests.test_tools_api tests.test_sessions -v
+python -m pytest
 ```
 
 Lint and format (ruff):

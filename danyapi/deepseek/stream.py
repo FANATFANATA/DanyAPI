@@ -42,12 +42,17 @@ def _navigate(node: Any, parts: list[str]) -> Any:
     cur: Any = node
     for raw_part in parts:
         part = _normalise_key(raw_part)
-        if isinstance(cur, list):
-            idx = int(part)
-            cur = cur[idx]
-        elif isinstance(cur, dict):
-            cur = cur[part]
-        else:
+        try:
+            if isinstance(cur, list):
+                idx = int(part)
+                if idx >= len(cur) or idx < -len(cur):
+                    return None
+                cur = cur[idx]
+            elif isinstance(cur, dict):
+                cur = cur[part]
+            else:
+                return None
+        except (KeyError, ValueError, TypeError):
             return None
     return cur
 
@@ -60,13 +65,19 @@ def _set_path(target: dict, parts: list[str], value: Any) -> None:
             if isinstance(node, dict):
                 node[part] = value
             return
-        if isinstance(node, list):
-            node = node[int(part)]
-        elif isinstance(node, dict):
-            if part not in node or not isinstance(node[part], (dict, list)):
-                node[part] = {}
-            node = node[part]
-        else:
+        try:
+            if isinstance(node, list):
+                idx = int(part)
+                if idx >= len(node) or idx < -len(node):
+                    return
+                node = node[idx]
+            elif isinstance(node, dict):
+                if part not in node or not isinstance(node[part], (dict, list)):
+                    node[part] = {}
+                node = node[part]
+            else:
+                return
+        except (KeyError, ValueError, TypeError):
             return
 
 

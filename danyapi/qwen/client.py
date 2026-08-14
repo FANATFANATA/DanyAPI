@@ -130,7 +130,7 @@ class QwenClient:
             resp = await self.http.get("/api/v1/auths/", headers=self._request_headers())
             if resp.status_code != 200:
                 return False
-            return bool(resp.json().get("success", True))
+            return resp.json().get("success") is True
         except (httpx.HTTPError, ValueError):
             return False
 

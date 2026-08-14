@@ -8,7 +8,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
-_DSML_MARKER = re.compile(r"｜｜\s*DSML\s*｜｜", re.IGNORECASE)
+_DSML_MARKER = re.compile(r"\uff5c\uff5c\s*DSML\s*\uff5c\uff5c", re.IGNORECASE)
 
 
 def _strip_dsml(text: str) -> str:

@@ -222,9 +222,14 @@ class DeepSeekClient:
                 params={"chat_session_id": chat_session_id},
             )
             resp.raise_for_status()
+            payload = resp.json()
+        except httpx.HTTPStatusError as exc:
+            raise DeepSeekError(exc.response.status_code, exc.response.text[:300]) from exc
         except httpx.HTTPError as exc:
             raise DeepSeekError(-1, f"http request failed: {exc}") from exc
-        biz = self._biz(resp.json())
+        except ValueError as exc:
+            raise DeepSeekError(-1, "invalid JSON from history_messages") from exc
+        biz = self._biz(payload)
         return (biz or {}).get("chat_messages", [])
 
     async def rename_session(self, chat_session_id: str, title: str) -> None:
