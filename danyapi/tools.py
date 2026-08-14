@@ -696,6 +696,7 @@ def _xml_invoke_arguments(body: str, param_types: dict[str, Any] | None = None) 
 def _parse_xml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | None = None) -> tuple[list[ToolCall] | None, str]:
     calls: list[ToolCall] = []
     remainder = text
+    consumed: list[tuple[int, int]] = []
     invoke_pattern = re.compile(
         r"<(?:invoke|use_tool|tool_use)\s+name=([\"']?)([^\s>\"']+)\1\s*>(.*?)</(?:invoke|use_tool|tool_use)>",
         re.DOTALL | re.IGNORECASE,
@@ -707,6 +708,7 @@ def _parse_xml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | N
             continue
         calls.append(ToolCall.create(tool_name, arguments))
         remainder = remainder.replace(match.group(0), " ")
+        consumed.append(match.span())
     block_pattern = re.compile(r"<(?:tool_call|function_call)>(.*?)</(?:tool_call|function_call)>", re.DOTALL | re.IGNORECASE)
     for match in block_pattern.finditer(text):
         parsed = _extract_json_object(match.group(1))
@@ -716,6 +718,20 @@ def _parse_xml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | N
         extracted = _extract_calls(obj)
         if extracted:
             calls.extend(extracted)
+            remainder = remainder.replace(match.group(0), " ")
+            consumed.append(match.span())
+    for tool_name, param_types in (tool_schemas or {}).items():
+        escaped = re.escape(tool_name)
+        tool_tag_pattern = re.compile(rf"<{escaped}(?:\s+[^>]*)?>(.*?)</{escaped}>", re.DOTALL | re.IGNORECASE)
+        for match in tool_tag_pattern.finditer(text):
+            start, end = match.span()
+            if any(s <= start and end <= e for s, e in consumed):
+                continue
+            arguments = _xml_invoke_arguments(match.group(1), param_types)
+            if arguments is None:
+                continue
+            calls.append(ToolCall.create(tool_name, arguments))
+            consumed.append((start, end))
             remainder = remainder.replace(match.group(0), " ")
     if not calls:
         return None, ""
