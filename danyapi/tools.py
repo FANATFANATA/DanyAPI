@@ -8,6 +8,15 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
+_DSML_MARKER = re.compile(r"｜｜\s*DSML\s*｜｜", re.IGNORECASE)
+
+
+def _strip_dsml(text: str) -> str:
+    if not text:
+        return text
+    return _DSML_MARKER.sub("", text)
+
+
 TOOL_CALL_INSTRUCTION = (
     "You have access to the following functions. Call them when the user's request requires it.\n\n"
     "{functions}\n\n"
@@ -776,7 +785,7 @@ def _iter_json_objects(text: str) -> Iterator[tuple[dict, int, int]]:
 def parse_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | None = None) -> tuple[list[ToolCall], str] | None:
     if not text or not text.strip():
         return None
-    stripped = _strip_fences(text)
+    stripped = _strip_fences(_strip_dsml(text))
     extracted = _extract_json_object(stripped)
     if extracted is not None:
         obj, start, end = extracted
