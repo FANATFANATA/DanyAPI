@@ -57,7 +57,7 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r requirements-dev.txt
 
       - name: Build native PoW solver
         run: clang -O2 -o danyapi/deepseek/pow_solver danyapi/deepseek/pow_solver.c
