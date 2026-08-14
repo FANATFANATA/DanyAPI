@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 import sys
 import time
 import uuid
@@ -11,6 +12,7 @@ import httpx
 from fastapi import HTTPException
 
 from .. import tools as toolemu
+from ..config import settings
 from ..deepseek.stream import IncrementalSSE
 from .client import QwenClient, QwenError
 from .stream import QwenStreamReconstructor, error_code
@@ -183,6 +185,13 @@ async def _try_stop_stream(client, session_id: str, message_id: str | None) -> N
         log.debug("stop_stream failed for %s: %s", session_id, exc)
 
 
+async def _human_delay() -> None:
+    """Simulate human typing / pause before sending a message."""
+    delay = random.uniform(settings.human_delay_min, settings.human_delay_max)
+    if delay > 0:
+        await asyncio.sleep(delay)
+
+
 def _accumulate_usage(session, rec: QwenStreamReconstructor) -> dict:
     current = rec.usage_tokens
     prev_input = int(getattr(session, "accumulated_input_tokens", 0) or 0)
@@ -213,6 +222,7 @@ async def collect_non_stream(
     include_usage=False,
     context_seq: tuple[str, ...] | None = None,
 ):
+    await _human_delay()
     async with lock:
         session, session_key = await _prepare_session(account, pool, existing_sid, model_id, context_seq)
         stop_response_id: str | None = None
@@ -319,6 +329,7 @@ async def stream_openai(
     def sse(data: dict) -> str:
         return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
+    await _human_delay()
     async with lock:
         try:
             session, session_key = await _prepare_session(account, pool, existing_sid, model_id, context_seq)

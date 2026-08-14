@@ -185,6 +185,8 @@ credentials are documented in [Account setup](#account-setup).
 | `DANYAPI_LOG_FILE` | (empty) | File path for persistent logs; empty = console only |
 | `DANYAPI_LOG_MAX_BYTES` | `10485760` | Max log file size in bytes before rotation |
 | `DANYAPI_LOG_BACKUP_COUNT` | `3` | Number of rotated log files to keep |
+| `DANYAPI_HUMAN_DELAY_MIN` | `0.5` | Minimum delay in seconds before sending a request (uniform random jitter) |
+| `DANYAPI_HUMAN_DELAY_MAX` | `3.0` | Maximum delay in seconds; set both to `0` to disable |
 
 ## Usage
 
