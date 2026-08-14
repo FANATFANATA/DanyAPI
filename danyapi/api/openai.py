@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 import logging
+import random
 import sys
 import time
 import uuid
@@ -400,6 +401,13 @@ RETRY_BACKOFF_MAX_SEC = 8.0
 DEEPSEEK_AUTH_ERROR_CODES = {40001, 40002, 40003, 40012, 40029}
 
 
+async def _human_delay() -> None:
+    """Simulate human typing / pause before sending a message."""
+    delay = random.uniform(settings.human_delay_min, settings.human_delay_max)
+    if delay > 0:
+        await asyncio.sleep(delay)
+
+
 def _resolve_provider(model: str) -> str:
     if model.startswith("qwen"):
         return "qwen"
@@ -719,6 +727,7 @@ async def _collect_non_stream(
     include_usage=False,
     context_seq: tuple[str, ...] | None = None,
 ):
+    await _human_delay()
     async with lock:
         session, session_key, parent_message_id = await _prepare_session(account, pool, existing_sid, context_seq)
         stop_message_id: str | None = None
@@ -851,6 +860,7 @@ async def _stream_openai(
     def sse(data: dict) -> str:
         return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
+    await _human_delay()
     async with lock:
         try:
             session, session_key, parent_message_id = await _prepare_session(account, pool, existing_sid, context_seq)

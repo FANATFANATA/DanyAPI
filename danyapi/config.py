@@ -69,6 +69,14 @@ class Settings:
             self.log_backup_count = 3
         self.cache_dir = os.environ.get("DANYAPI_CACHE_DIR", "").strip()
         self.cache_enabled = os.environ.get("DANYAPI_CACHE_DISABLED", "").strip().lower() not in ("1", "true", "yes", "on")
+        try:
+            self.human_delay_min = float(os.environ.get("DANYAPI_HUMAN_DELAY_MIN", "0.5"))
+        except ValueError:
+            self.human_delay_min = 0.5
+        try:
+            self.human_delay_max = float(os.environ.get("DANYAPI_HUMAN_DELAY_MAX", "3.0"))
+        except ValueError:
+            self.human_delay_max = 3.0
 
 
 settings = Settings()
