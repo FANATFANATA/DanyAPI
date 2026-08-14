@@ -430,6 +430,11 @@ def _include_usage(req: ChatCompletionRequest) -> bool:
     return bool((opts or {}).get("include_usage"))
 
 
+def _deepseek_usage(total: int) -> dict:
+    value = max(0, int(total or 0))
+    return {"prompt_tokens": 0, "completion_tokens": value, "total_tokens": value}
+
+
 async def _chat_completions_deepseek(req: ChatCompletionRequest) -> Any:
     pool: AccountPool = app.state.pool
     if pool is None:
@@ -782,7 +787,7 @@ async def _collect_non_stream(
         if _is_context_limit(rec) and not (rec.content or rec.reasoning):
             _drop_session(pool, account, session_key)
             raise HTTPException(400, "context length exceeded: conversation too long, start a new conversation")
-        session.accumulated_tokens = rec.accumulated_tokens
+        session.accumulated_tokens = max(getattr(session, "accumulated_tokens", 0) or 0, rec.accumulated_tokens)
         account.sessions.touch_last_message(session_key, rec.id or response_message_id)
         log.info("deepseek completion OK (%.0fms)", (time.monotonic() - started) * 1000)
 
@@ -819,7 +824,7 @@ async def _collect_non_stream(
                     "finish_reason": finish,
                 }
             ],
-            "usage": rec.usage,
+            "usage": _deepseek_usage(getattr(session, "accumulated_tokens", 0)),
             "session_id": session_key,
         }
 
@@ -1070,7 +1075,7 @@ async def _stream_openai(
             yield "data: [DONE]\n\n"
             return
 
-        session.accumulated_tokens = rec.accumulated_tokens
+        session.accumulated_tokens = max(getattr(session, "accumulated_tokens", 0) or 0, rec.accumulated_tokens)
         account.sessions.touch_last_message(session_key, rec.id or response_message_id)
         log.info("deepseek completion OK (%.0fms)", (time.monotonic() - started) * 1000)
 
@@ -1127,7 +1132,7 @@ async def _stream_openai(
                     "created": created,
                     "model": model,
                     "choices": [],
-                    "usage": rec.usage,
+                    "usage": _deepseek_usage(getattr(session, "accumulated_tokens", 0)),
                 }
             )
         yield sse(
