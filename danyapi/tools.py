@@ -519,7 +519,6 @@ def _fix_unbalanced_json(text: str) -> str | None:
     stack: list[str] = []
     insert_before: dict[int, int] = {}
     drop: set[int] = set()
-    trailing_extra = 0
     in_string = False
     escaped = False
 
@@ -549,26 +548,28 @@ def _fix_unbalanced_json(text: str) -> str | None:
                 while stack and stack[-1] != "[":
                     count += 1
                     stack.pop()
+                insert_before[i] = count
                 if stack:
                     stack.pop()
-                    insert_before[i] = count
                 else:
-                    trailing_extra += count
                     drop.add(i)
             else:
                 drop.add(i)
 
-    if not insert_before and not drop and not stack and not trailing_extra:
+    if not insert_before and not drop and not stack and not in_string:
         return None
 
     result: list[str] = []
     for i, ch in enumerate(text):
-        if i in drop:
-            continue
         if i in insert_before:
             result.append("}" * insert_before[i])
+        if i in drop:
+            continue
         result.append(ch)
-    result.append("}" * trailing_extra)
+    if in_string:
+        if escaped:
+            result.append("\\")
+        result.append('"')
     result.append("".join("}" if opening == "{" else "]" for opening in reversed(stack)))
     return "".join(result)
 

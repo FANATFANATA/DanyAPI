@@ -1,7 +1,8 @@
 import asyncio
 import json
-import unittest
 from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 import danyapi.api.openai as openai_mod
 import danyapi.qwen.api as qwen_api
@@ -99,124 +100,117 @@ class FakeAccount:
         self.broken = True
 
 
+@pytest.fixture(autouse=True)
+def zero_backoff():
+    orig_ds = openai_mod.RETRY_BACKOFF_SEC
+    orig_qwen = qwen_api.RETRY_BACKOFF_SEC
+    openai_mod.RETRY_BACKOFF_SEC = 0.0
+    qwen_api.RETRY_BACKOFF_SEC = 0.0
+    yield
+    openai_mod.RETRY_BACKOFF_SEC = orig_ds
+    qwen_api.RETRY_BACKOFF_SEC = orig_qwen
+
+
 async def collect_stream(gen):
     return [line async for line in gen]
 
 
-class TestDeepSeekToolCalls(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls._orig_backoff = openai_mod.RETRY_BACKOFF_SEC
-        openai_mod.RETRY_BACKOFF_SEC = 0.0
-
-    @classmethod
-    def tearDownClass(cls):
-        openai_mod.RETRY_BACKOFF_SEC = cls._orig_backoff
-
-    def _args(self, acct, tool_mode=True):
-        return {
-            "account": acct,
-            "pool": MagicMock(),
-            "existing_sid": "s1",
-            "lock": acct.sem,
-            "prompt": "x",
-            "model": "deepseek-v4-flash",
-            "model_type": "default",
-            "thinking": False,
-            "search": False,
-            "tool_mode": tool_mode,
-        }
-
-    def test_non_stream_formats_tool_calls(self):
-        acct = FakeAccount([DS_TOOL_SSE])
-        result = asyncio.run(openai_mod._collect_non_stream(**self._args(acct)))
-        choice = result["choices"][0]
-        self.assertEqual(choice["finish_reason"], "tool_calls")
-        message = choice["message"]
-        self.assertEqual(len(message["tool_calls"]), 1)
-        call = message["tool_calls"][0]
-        self.assertEqual(call["type"], "function")
-        self.assertEqual(call["function"]["name"], "get_weather")
-        self.assertEqual(json.loads(call["function"]["arguments"]), {"city": "Moscow"})
-
-    def test_non_stream_falls_back_to_content(self):
-        acct = FakeAccount([DS_PLAIN_SSE])
-        result = asyncio.run(openai_mod._collect_non_stream(**self._args(acct)))
-        choice = result["choices"][0]
-        self.assertEqual(choice["finish_reason"], "stop")
-        self.assertNotIn("tool_calls", choice["message"])
-        self.assertIn("22C", choice["message"]["content"])
-
-    def test_stream_emits_tool_call_deltas(self):
-        acct = FakeAccount([DS_TOOL_SSE])
-        gen = openai_mod._stream_openai(**self._args(acct))
-        lines = asyncio.run(collect_stream(gen))
-        joined = "".join(lines)
-        self.assertIn('"tool_calls"', joined)
-        self.assertIn('"name": "get_weather"', joined)
-        self.assertIn('"finish_reason": "tool_calls"', joined)
-        arguments = ""
-        for line in lines:
-            if not line.startswith("data: ") or line.startswith("data: [DONE]"):
-                continue
-            payload = json.loads(line[6:])
-            for chunk in payload.get("choices") or []:
-                for tc in (chunk.get("delta") or {}).get("tool_calls") or []:
-                    arguments += tc.get("function", {}).get("arguments", "")
-        self.assertEqual(json.loads(arguments), {"city": "Moscow"})
-
-    def test_stream_falls_back_to_content(self):
-        acct = FakeAccount([DS_PLAIN_SSE])
-        gen = openai_mod._stream_openai(**self._args(acct))
-        lines = asyncio.run(collect_stream(gen))
-        joined = "".join(lines)
-        self.assertNotIn('"tool_calls"', joined)
-        self.assertIn('"content": "The weather in Moscow is 22C and sunny."', joined)
-        self.assertIn('"finish_reason": "stop"', joined)
+def _deepseek_args(acct, tool_mode=True):
+    return {
+        "account": acct,
+        "pool": MagicMock(),
+        "existing_sid": "s1",
+        "lock": acct.sem,
+        "prompt": "x",
+        "model": "deepseek-v4-flash",
+        "model_type": "default",
+        "thinking": False,
+        "search": False,
+        "tool_mode": tool_mode,
+    }
 
 
-class TestQwenToolCalls(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls._orig_backoff = qwen_api.RETRY_BACKOFF_SEC
-        qwen_api.RETRY_BACKOFF_SEC = 0.0
-
-    @classmethod
-    def tearDownClass(cls):
-        qwen_api.RETRY_BACKOFF_SEC = cls._orig_backoff
-
-    def _args(self, acct, tool_mode=True):
-        return {
-            "account": acct,
-            "pool": MagicMock(),
-            "existing_sid": "s1",
-            "lock": acct.sem,
-            "prompt": "x",
-            "model": "qwen3.8-max",
-            "model_id": "qwen3.8-max",
-            "thinking": False,
-            "search": False,
-            "tool_mode": tool_mode,
-        }
-
-    def test_non_stream_formats_tool_calls(self):
-        acct = FakeAccount([QWEN_TOOL_SSE])
-        result = asyncio.run(qwen_api.collect_non_stream(**self._args(acct)))
-        choice = result["choices"][0]
-        self.assertEqual(choice["finish_reason"], "tool_calls")
-        message = choice["message"]
-        self.assertEqual(len(message["tool_calls"]), 1)
-        self.assertEqual(message["tool_calls"][0]["function"]["name"], "get_weather")
-
-    def test_stream_emits_tool_call_deltas(self):
-        acct = FakeAccount([QWEN_TOOL_SSE])
-        gen = qwen_api.stream_openai(**self._args(acct))
-        lines = asyncio.run(collect_stream(gen))
-        joined = "".join(lines)
-        self.assertIn('"tool_calls"', joined)
-        self.assertIn('"finish_reason": "tool_calls"', joined)
-        self.assertTrue(joined.rstrip().endswith("data: [DONE]"))
+def _qwen_args(acct, tool_mode=True):
+    return {
+        "account": acct,
+        "pool": MagicMock(),
+        "existing_sid": "s1",
+        "lock": acct.sem,
+        "prompt": "x",
+        "model": "qwen3.8-max",
+        "model_id": "qwen3.8-max",
+        "thinking": False,
+        "search": False,
+        "tool_mode": tool_mode,
+    }
 
 
-if __name__ == "__main__":
-    unittest.main()
+async def test_non_stream_formats_tool_calls():
+    acct = FakeAccount([DS_TOOL_SSE])
+    result = await openai_mod._collect_non_stream(**_deepseek_args(acct))
+    choice = result["choices"][0]
+    assert choice["finish_reason"] == "tool_calls"
+    message = choice["message"]
+    assert len(message["tool_calls"]) == 1
+    call = message["tool_calls"][0]
+    assert call["type"] == "function"
+    assert call["function"]["name"] == "get_weather"
+    assert json.loads(call["function"]["arguments"]) == {"city": "Moscow"}
+
+
+async def test_non_stream_falls_back_to_content():
+    acct = FakeAccount([DS_PLAIN_SSE])
+    result = await openai_mod._collect_non_stream(**_deepseek_args(acct))
+    choice = result["choices"][0]
+    assert choice["finish_reason"] == "stop"
+    assert "tool_calls" not in choice["message"]
+    assert "22C" in choice["message"]["content"]
+
+
+async def test_stream_emits_tool_call_deltas():
+    acct = FakeAccount([DS_TOOL_SSE])
+    gen = openai_mod._stream_openai(**_deepseek_args(acct))
+    lines = await collect_stream(gen)
+    joined = "".join(lines)
+    assert '"tool_calls"' in joined
+    assert '"name": "get_weather"' in joined
+    assert '"finish_reason": "tool_calls"' in joined
+    arguments = ""
+    for line in lines:
+        if not line.startswith("data: ") or line.startswith("data: [DONE]"):
+            continue
+        payload = json.loads(line[6:])
+        for chunk in payload.get("choices") or []:
+            for tc in (chunk.get("delta") or {}).get("tool_calls") or []:
+                arguments += tc.get("function", {}).get("arguments", "")
+    assert json.loads(arguments) == {"city": "Moscow"}
+
+
+async def test_stream_falls_back_to_content():
+    acct = FakeAccount([DS_PLAIN_SSE])
+    gen = openai_mod._stream_openai(**_deepseek_args(acct))
+    lines = await collect_stream(gen)
+    joined = "".join(lines)
+    assert '"tool_calls"' not in joined
+    assert '"content": "The weather in Moscow is 22C and sunny."' in joined
+    assert '"finish_reason": "stop"' in joined
+
+
+async def test_qwen_non_stream_formats_tool_calls():
+    acct = FakeAccount([QWEN_TOOL_SSE])
+    result = await qwen_api.collect_non_stream(**_qwen_args(acct))
+    choice = result["choices"][0]
+    assert choice["finish_reason"] == "tool_calls"
+    message = choice["message"]
+    assert len(message["tool_calls"]) == 1
+    assert message["tool_calls"][0]["function"]["name"] == "get_weather"
+
+
+async def test_qwen_stream_emits_tool_call_deltas():
+    acct = FakeAccount([QWEN_TOOL_SSE])
+    gen = qwen_api.stream_openai(**_qwen_args(acct))
+    lines = await collect_stream(gen)
+    joined = "".join(lines)
+    assert '"tool_calls"' in joined
+    assert '"finish_reason": "tool_calls"' in joined
+    assert joined.rstrip().endswith("data: [DONE]")

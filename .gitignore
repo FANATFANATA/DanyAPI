@@ -6,6 +6,8 @@ __pycache__/
 venv/
 .ruff_cache/
 .pytest_cache/
+.coverage
+htmlcov/
 *.exe
 pow_solver
 .playwright-mcp/

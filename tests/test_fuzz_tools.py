@@ -102,15 +102,37 @@ def test_fix_unbalanced_json_no_crash(raw: str) -> None:
     assert result is None or isinstance(result, str)
 
 
+def _balanced_brackets(text: str) -> bool:
+    stack: list[str] = []
+    in_string = False
+    escaped = False
+    for ch in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch in "[{":
+            stack.append(ch)
+        elif ch in "]}":
+            if not stack or (ch == "]" and stack[-1] != "[") or (ch == "}" and stack[-1] != "{"):
+                return False
+            stack.pop()
+    return not stack and not in_string
+
+
 @settings(max_examples=200, deadline=None)
 @given(raw=st.text(max_size=500))
 def test_fix_unbalanced_json_produces_balanced_output(raw: str) -> None:
     result = toolemu._fix_unbalanced_json(raw)
     if result is None:
         return
-    stripped = re.sub(r'"[^"]*"', "", result)
-    assert stripped.count("{") == stripped.count("}"), f"Unbalanced {{}} in: {result[:100]}"
-    assert stripped.count("[") == stripped.count("]"), f"Unbalanced [] in: {result[:100]}"
+    assert _balanced_brackets(result), f"Unbalanced brackets in: {result[:100]}"
 
 
 @settings(max_examples=200, deadline=None)

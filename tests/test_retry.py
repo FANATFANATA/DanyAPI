@@ -1,7 +1,8 @@
 import asyncio
-import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 import danyapi.api.openai as openai_mod
 from danyapi.api.openai import ChatMessage, _collect_non_stream, _stream_openai
@@ -81,373 +82,382 @@ class FakeAccount:
         self.broken = True
 
 
-class TestRetry(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls._orig_backoff = openai_mod.RETRY_BACKOFF_SEC
-        openai_mod.RETRY_BACKOFF_SEC = 0.0
+@pytest.fixture(autouse=True)
+def zero_backoff():
+    orig = openai_mod.RETRY_BACKOFF_SEC
+    openai_mod.RETRY_BACKOFF_SEC = 0.0
+    yield
+    openai_mod.RETRY_BACKOFF_SEC = orig
 
-    @classmethod
-    def tearDownClass(cls):
-        openai_mod.RETRY_BACKOFF_SEC = cls._orig_backoff
 
-    def _args(self, acct, pool=None, existing_sid: str | None = "s1"):
-        return {
-            "account": acct,
-            "pool": pool or MagicMock(),
-            "existing_sid": existing_sid,
-            "lock": acct.sem,
-            "prompt": "x",
-            "model": "deepseek-v4-flash",
-            "model_type": "default",
-            "thinking": False,
-            "search": False,
-        }
+def _args(acct, pool=None, existing_sid: str | None = "s1"):
+    return {
+        "account": acct,
+        "pool": pool or MagicMock(),
+        "existing_sid": existing_sid,
+        "lock": acct.sem,
+        "prompt": "x",
+        "model": "deepseek-v4-flash",
+        "model_type": "default",
+        "thinking": False,
+        "search": False,
+    }
 
-    def test_non_stream_retries_then_success(self):
-        acct = FakeAccount([BUSY_SSE, OK_SSE])
-        result = asyncio.run(_collect_non_stream(**self._args(acct)))
-        self.assertEqual(result["choices"][0]["message"]["content"], "Привет")
-        self.assertEqual(acct.pow.make_header.await_count, 2)
-        self.assertEqual(acct.client.completion.await_count, 2)
 
-    def test_non_stream_raises_429_after_retries(self):
-        acct = FakeAccount([BUSY_SSE] * (openai_mod.MAX_RETRIES + 1))
-        with self.assertRaises(Exception) as ctx:
-            asyncio.run(_collect_non_stream(**self._args(acct)))
-        exc = ctx.exception
-        assert isinstance(exc, openai_mod.HTTPException)
-        self.assertEqual(exc.status_code, 429)
-        self.assertIn("busy", exc.detail.lower())
+async def test_non_stream_retries_then_success():
+    acct = FakeAccount([BUSY_SSE, OK_SSE])
+    result = await _collect_non_stream(**_args(acct))
+    assert result["choices"][0]["message"]["content"] == "Привет"
+    assert acct.pow.make_header.await_count == 2
+    assert acct.client.completion.await_count == 2
 
-    def test_stream_emits_error_event_after_retries(self):
-        acct = FakeAccount([BUSY_SSE] * (openai_mod.MAX_RETRIES + 1))
-        gen = _stream_openai(**self._args(acct))
-        lines = list(asyncio.run(_collect(gen)))
-        self.assertEqual(acct.client.completion.await_count, openai_mod.MAX_RETRIES + 1)
-        joined = "".join(lines)
-        self.assertIn('"error"', joined)
-        self.assertIn("expert_busy_use_default", joined)
-        self.assertTrue(joined.rstrip().endswith("data: [DONE]"))
 
-    def test_stream_success_streams_content(self):
-        acct = FakeAccount([OK_SSE])
-        gen = _stream_openai(**self._args(acct))
-        lines = list(asyncio.run(_collect(gen)))
-        joined = "".join(lines)
-        self.assertIn('"content": "При"', joined)
-        self.assertIn('"content": "вет"', joined)
-        self.assertIn('"finish_reason": "stop"', joined)
-        self.assertTrue(joined.rstrip().endswith("data: [DONE]"))
+async def test_non_stream_raises_429_after_retries():
+    acct = FakeAccount([BUSY_SSE] * (openai_mod.MAX_RETRIES + 1))
+    with pytest.raises(Exception) as excinfo:
+        await _collect_non_stream(**_args(acct))
+    exc = excinfo.value
+    assert isinstance(exc, openai_mod.HTTPException)
+    assert exc.status_code == 429
+    assert "busy" in exc.detail.lower()
 
-    def test_stream_emits_usage_when_requested(self):
-        acct = FakeAccount([OK_SSE])
-        args = self._args(acct)
-        args["include_usage"] = True
-        gen = _stream_openai(**args)
-        lines = list(asyncio.run(_collect(gen)))
-        joined = "".join(lines)
-        self.assertIn('"usage"', joined)
-        self.assertIn('"completion_tokens"', joined)
 
-    def test_stream_omits_usage_by_default(self):
-        acct = FakeAccount([OK_SSE])
-        gen = _stream_openai(**self._args(acct))
-        lines = list(asyncio.run(_collect(gen)))
-        self.assertNotIn('"usage"', "".join(lines))
+async def test_stream_emits_error_event_after_retries():
+    acct = FakeAccount([BUSY_SSE] * (openai_mod.MAX_RETRIES + 1))
+    gen = _stream_openai(**_args(acct))
+    lines = list(await _collect(gen))
+    assert acct.client.completion.await_count == openai_mod.MAX_RETRIES + 1
+    joined = "".join(lines)
+    assert '"error"' in joined
+    assert "expert_busy_use_default" in joined
+    assert joined.rstrip().endswith("data: [DONE]")
 
-    def test_obtain_waits_for_lock(self):
-        acct = FakeAccount([OK_SSE])
-        state = {"under_lock": False}
 
-        async def fake_obtain(sid):
-            state["under_lock"] = acct.sem.locked()
-            return FakeSession(), "s1"
+async def test_stream_success_streams_content():
+    acct = FakeAccount([OK_SSE])
+    gen = _stream_openai(**_args(acct))
+    lines = list(await _collect(gen))
+    joined = "".join(lines)
+    assert '"content": "При"' in joined
+    assert '"content": "вет"' in joined
+    assert '"finish_reason": "stop"' in joined
+    assert joined.rstrip().endswith("data: [DONE]")
 
-        acct.sessions.obtain = fake_obtain
-        asyncio.run(_collect_non_stream(**self._args(acct)))
-        self.assertTrue(state["under_lock"])
 
-    def test_new_session_registered(self):
-        acct = FakeAccount([OK_SSE])
+async def test_stream_emits_usage_when_requested():
+    acct = FakeAccount([OK_SSE])
+    args = _args(acct)
+    args["include_usage"] = True
+    gen = _stream_openai(**args)
+    lines = list(await _collect(gen))
+    joined = "".join(lines)
+    assert '"usage"' in joined
+    assert '"completion_tokens"' in joined
+
+
+async def test_stream_omits_usage_by_default():
+    acct = FakeAccount([OK_SSE])
+    gen = _stream_openai(**_args(acct))
+    lines = list(await _collect(gen))
+    assert '"usage"' not in "".join(lines)
+
+
+async def test_obtain_waits_for_lock():
+    acct = FakeAccount([OK_SSE])
+    state = {"under_lock": False}
+
+    async def fake_obtain(sid):
+        state["under_lock"] = acct.sem.locked()
+        return FakeSession(), "s1"
+
+    acct.sessions.obtain = fake_obtain
+    await _collect_non_stream(**_args(acct))
+    assert state["under_lock"]
+
+
+async def test_new_session_registered():
+    acct = FakeAccount([OK_SSE])
+    pool = MagicMock()
+    acct.sessions.obtain = AsyncMock(return_value=(FakeSession(sid="new1"), "new1"))
+    await _collect_non_stream(**_args(acct, pool=pool, existing_sid=None))
+    pool.register.assert_called_once_with(0, "new1")
+
+
+async def test_prepare_session_auth_error_is_401():
+    from danyapi.deepseek.client import DeepSeekError
+
+    acct = FakeAccount([OK_SSE])
+    acct.sessions.obtain = AsyncMock(side_effect=DeepSeekError(40001, "token invalid"))
+    with pytest.raises(Exception) as excinfo:
+        await _collect_non_stream(**_args(acct))
+    exc = excinfo.value
+    assert isinstance(exc, openai_mod.HTTPException)
+    assert exc.status_code == 401
+    assert acct.broken
+
+
+async def test_prepare_session_non_auth_error_is_502():
+    from danyapi.deepseek.client import DeepSeekError
+
+    acct = FakeAccount([OK_SSE])
+    acct.sessions.obtain = AsyncMock(side_effect=DeepSeekError(5000, "session boom"))
+    with pytest.raises(Exception) as excinfo:
+        await _collect_non_stream(**_args(acct))
+    exc = excinfo.value
+    assert isinstance(exc, openai_mod.HTTPException)
+    assert exc.status_code == 502
+    assert not acct.broken
+
+
+async def test_completion_http_401_marks_broken():
+    from fastapi import HTTPException
+
+    acct = FakeAccount([OK_SSE])
+    acct.client.completion = AsyncMock(side_effect=HTTPException(401, "unauthorized"))
+    with pytest.raises(Exception) as excinfo:
+        await _collect_non_stream(**_args(acct))
+    exc = excinfo.value
+    assert isinstance(exc, openai_mod.HTTPException)
+    assert exc.status_code == 401
+    assert acct.broken
+
+
+async def test_stream_emits_error_when_completion_fails():
+    acct = FakeAccount([])
+    acct.client.completion = AsyncMock(side_effect=openai_mod.HTTPException(502, "boom"))
+    gen = _stream_openai(**_args(acct))
+    lines = list(await _collect(gen))
+    joined = "".join(lines)
+    assert '"error"' in joined
+    assert "boom" in joined
+    assert joined.rstrip().endswith("data: [DONE]")
+
+
+async def test_stream_emits_error_when_pow_header_fails():
+    from danyapi.deepseek.client import DeepSeekError
+
+    acct = FakeAccount([])
+    acct.pow.make_header = AsyncMock(side_effect=DeepSeekError(5000, "pow boom"))
+    gen = _stream_openai(**_args(acct))
+    lines = list(await _collect(gen))
+    joined = "".join(lines)
+    assert '"error"' in joined
+    assert "pow boom" in joined
+    assert joined.rstrip().endswith("data: [DONE]")
+
+
+async def test_non_stream_context_limit_drops_session_and_raises_400():
+    acct = FakeAccount([CTX_SSE])
+    pool = MagicMock()
+    with pytest.raises(Exception) as excinfo:
+        await _collect_non_stream(**_args(acct, pool=pool))
+    exc = excinfo.value
+    assert isinstance(exc, openai_mod.HTTPException)
+    assert exc.status_code == 400
+    pool.forget.assert_called_once_with("s1")
+    pool.forget_context.assert_called_once_with("s1")
+    acct.sessions.forget.assert_called_once_with("s1")
+
+
+async def test_stream_context_limit_drops_session_and_emits_length():
+    acct = FakeAccount([CTX_SSE])
+    pool = MagicMock()
+    gen = _stream_openai(**_args(acct, pool=pool))
+    lines = list(await _collect(gen))
+    joined = "".join(lines)
+    assert '"finish_reason": "length"' in joined
+    assert "context length exceeded" in joined
+    assert joined.rstrip().endswith("data: [DONE]")
+    pool.forget.assert_called_once_with("s1")
+    pool.forget_context.assert_called_once_with("s1")
+    acct.sessions.forget.assert_called_once_with("s1")
+
+
+async def test_non_stream_cancel_stops_upstream():
+    acct = FakeAccount([])
+    started = asyncio.Event()
+
+    class BlockingResp(FakeResp):
+        async def aiter_bytes(self):
+            yield (b'event: ready\ndata: {"request_message_id":1,"response_message_id":2,"model_type":"default"}\n\n')
+            started.set()
+            await asyncio.Event().wait()
+            yield b""
+
+    acct.client.completion = AsyncMock(return_value=BlockingResp(OK_SSE))
+    acct.client.stop_stream = AsyncMock()
+
+    task = asyncio.create_task(_collect_non_stream(**_args(acct)))
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    acct.client.stop_stream.assert_awaited_once()
+    args, _ = acct.client.stop_stream.call_args
+    assert args[0] == "c1"
+    assert args[1] == 2
+
+
+async def test_stream_disconnect_stops_upstream():
+    acct = FakeAccount([OK_SSE])
+    acct.client.stop_stream = AsyncMock()
+    gen = _stream_openai(**_args(acct))
+
+    first = await gen.__anext__()
+    assert first.startswith("data: ")
+    await gen.aclose()
+    acct.client.stop_stream.assert_awaited_once()
+    args, _ = acct.client.stop_stream.call_args
+    assert args[0] == "c1"
+    assert args[1] == 2
+
+
+async def test_stream_full_consumption_does_not_stop_upstream():
+    acct = FakeAccount([OK_SSE])
+    acct.client.stop_stream = AsyncMock()
+    gen = _stream_openai(**_args(acct))
+    lines = list(await _collect(gen))
+    assert any(line.startswith("data: ") for line in lines)
+    acct.client.stop_stream.assert_not_awaited()
+
+
+def test_model_type_mapping():
+    assert openai_mod.MODEL_TYPE_BY_NAME == {
+        "deepseek-v4-flash": "default",
+        "deepseek-v4-pro": "expert",
+        "deepseek-v4-vision": "vision",
+    }
+
+
+async def test_search_gated_to_flash_and_thinking_allowed():
+    captured = {}
+    orig = openai_mod._collect_non_stream
+
+    async def fake_collect(**kwargs):
+        captured.update(kwargs)
+        return {"ok": True}
+
+    openai_mod._collect_non_stream = fake_collect
+    try:
         pool = MagicMock()
-        acct.sessions.obtain = AsyncMock(return_value=(FakeSession(sid="new1"), "new1"))
-        asyncio.run(_collect_non_stream(**self._args(acct, pool=pool, existing_sid=None)))
-        pool.register.assert_called_once_with(0, "new1")
+        pool.acquire = AsyncMock(return_value=(FakeAccount([OK_SSE]), None))
+        openai_mod.app.state.pool = pool
 
-    def test_prepare_session_auth_error_is_401(self):
-        from danyapi.deepseek.client import DeepSeekError
-
-        acct = FakeAccount([OK_SSE])
-        acct.sessions.obtain = AsyncMock(side_effect=DeepSeekError(40001, "token invalid"))
-        with self.assertRaises(Exception) as ctx:
-            asyncio.run(_collect_non_stream(**self._args(acct)))
-        exc = ctx.exception
-        assert isinstance(exc, openai_mod.HTTPException)
-        self.assertEqual(exc.status_code, 401)
-        self.assertTrue(acct.broken)
-
-    def test_prepare_session_non_auth_error_is_502(self):
-        from danyapi.deepseek.client import DeepSeekError
-
-        acct = FakeAccount([OK_SSE])
-        acct.sessions.obtain = AsyncMock(side_effect=DeepSeekError(5000, "session boom"))
-        with self.assertRaises(Exception) as ctx:
-            asyncio.run(_collect_non_stream(**self._args(acct)))
-        exc = ctx.exception
-        assert isinstance(exc, openai_mod.HTTPException)
-        self.assertEqual(exc.status_code, 502)
-        self.assertFalse(acct.broken)
-
-    def test_completion_http_401_marks_broken(self):
-        from fastapi import HTTPException
-
-        acct = FakeAccount([OK_SSE])
-        acct.client.completion = AsyncMock(side_effect=HTTPException(401, "unauthorized"))
-        with self.assertRaises(Exception) as ctx:
-            asyncio.run(_collect_non_stream(**self._args(acct)))
-        exc = ctx.exception
-        assert isinstance(exc, openai_mod.HTTPException)
-        self.assertEqual(exc.status_code, 401)
-        self.assertTrue(acct.broken)
-
-    def test_stream_emits_error_when_completion_fails(self):
-        acct = FakeAccount([])
-        acct.client.completion = AsyncMock(side_effect=openai_mod.HTTPException(502, "boom"))
-        gen = _stream_openai(**self._args(acct))
-        lines = list(asyncio.run(_collect(gen)))
-        joined = "".join(lines)
-        self.assertIn('"error"', joined)
-        self.assertIn("boom", joined)
-        self.assertTrue(joined.rstrip().endswith("data: [DONE]"))
-
-    def test_stream_emits_error_when_pow_header_fails(self):
-        from danyapi.deepseek.client import DeepSeekError
-
-        acct = FakeAccount([])
-        acct.pow.make_header = AsyncMock(side_effect=DeepSeekError(5000, "pow boom"))
-        gen = _stream_openai(**self._args(acct))
-        lines = list(asyncio.run(_collect(gen)))
-        joined = "".join(lines)
-        self.assertIn('"error"', joined)
-        self.assertIn("pow boom", joined)
-        self.assertTrue(joined.rstrip().endswith("data: [DONE]"))
-
-    def test_non_stream_context_limit_drops_session_and_raises_400(self):
-        acct = FakeAccount([CTX_SSE])
-        pool = MagicMock()
-        with self.assertRaises(Exception) as ctx:
-            asyncio.run(_collect_non_stream(**self._args(acct, pool=pool)))
-        exc = ctx.exception
-        assert isinstance(exc, openai_mod.HTTPException)
-        self.assertEqual(exc.status_code, 400)
-        pool.forget.assert_called_once_with("s1")
-        pool.forget_context.assert_called_once_with("s1")
-        acct.sessions.forget.assert_called_once_with("s1")
-
-    def test_stream_context_limit_drops_session_and_emits_length(self):
-        acct = FakeAccount([CTX_SSE])
-        pool = MagicMock()
-        gen = _stream_openai(**self._args(acct, pool=pool))
-        lines = list(asyncio.run(_collect(gen)))
-        joined = "".join(lines)
-        self.assertIn('"finish_reason": "length"', joined)
-        self.assertIn("context length exceeded", joined)
-        self.assertTrue(joined.rstrip().endswith("data: [DONE]"))
-        pool.forget.assert_called_once_with("s1")
-        pool.forget_context.assert_called_once_with("s1")
-        acct.sessions.forget.assert_called_once_with("s1")
-
-    def test_non_stream_cancel_stops_upstream(self):
-        acct = FakeAccount([])
-        started = asyncio.Event()
-
-        class BlockingResp(FakeResp):
-            async def aiter_bytes(self):
-                yield (b'event: ready\ndata: {"request_message_id":1,"response_message_id":2,"model_type":"default"}\n\n')
-                started.set()
-                await asyncio.Event().wait()
-                yield b""
-
-        acct.client.completion = AsyncMock(return_value=BlockingResp(OK_SSE))
-        acct.client.stop_stream = AsyncMock()
-
-        async def run():
-            task = asyncio.create_task(_collect_non_stream(**self._args(acct)))
-            await started.wait()
-            task.cancel()
-            with self.assertRaises(asyncio.CancelledError):
-                await task
-            acct.client.stop_stream.assert_awaited_once()
-            args, _ = acct.client.stop_stream.call_args
-            self.assertEqual(args[0], "c1")
-            self.assertEqual(args[1], 2)
-
-        asyncio.run(run())
-
-    def test_stream_disconnect_stops_upstream(self):
-        acct = FakeAccount([OK_SSE])
-        acct.client.stop_stream = AsyncMock()
-        gen = _stream_openai(**self._args(acct))
-
-        async def run():
-            first = await gen.__anext__()
-            self.assertTrue(first.startswith("data: "))
-            await gen.aclose()
-            acct.client.stop_stream.assert_awaited_once()
-            args, _ = acct.client.stop_stream.call_args
-            self.assertEqual(args[0], "c1")
-            self.assertEqual(args[1], 2)
-
-        asyncio.run(run())
-
-    def test_stream_full_consumption_does_not_stop_upstream(self):
-        acct = FakeAccount([OK_SSE])
-        acct.client.stop_stream = AsyncMock()
-        gen = _stream_openai(**self._args(acct))
-        lines = list(asyncio.run(_collect(gen)))
-        self.assertTrue(any(line.startswith("data: ") for line in lines))
-        acct.client.stop_stream.assert_not_awaited()
-
-
-class TestModelConfig(unittest.TestCase):
-    def test_model_type_mapping(self):
-        self.assertEqual(
-            openai_mod.MODEL_TYPE_BY_NAME,
-            {
-                "deepseek-v4-flash": "default",
-                "deepseek-v4-pro": "expert",
-                "deepseek-v4-vision": "vision",
-            },
-        )
-
-    def test_search_gated_to_flash_and_thinking_allowed(self):
-        captured = {}
-        orig = openai_mod._collect_non_stream
-
-        async def fake_collect(**kwargs):
-            captured.update(kwargs)
-            return {"ok": True}
-
-        openai_mod._collect_non_stream = fake_collect
-        try:
-            pool = MagicMock()
-            pool.acquire = AsyncMock(return_value=(FakeAccount([OK_SSE]), None))
-            openai_mod.app.state.pool = pool
-
-            async def run(model, search, thinking):
-                req = SimpleNamespace(
-                    model=model,
-                    stream=False,
-                    thinking=thinking,
-                    search=search,
-                    session_id=None,
-                    files=None,
-                    messages=[ChatMessage(role="user", content="x")],
-                )
-                await openai_mod._chat_completions_deepseek(req)
-
-            asyncio.run(run("deepseek-v4-flash", search=True, thinking=None))
-            self.assertEqual(captured["model_type"], "default")
-            self.assertEqual(captured["search"], True)
-            self.assertEqual(captured["thinking"], False)
-
-            asyncio.run(run("deepseek-v4-pro", search=True, thinking=None))
-            self.assertEqual(captured["model_type"], "expert")
-            self.assertEqual(captured["search"], False)
-            self.assertEqual(captured["thinking"], True)
-
-            asyncio.run(run("deepseek-v4-vision", search=True, thinking=True))
-            self.assertEqual(captured["model_type"], "vision")
-            self.assertEqual(captured["search"], False)
-            self.assertEqual(captured["thinking"], True)
-        finally:
-            openai_mod._collect_non_stream = orig
-
-
-class TestAttachments(unittest.TestCase):
-    def test_pro_rejects_all_files(self):
-        from danyapi.api.openai import Attachment, _validate_attachments
-
-        with self.assertRaises(Exception) as ctx:
-            _validate_attachments([Attachment(b"x", "a.txt", "text/plain", False)], "expert")
-        exc = ctx.exception
-        assert isinstance(exc, openai_mod.HTTPException)
-        self.assertEqual(exc.status_code, 400)
-
-    def test_vision_rejects_text_files(self):
-        from danyapi.api.openai import Attachment, _validate_attachments
-
-        with self.assertRaises(Exception) as ctx:
-            _validate_attachments([Attachment(b"x", "a.txt", "text/plain", False)], "vision")
-        exc = ctx.exception
-        assert isinstance(exc, openai_mod.HTTPException)
-        self.assertEqual(exc.status_code, 400)
-
-    def test_vision_accepts_images(self):
-        from danyapi.api.openai import Attachment, _validate_attachments
-
-        _validate_attachments([Attachment(b"x", "a.png", "image/png", True)], "vision")
-
-    def test_too_many_files_rejected(self):
-        from danyapi.api.openai import MAX_FILES_PER_REQUEST, Attachment, _validate_attachments
-
-        many = [Attachment(b"x", f"{i}.txt", "text/plain", False) for i in range(MAX_FILES_PER_REQUEST + 1)]
-        with self.assertRaises(Exception) as ctx:
-            _validate_attachments(many, "default")
-        exc = ctx.exception
-        assert isinstance(exc, openai_mod.HTTPException)
-        self.assertEqual(exc.status_code, 400)
-
-    def test_collect_attachments_from_image_url_and_files(self):
-        import base64 as b64
-
-        from danyapi.api.openai import ChatMessage, _collect_attachments
-
-        img_b64 = b64.b64encode(b"pngdata").decode()
-        file_b64 = b64.b64encode(b"hello").decode()
-        req = SimpleNamespace(
-            model="deepseek-v4-flash",
-            messages=[
-                ChatMessage(
-                    role="user",
-                    content=[
-                        {"type": "text", "text": "what is this?"},
-                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
-                    ],
-                )
-            ],
-            files=[SimpleNamespace(name="doc.txt", content=file_b64, content_type="text/plain")],
-        )
-        atts = _collect_attachments(req)
-        self.assertEqual(len(atts), 2)
-        self.assertTrue(atts[0].is_image)
-        self.assertEqual(atts[0].data, b"pngdata")
-        self.assertFalse(atts[1].is_image)
-        self.assertEqual(atts[1].data, b"hello")
-
-    def test_upload_attachments_returns_ids(self):
-        from danyapi.api.openai import Attachment, _upload_attachments
-
-        acct = FakeAccount([OK_SSE])
-        acct.client.upload_file = AsyncMock(
-            side_effect=[
-                {"id": "file-1", "status": "PENDING"},
-                {"id": "file-2", "status": "PENDING"},
-            ]
-        )
-        acct.pow_upload = MagicMock()
-        acct.pow_upload.make_header = AsyncMock(return_value={"X-DS-PoW-Response": "x"})
-        ids = asyncio.run(
-            _upload_attachments(
-                acct,
-                [Attachment(b"a", "a.txt", "text/plain", False), Attachment(b"b", "b.txt", "text/plain", False)],
-                "default",
-                False,
+        async def run(model, search, thinking):
+            req = SimpleNamespace(
+                model=model,
+                stream=False,
+                thinking=thinking,
+                search=search,
+                session_id=None,
+                files=None,
+                messages=[ChatMessage(role="user", content="x")],
             )
-        )
-        self.assertEqual(ids, ["file-1", "file-2"])
-        self.assertEqual(acct.client.upload_file.await_count, 2)
+            await openai_mod._chat_completions_deepseek(req)
+
+        await run("deepseek-v4-flash", search=True, thinking=None)
+        assert captured["model_type"] == "default"
+        assert captured["search"] is True
+        assert captured["thinking"] is False
+
+        await run("deepseek-v4-pro", search=True, thinking=None)
+        assert captured["model_type"] == "expert"
+        assert captured["search"] is False
+        assert captured["thinking"] is True
+
+        await run("deepseek-v4-vision", search=True, thinking=True)
+        assert captured["model_type"] == "vision"
+        assert captured["search"] is False
+        assert captured["thinking"] is True
+    finally:
+        openai_mod._collect_non_stream = orig
+
+
+def test_pro_rejects_all_files():
+    from danyapi.api.openai import Attachment, _validate_attachments
+
+    with pytest.raises(Exception) as excinfo:
+        _validate_attachments([Attachment(b"x", "a.txt", "text/plain", False)], "expert")
+    exc = excinfo.value
+    assert isinstance(exc, openai_mod.HTTPException)
+    assert exc.status_code == 400
+
+
+def test_vision_rejects_text_files():
+    from danyapi.api.openai import Attachment, _validate_attachments
+
+    with pytest.raises(Exception) as excinfo:
+        _validate_attachments([Attachment(b"x", "a.txt", "text/plain", False)], "vision")
+    exc = excinfo.value
+    assert isinstance(exc, openai_mod.HTTPException)
+    assert exc.status_code == 400
+
+
+def test_vision_accepts_images():
+    from danyapi.api.openai import Attachment, _validate_attachments
+
+    _validate_attachments([Attachment(b"x", "a.png", "image/png", True)], "vision")
+
+
+def test_too_many_files_rejected():
+    from danyapi.api.openai import MAX_FILES_PER_REQUEST, Attachment, _validate_attachments
+
+    many = [Attachment(b"x", f"{i}.txt", "text/plain", False) for i in range(MAX_FILES_PER_REQUEST + 1)]
+    with pytest.raises(Exception) as excinfo:
+        _validate_attachments(many, "default")
+    exc = excinfo.value
+    assert isinstance(exc, openai_mod.HTTPException)
+    assert exc.status_code == 400
+
+
+def test_collect_attachments_from_image_url_and_files():
+    import base64 as b64
+
+    from danyapi.api.openai import ChatMessage, _collect_attachments
+
+    img_b64 = b64.b64encode(b"pngdata").decode()
+    file_b64 = b64.b64encode(b"hello").decode()
+    req = SimpleNamespace(
+        model="deepseek-v4-flash",
+        messages=[
+            ChatMessage(
+                role="user",
+                content=[
+                    {"type": "text", "text": "what is this?"},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
+                ],
+            )
+        ],
+        files=[SimpleNamespace(name="doc.txt", content=file_b64, content_type="text/plain")],
+    )
+    atts = _collect_attachments(req)
+    assert len(atts) == 2
+    assert atts[0].is_image
+    assert atts[0].data == b"pngdata"
+    assert not atts[1].is_image
+    assert atts[1].data == b"hello"
+
+
+async def test_upload_attachments_returns_ids():
+    from danyapi.api.openai import Attachment, _upload_attachments
+
+    acct = FakeAccount([OK_SSE])
+    acct.client.upload_file = AsyncMock(
+        side_effect=[
+            {"id": "file-1", "status": "PENDING"},
+            {"id": "file-2", "status": "PENDING"},
+        ]
+    )
+    acct.pow_upload = MagicMock()
+    acct.pow_upload.make_header = AsyncMock(return_value={"X-DS-PoW-Response": "x"})
+    ids = await _upload_attachments(
+        acct,
+        [Attachment(b"a", "a.txt", "text/plain", False), Attachment(b"b", "b.txt", "text/plain", False)],
+        "default",
+        False,
+    )
+    assert ids == ["file-1", "file-2"]
+    assert acct.client.upload_file.await_count == 2
 
 
 async def _collect(agen):
@@ -455,7 +465,3 @@ async def _collect(agen):
     async for item in agen:
         out.append(item)
     return out
-
-
-if __name__ == "__main__":
-    unittest.main()
