@@ -9,8 +9,8 @@ from dataclasses import dataclass
 from typing import Any
 
 _DSML_TAG = re.compile(
-    r"<\s*/?\s*\uff5c\uff5c\s*DSML\s*\uff5c\uff5c[^>]*>"
-    r"|\uff5c\uff5c\s*DSML\s*\uff5c\uff5c",
+    r"<\s*/?\s*(?:\||\uff5c){2}\s*DSML\s*(?:\||\uff5c){2}[^>]*>"
+    r"|(?:\||\uff5c){2}\s*DSML\s*(?:\||\uff5c){2}",
     re.IGNORECASE,
 )
 
