@@ -1,0 +1,1018 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DanyAPI · OpenAI-compatible API</title>
+    <style>
+        /* ── reset & base ─────────────────────────────────────────────── */
+        *,
+        *::before,
+        *::after {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background: #f8fafc;
+            color: #1e293b;
+            line-height: 1.7;
+            padding: 2rem 1rem;
+        }
+
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+            background: #ffffff;
+            border-radius: 1.25rem;
+            box-shadow: 0 20px 60px -12px rgba(0, 0, 0, 0.08);
+            padding: 2.5rem 2.75rem;
+        }
+
+        @media (max-width: 700px) {
+            .container {
+                padding: 1.5rem 1.25rem;
+                border-radius: 0.75rem;
+            }
+            body {
+                padding: 1rem 0.5rem;
+            }
+        }
+
+        /* ── typography ────────────────────────────────────────────────── */
+        h1,
+        h2,
+        h3,
+        h4,
+        h5,
+        h6 {
+            font-weight: 600;
+            line-height: 1.3;
+            margin-top: 2rem;
+            margin-bottom: 0.75rem;
+            letter-spacing: -0.01em;
+        }
+
+        h1 {
+            font-size: 2.2rem;
+            margin-top: 0;
+            margin-bottom: 0.25rem;
+            border-bottom: 2px solid #eef2f6;
+            padding-bottom: 0.6rem;
+        }
+
+        h2 {
+            font-size: 1.6rem;
+            margin-top: 2.4rem;
+            border-bottom: 1px solid #eef2f6;
+            padding-bottom: 0.4rem;
+        }
+
+        h3 {
+            font-size: 1.25rem;
+            margin-top: 1.8rem;
+        }
+
+        h4 {
+            font-size: 1.05rem;
+            margin-top: 1.4rem;
+            font-weight: 600;
+        }
+
+        p {
+            margin-bottom: 1rem;
+        }
+
+        a {
+            color: #2563eb;
+            text-decoration: none;
+            border-bottom: 1px solid transparent;
+            transition: border-color 0.2s;
+        }
+
+        a:hover {
+            border-bottom-color: #2563eb;
+        }
+
+        strong {
+            font-weight: 600;
+        }
+
+        code {
+            font-family: "SF Mono", "Fira Code", "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+            font-size: 0.875em;
+            background: #f1f5f9;
+            padding: 0.15rem 0.45rem;
+            border-radius: 4px;
+            color: #0f172a;
+            white-space: nowrap;
+        }
+
+        pre {
+            background: #0f172a;
+            color: #e2e8f0;
+            padding: 1.25rem 1.5rem;
+            border-radius: 10px;
+            overflow-x: auto;
+            font-size: 0.875rem;
+            line-height: 1.6;
+            margin: 1.25rem 0;
+            font-family: "SF Mono", "Fira Code", "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+        }
+
+        pre code {
+            background: transparent;
+            padding: 0;
+            color: inherit;
+            font-size: inherit;
+            white-space: pre;
+        }
+
+        /* ── lists ─────────────────────────────────────────────────────── */
+        ul,
+        ol {
+            margin: 0.75rem 0 1.25rem 1.5rem;
+        }
+
+        li {
+            margin-bottom: 0.35rem;
+        }
+
+        li>ul,
+        li>ol {
+            margin-top: 0.25rem;
+            margin-bottom: 0.25rem;
+        }
+
+        /* ── tables ────────────────────────────────────────────────────── */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1.25rem 0;
+            font-size: 0.9rem;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+        }
+
+        thead {
+            background: #f1f5f9;
+        }
+
+        th {
+            text-align: left;
+            font-weight: 600;
+            padding: 0.6rem 1rem;
+            border-bottom: 2px solid #e2e8f0;
+        }
+
+        td {
+            padding: 0.6rem 1rem;
+            border-bottom: 1px solid #eef2f6;
+            vertical-align: top;
+        }
+
+        tr:last-child td {
+            border-bottom: none;
+        }
+
+        /* ── blockquote ────────────────────────────────────────────────── */
+        blockquote {
+            border-left: 4px solid #94a3b8;
+            padding: 0.5rem 1.25rem;
+            margin: 1.25rem 0;
+            background: #f8fafc;
+            border-radius: 0 6px 6px 0;
+            color: #334155;
+        }
+
+        blockquote p:last-child {
+            margin-bottom: 0;
+        }
+
+        /* ── horizontal rule ──────────────────────────────────────────── */
+        hr {
+            border: none;
+            border-top: 2px solid #eef2f6;
+            margin: 2rem 0;
+        }
+
+        /* ── badges / inline metadata ──────────────────────────────────── */
+        .badge {
+            display: inline-block;
+            background: #eef2f6;
+            font-size: 0.75rem;
+            font-weight: 600;
+            padding: 0.1rem 0.6rem;
+            border-radius: 20px;
+            color: #475569;
+            letter-spacing: 0.01em;
+        }
+
+        .badge-green {
+            background: #dcfce7;
+            color: #166534;
+        }
+
+        .badge-blue {
+            background: #dbeafe;
+            color: #1e40af;
+        }
+
+        /* ── special: model names, env vars ───────────────────────────── */
+        .model {
+            font-weight: 600;
+            color: #0f172a;
+        }
+
+        .env-var {
+            font-family: monospace;
+            background: #f1f5f9;
+            padding: 0.1rem 0.4rem;
+            border-radius: 4px;
+            font-size: 0.85rem;
+            white-space: nowrap;
+        }
+
+        /* ── responsive table ──────────────────────────────────────────── */
+        .table-wrap {
+            overflow-x: auto;
+            margin: 1.25rem 0;
+            border-radius: 8px;
+        }
+
+        .table-wrap table {
+            margin: 0;
+        }
+
+        /* ── footnotes / small print ──────────────────────────────────── */
+        .footnote {
+            font-size: 0.85rem;
+            color: #64748b;
+            margin-top: 1rem;
+        }
+
+        /* ── header anchor hover ──────────────────────────────────────── */
+        h1:hover .anchor,
+        h2:hover .anchor,
+        h3:hover .anchor,
+        h4:hover .anchor {
+            opacity: 1;
+        }
+
+        .anchor {
+            opacity: 0;
+            font-weight: 400;
+            color: #94a3b8;
+            margin-left: 0.3rem;
+            font-size: 0.75em;
+            transition: opacity 0.2s;
+            text-decoration: none;
+            border-bottom: none;
+        }
+
+        .anchor:hover {
+            color: #2563eb;
+            border-bottom: none;
+        }
+
+        /* ── special code block language labels ──────────────────────── */
+        .code-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: #1e293b;
+            color: #94a3b8;
+            font-size: 0.7rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            padding: 0.3rem 1.5rem 0.1rem 1.5rem;
+            border-radius: 10px 10px 0 0;
+            margin-bottom: -1px;
+            font-family: inherit;
+        }
+
+        .code-header+pre {
+            border-radius: 0 0 10px 10px;
+            margin-top: 0;
+        }
+
+        .code-header+pre+pre {
+            border-radius: 10px;
+            margin-top: 1.25rem;
+        }
+
+        /* ── inline list spacing ──────────────────────────────────────── */
+        .inline-list {
+            display: inline;
+        }
+
+        /* ── scrollable code blocks ───────────────────────────────────── */
+        pre {
+            white-space: pre;
+            word-break: normal;
+            overflow-x: auto;
+        }
+
+        /* ── print-friendly ───────────────────────────────────────────── */
+        @media print {
+            body {
+                background: #fff;
+                padding: 0.5in;
+            }
+            .container {
+                box-shadow: none;
+                padding: 0;
+            }
+            pre {
+                background: #f1f5f9;
+                color: #0f172a;
+                border: 1px solid #e2e8f0;
+            }
+            .code-header {
+                background: #e2e8f0;
+                color: #475569;
+            }
+            .badge {
+                border: 1px solid #d1d5db;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+
+        <!-- ──────── TITLE ──────────────────────────────────────────── -->
+        <h1>DanyAPI</h1>
+        <p style="font-size:1.1rem; color:#475569; margin-top:-0.2rem;">
+            OpenAI-compatible HTTP API built on Python + FastAPI.
+        </p>
+        <p>
+            Instead of the paid APIs it talks to the internal APIs of the free web clients
+            <a href="https://chat.deepseek.com" target="_blank">chat.deepseek.com</a> and
+            <a href="https://chat.qwen.ai" target="_blank">chat.qwen.ai</a> using server-side accounts.
+            API users need no keys – all requests are made by the server accounts.
+        </p>
+
+        <hr />
+
+        <!-- ──────── FEATURES ─────────────────────────────────────────── -->
+        <h2>Features</h2>
+        <ul>
+            <li><code>GET /v1/models</code> – model list</li>
+            <li><code>POST /v1/chat/completions</code> – generation (stream and non-stream)</li>
+            <li>
+                DeepSeek models: <span class="model">deepseek-v4-flash</span> (default),
+                <span class="model">deepseek-v4-pro</span> (expert),
+                <span class="model">deepseek-v4-vision</span> (vision).
+                Internal <code>model_type</code>: <code>default</code>, <code>expert</code>, <code>vision</code>.
+            </li>
+            <li>Thinking is available for all DeepSeek models; web search works only for <span class="model">deepseek-v4-flash</span>.</li>
+            <li>
+                Attachments: <span class="model">deepseek-v4-vision</span> accepts images only;
+                <span class="model">deepseek-v4-flash</span> accepts images (OCR) and text files;
+                <span class="model">deepseek-v4-pro</span> accepts no files.
+                Per request: max 50 files, 100 MB each.
+            </li>
+            <li>
+                Qwen models: fetched from the account at startup
+                (<span class="model">qwen3.8-max</span>, <span class="model">qwen3.7-plus</span>, …)
+            </li>
+            <li>Thinking and web search (DeepSeek); thinking and search (Qwen). Thinking traces are exposed as <code>reasoning_content</code> (streamed live, both providers)</li>
+            <li>
+                Tool calling (emulated): <code>tools</code> / <code>tool_choice</code> / <code>parallel_tool_calls</code>
+                with proper <code>finish_reason: "tool_calls"</code> responses
+            </li>
+            <li>JSON mode (emulated): <code>response_format</code> with <code>json_object</code> / <code>json_schema</code></li>
+            <li><code>system</code> messages are injected as the model's system prompt</li>
+            <li>Real token usage in responses, accumulated per conversation like the official API; streaming usage via <code>stream_options.include_usage</code></li>
+            <li>On-disk session cache: conversations survive server restarts</li>
+            <li><code>GET /health</code> – readiness probe</li>
+            <li>
+                Multi-session: the message chain is stored server-side
+                (<code>session_id</code> in the response), like the web clients. Stateless requests
+                (no <code>session_id</code>) reuse the same server-side chat automatically based on
+                the message context, so plain OpenAI-protocol clients keep their
+                conversation too.
+            </li>
+        </ul>
+
+        <!-- ──────── INSTALL ──────────────────────────────────────────── -->
+        <h2>Install</h2>
+        <p>Requires Python 3.13+.</p>
+        <div class="code-header">bash</div>
+        <pre><code>pip install -r requirements.txt</code></pre>
+        <p>For development (tests + linting) install the dev extras:</p>
+        <div class="code-header">bash</div>
+        <pre><code>pip install -r requirements-dev.txt</code></pre>
+
+        <!-- ──────── ACCOUNT SETUP ────────────────────────────────────── -->
+        <h2>Account setup</h2>
+
+        <h3>DeepSeek</h3>
+        <p>Set a pool of tokens (from different accounts), comma-separated, or a single token via <span class="env-var">DEEPSEEK_TOKEN</span>:</p>
+        <div class="code-header">bash</div>
+        <pre><code>export DEEPSEEK_TOKENS="token1,token2,token3"
+            # or
+            export DEEPSEEK_TOKEN="token1"</code></pre>
+        <p>
+            Each account can generate <strong>one</strong> message at a time, so a pool of N tokens
+            gives up to N parallel generations. Grab a token in the browser:
+            DevTools → Application → Local Storage → <a href="https://chat.deepseek.com" target="_blank">https://chat.deepseek.com</a> → <code>userToken</code>.
+        </p>
+        <p>Or a single email + password account (login happens at startup):</p>
+        <div class="code-header">bash</div>
+        <pre><code>export DEEPSEEK_EMAIL="you@example.com"
+            export DEEPSEEK_PASSWORD="secret"</code></pre>
+
+        <h3>Qwen</h3>
+        <p>Same model, different token location (single token via <span class="env-var">QWEN_TOKEN</span>):</p>
+        <div class="code-header">bash</div>
+        <pre><code>export QWEN_TOKENS="token1,token2,token3"
+            # or
+            export QWEN_TOKEN="token1"</code></pre>
+        <p>
+            Grab a token in the browser:
+            DevTools → Application → Local Storage → <a href="https://chat.qwen.ai" target="_blank">https://chat.qwen.ai</a> → <code>token</code>.
+        </p>
+        <blockquote>
+            <p>
+                <strong>For Qwen accounts used by DanyAPI, disable the built-in <em>Tools</em> switch</strong>
+                (code interpreter, image generation, and other Qwen built-ins) in the
+                chat.qwen.ai web interface. When it is enabled, Qwen's built-in tools fire
+                their own response phases on every request, which DanyAPI cannot parse, and
+                the server-side conversation history grows fast (hitting the input token
+                limit quickly). With the switch off, DanyAPI's emulated tool calling
+                (<code>tools</code> / <code>tool_choice</code>) and plain chat work as intended.
+            </p>
+        </blockquote>
+        <p>Or a single email + password account (login happens at startup):</p>
+        <div class="code-header">bash</div>
+        <pre><code>export QWEN_EMAIL="you@example.com"
+            export QWEN_PASSWORD="secret"</code></pre>
+        <p>
+            Both providers are optional. Run at least one of them (or both) – requests
+            are routed to the right provider by the model name (<code>deepseek-*</code> / <code>qwen*</code>).
+        </p>
+        <p>
+            At startup every token is validated against its provider; invalid or expired
+            tokens are skipped with a warning (the server refuses to start when no valid
+            credential remains). The Qwen model list for <code>/v1/models</code> is fetched from the
+            first Qwen account at startup (text-chat models only); if the fetch fails,
+            a built-in default list is used. New requests without a <code>session_id</code> are
+            distributed across healthy accounts round-robin.
+        </p>
+
+        <!-- ──────── RUN ────────────────────────────────────────────────── -->
+        <h2>Run</h2>
+        <p>
+            The <code>.env</code> file (gitignored, created from <code>.env.example</code>) is loaded
+            automatically at startup:
+        </p>
+        <div class="code-header">bash</div>
+        <pre><code>cp .env.example .env   # fill in tokens
+            python -m danyapi
+            # or
+            uvicorn danyapi.api.openai:app --host 0.0.0.0 --port 8000</code></pre>
+        <p>Or with the helper scripts:</p>
+        <div class="code-header">bash</div>
+        <pre><code>run.bat   # Windows
+            ./run.sh  # Linux/macOS</code></pre>
+
+        <!-- ──────── LOGGING ───────────────────────────────────────────── -->
+        <h2>Logging</h2>
+        <p>By default logs go to the console. To persist them to a file, set <span class="env-var">DANYAPI_LOG_FILE</span> in <code>.env</code> (or as an environment variable):</p>
+        <div class="code-header">bash</div>
+        <pre><code>DANYAPI_LOG_FILE=/var/log/danyapi.log   # or danyapi.log for the working dir
+            DANYAPI_LOG_LEVEL=INFO                  # DEBUG / INFO / WARNING / ERROR
+            DANYAPI_LOG_MAX_BYTES=10485760          # rotate at 10 MB per file
+            DANYAPI_LOG_BACKUP_COUNT=3              # keep 3 rotated files</code></pre>
+        <p>
+            The file is rotated by size (<span class="env-var">DANYAPI_LOG_MAX_BYTES</span>, default 10 MB) keeping
+            <span class="env-var">DANYAPI_LOG_BACKUP_COUNT</span> backups (default 3). When started via
+            <code>python -m danyapi</code>, uvicorn's own startup/access logs are routed through the
+            same root logger and also land in the file.
+        </p>
+
+        <!-- ──────── DOCKER ────────────────────────────────────────────── -->
+        <h2>Docker</h2>
+        <div class="code-header">bash</div>
+        <pre><code>docker build -t danyapi .
+            docker run -d -p 8000:8000 \
+            -e DEEPSEEK_TOKENS="token1,token2" \
+            -e QWEN_TOKENS="token3" \
+            danyapi</code></pre>
+        <p>
+            The <code>.env</code> file is not baked into the image; pass credentials as environment
+            variables or mount your <code>.env</code> as a volume (<code>-v /path/to/.env:/app/.env</code>).
+        </p>
+
+        <h3>Prebuilt image (GHCR)</h3>
+        <p>
+            CI builds and pushes the image to the GitHub Container Registry on every push
+            to <code>main</code> (<code>latest</code> and <code>sha-*</code> tags) and on version tags (<code>v1.2.3</code>):
+        </p>
+        <div class="code-header">bash</div>
+        <pre><code>docker run -d -p 8000:8000 \
+            -e DEEPSEEK_TOKENS="token1,token2" \
+            -e QWEN_TOKENS="token3" \
+            ghcr.io/fanatfanata/danyapi:latest</code></pre>
+
+        <!-- ──────── ENVIRONMENT VARIABLES ────────────────────────────── -->
+        <h2>Environment variables</h2>
+        <p>All configuration is environment-driven (<code>.env</code> or exported vars). Provider credentials are documented in <a href="#account-setup">Account setup</a>.</p>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr><th>Variable</th><th>Default</th><th>Description</th></tr>
+                </thead>
+                <tbody>
+                    <tr><td><span class="env-var">DANYAPI_HOST</span></td><td><code>0.0.0.0</code></td><td>Address the API server binds to</td></tr>
+                    <tr><td><span class="env-var">DANYAPI_PORT</span></td><td><code>8000</code></td><td>Port the API server listens on</td></tr>
+                    <tr><td><span class="env-var">DANYAPI_TIMEOUT</span></td><td><code>60</code></td><td>Upstream request timeout in seconds</td></tr>
+                    <tr><td><span class="env-var">DANYAPI_ACQUIRE_TIMEOUT</span></td><td>(empty)</td><td>Seconds to wait for a free account before returning 429; empty = wait forever</td></tr>
+                    <tr><td><span class="env-var">DANYAPI_SESSION_CACHE_SIZE</span></td><td><code>128</code></td><td>Max server-side chats cached per provider (LRU) for stateless session reuse</td></tr>
+                    <tr><td><span class="env-var">DANYAPI_SESSION_TTL_SECONDS</span></td><td><code>3600</code></td><td>Seconds an unused session/context stays reusable; <code>0</code> = never expire</td></tr>
+                    <tr><td><span class="env-var">DANYAPI_CACHE_DIR</span></td><td>(empty)</td><td>Directory for the on-disk session cache; empty = system temp dir (<code>%TEMP%\danyapi</code> / <code>/tmp/danyapi</code>)</td></tr>
+                    <tr><td><span class="env-var">DANYAPI_CACHE_DISABLED</span></td><td>(empty)</td><td>Set to <code>1</code>/<code>true</code>/<code>yes</code>/<code>on</code> to disable the on-disk cache entirely</td></tr>
+                    <tr><td><span class="env-var">DANYAPI_LOG_LEVEL</span></td><td><code>INFO</code></td><td>Log level: <code>DEBUG</code>, <code>INFO</code>, <code>WARNING</code>, <code>ERROR</code></td></tr>
+                    <tr><td><span class="env-var">DANYAPI_LOG_FILE</span></td><td>(empty)</td><td>File path for persistent logs; empty = console only</td></tr>
+                    <tr><td><span class="env-var">DANYAPI_LOG_MAX_BYTES</span></td><td><code>10485760</code></td><td>Max log file size in bytes before rotation</td></tr>
+                    <tr><td><span class="env-var">DANYAPI_LOG_BACKUP_COUNT</span></td><td><code>3</code></td><td>Number of rotated log files to keep</td></tr>
+                    <tr><td><span class="env-var">DANYAPI_HUMAN_DELAY_MIN</span></td><td><code>0.5</code></td><td>Minimum delay in seconds before sending a request (uniform random jitter)</td></tr>
+                    <tr><td><span class="env-var">DANYAPI_HUMAN_DELAY_MAX</span></td><td><code>3.0</code></td><td>Maximum delay in seconds; set both to <code>0</code> to disable</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- ──────── USAGE ─────────────────────────────────────────────── -->
+        <h2>Usage</h2>
+        <p>OpenAI SDK usage (drop-in replacement for the official API):</p>
+        <div class="code-header">python</div>
+        <pre><code>from openai import OpenAI
+
+            client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="dummy")
+            r = client.chat.completions.create(
+            model="deepseek-v4-flash",
+            messages=[{"role": "user", "content": "Hello!"}],
+            )
+            print(r.choices[0].message.content)</code></pre>
+
+        <div class="code-header">bash</div>
+        <pre><code>curl http://127.0.0.1:8000/v1/chat/completions \
+            -H "Content-Type: application/json" \
+            -d '{"model": "deepseek-v4-flash", "messages": [{"role": "user", "content": "Hello!"}]}'</code></pre>
+
+        <p>Or with a Qwen model:</p>
+        <div class="code-header">bash</div>
+        <pre><code>curl http://127.0.0.1:8000/v1/chat/completions \
+            -H "Content-Type: application/json" \
+            -d '{"model": "qwen3.8-max", "messages": [{"role": "user", "content": "Hello!"}]}'</code></pre>
+
+        <p>Multi-turn: the response includes <code>session_id</code>; pass it in the next request to continue the same conversation.</p>
+        <div class="code-header">json</div>
+        <pre><code>{
+            "model": "deepseek-v4-flash",
+            "messages": [{"role": "user", "content": "2+2?"}],
+            "session_id": "&lt;id from the previous response&gt;",
+            "thinking": true,
+            "search": false,
+            "stream": true
+            }</code></pre>
+
+        <p>
+            Stateless clients (no <code>session_id</code>) don't lose context either: the server
+            derives a fingerprint from the <code>system</code>/<code>user</code> messages and reuses the
+            matching server-side chat. If the message context is identical – the same
+            chat is used; if the context is a continuation of a previously seen one –
+            that chat is continued, so multi-turn conversations work even when the
+            client never echoes <code>session_id</code>. Pass <code>session_id</code> to force an exact
+            conversation (or to branch off into an independent chat). The in-memory
+            cache is LRU-bounded per provider (<span class="env-var">DANYAPI_SESSION_CACHE_SIZE</span>, default
+            128).
+        </p>
+        <p>
+            The context fingerprint is scoped by the <code>user</code> field when the client sends
+            it: two different <code>user</code> values never share a server-side chat even for
+            identical messages, so stateless multi-tenant clients stay isolated. Cache
+            entries expire after <span class="env-var">DANYAPI_SESSION_TTL_SECONDS</span> (default 3600, <code>0</code>
+            disables expiry) so stale chats are dropped instead of being reused.
+            Qwen chats are also model-aware: a <code>session_id</code> created for one Qwen model
+            is automatically migrated to a new chat if a request switches models.
+        </p>
+        <p>No context is ever duplicated or lost:</p>
+        <ul>
+            <li>A reused chat receives <strong>only the delta</strong>: the new user message, or the tool round tail (tool results) in the case of a tool call. The full conversation history lives server-side in the chat.</li>
+            <li>The tool schema / system prompt are injected <strong>once</strong>, into the first message of a chat, and are not repeated in every follow-up message.</li>
+            <li>If a chat cannot be matched (cache miss or eviction), the whole message history is replayed into a fresh chat, so the model always sees the full conversation.</li>
+        </ul>
+
+        <h3>Request fields</h3>
+        <p><code>POST /v1/chat/completions</code> accepts:</p>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr><th>Field</th><th>Default</th><th>Notes</th></tr>
+                </thead>
+                <tbody>
+                    <tr><td><code>model</code></td><td><code>deepseek-v4-flash</code></td><td><code>deepseek-*</code> routes to DeepSeek, <code>qwen*</code> to Qwen; anything else is HTTP 404</td></tr>
+                    <tr><td><code>messages</code></td><td><code>[]</code></td><td>OpenAI format; <code>content</code> may be a string or a list of <code>text</code>/<code>image_url</code> parts</td></tr>
+                    <tr><td><code>stream</code></td><td><code>false</code></td><td>SSE stream (<code>data:</code> chunks + <code>data: [DONE]</code>)</td></tr>
+                    <tr><td><code>thinking</code></td><td>provider-specific</td><td>DeepSeek: off by default, on for <code>deepseek-v4-pro</code>; Qwen: on by default</td></tr>
+                    <tr><td><code>search</code></td><td><code>false</code></td><td>Web search; DeepSeek honors it only for <code>deepseek-v4-flash</code></td></tr>
+                    <tr><td><code>session_id</code></td><td><code>null</code></td><td>Continue an exact server-side conversation</td></tr>
+                    <tr><td><code>user</code></td><td><code>null</code></td><td>Scopes the stateless context fingerprint (multi-tenant isolation)</td></tr>
+                    <tr><td><code>files</code></td><td><code>null</code></td><td>DeepSeek attachments: <code>{name, content (base64), content_type}</code></td></tr>
+                    <tr><td><code>tools</code>, <code>tool_choice</code>, <code>parallel_tool_calls</code></td><td><code>null</code></td><td>Emulated tool calling (see below)</td></tr>
+                    <tr><td><code>response_format</code></td><td><code>null</code></td><td>Emulated JSON mode (see below)</td></tr>
+                    <tr><td><code>stream_options</code></td><td><code>null</code></td><td><code>{"include_usage": true}</code> adds <code>usage</code> to the final SSE chunk</td></tr>
+                    <tr><td><code>temperature</code>, <code>top_p</code></td><td><code>null</code></td><td>Accepted for compatibility but ignored: the upstream web APIs have no sampling parameters</td></tr>
+                </tbody>
+            </table>
+        </div>
+        <p>
+            The response additionally carries <code>reasoning_content</code> (the thinking trace)
+            in <code>message</code> (non-stream) or <code>delta</code> (stream) when thinking is enabled,
+            and <code>session_id</code> to continue the conversation.
+        </p>
+
+        <h3>Session persistence</h3>
+        <p>
+            The session registry (chat ids, context fingerprints, session → account
+            affinity, accumulated usage counters) is written to disk as JSON files, so
+            conversations survive server restarts and keep pointing at the same
+            server-side chats and accounts:
+        </p>
+        <ul>
+            <li>Location: <span class="env-var">DANYAPI_CACHE_DIR</span>, default is the system temp dir (<code>%TEMP%\danyapi</code> on Windows, <code>/tmp/danyapi</code> on Linux/macOS).</li>
+            <li>Files: <code>&lt;provider&gt;-sessions-default.json</code>, <code>&lt;provider&gt;-contexts-default.json</code>, <code>&lt;provider&gt;-affinities-default.json</code>.</li>
+            <li>Writes are atomic (temp file + rename), so a crash mid-write cannot corrupt the cache.</li>
+            <li>Set <span class="env-var">DANYAPI_CACHE_DISABLED=1</span> to keep everything in memory only.</li>
+            <li>In Docker, mount <span class="env-var">DANYAPI_CACHE_DIR</span> as a volume if you want sessions to survive container recreation.</li>
+        </ul>
+        <p>Note that the upstream chats themselves live on the provider side; the local cache only maps your <code>session_id</code> / message context to them.</p>
+
+        <!-- ──────── FILE ATTACHMENTS ──────────────────────────────────── -->
+        <h2>File attachments (DeepSeek)</h2>
+        <p>Send files as base64 in the <code>files</code> field, or as <code>image_url</code> (data URI) parts inside a message:</p>
+        <div class="code-header">bash</div>
+        <pre><code>curl http://127.0.0.1:8000/v1/chat/completions \
+            -H "Content-Type: application/json" \
+            -d '{
+            "model": "deepseek-v4-flash",
+            "messages": [{"role": "user", "content": "What magic number is in the file?"}],
+            "files": [{"name": "secret.txt", "content": "&lt;base64&gt;", "content_type": "text/plain"}]
+            }'</code></pre>
+
+        <div class="code-header">json</div>
+        <pre><code>{
+            "model": "deepseek-v4-vision",
+            "messages": [{
+            "role": "user",
+            "content": [
+            {"type": "text", "text": "Describe the image."},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,&lt;base64&gt;"}}
+            ]
+            }]
+            }</code></pre>
+        <p>
+            Per-model limits: <span class="model">deepseek-v4-vision</span> accepts images only;
+            <span class="model">deepseek-v4-flash</span> accepts images (OCR) and text files;
+            <span class="model">deepseek-v4-pro</span> accepts no files.
+            Max 50 files, 100 MB each per request.
+        </p>
+
+        <!-- ──────── TOOL CALLING ──────────────────────────────────────── -->
+        <h2>Tool calling (emulated)</h2>
+        <p>
+            Neither chat.deepseek.com nor chat.qwen.ai exposes a native function-calling
+            API, so DanyAPI emulates it at the proxy layer with prompt injection. The
+            OpenAI-compatible <code>tools</code>, <code>tool_choice</code> and <code>parallel_tool_calls</code> request
+            fields are accepted:
+        </p>
+        <div class="code-header">bash</div>
+        <pre><code>curl http://127.0.0.1:8000/v1/chat/completions \
+            -H "Content-Type: application/json" \
+            -d '{
+            "model": "deepseek-v4-flash",
+            "messages": [{"role": "user", "content": "What is the weather in Moscow?"}],
+            "tools": [{
+            "type": "function",
+            "function": {
+            "name": "get_weather",
+            "description": "Get the weather in a city",
+            "parameters": {
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
+            "required": ["city"]
+            }
+            }
+            }],
+            "tool_choice": "auto"
+            }'</code></pre>
+
+        <p>How it works:</p>
+        <ol>
+            <li>
+                When <code>tools</code> are present, the function schema and a strict JSON instruction
+                (with a concrete example, no template placeholders) are injected into the
+                prompt sent to the upstream model.
+            </li>
+            <li>
+                The model replies with a tool call – DanyAPI understands several formats
+                and normalizes them all to a proper OpenAI response:
+                <ul>
+                    <li>JSON <code>{"tool_calls": [{"name": "...", "arguments": {...}}]}</code>;</li>
+                    <li>legacy <code>{"function_call": {...}}</code>;</li>
+                    <li>a bare dict <code>{"name": "...", "arguments": {...}}</code> (Qwen/DeepSeek style) or a bare array <code>[...]</code> of them;</li>
+                    <li>XML/Anthropic style <code>&lt;tool_calls&gt;&lt;invoke name="..."&gt;...&lt;/invoke&gt;&lt;/tool_calls&gt;</code> (arguments as child tags, <code>&lt;parameter name="..."&gt;</code>, or inline JSON).</li>
+                </ul>
+                The result is <code>message.tool_calls</code> (non-stream) or streamed
+                <code>delta.tool_calls</code> chunks, both with <code>finish_reason: "tool_calls"</code>.
+                Any number of calls in one reply are supported (<code>parallel_tool_calls</code>),
+                so clients that ship many tools (e.g. opencode) work out of the box.
+            </li>
+            <li>
+                You run the tool, then send back the result:
+                <code>{"role": "tool", "tool_call_id": "&lt;id&gt;", "content": "22C, sunny"}</code>.
+                DanyAPI renders the tool results into the prompt and continues the
+                conversation until the model answers (or calls more tools).
+            </li>
+        </ol>
+
+        <p>Notes:</p>
+        <ul>
+            <li>
+                <code>tool_choice</code>: <code>"auto"</code> (default), <code>"none"</code> (tools are accepted but no
+                schema is injected), <code>"required"</code>, or
+                <code>{"type": "function", "function": {"name": "&lt;tool&gt;"}}</code>.
+            </li>
+            <li>
+                Pass the <code>session_id</code> from the first response back in the tool-result
+                request to keep the conversation server-side. Stateless clients work too:
+                the context cache reuses the chat from the previous round, so the tool
+                results are sent as the continuation of the same server-side conversation
+                instead of replaying the whole history into a brand-new chat. If a session
+                cannot be matched (e.g. the cache was evicted), the whole message history
+                (including tool results) is replayed into the prompt instead, so plain
+                OpenAI-protocol clients keep working.
+            </li>
+            <li>
+                While <code>tools</code> are present, streamed replies are buffered until the model
+                finishes so the reply can be classified as a tool call or plain text.
+                Reasoning (<code>reasoning_content</code>) is streamed live in both cases.
+            </li>
+        </ul>
+
+        <!-- ──────── JSON MODE ─────────────────────────────────────────── -->
+        <h2>JSON mode (emulated)</h2>
+        <p>
+            <code>response_format</code> is emulated the same way as tool calling – the JSON
+            constraint (and an optional schema) is injected into the prompt:
+        </p>
+        <div class="code-header">bash</div>
+        <pre><code>curl http://127.0.0.1:8000/v1/chat/completions \
+            -H "Content-Type: application/json" \
+            -d '{
+            "model": "deepseek-v4-flash",
+            "messages": [{"role": "user", "content": "Extract the city and temperature."}],
+            "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+            "schema": {
+            "type": "object",
+            "properties": {"city": {"type": "string"}, "temperature": {"type": "number"}},
+            "required": ["city", "temperature"]
+            }
+            }
+            }
+            }'</code></pre>
+        <p>
+            <code>response_format</code> accepts <code>"json_object"</code>, <code>{"type": "json_object"}</code> and
+            <code>{"type": "json_schema", "json_schema": {...}}</code>. As with tool calling this is
+            prompt-level emulation: replies are JSON in practice but not guaranteed
+            schema-valid – validate on the client side.
+        </p>
+
+        <!-- ──────── SYSTEM PROMPT & HEALTH ───────────────────────────── -->
+        <h2>System prompt and health</h2>
+        <ul>
+            <li>
+                <code>system</code> messages are collected and injected as the model's system prompt
+                in front of the first user turn (upstream web APIs have no dedicated
+                <code>system</code> field).
+            </li>
+            <li>
+                <code>GET /health</code> returns <code>{"status": "ok", "deepseek": true, "qwen": true}</code>
+                plus per-provider cache stats (<code>deepseek_stats</code> / <code>qwen_stats</code>: account
+                health, session-affinity count, context-cache size and hit/miss counters) –
+                useful for readiness probes and load balancers.
+            </li>
+            <li>
+                When the client disconnects mid-generation, DanyAPI tells the upstream
+                provider to stop the stream, so the server-side chat does not keep a
+                partial response.
+            </li>
+        </ul>
+
+        <!-- ──────── TOKEN USAGE ───────────────────────────────────────── -->
+        <h2>Token usage</h2>
+        <p>
+            Every response carries an OpenAI-style <code>usage</code> object, and both providers
+            report it <strong>accumulated per conversation</strong> (like the official API, where the
+            counter grows with every turn of the same chat):
+        </p>
+        <ul>
+            <li>
+                <strong>Qwen</strong> – the upstream reports per-turn prompt/completion counts; DanyAPI
+                sums them per chat. <code>prompt_tokens</code> = total input tokens processed by this
+                conversation so far, <code>completion_tokens</code> = total output generated,
+                <code>total_tokens</code> = their sum.
+            </li>
+            <li>
+                <strong>DeepSeek</strong> – the web API only exposes a single cumulative counter
+                (<code>accumulated_token_usage</code>), so <code>completion_tokens</code> is the total generated
+                in this conversation so far and <code>prompt_tokens</code> is always <code>0</code>
+                (<code>total_tokens</code> equals <code>completion_tokens</code>).
+            </li>
+        </ul>
+        <p>
+            The counters live on the session, so a new conversation starts from zero and
+            continuing a <code>session_id</code> keeps counting. They are also persisted in the
+            on-disk session cache (survive restarts).
+        </p>
+        <p>
+            Streaming usage: pass <code>"stream_options": {"include_usage": true}</code> and the
+            final SSE chunk carries the same accumulated <code>usage</code> (like the official API).
+        </p>
+
+        <!-- ──────── ERROR HANDLING ────────────────────────────────────── -->
+        <h2>Error handling</h2>
+        <p>Non-stream requests get a plain HTTP error; stream requests get an SSE <code>error</code> event (and <code>data: [DONE]</code>) once the stream is open.</p>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr><th>Status</th><th>When</th></tr>
+                </thead>
+                <tbody>
+                    <tr><td><code>400</code></td><td>Bad request: invalid base64/files, per-model attachment rules violated, context length exceeded</td></tr>
+                    <tr><td><code>401</code></td><td>DeepSeek auth error (invalid/expired token); the account is then marked broken and excluded from the pool</td></tr>
+                    <tr><td><code>404</code></td><td>Unknown model name</td></tr>
+                    <tr><td><code>429</code></td><td>All accounts busy (<span class="env-var">DANYAPI_ACQUIRE_TIMEOUT</span> expired) or upstream throttling after retries are exhausted</td></tr>
+                    <tr><td><code>502</code></td><td>Upstream request failed (network, file upload, Qwen WAF challenge)</td></tr>
+                    <tr><td><code>503</code></td><td>Provider not configured (no tokens/email for that provider) or all its accounts are broken</td></tr>
+                </tbody>
+            </table>
+        </div>
+        <p>
+            Retries: <code>expert_busy_use_default</code> / <code>parallel_chat_limit</code> / <code>server_busy</code> /
+            <code>busy</code> (DeepSeek) and <code>Too_Many_Requests</code> / <code>RateLimited</code> / <code>quotaLimited</code>
+            (Qwen) are retried automatically up to 5 times with exponential backoff
+            (1s, capped at 8s) before surfacing as errors. Responses can also end with
+            <code>finish_reason: "content_filter"</code> when the upstream moderates the output.
+            See <a href="#account-limits">Account limits</a>.
+        </p>
+
+        <!-- ──────── TESTS ─────────────────────────────────────────────── -->
+        <h2>Tests</h2>
+        <div class="code-header">bash</div>
+        <pre><code>python -m pytest</code></pre>
+        <p>Lint and format (ruff):</p>
+        <div class="code-header">bash</div>
+        <pre><code>ruff check .
+            ruff format .</code></pre>
+        <p>Tests, lint and the native solver build also run in CI on every push (<code>.github/workflows/ci.yml</code>).</p>
+
+        <!-- ──────── HOW IT WORKS ──────────────────────────────────────── -->
+        <h2>How it works</h2>
+
+        <h3>DeepSeek</h3>
+        <p>Protocol reverse-engineered from the chat.deepseek.com main bundle (<code>fe-static.deepseek.com/chat/static/main.4e922c397f.js</code>) and the wasm module <code>sha3_wasm_bg.7b9ca65ddd.wasm</code>:</p>
+        <ul>
+            <li>Auth: <code>POST /api/v0/users/login</code> → <code>data.biz_data.user.token</code>, then <code>Authorization: Bearer &lt;token&gt;</code>.</li>
+            <li>Headers: <code>x-client-bundle-id</code>, <code>x-client-platform</code>, <code>x-client-version</code>, <code>x-client-locale</code>, <code>x-client-timezone-offset</code>.</li>
+            <li>Session: <code>POST /api/v0/chat_session/create</code> (empty body) → <code>chat_session.id</code>.</li>
+            <li>Generation: <code>POST /api/v0/chat/completion</code>: <code>{chat_session_id, parent_message_id, model_type, prompt, ref_file_ids, thinking_enabled, search_enabled, action, preempt}</code>.</li>
+            <li>Response – <code>text/event-stream</code>: <code>ready</code> events, deltas (<code>SET</code>/<code>APPEND</code>/<code>BATCH</code>, <code>response/...</code> paths), <code>finish</code>, <code>close</code>.</li>
+            <li>
+                PoW header <code>X-DS-PoW-Response</code> – base64 of <code>{algorithm, challenge, salt, answer, signature, target_path}</code>.
+                The challenge is single-use: <code>answer</code> = minimal counter c where
+                <code>DeepSeekHashV1(f"{salt}_{expire_at}_" + str(c))</code> matches <code>challenge</code>
+                (32 bytes). The server iterates c in <code>[0, difficulty)</code>.
+            </li>
+        </ul>
+
+        <h3>Qwen</h3>
+        <p>Protocol reverse-engineered from the chat.qwen.ai frontend bundle (<code>assets.alicdn.com/g/qwenweb/qwen-chat-fe/0.2.83/js/main.js</code>):</p>
+        <ul>
+            <li>Auth: <code>POST /api/v2/auths/signin</code> with <code>{email, password}</code> where the password is SHA-256 hex of the plain text → <code>data.token</code> (JWT). Requests send it as <code>Authorization: Bearer &lt;token&gt;</code> and the <code>token</code> cookie.</li>
+            <li>Headers: <code>source: web</code>, <code>version: 0.2.83</code>, <code>X-Request-Id</code>, <code>Timezone</code>, browser <code>sec-ch-ua</code>/<code>User-Agent</code>/<code>Origin</code>/<code>Referer</code>.</li>
+            <li>Session: <code>POST /api/v2/chats/new</code> (<code>{chatId, models, chat_type: "t2t", chat_mode: "normal", timestamp}</code>) → <code>data.id</code> (the chat id).</li>
+            <li>
+                Generation: <code>POST /api/v2/chat/completions?chat_id=&lt;id&gt;</code> with
+                <code>{stream, version: "2.1", incremental_output, chat_id, model, parent_id,
+                messages: [{fid, parentId, role, content, chat_type: "t2t", feature_config:
+                {thinking_enabled, output_schema: "phase", ...}}]}</code>.
+                The chat history lives server-side; <code>parent_id</code> points at the last assistant
+                response id, so the next turn continues the same conversation.
+            </li>
+            <li>
+                Response – <code>text/event-stream</code> of OpenAI-style JSON chunks:
+                <code>{"choices": [{"delta": {"role", "content", "phase", "status"}}],
+                "response_id", "usage"}</code>. The <code>response.created</code> chunk opens the stream with
+                the assistant <code>response_id</code>; content is streamed in the <code>answer</code> phase,
+                thinking in <code>think</code>/<code>DeepThinking</code>/<code>thinking_summary</code> phases, and the stream
+                ends with a chunk whose <code>delta.status</code> is <code>finished</code>.
+            </li>
+        </ul>
+
+        <!-- ──────── NATIVE POW SOLVER ────────────────────────────────── -->
+        <h2>Native PoW solver (optional)</h2>
+        <p>If you have a C compiler (<code>clang</code> or <code>gcc</code>), build the binary for maximum speed:</p>
+        <div class="code-header">bash</div>
+        <pre><code>clang -O2 -o danyapi/deepseek/pow_solver.exe danyapi/deepseek/pow_solver.c  # Windows
+            clang -O2 -o danyapi/deepseek/pow_solver danyapi/deepseek/pow_solver.c      # Linux/macOS</code></pre>
+        <p>
+            The prebuilt Docker image compiles this binary at build time, so container
+            users get the native solver out of the box.
+        </p>
+        <p>
+            Solvers are tried in order until one succeeds: native binary → Node solver
+            (the site's wasm module) → pure-Python Keccak fallback (capped at 2M
+            iterations, so it only handles low difficulties). Each solved header is
+            single-use; the next challenge is prefetched in the background so the next
+            request does not wait.
+        </p>
+
+        <!-- ──────── ACCOUNT LIMITS ────────────────────────────────────── -->
+        <h2 id="account-limits">Account limits</h2>
+        <ul>
+            <li>
+                One chat.deepseek.com account can generate <strong>one message at a time</strong>
+                (otherwise the server replies <code>parallel_chat_limit</code>). DanyAPI keeps an
+                <strong>account pool</strong> and distributes concurrent requests across accounts;
+                if all are busy, requests wait in a queue. More tokens = more parallel
+                generations. The same applies to chat.qwen.ai accounts (Qwen uses its own
+                pool, so DeepSeek and Qwen parallel generations are independent).
+            </li>
+            <li>
+                Sessions are tied to the account they were created on: repeat requests with
+                the same <code>session_id</code> (or the same cached message context) route to the
+                same account, so the conversation history stays intact server-side.
+            </li>
+            <li>
+                The in-memory session/context cache is LRU-bounded per account and per
+                provider. When an entry is evicted, the corresponding chat is no longer
+                reused and a new one is created on the next request; the explicit
+                <code>session_id</code> remains the reliable way to pin a conversation. Unused
+                entries also expire after <span class="env-var">DANYAPI_SESSION_TTL_SECONDS</span>, and session-id →
+                account affinity is cleaned up together with the cache, so memory stays
+                bounded on long-running instances.
+            </li>
+            <li>
+                DeepSeek may throttle accounts (especially the expert model
+                <span class="model">deepseek-v4-pro</span> – "limited resource"). Responses with <code>finish_reason</code>
+                <code>expert_busy_use_default</code> / <code>parallel_chat_limit</code> / <code>server_busy</code> / <code>busy</code>
+                are retried automatically (up to 5 retries with exponential backoff). If all
+                attempts are exhausted:
+                <ul>
+                    <li>non-stream requests get HTTP 429 with the DeepSeek error text;</li>
+                    <li>stream requests get an SSE <code>error</code> event with <code>finish_reason</code>.</li>
+                </ul>
+            </li>
+            <li>
+                Qwen may reply <code>Too_Many_Requests</code> / <code>RateLimited</code> / <code>quotaLimited</code>;
+                those are retried automatically the same way (up to 5 retries), then
+                reported as HTTP 429 or an SSE <code>error</code> event.
+            </li>
+            <li>
+                The DeepSeek PoW challenge is single-use – a new one is solved per request
+                (the next one is prefetched in advance so you don't wait).
+            </li>
+            <li>
+                When all accounts are busy, requests wait for a free account. Set
+                <span class="env-var">DANYAPI_ACQUIRE_TIMEOUT</span> (seconds) to cap that wait and get an HTTP 429
+                ("all accounts are busy") instead of waiting forever.
+            </li>
+            <li>
+                Long server-side conversations eventually exceed the model's context window.
+                When that happens DanyAPI detects the context-limit error, discards the
+                overflowing chat (so it is never reused) and reports the failure: HTTP 400
+                for non-stream requests, or an SSE <code>error</code> event with
+                <code>finish_reason: "length"</code> for stream requests. The next request automatically
+                starts with a fresh conversation. To avoid hitting the limit often, keep Qwen
+                built-in tools disabled (see above) and rotate long conversations client-side.
+            </li>
+        </ul>
+
+        <hr />
+        <p style="color:#94a3b8; font-size:0.85rem; text-align:center; margin-top:1.5rem;">
+            DanyAPI · built with FastAPI &amp; Python
+        </p>
+
+    </div>
+</body>
+</html>
