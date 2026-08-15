@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="black" data-title-key="title_internals">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>How it works · DanyAPI</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2040%2040'%3E%3Cpath%20d='M20%202.5L35%2011V29L20%2037.5L5%2029V11Z'%20fill='%232563eb'/%3E%3Ccircle%20cx='20'%20cy='20'%20r='5'%20fill='%23ffffff'/%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="style.css" />
+    <script src="theme.js"></script>
+    <script src="i18n.js"></script>
+</head>
+<body>
+    <header class="topbar">
+        <div class="topbar-inner">
+            <a class="brand" href="index.html">
+            <svg class="brand-logo" viewBox="0 0 40 40" aria-hidden="true">
+                <defs>
+                    <linearGradient id="brand-grad" x1="0" y1="0" x2="1" y2="1">
+                        <stop offset="0" stop-color="var(--link)"></stop>
+                        <stop offset="1" stop-color="var(--link-hover)"></stop>
+                    </linearGradient>
+                </defs>
+                <path d="M20 2.5 L35 11 V29 L20 37.5 L5 29 V11 Z" fill="none" stroke="url(#brand-grad)" stroke-width="2.6" stroke-linejoin="round"></path>
+                <path d="M20 13.5 L12.5 26.5 H27.5 Z" fill="none" stroke="url(#brand-grad)" stroke-width="1.8" stroke-linejoin="round"></path>
+                <circle cx="20" cy="13.5" r="3" fill="url(#brand-grad)"></circle>
+                <circle cx="12.5" cy="26.5" r="3" fill="url(#brand-grad)"></circle>
+                <circle cx="27.5" cy="26.5" r="3" fill="url(#brand-grad)"></circle>
+                <circle cx="20" cy="26.5" r="1.8" fill="var(--bg-container)"></circle>
+            </svg>
+            <span class="brand-name">DanyAPI</span>
+        </a>
+            <div class="top-controls">
+                <div class="docs-nav">
+                    <button type="button" class="docs-btn" aria-expanded="false">Docs</button>
+                    <div class="docs-dropdown">
+                        <a href="overview.html" data-i18n="nav_overview">Overview</a>
+                        <a href="setup.html" data-i18n="nav_install">Install &amp; accounts</a>
+                        <a href="configuration.html" data-i18n="nav_config">Configuration</a>
+                        <a href="usage.html" data-i18n="nav_usage">Usage</a>
+                        <a href="internals.html" data-i18n="nav_internals">How it works</a>
+                    </div>
+                </div>
+                <div class="lang-switcher" role="group" data-i18n-aria="lang_group" aria-label="Language">
+                    <button type="button" class="lang-btn" data-lang-btn="en" aria-label="English">EN</button>
+                    <button type="button" class="lang-btn" data-lang-btn="ru" aria-label="Русский">RU</button>
+                </div>
+                <div class="theme-switcher" role="group" data-i18n-aria="theme_group" aria-label="Theme">
+                    <label for="theme-select" class="theme-label" data-i18n="theme_label">Theme</label>
+                    <div class="theme-select-wrap">
+                        <select id="theme-select" class="theme-select">
+                            <option value="black">Black</option>
+                            <option value="hacker">Hacker</option>
+                            <option value="monokai">Monokai</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </header>
+    <div class="layout">
+        <aside class="sidebar">
+            <nav class="page-nav" aria-label="Sections">
+                <div class="page-nav-title" data-i18n="sidebar_label">Pages</div>
+                <a href="index.html" data-i18n="nav_setup">Setup</a>
+                <a href="overview.html" data-i18n="nav_overview">Overview</a>
+                <a href="setup.html" data-i18n="nav_install">Install &amp; accounts</a>
+                <a href="configuration.html" data-i18n="nav_config">Configuration</a>
+                <a href="usage.html" data-i18n="nav_usage">Usage</a>
+                <a href="internals.html" class="active" data-i18n="nav_internals">How it works</a>
+            </nav>
+        </aside>
+        <main class="main">
+            <div class="container">
+                <h1>How it works</h1>
+                <p class="subtitle" data-i18n="in_subtitle">
+                    Reverse-engineered provider protocols and account limits.
+                </p>
+
+                <h2 id="deepseek" data-i18n="pl_in_ds">DeepSeek</h2>
+                <p data-i18n-html="in_ds_p">Protocol reverse-engineered from the chat.deepseek.com main bundle (<code>fe-static.deepseek.com/chat/static/main.4e922c397f.js</code>) and the wasm module <code>sha3_wasm_bg.7b9ca65ddd.wasm</code>:</p>
+                <ul>
+                    <li data-i18n-html="in_ds_b1">Auth: <code>POST /api/v0/users/login</code> → <code>data.biz_data.user.token</code>, then <code>Authorization: Bearer &lt;token&gt;</code>.</li>
+                    <li data-i18n-html="in_ds_b2">Headers: <code>x-client-bundle-id</code>, <code>x-client-platform</code>, <code>x-client-version</code>, <code>x-client-locale</code>, <code>x-client-timezone-offset</code>.</li>
+                    <li data-i18n-html="in_ds_b3">Session: <code>POST /api/v0/chat_session/create</code> (empty body) → <code>chat_session.id</code>.</li>
+                    <li data-i18n-html="in_ds_b4">Generation: <code>POST /api/v0/chat/completion</code>: <code>{chat_session_id, parent_message_id, model_type, prompt, ref_file_ids, thinking_enabled, search_enabled, action, preempt}</code>.</li>
+                    <li data-i18n-html="in_ds_b5">Response - <code>text/event-stream</code>: <code>ready</code> events, deltas (<code>SET</code>/<code>APPEND</code>/<code>BATCH</code>, <code>response/...</code> paths), <code>finish</code>, <code>close</code>.</li>
+                    <li data-i18n-html="in_ds_b6">
+                        PoW header <code>X-DS-PoW-Response</code> - base64 of <code>{algorithm, challenge, salt, answer, signature, target_path}</code>.
+                        The challenge is single-use: <code>answer</code> = minimal counter c where
+                        <code>DeepSeekHashV1(f"{salt}_{expire_at}_" + str(c))</code> matches <code>challenge</code>
+                        (32 bytes). The server iterates c in <code>[0, difficulty)</code>.
+                    </li>
+                </ul>
+
+                <h2 id="qwen" data-i18n="pl_in_qw">Qwen</h2>
+                <p data-i18n-html="in_qw_p">Protocol reverse-engineered from the chat.qwen.ai frontend bundle (<code>assets.alicdn.com/g/qwenweb/qwen-chat-fe/0.2.83/js/main.js</code>):</p>
+                <ul>
+                    <li data-i18n-html="in_qw_b1">Auth: <code>POST /api/v2/auths/signin</code> with <code>{email, password}</code> where the password is SHA-256 hex of the plain text → <code>data.token</code> (JWT). Requests send it as <code>Authorization: Bearer &lt;token&gt;</code> and the <code>token</code> cookie.</li>
+                    <li data-i18n-html="in_qw_b2">Headers: <code>source: web</code>, <code>version: 0.2.83</code>, <code>X-Request-Id</code>, <code>Timezone</code>, browser <code>sec-ch-ua</code>/<code>User-Agent</code>/<code>Origin</code>/<code>Referer</code>.</li>
+                    <li data-i18n-html="in_qw_b3">Session: <code>POST /api/v2/chats/new</code> (<code>{chatId, models, chat_type: "t2t", chat_mode: "normal", timestamp}</code>) → <code>data.id</code> (the chat id).</li>
+                    <li data-i18n-html="in_qw_b4">
+                        Generation: <code>POST /api/v2/chat/completions?chat_id=&lt;id&gt;</code> with
+                        <code>{stream, version: "2.1", incremental_output, chat_id, model, parent_id,
+                        messages: [{fid, parentId, role, content, chat_type: "t2t", feature_config:
+                        {thinking_enabled, output_schema: "phase", ...}}]}</code>.
+                        The chat history lives server-side; <code>parent_id</code> points at the last assistant
+                        response id, so the next turn continues the same conversation.
+                    </li>
+                    <li data-i18n-html="in_qw_b5">
+                        Response - <code>text/event-stream</code> of OpenAI-style JSON chunks:
+                        <code>{"choices": [{"delta": {"role", "content", "phase", "status"}}],
+                        "response_id", "usage"}</code>. The <code>response.created</code> chunk opens the stream with
+                        the assistant <code>response_id</code>; content is streamed in the <code>answer</code> phase,
+                        thinking in <code>think</code>/<code>DeepThinking</code>/<code>thinking_summary</code> phases, and the stream
+                        ends with a chunk whose <code>delta.status</code> is <code>finished</code>.
+                    </li>
+                </ul>
+
+                <h2 id="account-limits" data-i18n="in_limits_h">Account limits</h2>
+                <ul>
+                    <li data-i18n-html="in_l1">
+                        One chat.deepseek.com account can generate <strong>one message at a time</strong>
+                        (otherwise the server replies <code>parallel_chat_limit</code>). DanyAPI keeps an
+                        <strong>account pool</strong> and distributes concurrent requests across accounts;
+                        if all are busy, requests wait in a queue. More tokens = more parallel
+                        generations. The same applies to chat.qwen.ai accounts (Qwen uses its own
+                        pool, so DeepSeek and Qwen parallel generations are independent).
+                    </li>
+                    <li data-i18n-html="in_l2">
+                        Sessions are tied to the account they were created on: repeat requests with
+                        the same <code>session_id</code> (or the same cached message context) route to the
+                        same account, so the conversation history stays intact server-side.
+                    </li>
+                    <li data-i18n-html="in_l3">
+                        The in-memory session/context cache is LRU-bounded per account and per
+                        provider. When an entry is evicted, the corresponding chat is no longer
+                        reused and a new one is created on the next request; the explicit
+                        <code>session_id</code> remains the reliable way to pin a conversation. Unused
+                        entries also expire after <span class="env-var">DANYAPI_SESSION_TTL_SECONDS</span>, and session-id →
+                        account affinity is cleaned up together with the cache, so memory stays
+                        bounded on long-running instances.
+                    </li>
+                    <li>
+                        <p data-i18n-html="in_l4">
+                            DeepSeek may throttle accounts (especially the expert model
+                            <span class="model">deepseek-v4-pro</span> - "limited resource"). Responses with <code>finish_reason</code>
+                            <code>expert_busy_use_default</code> / <code>parallel_chat_limit</code> / <code>server_busy</code> / <code>busy</code>
+                            are retried automatically (up to 5 retries with exponential backoff). If all
+                            attempts are exhausted:
+                        </p>
+                        <ul>
+                            <li data-i18n-html="in_l4_1">non-stream requests get HTTP 429 with the DeepSeek error text;</li>
+                            <li data-i18n-html="in_l4_2">stream requests get an SSE <code>error</code> event with <code>finish_reason</code>.</li>
+                        </ul>
+                    </li>
+                    <li data-i18n-html="in_l5">
+                        Qwen may reply <code>Too_Many_Requests</code> / <code>RateLimited</code> / <code>quotaLimited</code>;
+                        those are retried automatically the same way (up to 5 retries), then
+                        reported as HTTP 429 or an SSE <code>error</code> event.
+                    </li>
+                    <li data-i18n-html="in_l6">
+                        The DeepSeek PoW challenge is single-use - a new one is solved per request
+                        (the next one is prefetched in advance so you don't wait).
+                    </li>
+                    <li data-i18n-html="in_l7">
+                        When all accounts are busy, requests wait for a free account. Set
+                        <span class="env-var">DANYAPI_ACQUIRE_TIMEOUT</span> (seconds) to cap that wait and get an HTTP 429
+                        ("all accounts are busy") instead of waiting forever.
+                    </li>
+                    <li data-i18n-html="in_l8">
+                        Long server-side conversations eventually exceed the model's context window.
+                        When that happens DanyAPI detects the context-limit error, discards the
+                        overflowing chat (so it is never reused) and reports the failure: HTTP 400
+                        for non-stream requests, or an SSE <code>error</code> event with
+                        <code>finish_reason: "length"</code> for stream requests. The next request automatically
+                        starts with a fresh conversation. To avoid hitting the limit often, keep Qwen
+                        built-in tools disabled (see <a href="setup.html#account-setup">Account setup</a>)
+                        and rotate long conversations client-side.
+                    </li>
+                </ul>
+
+                <hr />
+                <p class="footer-note" data-i18n="footer_note">
+                    DanyAPI · built with FastAPI &amp; Python
+                </p>
+            </div>
+        </main>
+        <aside class="toc-aside">
+            <div class="toc">
+                <div class="toc-title" data-i18n="toc_title">On this page</div>
+                <ul class="toc-list"></ul>
+            </div>
+        </aside>
+    </div>
+    <script src="site.js"></script>
+</body>
+</html>

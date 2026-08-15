@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="black" data-title-key="title_config">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Configuration · DanyAPI</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2040%2040'%3E%3Cpath%20d='M20%202.5L35%2011V29L20%2037.5L5%2029V11Z'%20fill='%232563eb'/%3E%3Ccircle%20cx='20'%20cy='20'%20r='5'%20fill='%23ffffff'/%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="style.css" />
+    <script src="theme.js"></script>
+    <script src="i18n.js"></script>
+</head>
+<body>
+    <header class="topbar">
+        <div class="topbar-inner">
+            <a class="brand" href="index.html">
+            <svg class="brand-logo" viewBox="0 0 40 40" aria-hidden="true">
+                <defs>
+                    <linearGradient id="brand-grad" x1="0" y1="0" x2="1" y2="1">
+                        <stop offset="0" stop-color="var(--link)"></stop>
+                        <stop offset="1" stop-color="var(--link-hover)"></stop>
+                    </linearGradient>
+                </defs>
+                <path d="M20 2.5 L35 11 V29 L20 37.5 L5 29 V11 Z" fill="none" stroke="url(#brand-grad)" stroke-width="2.6" stroke-linejoin="round"></path>
+                <path d="M20 13.5 L12.5 26.5 H27.5 Z" fill="none" stroke="url(#brand-grad)" stroke-width="1.8" stroke-linejoin="round"></path>
+                <circle cx="20" cy="13.5" r="3" fill="url(#brand-grad)"></circle>
+                <circle cx="12.5" cy="26.5" r="3" fill="url(#brand-grad)"></circle>
+                <circle cx="27.5" cy="26.5" r="3" fill="url(#brand-grad)"></circle>
+                <circle cx="20" cy="26.5" r="1.8" fill="var(--bg-container)"></circle>
+            </svg>
+            <span class="brand-name">DanyAPI</span>
+        </a>
+            <div class="top-controls">
+                <div class="docs-nav">
+                    <button type="button" class="docs-btn" aria-expanded="false">Docs</button>
+                    <div class="docs-dropdown">
+                        <a href="overview.html" data-i18n="nav_overview">Overview</a>
+                        <a href="setup.html" data-i18n="nav_install">Install &amp; accounts</a>
+                        <a href="configuration.html" data-i18n="nav_config">Configuration</a>
+                        <a href="usage.html" data-i18n="nav_usage">Usage</a>
+                        <a href="internals.html" data-i18n="nav_internals">How it works</a>
+                    </div>
+                </div>
+                <div class="lang-switcher" role="group" data-i18n-aria="lang_group" aria-label="Language">
+                    <button type="button" class="lang-btn" data-lang-btn="en" aria-label="English">EN</button>
+                    <button type="button" class="lang-btn" data-lang-btn="ru" aria-label="Русский">RU</button>
+                </div>
+                <div class="theme-switcher" role="group" data-i18n-aria="theme_group" aria-label="Theme">
+                    <label for="theme-select" class="theme-label" data-i18n="theme_label">Theme</label>
+                    <div class="theme-select-wrap">
+                        <select id="theme-select" class="theme-select">
+                            <option value="black">Black</option>
+                            <option value="hacker">Hacker</option>
+                            <option value="monokai">Monokai</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </header>
+    <div class="layout">
+        <aside class="sidebar">
+            <nav class="page-nav" aria-label="Sections">
+                <div class="page-nav-title" data-i18n="sidebar_label">Pages</div>
+                <a href="index.html" data-i18n="nav_setup">Setup</a>
+                <a href="overview.html" data-i18n="nav_overview">Overview</a>
+                <a href="setup.html" data-i18n="nav_install">Install &amp; accounts</a>
+                <a href="configuration.html" class="active" data-i18n="nav_config">Configuration</a>
+                <a href="usage.html" data-i18n="nav_usage">Usage</a>
+                <a href="internals.html" data-i18n="nav_internals">How it works</a>
+            </nav>
+        </aside>
+        <main class="main">
+            <div class="container">
+                <h1>Configuration</h1>
+                <p class="subtitle" data-i18n="cf_subtitle">
+                    Environment variables, Docker and the optional native PoW solver.
+                </p>
+
+                <h2 id="environment-variables" data-i18n="pl_env">Environment variables</h2>
+                <p data-i18n-html="cf_env_intro">
+                    All configuration is environment-driven (<code>.env</code> or exported vars). Provider credentials are documented in
+                    <a href="setup.html#account-setup">Account setup</a>.
+                </p>
+                <div class="table-wrap">
+                    <table>
+                        <thead>
+                            <tr><th data-i18n="cf_th_var">Variable</th><th data-i18n="cf_th_default">Default</th><th data-i18n="cf_th_desc">Description</th></tr>
+                        </thead>
+                        <tbody>
+                            <tr><td><span class="env-var">DANYAPI_HOST</span></td><td><code>0.0.0.0</code></td><td data-i18n="cf_r1_desc">Address the API server binds to</td></tr>
+                            <tr><td><span class="env-var">DANYAPI_PORT</span></td><td><code>8000</code></td><td data-i18n="cf_r2_desc">Port the API server listens on</td></tr>
+                            <tr><td><span class="env-var">DANYAPI_TIMEOUT</span></td><td><code>60</code></td><td data-i18n="cf_r3_desc">Upstream request timeout in seconds</td></tr>
+                            <tr><td><span class="env-var">DANYAPI_ACQUIRE_TIMEOUT</span></td><td>(empty)</td><td data-i18n="cf_r4_desc">Seconds to wait for a free account before returning 429; empty = wait forever</td></tr>
+                            <tr><td><span class="env-var">DANYAPI_SESSION_CACHE_SIZE</span></td><td><code>128</code></td><td data-i18n="cf_r5_desc">Max server-side chats cached per provider (LRU) for stateless session reuse</td></tr>
+                            <tr><td><span class="env-var">DANYAPI_SESSION_TTL_SECONDS</span></td><td><code>3600</code></td><td data-i18n="cf_r6_desc">Seconds an unused session/context stays reusable; <code>0</code> = never expire</td></tr>
+                            <tr><td><span class="env-var">DANYAPI_CACHE_DIR</span></td><td>(empty)</td><td data-i18n="cf_r7_desc">Directory for the on-disk session cache; empty = system temp dir (<code>%TEMP%\danyapi</code> / <code>/tmp/danyapi</code>)</td></tr>
+                            <tr><td><span class="env-var">DANYAPI_CACHE_DISABLED</span></td><td>(empty)</td><td data-i18n="cf_r8_desc">Set to <code>1</code>/<code>true</code>/<code>yes</code>/<code>on</code> to disable the on-disk cache entirely</td></tr>
+                            <tr><td><span class="env-var">DANYAPI_LOG_LEVEL</span></td><td><code>INFO</code></td><td data-i18n="cf_r9_desc">Log level: <code>DEBUG</code>, <code>INFO</code>, <code>WARNING</code>, <code>ERROR</code></td></tr>
+                            <tr><td><span class="env-var">DANYAPI_LOG_FILE</span></td><td>(empty)</td><td data-i18n="cf_r10_desc">File path for persistent logs; empty = console only</td></tr>
+                            <tr><td><span class="env-var">DANYAPI_LOG_MAX_BYTES</span></td><td><code>10485760</code></td><td data-i18n="cf_r11_desc">Max log file size in bytes before rotation</td></tr>
+                            <tr><td><span class="env-var">DANYAPI_LOG_BACKUP_COUNT</span></td><td><code>3</code></td><td data-i18n="cf_r12_desc">Number of rotated log files to keep</td></tr>
+                            <tr><td><span class="env-var">DANYAPI_HUMAN_DELAY_MIN</span></td><td><code>0.5</code></td><td data-i18n="cf_r13_desc">Minimum delay in seconds before sending a request (uniform random jitter)</td></tr>
+                            <tr><td><span class="env-var">DANYAPI_HUMAN_DELAY_MAX</span></td><td><code>3.0</code></td><td data-i18n="cf_r14_desc">Maximum delay in seconds; set both to <code>0</code> to disable</td></tr>
+                            <tr><td><span class="env-var">DANYAPI_AUTO_UPDATE</span></td><td><code>1</code></td><td data-i18n="cf_r15_desc">Auto-update to the latest GitHub release on each start; <code>0</code> disables</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <h2 id="docker" data-i18n="pl_docker">Docker</h2>
+                <div class="code-header">bash</div>
+                <pre><code>docker build -t danyapi .
+                    docker run -d -p 8000:8000 \
+                    -e DEEPSEEK_TOKENS="token1,token2" \
+                    -e QWEN_TOKENS="token3" \
+                    danyapi</code></pre>
+                <p data-i18n-html="cf_docker_p1">
+                    The <code>.env</code> file is not baked into the image; pass credentials as environment
+                    variables or mount your <code>.env</code> as a volume (<code>-v /path/to/.env:/app/.env</code>).
+                </p>
+
+                <h3 id="prebuilt" data-i18n="cf_docker_h3">Prebuilt image (GHCR)</h3>
+                <p data-i18n-html="cf_docker_p2">
+                    CI builds and pushes the image to the GitHub Container Registry on every push
+                    to <code>main</code> (<code>latest</code> and <code>sha-*</code> tags) and on version tags (<code>v1.2.3</code>):
+                </p>
+                <div class="code-header">bash</div>
+                <pre><code>docker run -d -p 8000:8000 \
+                    -e DEEPSEEK_TOKENS="token1,token2" \
+                    -e QWEN_TOKENS="token3" \
+                    ghcr.io/fanatfanata/danyapi:latest</code></pre>
+
+                <h2 id="native-pow-solver" data-i18n="pl_pow">Native PoW solver (optional)</h2>
+                <p data-i18n-html="cf_pow_p1">If you have a C compiler (<code>clang</code> or <code>gcc</code>), build the binary for maximum speed:</p>
+                <div class="code-header">bash</div>
+                <pre><code>clang -O2 -o danyapi/deepseek/pow_solver.exe danyapi/deepseek/pow_solver.c  # Windows
+                    clang -O2 -o danyapi/deepseek/pow_solver danyapi/deepseek/pow_solver.c      # Linux/macOS</code></pre>
+                <p data-i18n-html="cf_pow_p2">
+                    The prebuilt Docker image compiles this binary at build time, so container
+                    users get the native solver out of the box.
+                </p>
+                <p data-i18n-html="cf_pow_p3">
+                    Solvers are tried in order until one succeeds: native binary → Node solver
+                    (the site's wasm module) → pure-Python Keccak fallback (capped at 2M
+                    iterations, so it only handles low difficulties). Each solved header is
+                    single-use; the next challenge is prefetched in the background so the next
+                    request does not wait.
+                </p>
+
+                <hr />
+                <p class="footer-note" data-i18n="footer_note">
+                    DanyAPI · built with FastAPI &amp; Python
+                </p>
+            </div>
+        </main>
+        <aside class="toc-aside">
+            <div class="toc">
+                <div class="toc-title" data-i18n="toc_title">On this page</div>
+                <ul class="toc-list"></ul>
+            </div>
+        </aside>
+    </div>
+    <script src="site.js"></script>
+</body>
+</html>

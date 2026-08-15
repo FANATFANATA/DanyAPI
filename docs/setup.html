@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="black" data-title-key="title_setup">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Install &amp; accounts · DanyAPI</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2040%2040'%3E%3Cpath%20d='M20%202.5L35%2011V29L20%2037.5L5%2029V11Z'%20fill='%232563eb'/%3E%3Ccircle%20cx='20'%20cy='20'%20r='5'%20fill='%23ffffff'/%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="style.css" />
+    <script src="theme.js"></script>
+    <script src="i18n.js"></script>
+</head>
+<body>
+    <header class="topbar">
+        <div class="topbar-inner">
+            <a class="brand" href="index.html">
+            <svg class="brand-logo" viewBox="0 0 40 40" aria-hidden="true">
+                <defs>
+                    <linearGradient id="brand-grad" x1="0" y1="0" x2="1" y2="1">
+                        <stop offset="0" stop-color="var(--link)"></stop>
+                        <stop offset="1" stop-color="var(--link-hover)"></stop>
+                    </linearGradient>
+                </defs>
+                <path d="M20 2.5 L35 11 V29 L20 37.5 L5 29 V11 Z" fill="none" stroke="url(#brand-grad)" stroke-width="2.6" stroke-linejoin="round"></path>
+                <path d="M20 13.5 L12.5 26.5 H27.5 Z" fill="none" stroke="url(#brand-grad)" stroke-width="1.8" stroke-linejoin="round"></path>
+                <circle cx="20" cy="13.5" r="3" fill="url(#brand-grad)"></circle>
+                <circle cx="12.5" cy="26.5" r="3" fill="url(#brand-grad)"></circle>
+                <circle cx="27.5" cy="26.5" r="3" fill="url(#brand-grad)"></circle>
+                <circle cx="20" cy="26.5" r="1.8" fill="var(--bg-container)"></circle>
+            </svg>
+            <span class="brand-name">DanyAPI</span>
+        </a>
+            <div class="top-controls">
+                <div class="docs-nav">
+                    <button type="button" class="docs-btn" aria-expanded="false">Docs</button>
+                    <div class="docs-dropdown">
+                        <a href="overview.html" data-i18n="nav_overview">Overview</a>
+                        <a href="setup.html" data-i18n="nav_install">Install &amp; accounts</a>
+                        <a href="configuration.html" data-i18n="nav_config">Configuration</a>
+                        <a href="usage.html" data-i18n="nav_usage">Usage</a>
+                        <a href="internals.html" data-i18n="nav_internals">How it works</a>
+                    </div>
+                </div>
+                <div class="lang-switcher" role="group" data-i18n-aria="lang_group" aria-label="Language">
+                    <button type="button" class="lang-btn" data-lang-btn="en" aria-label="English">EN</button>
+                    <button type="button" class="lang-btn" data-lang-btn="ru" aria-label="Русский">RU</button>
+                </div>
+                <div class="theme-switcher" role="group" data-i18n-aria="theme_group" aria-label="Theme">
+                    <label for="theme-select" class="theme-label" data-i18n="theme_label">Theme</label>
+                    <div class="theme-select-wrap">
+                        <select id="theme-select" class="theme-select">
+                            <option value="black">Black</option>
+                            <option value="hacker">Hacker</option>
+                            <option value="monokai">Monokai</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </header>
+    <div class="layout">
+        <aside class="sidebar">
+            <nav class="page-nav" aria-label="Sections">
+                <div class="page-nav-title" data-i18n="sidebar_label">Pages</div>
+                <a href="index.html" data-i18n="nav_setup">Setup</a>
+                <a href="overview.html" data-i18n="nav_overview">Overview</a>
+                <a href="setup.html" class="active" data-i18n="nav_install">Install &amp; accounts</a>
+                <a href="configuration.html" data-i18n="nav_config">Configuration</a>
+                <a href="usage.html" data-i18n="nav_usage">Usage</a>
+                <a href="internals.html" data-i18n="nav_internals">How it works</a>
+            </nav>
+        </aside>
+        <main class="main">
+            <div class="container">
+                <h1>Install &amp; accounts</h1>
+                <p class="subtitle" data-i18n="st_subtitle">
+                    Install, configure accounts and run DanyAPI.
+                </p>
+
+                <h2 id="setup-script" data-i18n="pl_script">Setup script</h2>
+                <p data-i18n-html="st_script_p1">
+                    One-command install: paste <code>irm https://fanatfanata.github.io/DanyAPI/install.ps1 | iex</code>
+                    into PowerShell, or <code>curl -fsSL https://fanatfanata.github.io/DanyAPI/install.sh | bash</code>
+                    on Linux/macOS - it clones the repo and runs <code>docs/setup.py</code>. The script installs dependencies,
+                    creates <code>.env</code> from <code>.env.example</code> if missing, asks for the provider credentials and server
+                    settings, live-checks the tokens against the provider, writes everything back to <code>.env</code> and creates a
+                    <code>DanyAPI</code> launcher shortcut on the desktop. The server auto-updates itself from the latest GitHub
+                    release at every launch (<code>DANYAPI_AUTO_UPDATE=0</code> disables it). Press <code>Enter</code> to keep a
+                    current value, type <code>!clear</code> to erase one.
+                </p>
+                <div class="code-header">bash</div>
+                <pre><code>docs\setup.bat      # Windows
+                    docs/setup.sh       # Linux/macOS
+                    # or directly:
+                    python docs/setup.py</code></pre>
+                <p data-i18n-html="st_script_p2">
+                    Requires Python 3.13+. Passwords are masked during input and written to <code>.env</code> which is
+                    gitignored and never committed.
+                </p>
+
+                <h2 id="install" data-i18n="pl_install">Install</h2>
+                <p data-i18n="st_install_p">Requires Python 3.13+.</p>
+                <div class="code-header">bash</div>
+                <pre><code>pip install -r requirements.txt</code></pre>
+                <p data-i18n="st_dev">For development (tests + linting) install the dev extras:</p>
+                <div class="code-header">bash</div>
+                <pre><code>pip install -r requirements-dev.txt</code></pre>
+
+                <h2 id="account-setup" data-i18n="pl_accounts">Account setup</h2>
+
+                <h3 id="deepseek" data-i18n="st_ds_h">DeepSeek</h3>
+                <p data-i18n-html="st_ds_p1">Set a pool of tokens (from different accounts), comma-separated, or a single token via <span class="env-var">DEEPSEEK_TOKEN</span>:</p>
+                <div class="code-header">bash</div>
+                <pre><code>export DEEPSEEK_TOKENS="token1,token2,token3"
+                    # or
+                    export DEEPSEEK_TOKEN="token1"</code></pre>
+                <p data-i18n-html="st_ds_p2">
+                    Each account can generate <strong>one</strong> message at a time, so a pool of N tokens
+                    gives up to N parallel generations. Grab a token in the browser:
+                    DevTools → Application → Local Storage → <a href="https://chat.deepseek.com" target="_blank">https://chat.deepseek.com</a> → <code>userToken</code>.
+                </p>
+                <p data-i18n="st_ds_p3">Or a single email + password account (login happens at startup):</p>
+                <div class="code-header">bash</div>
+                <pre><code>export DEEPSEEK_EMAIL="you@example.com"
+                    export DEEPSEEK_PASSWORD="secret"</code></pre>
+
+                <h3 id="qwen" data-i18n="st_qw_h">Qwen</h3>
+                <p data-i18n-html="st_qw_p1">Same model, different token location (single token via <span class="env-var">QWEN_TOKEN</span>):</p>
+                <div class="code-header">bash</div>
+                <pre><code>export QWEN_TOKENS="token1,token2,token3"
+                    # or
+                    export QWEN_TOKEN="token1"</code></pre>
+                <p data-i18n-html="st_qw_p2">
+                    Grab a token in the browser:
+                    DevTools → Application → Local Storage → <a href="https://chat.qwen.ai" target="_blank">https://chat.qwen.ai</a> → <code>token</code>.
+                </p>
+                <blockquote>
+                    <p data-i18n-html="st_qw_blockquote">
+                        <strong>For Qwen accounts used by DanyAPI, disable the built-in <em>Tools</em> switch</strong>
+                        (code interpreter, image generation, and other Qwen built-ins) in the
+                        chat.qwen.ai web interface. When it is enabled, Qwen's built-in tools fire
+                        their own response phases on every request, which DanyAPI cannot parse, and
+                        the server-side conversation history grows fast (hitting the input token
+                        limit quickly). With the switch off, DanyAPI's emulated tool calling
+                        (<code>tools</code> / <code>tool_choice</code>) and plain chat work as intended.
+                    </p>
+                </blockquote>
+                <p data-i18n="st_qw_p3">Or a single email + password account (login happens at startup):</p>
+                <div class="code-header">bash</div>
+                <pre><code>export QWEN_EMAIL="you@example.com"
+                    export QWEN_PASSWORD="secret"</code></pre>
+                <p data-i18n-html="st_both">
+                    Both providers are optional. Run at least one of them (or both) - requests
+                    are routed to the right provider by the model name (<code>deepseek-*</code> / <code>qwen*</code>).
+                </p>
+                <p data-i18n-html="st_valid">
+                    At startup every token is validated against its provider; invalid or expired
+                    tokens are skipped with a warning (the server refuses to start when no valid
+                    credential remains). The Qwen model list for <code>/v1/models</code> is fetched from the
+                    first Qwen account at startup (text-chat models only); if the fetch fails,
+                    a built-in default list is used. New requests without a <code>session_id</code> are
+                    distributed across healthy accounts round-robin.
+                </p>
+
+                <h2 id="run" data-i18n="pl_run">Run</h2>
+                <p data-i18n-html="st_run_p1">
+                    The <code>.env</code> file (gitignored, created from <code>.env.example</code>) is loaded
+                    automatically at startup:
+                </p>
+                <div class="code-header">bash</div>
+                <pre><code>cp .env.example .env   # fill in tokens
+                    python -m danyapi
+                    # or
+                    uvicorn danyapi.api.openai:app --host 0.0.0.0 --port 8000</code></pre>
+                <p data-i18n="st_run_p2">Or with the helper scripts:</p>
+                <div class="code-header">bash</div>
+                <pre><code>run.bat   # Windows
+                    ./run.sh  # Linux/macOS</code></pre>
+
+                <h2 id="logging" data-i18n="pl_logging">Logging</h2>
+                <p data-i18n-html="st_log_p1">By default logs go to the console. To persist them to a file, set <span class="env-var">DANYAPI_LOG_FILE</span> in <code>.env</code> (or as an environment variable):</p>
+                <div class="code-header">bash</div>
+                <pre><code>DANYAPI_LOG_FILE=/var/log/danyapi.log   # or danyapi.log for the working dir
+                    DANYAPI_LOG_LEVEL=INFO                  # DEBUG / INFO / WARNING / ERROR
+                    DANYAPI_LOG_MAX_BYTES=10485760          # rotate at 10 MB per file
+                    DANYAPI_LOG_BACKUP_COUNT=3              # keep 3 rotated files</code></pre>
+                <p data-i18n-html="st_log_p2">
+                    The file is rotated by size (<span class="env-var">DANYAPI_LOG_MAX_BYTES</span>, default 10 MB) keeping
+                    <span class="env-var">DANYAPI_LOG_BACKUP_COUNT</span> backups (default 3). When started via
+                    <code>python -m danyapi</code>, uvicorn's own startup/access logs are routed through the
+                    same root logger and also land in the file.
+                </p>
+
+                <hr />
+                <p class="footer-note" data-i18n="footer_note">
+                    DanyAPI · built with FastAPI &amp; Python
+                </p>
+            </div>
+        </main>
+        <aside class="toc-aside">
+            <div class="toc">
+                <div class="toc-title" data-i18n="toc_title">On this page</div>
+                <ul class="toc-list"></ul>
+            </div>
+        </aside>
+    </div>
+    <script src="site.js"></script>
+</body>
+</html>
