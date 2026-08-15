@@ -321,7 +321,7 @@ def collect_provider(name, current):
         print(f"  {name} password (current set, Enter keeps, !clear erases):")
     else:
         print(f"  {name} password (empty keeps unset):")
-    password = input("    ").strip()
+    password = getpass.getpass("    ").strip()
     if password == "":
         password = current.get(password_key, "")
     elif password == "!clear":
