@@ -695,6 +695,24 @@ def _is_input_exceeds_limit(rec: MessageReconstructor) -> bool:
     return bool(hint and hint.get("finish_reason") == INPUT_EXCEEDS_LIMIT)
 
 
+def _input_exceeds_hint_from_http(exc: HTTPException) -> dict | None:
+    detail = exc.detail
+    if isinstance(detail, str):
+        try:
+            detail = json.loads(detail)
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(detail, dict):
+        return None
+    if detail.get("finish_reason") != INPUT_EXCEEDS_LIMIT:
+        return None
+    message = detail.get("message")
+    return {
+        "message": message if isinstance(message, str) else "Content is too long",
+        "finish_reason": INPUT_EXCEEDS_LIMIT,
+    }
+
+
 def _drop_session(pool, account, session_key) -> None:
     pool.forget(session_key)
     pool.forget_context(session_key)
@@ -852,6 +870,11 @@ async def _collect_non_stream(
                         ref_file_ids,
                     )
                 except HTTPException as exc:
+                    input_hint = _input_exceeds_hint_from_http(exc)
+                    if input_hint is not None:
+                        rec = MessageReconstructor()
+                        rec.hint_error = input_hint
+                        break
                     if _is_retryable_http(exc) and attempt < MAX_RETRIES:
                         log.warning(
                             "deepseek provider error (%s), attempt %d/%d",
@@ -1019,6 +1042,11 @@ async def _stream_openai(
                     ref_file_ids,
                 )
             except HTTPException as exc:
+                input_hint = _input_exceeds_hint_from_http(exc)
+                if input_hint is not None:
+                    rec = MessageReconstructor()
+                    rec.hint_error = input_hint
+                    break
                 if _is_retryable_http(exc) and attempt < MAX_RETRIES:
                     log.warning(
                         "deepseek provider error (%s), attempt %d/%d",

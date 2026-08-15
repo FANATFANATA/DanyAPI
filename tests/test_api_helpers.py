@@ -206,6 +206,18 @@ def test_is_input_exceeds_limit():
     assert not openai_mod._is_input_exceeds_limit(_rec(status="FINISHED"))
 
 
+def test_input_exceeds_hint_from_http():
+    body = '{"message":"Content is too long. Please shorten it and try again.","finish_reason":"input_exceeds_limit"}'
+    hint = openai_mod._input_exceeds_hint_from_http(openai_mod.HTTPException(400, body))
+    assert hint is not None
+    assert hint["finish_reason"] == "input_exceeds_limit"
+    assert hint["message"] == "Content is too long. Please shorten it and try again."
+    assert openai_mod._input_exceeds_hint_from_http(openai_mod.HTTPException(400, "plain")) is None
+    assert openai_mod._input_exceeds_hint_from_http(openai_mod.HTTPException(400, {"finish_reason": "other"})) is None
+    assert openai_mod._input_exceeds_hint_from_http(openai_mod.HTTPException(400, {"finish_reason": "input_exceeds_limit"})) is not None
+    assert openai_mod._input_exceeds_hint_from_http(openai_mod.HTTPException(400, 42)) is None
+
+
 def test_deepseek_status():
     err = DeepSeekError(40001, "bad")
     assert openai_mod._deepseek_status(err) == 401
@@ -934,6 +946,107 @@ async def test_stream_auto_continues():
     joined = "".join(lines)
     assert '"content": "Hi"' in joined
     assert joined.rstrip().endswith("data: [DONE]")
+
+
+INPUT_HTTP_BODY = '{"message":"Content is too long. Please shorten it and try again.","finish_reason":"input_exceeds_limit"}'
+
+
+async def test_non_stream_input_exceeds_http_continues():
+    acct = FakeAccount([OK_SSE])
+    acct.client.completion = AsyncMock(
+        side_effect=[
+            openai_mod.HTTPException(400, INPUT_HTTP_BODY),
+            FakeResp(sse_text=OK_SSE),
+        ]
+    )
+    acct.sessions.obtain = AsyncMock(return_value=(FakeSession(), "s1"))
+    result = await openai_mod._collect_non_stream(
+        account=acct,
+        pool=MagicMock(),
+        existing_sid="s1",
+        lock=acct.sem,
+        prompt="x",
+        model="deepseek-v4-flash",
+        model_type="default",
+        thinking=False,
+        search=False,
+    )
+    assert result["choices"][0]["message"]["content"] == "Hi"
+    assert acct.client.completion.await_count == 2
+
+
+async def test_stream_input_exceeds_http_continues():
+    acct = FakeAccount([OK_SSE])
+    acct.client.completion = AsyncMock(
+        side_effect=[
+            openai_mod.HTTPException(400, INPUT_HTTP_BODY),
+            FakeResp(sse_text=OK_SSE),
+        ]
+    )
+    acct.sessions.obtain = AsyncMock(return_value=(FakeSession(), "s1"))
+    gen = openai_mod._stream_openai(
+        account=acct,
+        pool=MagicMock(),
+        existing_sid="s1",
+        lock=acct.sem,
+        prompt="x",
+        model="deepseek-v4-flash",
+        model_type="default",
+        thinking=False,
+        search=False,
+    )
+    joined = "".join(await _collect_agen(gen))
+    assert '"content": "Hi"' in joined
+    assert joined.rstrip().endswith("data: [DONE]")
+
+
+async def test_non_stream_input_exceeds_http_continuation_none():
+    acct = FakeAccount([])
+    acct.client.completion = AsyncMock(
+        side_effect=[
+            openai_mod.HTTPException(400, INPUT_HTTP_BODY),
+            openai_mod.HTTPException(404, "gone"),
+        ]
+    )
+    acct.sessions.obtain = AsyncMock(return_value=(FakeSession(), "s1"))
+    with pytest.raises(openai_mod.HTTPException) as excinfo:
+        await openai_mod._collect_non_stream(
+            account=acct,
+            pool=MagicMock(),
+            existing_sid="s1",
+            lock=acct.sem,
+            prompt="x",
+            model="deepseek-v4-flash",
+            model_type="default",
+            thinking=False,
+            search=False,
+        )
+    assert excinfo.value.status_code == 429
+    assert "Content is too long" in excinfo.value.detail
+
+
+async def test_stream_input_exceeds_http_continuation_none():
+    acct = FakeAccount([])
+    acct.client.completion = AsyncMock(
+        side_effect=[
+            openai_mod.HTTPException(400, INPUT_HTTP_BODY),
+            openai_mod.HTTPException(404, "gone"),
+        ]
+    )
+    acct.sessions.obtain = AsyncMock(return_value=(FakeSession(), "s1"))
+    gen = openai_mod._stream_openai(
+        account=acct,
+        pool=MagicMock(),
+        existing_sid="s1",
+        lock=acct.sem,
+        prompt="x",
+        model="deepseek-v4-flash",
+        model_type="default",
+        thinking=False,
+        search=False,
+    )
+    lines = await _collect_agen(gen)
+    assert "".join(lines).rstrip().endswith("data: [DONE]")
 
 
 async def test_stream_prepare_session_error():

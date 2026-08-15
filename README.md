@@ -4,4 +4,4 @@ OpenAI-compatible HTTP API built on Python + FastAPI. Instead of the paid APIs i
 
 ## Contacts
 
-[Creator](https://t.me/DanyaVoredom) · [Telegram channel](https://t.me/DanyAPIFree)
+[Creator](https://t.me/DanyaVoredom) · [Telegram channel](https://t.me/DanyAPIFree) · [Website](https://fanatfanata.github.io/DanyAPI/)

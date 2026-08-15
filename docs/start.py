@@ -12,6 +12,7 @@ REPO = "FANATFANATA/DanyAPI"
 API = f"https://api.github.com/repos/{REPO}/releases/latest"
 TAG_FILE = ROOT / ".installed-release"
 ENV_FILE = ROOT / ".env"
+USER_FILES = (".env", "run.bat", "run.sh")
 
 
 def env_flag(name, default):
@@ -57,26 +58,36 @@ def run(cmd, cwd=None):
 
 
 def git_update(tag):
-    for cmd in (
-        ["git", "fetch", "origin", "--tags", "--force"],
-        ["git", "checkout", "-f", tag],
-        ["git", "reset", "--hard", tag],
-    ):
-        if run(cmd) != 0:
+    if run(["git", "fetch", "origin", "--tags", "--force"]) != 0:
+        return False
+    if run(["git", "checkout", "-f", tag]) != 0:
+        run(["git", "fetch", "--unshallow", "origin"])
+        run(["git", "fetch", "origin", "--tags", "--force"])
+        if run(["git", "checkout", "-f", tag]) != 0:
             return False
+    if run(["git", "reset", "--hard", tag]) != 0:
+        return False
     return True
 
 
 def zip_update(tag):
     parent = ROOT.parent
     tmp_zip = parent / "danyapi-update.zip"
-    tmp_dir = parent / ("DanyAPI-" + tag)
     old_dir = parent / ".DanyAPI.old"
     url = f"https://github.com/{REPO}/archive/refs/tags/{tag}.zip"
     print(f"DanyAPI: downloading {url}")
     try:
         urllib.request.urlretrieve(url, str(tmp_zip))
         with zipfile.ZipFile(tmp_zip) as zf:
+            names = [n for n in zf.namelist() if n]
+            roots = {Path(n).parts[0] for n in names}
+            if len(roots) != 1:
+                print("DanyAPI: update archive layout unexpected, aborting")
+                tmp_zip.unlink(missing_ok=True)
+                return False
+            tmp_dir = parent / next(iter(roots))
+            if tmp_dir.exists():
+                shutil.rmtree(str(tmp_dir), ignore_errors=True)
             zf.extractall(str(parent))
     except Exception as exc:
         print(f"DanyAPI: update download failed: {exc}")
@@ -88,8 +99,28 @@ def zip_update(tag):
         return False
     if old_dir.exists():
         shutil.rmtree(str(old_dir), ignore_errors=True)
-    shutil.move(str(ROOT), str(old_dir))
-    shutil.move(str(tmp_dir), str(ROOT))
+    try:
+        os.chdir(str(parent))
+    except OSError:
+        pass
+    try:
+        shutil.move(str(ROOT), str(old_dir))
+    except Exception as exc:
+        print(f"DanyAPI: could not replace installation: {exc}")
+        return False
+    try:
+        shutil.move(str(tmp_dir), str(ROOT))
+    except Exception as exc:
+        shutil.move(str(old_dir), str(ROOT))
+        shutil.rmtree(str(tmp_dir), ignore_errors=True)
+        print(f"DanyAPI: could not replace installation: {exc}")
+        return False
+    for name in USER_FILES:
+        if (old_dir / name).exists():
+            try:
+                shutil.copy2(str(old_dir / name), str(ROOT / name))
+            except Exception as exc:
+                print(f"DanyAPI: warning, could not restore {name}: {exc}")
     tmp_zip.unlink(missing_ok=True)
     shutil.rmtree(str(old_dir), ignore_errors=True)
     return True
@@ -120,7 +151,10 @@ def main():
         return run([sys.executable, "-m", "danyapi"])
     local = git_local_tag() or file_local_tag()
     if local != latest:
-        update_to(latest)
+        try:
+            update_to(latest)
+        except Exception as exc:
+            print(f"DanyAPI: update failed: {exc}")
     else:
         print(f"DanyAPI: already at {latest}")
     return run([sys.executable, "-m", "danyapi"])
