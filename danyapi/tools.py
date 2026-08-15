@@ -493,7 +493,66 @@ def _loads_lenient(text: str) -> Any:
             return json.loads(normalized)
         except (json.JSONDecodeError, TypeError, ValueError):
             pass
+    # Fix unmatched braces/brackets — models sometimes drop closing brackets
+    fixed = _fix_unbalanced_json(text)
+    if fixed is not None and fixed != text:
+        try:
+            return json.loads(fixed)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
     raise ValueError("invalid json")
+
+
+def _fix_unbalanced_json(text: str) -> str | None:
+    """Attempt to fix JSON with missing closing braces/brackets.
+
+    Uses a stack-based approach to find where brackets are unclosed and insert
+    the missing closers at the right positions rather than just appending them
+    at the end (which can produce invalid nesting like }]} instead of }}]).
+    """
+    stack: list[str] = []
+    result = list(text)
+    inserted_positions: dict[int, int] = {}  # position -> count of chars to insert
+
+    for i, ch in enumerate(result):
+        if ch == "{":
+            stack.append("{")
+        elif ch == "[":
+            stack.append("[")
+        elif ch == "}":
+            if not stack or stack[-1] != "{":
+                # Extra closing brace — skip it (unlikely but safe)
+                continue
+            stack.pop()
+        elif ch == "]":
+            if not stack or stack[-1] != "[":
+                # Closing bracket doesn't match top of stack — close any open braces first
+                while stack and stack[-1] != "[":
+                    inserted_positions[i] = inserted_positions.get(i, 0) + 1  # insert } before ]
+                    stack.pop()
+                if not stack or stack[-1] != "[":
+                    continue
+                stack.pop()
+            else:
+                stack.pop()
+
+    # Any remaining open brackets need closers at the end
+    trailing = ""
+    while stack:
+        opening = stack.pop()
+        trailing += "}" if opening == "{" else "]"
+
+    if not inserted_positions and not trailing:
+        return None
+
+    # Build fixed string
+    parts: list[str] = []
+    for i, ch in enumerate(result):
+        if i in inserted_positions:
+            parts.append("}" * inserted_positions[i])
+        parts.append(ch)
+    parts.append(trailing)
+    return "".join(parts)
 
 
 def _balanced_json(text: str) -> tuple[int, int] | None:
