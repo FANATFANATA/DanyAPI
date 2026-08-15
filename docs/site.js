@@ -179,7 +179,7 @@
 
     var TERM = {
         en: [
-            { type: 'cmd', text: 'irm https://fanatfanata.github.io/DanyAPI/install.ps1 | iex' },
+            { type: 'cmd', text: 'irm https://raw.githubusercontent.com/FANATFANATA/DanyAPI/main/docs/install.ps1 | iex' },
             { type: 'ok', text: 'Cloning DanyAPI into $HOME\\DanyAPI' },
             { type: 'ok', text: 'Python 3.13+ detected' },
             { type: 'ok', text: '.env created from .env.example' },
@@ -192,7 +192,7 @@
             { type: 'info', text: 'Next: double-click the shortcut to start the server' }
         ],
         ru: [
-            { type: 'cmd', text: 'irm https://fanatfanata.github.io/DanyAPI/install.ps1 | iex' },
+            { type: 'cmd', text: 'irm https://raw.githubusercontent.com/FANATFANATA/DanyAPI/main/docs/install.ps1 | iex' },
             { type: 'ok', text: 'Клонирование DanyAPI в ~\\DanyAPI' },
             { type: 'ok', text: 'Python 3.13+ найден' },
             { type: 'ok', text: '.env создан из .env.example' },
