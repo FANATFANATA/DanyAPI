@@ -28,6 +28,7 @@
         idx_intro: 'OpenAI-совместимый HTTP API на Python + FastAPI. Одна команда скачает его, поставит зависимости, настроит <code>.env</code>, проверит токены у провайдеров и создаст на рабочем столе ярлык <code>DanyAPI</code>. Сервер сам обновляется до последнего GitHub-релиза при каждом запуске.',
         idx_cmd_label: 'Открой терминал и вставь это:',
         idx_cmd_hint: 'Или выбери свою платформу:',
+        idx_creator: '<a href="https://t.me/DanyaVoredom" target="_blank">Создатель</a> · <a href="https://t.me/DanyAPIFree" target="_blank">Телеграм-канал</a>',
         idx_term_note: 'Это выглядит так: скрипт выполнит всё это в твоём терминале. Здесь просто наглядная демонстрация.',
         idx_manual: 'Предпочитаешь ручную установку? Открой <a href="setup.html#setup-script">пошаговую инструкцию</a>.',
         idx_after: 'После установки',

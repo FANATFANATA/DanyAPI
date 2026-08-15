@@ -24,7 +24,17 @@ from_zip() {
     else
         wget -q "$ZIP_URL" -O "$tmp/repo.zip"
     fi
-    (cd "$tmp" && (unzip -q repo.zip || tar -xzf repo.zip))
+    (
+        cd "$tmp"
+        if command -v unzip >/dev/null 2>&1; then
+            unzip -q repo.zip
+        elif command -v tar >/dev/null 2>&1; then
+            tar -xzf repo.zip
+        else
+            echo "Neither unzip nor tar is available." >&2
+            exit 1
+        fi
+    )
     rm -rf "$TARGET"
     mv "$tmp/DanyAPI-$BRANCH" "$TARGET"
     rm -rf "$tmp"

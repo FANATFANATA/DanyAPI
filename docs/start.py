@@ -98,11 +98,15 @@ def zip_update(tag):
 def update_to(tag):
     print(f"DanyAPI: updating to {tag} ...")
     if (ROOT / ".git").exists():
-        git_update(tag)
+        if not git_update(tag):
+            print("DanyAPI: git update failed, aborting update.")
+            return
     else:
         if not zip_update(tag):
             return
-    run([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"])
+    if run([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"]) != 0:
+        print("DanyAPI: pip install failed, aborting update.")
+        return
     TAG_FILE.write_text(tag, encoding="utf-8")
     print(f"DanyAPI: updated to {tag}")
 
