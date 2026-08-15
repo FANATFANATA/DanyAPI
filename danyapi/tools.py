@@ -506,7 +506,6 @@ def _loads_lenient(text: str) -> Any:
             return json.loads(normalized)
         except (json.JSONDecodeError, TypeError, ValueError):
             pass
-    # Fix unmatched braces/brackets — models sometimes drop closing brackets
     fixed = _fix_unbalanced_json(text)
     if fixed is not None and fixed != text:
         try:
