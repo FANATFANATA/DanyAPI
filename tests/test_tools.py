@@ -227,6 +227,34 @@ class TestParseToolCalls(unittest.TestCase):
         self.assertEqual(calls[0].name, "f")
         self.assertEqual(json.loads(calls[0].arguments), {"x": "it's"})
 
+    def test_single_quotes_with_double_quotes_inside(self):
+        text = "{'tool_calls': [{'name': 'f', 'arguments': {'x': 'say \"hi\"'}}]}"
+        parsed = parse_tool_calls(text)
+        self.assertIsNotNone(parsed)
+        assert parsed is not None
+        calls, _ = parsed
+        assert calls is not None
+        self.assertEqual(json.loads(calls[0].arguments), {"x": 'say "hi"'})
+
+    def test_single_quotes_with_backslashes_inside(self):
+        text = r"{'tool_calls': [{'name': 'f', 'arguments': {'path': 'C:\\Windows'}}]}"
+        parsed = parse_tool_calls(text)
+        self.assertIsNotNone(parsed)
+        assert parsed is not None
+        calls, _ = parsed
+        assert calls is not None
+        self.assertEqual(json.loads(calls[0].arguments), {"path": r"C:\Windows"})
+
+    def test_truncated_json_not_misparsed(self):
+        text = '{"tool_calls": [{"name": "f", "arguments": {"command": "ls"}}'
+        parsed = parse_tool_calls(text)
+        self.assertIsNone(parsed)
+
+    def test_truncated_missing_argument_key_not_accepted(self):
+        text = '{"name": "f", "arguments": {"command": "ls"}'
+        parsed = parse_tool_calls(text)
+        self.assertIsNone(parsed)
+
     def test_bare_dict_trailing_comma(self):
         text = '{"name": "f", "arguments": {"x": 1,}}'
         parsed = parse_tool_calls(text)

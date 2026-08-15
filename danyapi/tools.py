@@ -460,13 +460,22 @@ def _normalize_single_quotes(text: str) -> str:
             continue
         if in_single:
             if escaped:
-                out.append(ch)
+                if ch == "'":
+                    out.append("'")
+                elif ch == '"':
+                    out.append('\\"')
+                elif ch == "\\":
+                    out.append("\\\\")
+                else:
+                    out.append("\\" + ch)
                 escaped = False
             elif ch == "\\":
                 escaped = True
             elif ch == "'":
                 out.append('"')
                 in_single = False
+            elif ch == '"':
+                out.append('\\"')
             else:
                 out.append(ch)
             continue
@@ -604,12 +613,14 @@ def _extract_json_object(text: str) -> tuple[dict, int, int] | None:
         return None
     candidate = stripped[start : end + 1]
     for cut in range(len(candidate), 0, -1):
-        try:
-            obj = _loads_lenient(candidate[:cut])
-            if isinstance(obj, dict):
-                return obj, start, start + cut - 1
-        except ValueError:
+        if candidate[cut - 1] not in "}]":
             continue
+        try:
+            obj = json.loads(candidate[:cut])
+        except (json.JSONDecodeError, TypeError, ValueError):
+            continue
+        if isinstance(obj, dict):
+            return obj, start, start + cut - 1
     return None
 
 

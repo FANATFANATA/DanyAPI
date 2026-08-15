@@ -859,7 +859,7 @@ async def _collect_non_stream(
             _drop_session(pool, account, session_key)
             raise HTTPException(400, "context length exceeded: conversation too long, start a new conversation")
         if _is_input_exceeds_limit(rec):
-            cont_parent = rec.id or response_message_id
+            cont_parent = rec.id or response_message_id or parent_message_id
             for _ in range(MAX_CONTINUE_ROUNDS):
                 cont_rec = await _collect_continuation(account, session, cont_parent, model_type, thinking, search, ref_file_ids)
                 if cont_rec is None:
@@ -1126,7 +1126,7 @@ async def _stream_openai(
             yield "data: [DONE]\n\n"
             return
         if _is_input_exceeds_limit(rec):
-            cont_parent = rec.id or response_message_id
+            cont_parent = rec.id or response_message_id or parent_message_id
             for _ in range(MAX_CONTINUE_ROUNDS):
                 cont_rec = await _collect_continuation(account, session, cont_parent, model_type, thinking, search, ref_file_ids)
                 if cont_rec is None:
@@ -1134,15 +1134,18 @@ async def _stream_openai(
                 rec.extend_with(cont_rec)
                 cont_parent = cont_rec.id or cont_parent
                 if cont_rec.content:
-                    yield sse(
-                        {
-                            "id": chunk_id,
-                            "object": "chat.completion.chunk",
-                            "created": created,
-                            "model": model,
-                            "choices": [{"index": 0, "delta": {"content": cont_rec.content}, "finish_reason": None}],
-                        }
-                    )
+                    if tool_mode:
+                        content_buf += cont_rec.content
+                    else:
+                        yield sse(
+                            {
+                                "id": chunk_id,
+                                "object": "chat.completion.chunk",
+                                "created": created,
+                                "model": model,
+                                "choices": [{"index": 0, "delta": {"content": cont_rec.content}, "finish_reason": None}],
+                            }
+                        )
                 if cont_rec.reasoning:
                     yield sse(
                         {
