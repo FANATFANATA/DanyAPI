@@ -385,7 +385,7 @@ html[data-theme="black"] .brand-name {
 }
 
 .home-card {
-    width: min(920px, 100%);
+    width: min(1180px, 100%);
     margin: 0 auto;
     text-align: center;
     background: color-mix(in srgb, var(--bg-container) 44%, transparent);
@@ -744,7 +744,8 @@ code {
     padding: 0.15rem 0.45rem;
     border-radius: 6px;
     color: var(--code-inline-text);
-    white-space: nowrap;
+    white-space: normal;
+    overflow-wrap: anywhere;
 }
 
 pre {
@@ -947,7 +948,8 @@ hr {
     padding: 0.55rem 0.9rem;
     border-radius: 10px;
     overflow-x: auto;
-    white-space: nowrap;
+    white-space: normal;
+    overflow-wrap: anywhere;
     font-size: 0.85rem;
 }
 
@@ -986,6 +988,7 @@ hr {
     display: inline-flex;
     align-items: center;
     gap: 0.45rem;
+    max-width: 100%;
     padding: 0.3rem 0.75rem;
     border-radius: 999px;
     border: 1px solid color-mix(in srgb, var(--border-strong) 55%, transparent);
@@ -1011,7 +1014,8 @@ hr {
     padding: 0;
     color: inherit;
     font-size: inherit;
-    white-space: nowrap;
+    white-space: normal;
+    overflow-wrap: anywhere;
 }
 
 .btn {
