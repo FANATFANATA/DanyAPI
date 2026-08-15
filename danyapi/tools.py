@@ -508,39 +508,40 @@ def _loads_lenient(text: str) -> Any:
 
 
 def _fix_unbalanced_json(text: str) -> str | None:
-    """Attempt to fix JSON with missing closing braces/brackets.
-
-    Uses a stack-based approach to find where brackets are unclosed and insert
-    the missing closers at the right positions rather than just appending them
-    at the end (which can produce invalid nesting like }]} instead of }}]).
-    """
     stack: list[str] = []
     result = list(text)
-    inserted_positions: dict[int, int] = {}  # position -> count of chars to insert
+    inserted_positions: dict[int, int] = {}
+    in_string = False
+    escaped = False
 
     for i, ch in enumerate(result):
-        if ch == "{":
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
             stack.append("{")
         elif ch == "[":
             stack.append("[")
         elif ch == "}":
-            if not stack or stack[-1] != "{":
-                # Extra closing brace — skip it (unlikely but safe)
-                continue
-            stack.pop()
+            if stack and stack[-1] == "{":
+                stack.pop()
         elif ch == "]":
-            if not stack or stack[-1] != "[":
-                # Closing bracket doesn't match top of stack — close any open braces first
+            if stack and stack[-1] == "[":
+                stack.pop()
+            elif stack:
                 while stack and stack[-1] != "[":
-                    inserted_positions[i] = inserted_positions.get(i, 0) + 1  # insert } before ]
+                    inserted_positions[i] = inserted_positions.get(i, 0) + 1
                     stack.pop()
-                if not stack or stack[-1] != "[":
-                    continue
-                stack.pop()
-            else:
-                stack.pop()
+                if stack:
+                    stack.pop()
 
-    # Any remaining open brackets need closers at the end
     trailing = ""
     while stack:
         opening = stack.pop()
@@ -549,7 +550,6 @@ def _fix_unbalanced_json(text: str) -> str | None:
     if not inserted_positions and not trailing:
         return None
 
-    # Build fixed string
     parts: list[str] = []
     for i, ch in enumerate(result):
         if i in inserted_positions:

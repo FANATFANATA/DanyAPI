@@ -76,7 +76,7 @@ _malformed_json = st.one_of(
     # Truncated JSON — cut valid JSON in half
     _tool_call_json.flatmap(lambda j: st.just(j[: len(j) // 2 + 1]) if len(j) > 4 else st.just(j)),
     # JSON with missing closing brackets (the DeepSeek bug pattern)
-    _tool_call_json.map(lambda s: s.rstrip("}]") + "}" if s.endswith("]}") else s),
+    _tool_call_json.map(lambda s: re.sub(r"\}(?=\])", "", s, count=1)),
     # XML invoke format
     st.text(min_size=1, max_size=20).map(lambda name: f'<invoke name="{name}"><parameter name="city">Moscow</parameter></invoke>'),
 )
