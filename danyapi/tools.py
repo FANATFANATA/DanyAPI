@@ -517,12 +517,13 @@ def _loads_lenient(text: str) -> Any:
 
 def _fix_unbalanced_json(text: str) -> str | None:
     stack: list[str] = []
-    result = list(text)
-    inserted_positions: dict[int, int] = {}
+    insert_before: dict[int, int] = {}
+    drop: set[int] = set()
+    trailing_extra = 0
     in_string = False
     escaped = False
 
-    for i, ch in enumerate(result):
+    for i, ch in enumerate(text):
         if in_string:
             if escaped:
                 escaped = False
@@ -533,38 +534,43 @@ def _fix_unbalanced_json(text: str) -> str | None:
             continue
         if ch == '"':
             in_string = True
-        elif ch == "{":
-            stack.append("{")
-        elif ch == "[":
-            stack.append("[")
+        elif ch in "{[":
+            stack.append(ch)
         elif ch == "}":
             if stack and stack[-1] == "{":
                 stack.pop()
+            else:
+                drop.add(i)
         elif ch == "]":
             if stack and stack[-1] == "[":
                 stack.pop()
             elif stack:
+                count = 0
                 while stack and stack[-1] != "[":
-                    inserted_positions[i] = inserted_positions.get(i, 0) + 1
+                    count += 1
                     stack.pop()
                 if stack:
                     stack.pop()
+                    insert_before[i] = count
+                else:
+                    trailing_extra += count
+                    drop.add(i)
+            else:
+                drop.add(i)
 
-    trailing = ""
-    while stack:
-        opening = stack.pop()
-        trailing += "}" if opening == "{" else "]"
-
-    if not inserted_positions and not trailing:
+    if not insert_before and not drop and not stack and not trailing_extra:
         return None
 
-    parts: list[str] = []
-    for i, ch in enumerate(result):
-        if i in inserted_positions:
-            parts.append("}" * inserted_positions[i])
-        parts.append(ch)
-    parts.append(trailing)
-    return "".join(parts)
+    result: list[str] = []
+    for i, ch in enumerate(text):
+        if i in drop:
+            continue
+        if i in insert_before:
+            result.append("}" * insert_before[i])
+        result.append(ch)
+    result.append("}" * trailing_extra)
+    result.append("".join("}" if opening == "{" else "]" for opening in reversed(stack)))
+    return "".join(result)
 
 
 def _balanced_json(text: str) -> tuple[int, int] | None:

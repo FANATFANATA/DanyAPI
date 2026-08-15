@@ -18,7 +18,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from .. import tools as toolemu
-from ..accounts import AccountPool, AccountPoolBusy, DeepSeekAccount
+from ..accounts import AccountPool, AccountPoolBusy, DeepSeekAccount, account_lock
 from ..config import settings
 from ..deepseek.client import DeepSeekClient, DeepSeekError, DeepSeekSession
 from ..deepseek.stream import IncrementalSSE, MessageReconstructor
@@ -248,7 +248,7 @@ def _split_data_uri(uri: str) -> tuple[str, bytes]:
     meta, _, payload = uri[5:].partition(",")
     content_type = meta.split(";", 1)[0] or "application/octet-stream"
     try:
-        data = base64.b64decode(payload)
+        data = base64.b64decode(payload, validate=True)
     except ValueError as exc:
         raise HTTPException(400, "invalid base64 in image_url") from exc
     return content_type, data
@@ -405,7 +405,6 @@ DEEPSEEK_AUTH_ERROR_CODES = {40001, 40002, 40003, 40012, 40029}
 
 
 async def _human_delay() -> None:
-    """Simulate human typing / pause before sending a message."""
     delay = random.uniform(settings.human_delay_min, settings.human_delay_max)
     if delay > 0:
         await asyncio.sleep(delay)
@@ -444,6 +443,38 @@ def _include_usage(req: ChatCompletionRequest) -> bool:
 def _deepseek_usage(total: int) -> dict:
     value = max(0, int(total or 0))
     return {"prompt_tokens": 0, "completion_tokens": value, "total_tokens": value}
+
+
+def _sse(data: dict) -> str:
+    return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+async def _stream_guard(gen, model: str):
+    try:
+        async for item in gen:
+            yield item
+    except AccountPoolBusy:
+        chunk_id = f"chatcmpl-{uuid.uuid4().hex}"
+        created = int(time.time())
+        yield _sse(
+            {
+                "id": chunk_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "error": {"message": "all accounts are busy, try again later"},
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "error"}],
+            }
+        )
+        yield _sse(
+            {
+                "id": chunk_id,
+                "session_id": None,
+                "object": "chat.completion.chunk",
+                "choices": [],
+            }
+        )
+        yield "data: [DONE]\n\n"
 
 
 async def _chat_completions_deepseek(req: ChatCompletionRequest) -> Any:
@@ -496,12 +527,15 @@ async def _chat_completions_deepseek(req: ChatCompletionRequest) -> Any:
     }
     if req.stream:
         return StreamingResponse(
-            _stream_openai(lock=account.sem, **common),
+            _stream_guard(_stream_openai(lock=account.sem, **common), req.model),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
-    return await _collect_non_stream(lock=account.sem, **common)
+    try:
+        return await _collect_non_stream(lock=account.sem, **common)
+    except AccountPoolBusy:
+        raise HTTPException(429, "all accounts are busy, try again later") from None
 
 
 async def _chat_completions_qwen(req: ChatCompletionRequest) -> Any:
@@ -546,12 +580,15 @@ async def _chat_completions_qwen(req: ChatCompletionRequest) -> Any:
     }
     if req.stream:
         return StreamingResponse(
-            qwen_api.stream_openai(lock=account.sem, **common),
+            _stream_guard(qwen_api.stream_openai(lock=account.sem, **common), req.model),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
-    return await qwen_api.collect_non_stream(lock=account.sem, **common)
+    try:
+        return await qwen_api.collect_non_stream(lock=account.sem, **common)
+    except AccountPoolBusy:
+        raise HTTPException(429, "all accounts are busy, try again later") from None
 
 
 async def _prepare_session(
@@ -570,6 +607,7 @@ async def _prepare_session(
         if existing_sid:
             pool.forget(existing_sid)
             pool.forget_context(existing_sid)
+            account.sessions.forget(existing_sid)
     if context_seq:
         pool.index_context(session_key, context_seq)
     return session, session_key, session.last_message_id
@@ -790,7 +828,7 @@ async def _collect_non_stream(
     context_seq: tuple[str, ...] | None = None,
 ):
     await _human_delay()
-    async with lock:
+    async with account_lock(lock, settings.acquire_timeout):
         session, session_key, parent_message_id = await _prepare_session(account, pool, existing_sid, context_seq)
         stop_message_id: str | None = None
         started = time.monotonic()
@@ -933,7 +971,7 @@ async def _stream_openai(
         return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
     await _human_delay()
-    async with lock:
+    async with account_lock(lock, settings.acquire_timeout):
         try:
             session, session_key, parent_message_id = await _prepare_session(account, pool, existing_sid, context_seq)
         except HTTPException as exc:

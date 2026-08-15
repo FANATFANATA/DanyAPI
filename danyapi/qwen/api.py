@@ -12,6 +12,7 @@ import httpx
 from fastapi import HTTPException
 
 from .. import tools as toolemu
+from ..accounts import account_lock
 from ..config import settings
 from ..deepseek.stream import IncrementalSSE
 from .client import QwenClient, QwenError
@@ -107,6 +108,7 @@ async def _prepare_session(account, pool, existing_sid: str | None, model_id: st
         if existing_sid:
             pool.forget(existing_sid)
             pool.forget_context(existing_sid)
+            account.sessions.forget(existing_sid)
     if context_seq:
         pool.index_context(session_key, context_seq)
     return session, session_key
@@ -186,7 +188,6 @@ async def _try_stop_stream(client, session_id: str, message_id: str | None) -> N
 
 
 async def _human_delay() -> None:
-    """Simulate human typing / pause before sending a message."""
     delay = random.uniform(settings.human_delay_min, settings.human_delay_max)
     if delay > 0:
         await asyncio.sleep(delay)
@@ -223,7 +224,7 @@ async def collect_non_stream(
     context_seq: tuple[str, ...] | None = None,
 ):
     await _human_delay()
-    async with lock:
+    async with account_lock(lock, settings.acquire_timeout):
         session, session_key = await _prepare_session(account, pool, existing_sid, model_id, context_seq)
         stop_response_id: str | None = None
         try:
@@ -330,7 +331,7 @@ async def stream_openai(
         return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
     await _human_delay()
-    async with lock:
+    async with account_lock(lock, settings.acquire_timeout):
         try:
             session, session_key = await _prepare_session(account, pool, existing_sid, model_id, context_seq)
         except HTTPException as exc:

@@ -4,6 +4,7 @@ import asyncio
 import logging
 import threading
 import time
+from contextlib import asynccontextmanager
 
 from .deepseek.client import DeepSeekClient
 from .pow import PowManager
@@ -15,6 +16,22 @@ log = logging.getLogger("danyapi.accounts")
 
 class AccountPoolBusy(Exception):
     pass
+
+
+@asynccontextmanager
+async def account_lock(sem: asyncio.Semaphore, max_wait: float | None = None):
+    if max_wait is None:
+        async with sem:
+            yield
+        return
+    try:
+        await asyncio.wait_for(sem.acquire(), timeout=max_wait)
+    except TimeoutError as exc:
+        raise AccountPoolBusy() from exc
+    try:
+        yield
+    finally:
+        sem.release()
 
 
 class ContextIndex:
