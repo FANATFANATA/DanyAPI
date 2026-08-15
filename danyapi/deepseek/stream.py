@@ -180,7 +180,7 @@ class MessageReconstructor:
         if event.event in ("toast", "hint"):
             if isinstance(event.data, dict) and event.data.get("type") == "error":
                 self.hint_error = {
-                    "message": event.data.get("content", ""),
+                    "message": event.data.get("content") or event.data.get("message") or "",
                     "finish_reason": event.data.get("finish_reason"),
                 }
             return
@@ -217,6 +217,22 @@ class MessageReconstructor:
         r_diff = reasoning.removeprefix(self._prev_reasoning)
         self._prev_content, self._prev_reasoning = content, reasoning
         return c_diff, r_diff
+
+    def extend_with(self, other: MessageReconstructor) -> None:
+        other_fragments = (other.message or {}).get("fragments")
+        if isinstance(other_fragments, list) and other_fragments:
+            fragments = self.message.get("fragments")
+            if isinstance(fragments, list):
+                fragments.extend(other_fragments)
+            else:
+                self.message["fragments"] = list(other_fragments)
+        if other.id:
+            self.message["id"] = other.id
+        if other.status:
+            self.message["status"] = other.status
+        if other.accumulated_tokens:
+            self.message["accumulated_token_usage"] = other.accumulated_tokens
+        self.hint_error = other.hint_error
 
     @property
     def status(self) -> str | None:

@@ -66,6 +66,9 @@ STATUS_TO_FINISH_REASON = {
 }
 
 CONTEXT_LENGTH_STATUS = "CONTEXT_LENGTH_EXCEEDED"
+INPUT_EXCEEDS_LIMIT = "input_exceeds_limit"
+CONTINUE_PROMPT = "Continue"
+MAX_CONTINUE_ROUNDS = 5
 
 
 class ChatMessage(BaseModel):
@@ -647,6 +650,13 @@ def _is_context_limit(rec: MessageReconstructor) -> bool:
     return bool(hint and hint.get("finish_reason") == CONTEXT_LENGTH_STATUS)
 
 
+def _is_input_exceeds_limit(rec: MessageReconstructor) -> bool:
+    if rec.status == INPUT_EXCEEDS_LIMIT:
+        return True
+    hint = rec.hint_error
+    return bool(hint and hint.get("finish_reason") == INPUT_EXCEEDS_LIMIT)
+
+
 def _drop_session(pool, account, session_key) -> None:
     pool.forget(session_key)
     pool.forget_context(session_key)
@@ -709,6 +719,58 @@ async def _try_stop_stream(client, session_id: str, message_id: str | None) -> N
         await client.stop_stream(session_id, message_id)
     except Exception as exc:
         log.debug("stop_stream failed for %s: %s", session_id, exc)
+
+
+async def _collect_continuation(
+    account,
+    session,
+    parent_message_id,
+    model_type,
+    thinking,
+    search,
+    ref_file_ids=None,
+) -> MessageReconstructor | None:
+    for attempt in range(MAX_RETRIES + 1):
+        if attempt:
+            await asyncio.sleep(min(RETRY_BACKOFF_SEC * (2 ** (attempt - 1)), RETRY_BACKOFF_MAX_SEC))
+        try:
+            pow_headers = await _fresh_pow_headers(account)
+            resp = await _send_with_auth(
+                account,
+                account.client,
+                pow_headers,
+                session.id,
+                parent_message_id,
+                CONTINUE_PROMPT,
+                model_type,
+                thinking,
+                search,
+                ref_file_ids,
+            )
+        except HTTPException as exc:
+            if _is_retryable_http(exc) and attempt < MAX_RETRIES:
+                log.warning(
+                    "deepseek continuation error (%s), attempt %d/%d",
+                    exc.status_code,
+                    attempt + 1,
+                    MAX_RETRIES,
+                )
+                continue
+            return None
+        rec = MessageReconstructor()
+        incremental = IncrementalSSE()
+        try:
+            async for chunk in resp.aiter_bytes():
+                for event in incremental.feed(chunk):
+                    rec.handle(event)
+            for event in incremental.finish():
+                rec.handle(event)
+        finally:
+            await resp.aclose()
+        if not (rec.content or rec.reasoning) and _is_retryable_hint(rec) and attempt < MAX_RETRIES:
+            continue
+        return rec
+    return None
 
 
 async def _collect_non_stream(
@@ -796,6 +858,16 @@ async def _collect_non_stream(
         if _is_context_limit(rec) and not (rec.content or rec.reasoning):
             _drop_session(pool, account, session_key)
             raise HTTPException(400, "context length exceeded: conversation too long, start a new conversation")
+        if _is_input_exceeds_limit(rec):
+            cont_parent = rec.id or response_message_id
+            for _ in range(MAX_CONTINUE_ROUNDS):
+                cont_rec = await _collect_continuation(account, session, cont_parent, model_type, thinking, search, ref_file_ids)
+                if cont_rec is None:
+                    break
+                rec.extend_with(cont_rec)
+                cont_parent = cont_rec.id or cont_parent
+                if not _is_input_exceeds_limit(cont_rec):
+                    break
         session.accumulated_tokens = max(getattr(session, "accumulated_tokens", 0) or 0, rec.accumulated_tokens)
         account.sessions.touch_last_message(session_key, rec.id or response_message_id)
         log.info("deepseek completion OK (%.0fms)", (time.monotonic() - started) * 1000)
@@ -1053,6 +1125,36 @@ async def _stream_openai(
             )
             yield "data: [DONE]\n\n"
             return
+        if _is_input_exceeds_limit(rec):
+            cont_parent = rec.id or response_message_id
+            for _ in range(MAX_CONTINUE_ROUNDS):
+                cont_rec = await _collect_continuation(account, session, cont_parent, model_type, thinking, search, ref_file_ids)
+                if cont_rec is None:
+                    break
+                rec.extend_with(cont_rec)
+                cont_parent = cont_rec.id or cont_parent
+                if cont_rec.content:
+                    yield sse(
+                        {
+                            "id": chunk_id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": model,
+                            "choices": [{"index": 0, "delta": {"content": cont_rec.content}, "finish_reason": None}],
+                        }
+                    )
+                if cont_rec.reasoning:
+                    yield sse(
+                        {
+                            "id": chunk_id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": model,
+                            "choices": [{"index": 0, "delta": {"reasoning_content": cont_rec.reasoning}, "finish_reason": None}],
+                        }
+                    )
+                if not _is_input_exceeds_limit(cont_rec):
+                    break
         if not (rec.content or rec.reasoning) and rec.hint_error:
             hint = rec.hint_error
             yield sse(
