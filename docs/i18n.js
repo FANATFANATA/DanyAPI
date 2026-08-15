@@ -18,6 +18,7 @@
         nav_config: 'Конфигурация',
         nav_usage: 'Использование',
         nav_internals: 'Как это работает',
+        nav_docs: 'Доки',
         title_index: 'DanyAPI · установка',
         title_overview: 'Обзор · DanyAPI',
         title_setup: 'Установка и аккаунты · DanyAPI',
