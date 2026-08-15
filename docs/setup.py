@@ -1,4 +1,5 @@
 import datetime
+import getpass
 import hashlib
 import json
 import os
@@ -81,7 +82,7 @@ GROUPS = [
 def ask(question, default):
     suffix = " [Y/n]" if default else " [y/N]"
     while True:
-        raw = input("%s%s: " % (question, suffix)).strip().lower()
+        raw = input(f"{question}{suffix}: ").strip().lower()
         if raw == "":
             return default
         if raw in ("y", "yes"):
@@ -93,19 +94,19 @@ def ask(question, default):
 
 def run_pip(req):
     cmd = [sys.executable, "-m", "pip", "install", "-r", req]
-    print("Running: %s" % " ".join(cmd))
+    print(f"Running: {' '.join(cmd)}")
     rc = subprocess.call(cmd, cwd=str(ROOT))
     if rc != 0:
-        print("pip install failed for %s (exit %d)" % (req, rc))
+        print(f"pip install failed for {req} (exit {rc})")
         sys.exit(rc)
 
 
 def prompt(key, label, kind, current):
     while True:
         if current:
-            raw = input("  %s - %s [%s]: " % (key, label, current)).strip()
+            raw = input(f"  {key} - {label} [{current}]: ").strip()
         else:
-            raw = input("  %s - %s: " % (key, label)).strip()
+            raw = input(f"  {key} - {label}: ").strip()
         if raw == "":
             return current
         if raw == "!clear":
@@ -126,7 +127,7 @@ def prompt(key, label, kind, current):
                     raise ValueError("must be 0 or 1")
             return raw
         except ValueError as e:
-            print("    invalid: %s" % e)
+            print(f"    invalid: {e}")
 
 
 def quote(value):
@@ -136,7 +137,7 @@ def quote(value):
         if '"' in value:
             print("    warning: value contains a double quote, writing it raw")
             return value
-        return '"%s"' % value
+        return f'"{value}"'
     return value
 
 
@@ -158,15 +159,15 @@ def load_env():
 def update_env(values):
     lines = ENV_FILE.read_text(encoding="utf-8").splitlines(keepends=True)
     for key, value in values.items():
-        pattern = re.compile(r"^\s*%s\s*=" % re.escape(key))
+        pattern = re.compile(rf"^\s*{re.escape(key)}\s*=")
         found = False
         for i, line in enumerate(lines):
             if pattern.match(line):
-                lines[i] = "%s=%s\n" % (key, quote(value))
+                lines[i] = f"{key}={quote(value)}\n"
                 found = True
                 break
         if not found:
-            lines.append("%s=%s\n" % (key, quote(value)))
+            lines.append(f"{key}={quote(value)}\n")
     fd, path = tempfile.mkstemp(dir=str(ROOT), suffix=".env.tmp")
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.writelines(lines)
@@ -207,7 +208,7 @@ def _ds_headers(token=None):
 def _qwen_headers(token=None):
     now = datetime.datetime.now().astimezone()
     offset = now.strftime("%z")
-    timezone = "%s GMT%s" % (now.strftime("%a %b %d %Y %H:%M:%S"), offset)
+    timezone = f"{now.strftime('%a %b %d %Y %H:%M:%S')} GMT{offset}"
     headers = {
         "User-Agent": QWEN_UA,
         "X-Request-Id": str(uuid.uuid4()),
@@ -222,17 +223,17 @@ def _qwen_headers(token=None):
 
 def check_deepseek_token(token):
     did = str(uuid.uuid4())
-    url = "https://chat.deepseek.com/api/v0/client/settings?did=%s&scope=main" % did
+    url = f"https://chat.deepseek.com/api/v0/client/settings?did={did}&scope=main"
     status, body = _request(url, _ds_headers(token))
     if status is None:
-        return False, "network error: %s" % body
+        return False, f"network error: {body}"
     try:
         payload = json.loads(body)
         if payload.get("code") == 0:
             return True, ""
         return False, "server rejected the token"
     except ValueError:
-        return False, "unexpected response: %s" % body[:200]
+        return False, f"unexpected response: {body[:200]}"
 
 
 def check_deepseek_login(email, password):
@@ -246,50 +247,50 @@ def check_deepseek_login(email, password):
     }
     status, body = _request("https://chat.deepseek.com/api/v0/users/login", _ds_headers(), payload)
     if status is None:
-        return False, "network error: %s" % body
+        return False, f"network error: {body}"
     try:
         resp = json.loads(body)
         if resp.get("code"):
-            return False, "code %s: %s" % (resp.get("code"), resp.get("msg") or resp.get("message") or "")
+            return False, f"code {resp.get('code')}: {resp.get('msg') or resp.get('message') or ''}"
         data = resp.get("data") or {}
         if data.get("biz_code"):
-            return False, "biz %s: %s" % (data.get("biz_code"), data.get("biz_msg", ""))
+            return False, f"biz {data.get('biz_code')}: {data.get('biz_msg', '')}"
         user = (data.get("biz_data") or {}).get("user") or {}
         return bool(user.get("token")), "login failed: no token in response"
     except ValueError:
-        return False, "unexpected response: %s" % body[:200]
+        return False, f"unexpected response: {body[:200]}"
 
 
 def check_qwen_token(token):
     status, body = _request("https://chat.qwen.ai/api/v1/auths/", _qwen_headers(token))
     if status != 200:
-        return False, "http %s: %s" % (status, body[:200])
+        return False, f"http {status}: {body[:200]}"
     try:
         payload = json.loads(body)
         if payload.get("success") is True:
             return True, ""
         return False, "server rejected the token"
     except ValueError:
-        return False, "unexpected response: %s" % body[:200]
+        return False, f"unexpected response: {body[:200]}"
 
 
 def check_qwen_login(email, password):
     payload = {"email": email, "password": hashlib.sha256(password.encode("utf-8")).hexdigest()}
     status, body = _request("https://chat.qwen.ai/api/v2/auths/signin", _qwen_headers(), payload)
     if status is None:
-        return False, "network error: %s" % body
+        return False, f"network error: {body}"
     try:
         resp = json.loads(body)
         if resp.get("success") is not True:
             data = resp.get("data")
             if isinstance(data, dict) and data.get("code"):
-                return False, "code %s: %s" % (data.get("code"), data.get("details") or data.get("message") or "")
+                return False, f"code {data.get('code')}: {data.get('details') or data.get('message') or ''}"
             return False, "login failed"
         biz = resp.get("data") or {}
         token = biz.get("token") or (biz.get("user") or {}).get("token")
         return bool(token), "login failed: no token in response"
     except ValueError:
-        return False, "unexpected response: %s" % body[:200]
+        return False, f"unexpected response: {body[:200]}"
 
 
 def split_tokens(raw):
@@ -305,21 +306,21 @@ def collect_provider(name, current):
     host = "chat.deepseek.com" if name == "DeepSeek" else "chat.qwen.ai"
     storage = "userToken" if name == "DeepSeek" else "token"
     print()
-    print("[ %s ]" % name)
-    print("  Grab a token: open %s -> DevTools -> Application -> Local Storage -> %s" % (host, storage))
-    tokens = input("  %s tokens, comma-separated [%s]: " % (name, current.get(tokens_key, "") or "(empty)")).strip()
+    print(f"[ {name} ]")
+    print(f"  Grab a token: open {host} -> DevTools -> Application -> Local Storage -> {storage}")
+    tokens = input(f"  {name} tokens, comma-separated [{current.get(tokens_key, '') or '(empty)'}]: ").strip()
     if tokens == "":
         tokens = current.get(tokens_key, "")
-    single = input("  %s single token, fallback [%s]: " % (name, current.get(single_key, "") or "(empty)")).strip()
+    single = input(f"  {name} single token, fallback [{current.get(single_key, '') or '(empty)'}]: ").strip()
     if single == "":
         single = current.get(single_key, "")
-    email = input("  %s email, login fallback [%s]: " % (name, current.get(email_key, "") or "(empty)")).strip()
+    email = input(f"  {name} email, login fallback [{current.get(email_key, '') or '(empty)'}]: ").strip()
     if email == "":
         email = current.get(email_key, "")
     if current.get(password_key, ""):
-        print("  %s password (current set, Enter keeps, !clear erases):" % name)
+        print(f"  {name} password (current set, Enter keeps, !clear erases):")
     else:
-        print("  %s password (empty keeps unset):" % name)
+        print(f"  {name} password (empty keeps unset):")
     password = input("    ").strip()
     if password == "":
         password = current.get(password_key, "")
@@ -345,12 +346,12 @@ def check_provider(name, creds):
             for token in tokens:
                 ok, detail = check_deepseek_token(token)
                 if not ok:
-                    return False, "token invalid: %s" % detail
+                    return False, f"token invalid: {detail}"
             return True, ""
         for token in tokens:
             ok, detail = check_qwen_token(token)
             if not ok:
-                return False, "token invalid: %s" % detail
+                return False, f"token invalid: {detail}"
         return True, ""
     email = creds.get(upper + "_EMAIL", "").strip()
     password = creds.get(upper + "_PASSWORD", "")
@@ -365,11 +366,11 @@ def validate_provider(name, creds):
     while True:
         ok, detail = check_provider(name, creds)
         if ok:
-            print("  %s credentials OK." % name)
+            print(f"  {name} credentials OK.")
             return creds
-        print("  %s credentials INVALID: %s" % (name, detail))
-        if not ask("  Re-enter %s credentials?" % name, True):
-            print("  Keeping %s credentials as entered; the server may fail at startup." % name)
+        print(f"  {name} credentials INVALID: {detail}")
+        if not ask(f"  Re-enter {name} credentials?", True):
+            print(f"  Keeping {name} credentials as entered; the server may fail at startup.")
             return creds
         creds = collect_provider(name, creds)
 
@@ -409,17 +410,13 @@ def create_shortcut():
         return os.path.join(_desktop_dir(), "DanyAPI.lnk")
     if sys.platform.startswith("linux"):
         desktop = _desktop_dir()
-        content = ("[Desktop Entry]\nType=Application\nName=DanyAPI\nComment=Start the DanyAPI server\nExec=%s %s\nPath=%s\nTerminal=true\n") % (
-            py,
-            launcher,
-            root,
-        )
+        content = f"[Desktop Entry]\nType=Application\nName=DanyAPI\nComment=Start the DanyAPI server\nExec={py} {launcher}\nPath={root}\nTerminal=true\n"
         path = os.path.join(desktop, "DanyAPI.desktop")
         Path(path).write_text(content, encoding="utf-8")
         os.chmod(path, 0o755)
         return path
     desktop = _desktop_dir()
-    content = "#!/bin/zsh\ncd %s\nexec %s %s\n" % (shlex.quote(root), shlex.quote(py), shlex.quote(launcher))
+    content = f"#!/bin/zsh\ncd {shlex.quote(root)}\nexec {shlex.quote(py)} {shlex.quote(launcher)}\n"
     path = os.path.join(desktop, "DanyAPI.command")
     Path(path).write_text(content, encoding="utf-8")
     os.chmod(path, 0o755)
@@ -427,9 +424,6 @@ def create_shortcut():
 
 
 def main():
-    if sys.version_info < (3, 13):
-        print("DanyAPI requires Python 3.13+, found %d.%d" % (sys.version_info.major, sys.version_info.minor))
-        sys.exit(1)
     print("DanyAPI setup")
     print("==============")
     if not ENV_FILE.exists():
@@ -457,7 +451,7 @@ def main():
     print("Now the rest of the settings. Enter to keep the current value, !clear to erase.")
     for title, fields in GROUPS:
         print()
-        print("[ %s ]" % title)
+        print(f"[ {title} ]")
         for key, label, kind in fields:
             values[key] = prompt(key, label, kind, values.get(key, ""))
 
@@ -473,12 +467,12 @@ def main():
     if ask("Create a DanyAPI launcher shortcut on the desktop?", True):
         try:
             path = create_shortcut()
-            print("Shortcut created: %s" % path)
+            print(f"Shortcut created: {path}")
         except Exception as exc:
-            print("Shortcut creation failed: %s" % exc)
+            print(f"Shortcut creation failed: {exc}")
 
     print()
-    print("DanyAPI runs from: %s" % ROOT)
+    print(f"DanyAPI runs from: {ROOT}")
     print("The server auto-updates to the latest GitHub release at every launch (DANYAPI_AUTO_UPDATE=0 disables).")
     print("Start it anytime with the desktop shortcut or:")
     print("  run.bat   (Windows)")

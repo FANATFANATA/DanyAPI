@@ -9,7 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 REPO = "FANATFANATA/DanyAPI"
-API = "https://api.github.com/repos/%s/releases/latest" % REPO
+API = f"https://api.github.com/repos/{REPO}/releases/latest"
 TAG_FILE = ROOT / ".installed-release"
 ENV_FILE = ROOT / ".env"
 
@@ -57,9 +57,14 @@ def run(cmd, cwd=None):
 
 
 def git_update(tag):
-    run(["git", "fetch", "origin", "--tags", "--force"])
-    run(["git", "checkout", "-f", tag])
-    run(["git", "reset", "--hard", tag])
+    for cmd in (
+        ["git", "fetch", "origin", "--tags", "--force"],
+        ["git", "checkout", "-f", tag],
+        ["git", "reset", "--hard", tag],
+    ):
+        if run(cmd) != 0:
+            return False
+    return True
 
 
 def zip_update(tag):
@@ -67,14 +72,14 @@ def zip_update(tag):
     tmp_zip = parent / "danyapi-update.zip"
     tmp_dir = parent / ("DanyAPI-" + tag)
     old_dir = parent / ".DanyAPI.old"
-    url = "https://github.com/%s/archive/refs/tags/%s.zip" % (REPO, tag)
-    print("DanyAPI: downloading %s" % url)
+    url = f"https://github.com/{REPO}/archive/refs/tags/{tag}.zip"
+    print(f"DanyAPI: downloading {url}")
     try:
         urllib.request.urlretrieve(url, str(tmp_zip))
         with zipfile.ZipFile(tmp_zip) as zf:
             zf.extractall(str(parent))
     except Exception as exc:
-        print("DanyAPI: update download failed: %s" % exc)
+        print(f"DanyAPI: update download failed: {exc}")
         tmp_zip.unlink(missing_ok=True)
         return False
     if not tmp_dir.exists():
@@ -91,7 +96,7 @@ def zip_update(tag):
 
 
 def update_to(tag):
-    print("DanyAPI: updating to %s ..." % tag)
+    print(f"DanyAPI: updating to {tag} ...")
     if (ROOT / ".git").exists():
         git_update(tag)
     else:
@@ -99,7 +104,7 @@ def update_to(tag):
             return
     run([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"])
     TAG_FILE.write_text(tag, encoding="utf-8")
-    print("DanyAPI: updated to %s" % tag)
+    print(f"DanyAPI: updated to {tag}")
 
 
 def main():
@@ -113,7 +118,7 @@ def main():
     if local != latest:
         update_to(latest)
     else:
-        print("DanyAPI: already at %s" % latest)
+        print(f"DanyAPI: already at {latest}")
     return run([sys.executable, "-m", "danyapi"])
 
 
