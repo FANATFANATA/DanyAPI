@@ -82,8 +82,6 @@ def deepseek_hash_v1(data: bytes, output_bytes: int = 32) -> bytes:
     block = bytearray(data)
     block.append(0x06)
     padlen = rate - (len(block) % rate)
-    if padlen == 0:
-        padlen = rate
     block += bytes(padlen)
     block[-1] |= 0x80
     for off in range(0, len(block), rate):

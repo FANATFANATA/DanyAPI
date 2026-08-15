@@ -972,6 +972,55 @@ def test_extract_wrapped_calls_tool_calls_dict():
     assert calls[0].name == "f"
 
 
+def test_parse_two_objects_second_is_tool_call():
+    text = '{"a": 1} {"tool_calls": [{"name": "f", "arguments": {"x": 1}}]}'
+    parsed = parse_tool_calls(text)
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert calls[0].name == "f"
+
+
+def test_xml_invoke_empty_args_skipped():
+    text = '<tool_calls><invoke name="bash">   </invoke></tool_calls>'
+    parsed = _parse_xml_tool_calls(text, {"bash": {"cmd": "string"}})
+    assert parsed == (None, "")
+
+
+def test_xml_open_pattern_overlap_skipped():
+    text = '<invoke name="other"><bash>x</bash></invoke>'
+    parsed = _parse_xml_tool_calls(text, {"other": {"a": "string"}, "bash": {"cmd": "string"}})
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert [c.name for c in calls] == ["other"]
+
+
+def test_xml_open_pattern_empty_merged_skipped():
+    text = "<bash></bash>"
+    parsed = _parse_xml_tool_calls(text, {"bash": {"cmd": "string"}})
+    assert parsed == (None, "")
+
+
+def test_xml_open_pattern_with_schema():
+    text = "<bash><cmd>ls</cmd></bash>"
+    parsed = _parse_xml_tool_calls(text, {"bash": {"cmd": "string"}})
+    assert parsed is not None
+    calls, _wrapper = parsed
+    assert calls is not None
+    assert calls[0].name == "bash"
+    assert json.loads(calls[0].arguments) == {"cmd": "ls"}
+
+
+def test_xml_selfclose_overlap_skipped():
+    text = '<invoke name="other"><bash/></invoke>'
+    parsed = _parse_xml_tool_calls(text, {"other": {"a": "string"}, "bash": {"cmd": "string"}})
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert [c.name for c in calls] == ["other"]
+
+
 def test_tool_schema_map_skips_bad_tools():
     tools = [
         {"function": {}},

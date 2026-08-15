@@ -422,6 +422,16 @@ def test_account_for_session_expired_discards(pool_store):
     assert "s1" not in store
 
 
+def test_account_for_session_broken_discards(pool_store):
+    store = JsonStore("aff6", "default")
+    a0 = make_acct(0)
+    a0.broken = True
+    pool = AccountPool([a0], affinity_store=store)
+    pool.register(0, "s1")
+    assert pool.account_for_session("s1") is None
+    assert "s1" not in store
+
+
 def test_restore_affinities_variants(pool_store):
     store = JsonStore("aff5", "default")
     store.set("good", 0)

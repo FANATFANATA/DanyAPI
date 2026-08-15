@@ -366,8 +366,6 @@ def build_prompt(
         tail = _tail_after_last_user(messages)
         if _is_tool_round_tail(tail):
             tail_prompt = _render_tool_tail(tail)
-            if not tail_prompt.strip():
-                tail_prompt = extract_last_user(messages)
             return tail_prompt, True
         base = extract_last_user(messages)
         blocks = []
@@ -605,29 +603,15 @@ def _balanced_json(text: str) -> tuple[int, int] | None:
 def _extract_json_object(text: str) -> tuple[dict, int, int] | None:
     stripped = _strip_fences(text)
     bounds = _balanced_json(stripped)
-    if bounds is not None:
-        start, end = bounds
-        try:
-            obj = _loads_lenient(stripped[start : end + 1])
-            if isinstance(obj, dict):
-                return obj, start, end
-        except ValueError:
-            pass
-    start = stripped.find("{")
-    end = stripped.rfind("}")
-    if start == -1 or end == -1 or end <= start:
+    if bounds is None:
         return None
-    candidate = stripped[start : end + 1]
-    for cut in range(len(candidate), 0, -1):
-        if candidate[cut - 1] not in "}]":
-            continue
-        try:
-            obj = json.loads(candidate[:cut])
-        except (json.JSONDecodeError, TypeError, ValueError):
-            continue
-        if isinstance(obj, dict):
-            return obj, start, start + cut - 1
-    return None
+    start, end = bounds
+    try:
+        obj = _loads_lenient(stripped[start : end + 1])
+    except ValueError:
+        return None
+    if isinstance(obj, dict):
+        return obj, start, end
 
 
 def _extract_one_call(item: Any) -> ToolCall | None:
@@ -851,8 +835,6 @@ def _parse_bare_array_calls(text: str) -> list[ToolCall] | None:
     try:
         items = _loads_lenient(stripped)
     except ValueError:
-        return None
-    if not isinstance(items, list):
         return None
     calls: list[ToolCall] = []
     for item in items:

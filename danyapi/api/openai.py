@@ -808,7 +808,6 @@ async def _collect_continuation(
         if not (rec.content or rec.reasoning) and _is_retryable_hint(rec) and attempt < MAX_RETRIES:
             continue
         return rec
-    return None
 
 
 async def _collect_non_stream(
