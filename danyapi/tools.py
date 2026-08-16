@@ -8,6 +8,8 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
+import jsonschema
+
 _DSML_TAG = re.compile(
     r"<\s*/?\s*(?:\||\uff5c){2}\s*DSML\s*(?:\||\uff5c){2}[^>]*>"
     r"|(?:\||\uff5c){2}\s*DSML\s*(?:\||\uff5c){2}",
@@ -29,7 +31,9 @@ TOOL_CALL_INSTRUCTION = (
     '{{"tool_calls": [{{"name": "get_weather", "arguments": {{"city": "Moscow"}}}}]}}\n\n'
     "Use the exact function names and JSON argument keys from the definitions above. "
     'The value of "arguments" must be a JSON object with only those keys. '
-    'You may include multiple entries in the "tool_calls" array to call several functions at once.\n'
+    'You may include multiple entries in the "tool_calls" array to call several functions at once. '
+    "Large tool results are truncated to fit the context window, so keep tool inputs "
+    "(file line ranges, output sizes) as small as practical.\n"
     "{choice}"
 )
 
@@ -37,6 +41,19 @@ CHOICE_INSTRUCTIONS = {
     "required": "You MUST call one or more functions from the list above.",
     "function": "You MUST call exactly the function specified below and no other functions.",
 }
+
+# Default cap for a single tool result when rendering the upstream prompt.
+# A full file read (up to ~100 KB) would otherwise blow the upstream context.
+# 0 disables truncation.
+TOOL_RESULT_MAX_CHARS = 8000
+
+
+def _truncate_tool_result(text: str, limit: int) -> str:
+    if limit > 0 and len(text) > limit:
+        omitted = len(text) - limit
+        return f"{text[:limit]} ... [truncated: {omitted} more characters]"
+    return text
+
 
 JSON_MODE_INSTRUCTION = """You must reply with ONLY a valid JSON object, no markdown fences, no extra text, no explanations, no comments inside the JSON.
 {constraints}"""
@@ -187,7 +204,7 @@ def _render_tool_call_mention(call: Any) -> str:
     return f"[assistant called {name}({args})]"
 
 
-def render_message(msg: Any) -> str:
+def render_message(msg: Any, tool_result_limit: int = TOOL_RESULT_MAX_CHARS) -> str:
     role = getattr(msg, "role", "user")
     text = _content_text(getattr(msg, "content", ""))
     if role in ("user", "system"):
@@ -211,29 +228,29 @@ def render_message(msg: Any) -> str:
     if role == "tool":
         tool_call_id = getattr(msg, "tool_call_id", None) or ""
         prefix = f"Tool result ({tool_call_id})" if tool_call_id else "Tool result"
-        return f"{prefix}: {text}"
+        return f"{prefix}: {_truncate_tool_result(text, tool_result_limit)}"
     if role == "function":
         name = getattr(msg, "name", None) or ""
-        return f"Function {name} returned: {text}"
+        return f"Function {name} returned: {_truncate_tool_result(text, tool_result_limit)}"
     return text
 
 
-def _render_history(messages: list[Any]) -> str:
+def _render_history(messages: list[Any], tool_result_limit: int = TOOL_RESULT_MAX_CHARS) -> str:
     parts = []
     for msg in messages:
-        text = render_message(msg)
+        text = render_message(msg, tool_result_limit)
         if text:
             role = getattr(msg, "role", "user")
             parts.append(f"{role.capitalize()}: {text}")
     return "\n".join(parts)
 
 
-def _render_tool_tail(messages: list[Any]) -> str:
+def _render_tool_tail(messages: list[Any], tool_result_limit: int = TOOL_RESULT_MAX_CHARS) -> str:
     parts = []
     for msg in messages:
         role = getattr(msg, "role", None)
         if role in ("tool", "function"):
-            text = render_message(msg)
+            text = render_message(msg, tool_result_limit)
             if text:
                 parts.append(text)
     parts.append("Continue the conversation and provide the final answer based on the tool results.")
@@ -351,12 +368,42 @@ def render_json_mode(response_format: Any) -> str | None:
     return JSON_MODE_INSTRUCTION.format(constraints=constraints)
 
 
+def response_format_schema(response_format: Any) -> dict | None:
+    """The JSON Schema from a response_format of type "json_schema", if any.
+
+    Only a dict is returned: validation against a non-dict schema would raise
+    jsonschema.SchemaError, which the handlers do not catch.
+    """
+    if not isinstance(response_format, dict):
+        return None
+    if response_format.get("type") != "json_schema":
+        return None
+    raw = response_format.get("json_schema")
+    schema = raw.get("schema") if isinstance(raw, dict) else None
+    return schema if isinstance(schema, dict) else None
+
+
+def validate_json_response(response: Any, schema: dict | None) -> None:
+    """Validate a parsed JSON response against the schema.
+
+    Raises:
+        ValueError: If validation fails.
+    """
+    if schema is None:
+        return
+    try:
+        jsonschema.validate(instance=response, schema=schema)
+    except jsonschema.ValidationError as exc:
+        raise ValueError(f"Response does not match JSON schema: {exc.message}") from exc
+
+
 def build_prompt(
     messages: list[Any],
     tools: list[Any] | None = None,
     tool_choice: Any = None,
     has_session: bool = False,
     response_format: Any = None,
+    tool_result_limit: int = TOOL_RESULT_MAX_CHARS,
 ) -> tuple[str, bool]:
     schema = render_tool_schema(tools, tool_choice)
     tools_present = schema is not None
@@ -365,7 +412,7 @@ def build_prompt(
     if has_session:
         tail = _tail_after_last_user(messages)
         if _is_tool_round_tail(tail):
-            tail_prompt = _render_tool_tail(tail)
+            tail_prompt = _render_tool_tail(tail, tool_result_limit)
             return tail_prompt, True
         base = extract_last_user(messages)
         blocks = []
@@ -376,7 +423,7 @@ def build_prompt(
 
     tool_round_active = is_tool_round(messages)
     if tool_round_active or _has_history(messages):
-        prompt = _render_history(messages)
+        prompt = _render_history(messages, tool_result_limit)
         if schema:
             prompt = f"{schema}\n\n{prompt}"
         if json_block:
@@ -488,6 +535,26 @@ def _normalize_single_quotes(text: str) -> str:
     return "".join(out)
 
 
+_TOOL_CALLS_BAD_SEP = re.compile(r'"tool_calls"\s*([^\s":{\[\],\d\w-])')
+
+
+def _repair_tool_calls_key(text: str) -> str:
+    """Repair a corrupted separator after the `"tool_calls"` key.
+
+    Models occasionally emit e.g. `"tool_calls">` instead of `"tool_calls": [`,
+    dropping the colon and the opening bracket. Re-insert the colon, and the
+    opening bracket as well unless the value already starts with one, so that
+    a single object or a comma-separated list of objects parses as an array.
+    """
+
+    def _fix(match: re.Match) -> str:
+        if text[match.end() :].lstrip().startswith("["):
+            return '"tool_calls": '
+        return '"tool_calls": ['
+
+    return _TOOL_CALLS_BAD_SEP.sub(_fix, text)
+
+
 def _loads_lenient(text: str) -> Any:
     text = text.strip()
     try:
@@ -504,6 +571,16 @@ def _loads_lenient(text: str) -> Any:
             return json.loads(normalized)
         except (json.JSONDecodeError, TypeError, ValueError):
             pass
+    # Repair a corrupted "tool_calls" key separator (e.g. `"tool_calls">`)
+    repaired = _repair_tool_calls_key(text)
+    if repaired != text:
+        for candidate in (repaired, _strip_trailing_commas(repaired), _fix_unbalanced_json(repaired)):
+            if candidate is None:
+                continue
+            try:
+                return json.loads(candidate)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                pass
     fixed = _fix_unbalanced_json(text)
     if fixed is not None and fixed != text:
         try:
@@ -673,9 +750,26 @@ def _unescape_xml(text: str) -> str:
     return text.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", '"').replace("&apos;", "'").replace("&amp;", "&")
 
 
+def _coerce_json_container(value: str) -> Any:
+    """Parse a JSON array/object embedded in a string parameter value.
+
+    DeepSeek emits nested structures as pre-serialized JSON strings; if the
+    value does not parse, or parses to a scalar, keep the raw string."""
+    stripped = value.strip()
+    if not stripped or stripped[0] not in "[{":
+        return value
+    try:
+        parsed = _loads_lenient(stripped)
+    except ValueError:
+        return value
+    return parsed if isinstance(parsed, (list, dict)) else value
+
+
 def _coerce_scalar(value: str, json_type: Any) -> Any:
     if not isinstance(value, str):
         return value
+    if json_type in ("array", "object"):
+        return _coerce_json_container(value)
     if json_type in ("integer", "number"):
         try:
             return int(value)
@@ -695,6 +789,62 @@ def _coerce_scalar(value: str, json_type: Any) -> Any:
     if json_type == "null":
         return None
     return value
+
+
+# Non-null types win: for union/nullable specs we coerce to the real value type,
+# not to None. "null" is the fallback for nullable-only properties. Containers
+# (array/object) rank above string: a failed JSON parse falls back to the raw
+# string, while a string hint would never attempt a parse.
+_TYPE_PRIORITY = ("integer", "number", "boolean", "array", "object", "string", "null")
+
+
+def _collect_declared_types(spec: dict) -> set[str]:
+    """All JSON types declared in a property spec, including types nested
+    inside anyOf/oneOf/allOf combinators (how union types are expressed)."""
+    types: set[str] = set()
+    typ = spec.get("type")
+    if isinstance(typ, str):
+        types.add(typ)
+    elif isinstance(typ, list):
+        types.update(t for t in typ if isinstance(t, str))
+    for combinator in ("anyOf", "oneOf", "allOf"):
+        variants = spec.get(combinator)
+        if not isinstance(variants, list):
+            continue
+        for variant in variants:
+            if isinstance(variant, dict):
+                types |= _collect_declared_types(variant)
+    return types
+
+
+def _coerce_untyped(value: str) -> Any:
+    """Coerce a parameter value whose type is unknown from the schema,
+    using JSON literal semantics. Non-literals are kept as strings."""
+    low = value.lower()
+    if low == "true":
+        return True
+    if low == "false":
+        return False
+    if low == "null":
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        pass
+    try:
+        return float(value)
+    except ValueError:
+        pass
+    return _coerce_json_container(value)
+
+
+_STRING_ATTR_FALSE = re.compile(r'string\s*=\s*["\']?false["\']?', re.IGNORECASE)
+
+
+def _string_attr_is_false(attrs: str) -> bool:
+    """Whether a <parameter> tag carries the model's `string="false"` hint,
+    i.e. the value is a non-string JSON literal rather than text."""
+    return _STRING_ATTR_FALSE.search(attrs) is not None
 
 
 def tool_schema_map(tools: list[Any] | None) -> dict[str, dict[str, Any]]:
@@ -718,14 +868,12 @@ def tool_schema_map(tools: list[Any] | None) -> dict[str, dict[str, Any]]:
         for prop, spec in properties.items():
             if not isinstance(spec, dict):
                 continue
-            typ = spec.get("type")
-            if isinstance(typ, list):
-                for candidate in ("integer", "number", "boolean", "null", "string"):
-                    if candidate in typ:
-                        typ = candidate
+            declared = _collect_declared_types(spec)
+            if declared:
+                for candidate in _TYPE_PRIORITY:
+                    if candidate in declared:
+                        prop_types[prop] = candidate
                         break
-            if typ:
-                prop_types[prop] = typ
         if prop_types:
             result[name] = prop_types
     return result
@@ -733,16 +881,21 @@ def tool_schema_map(tools: list[Any] | None) -> dict[str, dict[str, Any]]:
 
 def _xml_invoke_arguments(body: str, param_types: dict[str, Any] | None = None) -> dict[str, Any] | None:
     stripped = body.strip()
-    if stripped.startswith("{"):
+    if stripped and stripped[0] in "{[":
         try:
             parsed = _loads_lenient(stripped)
-            if isinstance(parsed, dict):
+            if isinstance(parsed, (dict, list)):
                 return parsed
         except ValueError:
             pass
     params: dict[str, Any] = {}
-    for match in re.finditer(r'<parameter\s+name=["\']([^"\']+)["\']\s*>(.*?)</parameter>', body, re.DOTALL | re.IGNORECASE):
-        params[match.group(1).strip()] = _coerce_scalar(_unescape_xml(match.group(2).strip()), (param_types or {}).get(match.group(1).strip()))
+    for match in re.finditer(r'<parameter\s+name=["\']([^"\']+)["\']([^>]*)>(.*?)</parameter>', body, re.DOTALL | re.IGNORECASE):
+        name = match.group(1).strip()
+        value = _unescape_xml(match.group(3).strip())
+        type_hint = (param_types or {}).get(name)
+        if type_hint is None and _string_attr_is_false(match.group(2)):
+            value = _coerce_untyped(value)
+        params[name] = _coerce_scalar(value, type_hint)
     if params:
         return params
     has_children = False
@@ -754,7 +907,8 @@ def _xml_invoke_arguments(body: str, param_types: dict[str, Any] | None = None) 
     inner = _unescape_xml(body.strip())
     if inner:
         return {"content": inner}
-    return None
+    # Empty body = zero-argument call (e.g. EnterPlanMode) → {}, not "no call".
+    return {}
 
 
 def _xml_tag_attrs(body: str, param_types: dict[str, Any] | None = None) -> dict[str, Any]:

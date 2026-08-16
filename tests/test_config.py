@@ -78,6 +78,12 @@ def test_invalid_log_backup_falls_back(settings_for):
     assert settings_for({"DANYAPI_LOG_BACKUP_COUNT": "5"}).log_backup_count == 5
 
 
+def test_tool_result_max_chars(settings_for):
+    assert settings_for({}).tool_result_max_chars == 8000
+    assert settings_for({"DANYAPI_TOOL_RESULT_MAX_CHARS": "bad"}).tool_result_max_chars == 8000
+    assert settings_for({"DANYAPI_TOOL_RESULT_MAX_CHARS": "123"}).tool_result_max_chars == 123
+
+
 def test_deepseek_tokens_comma(settings_for):
     s = settings_for({"DEEPSEEK_TOKENS": "a, b , c"})
     assert s.deepseek_tokens == ["a", "b", "c"]

@@ -77,6 +77,10 @@ class Settings:
             self.human_delay_max = float(os.environ.get("DANYAPI_HUMAN_DELAY_MAX", "3.0"))
         except ValueError:
             self.human_delay_max = 3.0
+        try:
+            self.tool_result_max_chars = int(os.environ.get("DANYAPI_TOOL_RESULT_MAX_CHARS", "8000"))
+        except ValueError:
+            self.tool_result_max_chars = 8000
 
 
 settings = Settings()

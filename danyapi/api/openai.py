@@ -92,6 +92,7 @@ class ChatCompletionRequest(BaseModel):
     temperature: float | None = None
     top_p: float | None = None
     thinking: bool | None = None
+    reasoning_effort: str | None = None
     search: bool | None = None
     session_id: str | None = None
     user: str | None = None
@@ -101,6 +102,20 @@ class ChatCompletionRequest(BaseModel):
     parallel_tool_calls: bool | None = None
     response_format: Any = None
     stream_options: Any = None
+
+
+def _resolve_thinking(req: ChatCompletionRequest, default: bool) -> bool:
+    """Resolve the thinking flag from either 'thinking' or 'reasoning_effort'.
+
+    OpenAI-compatible clients (e.g. Kimi Code) send reasoning_effort ("low"/"medium"/"high").
+    Map any non-none value to True so DanyAPI enables thinking on the upstream provider.
+    """
+    if req.thinking is not None:
+        return bool(req.thinking)
+    effort = (req.reasoning_effort or "").strip().lower()
+    if effort and effort != "off" and effort != "none":
+        return True
+    return default
 
 
 @asynccontextmanager
@@ -483,7 +498,7 @@ async def _chat_completions_deepseek(req: ChatCompletionRequest) -> Any:
         raise HTTPException(503, "deepseek provider is not configured")
 
     model_type = _resolve_model(req.model)
-    thinking = req.thinking if req.thinking is not None else (model_type == "expert")
+    thinking = _resolve_thinking(req, default=(model_type == "expert"))
     search = bool(req.search) and model_type == "default"
 
     context_seq = toolemu.context_sequence(req.messages, user=getattr(req, "user", None))
@@ -500,9 +515,11 @@ async def _chat_completions_deepseek(req: ChatCompletionRequest) -> Any:
             getattr(req, "tool_choice", None),
             existing_sid is not None,
             getattr(req, "response_format", None),
+            tool_result_limit=settings.tool_result_max_chars,
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+    json_schema = toolemu.response_format_schema(getattr(req, "response_format", None))
 
     attachments = _collect_attachments(req)
     _validate_attachments(attachments, model_type)
@@ -524,6 +541,7 @@ async def _chat_completions_deepseek(req: ChatCompletionRequest) -> Any:
         "tool_mode": tool_mode,
         "include_usage": _include_usage(req),
         "context_seq": context_seq,
+        "json_schema": json_schema,
     }
     if req.stream:
         return StreamingResponse(
@@ -543,7 +561,7 @@ async def _chat_completions_qwen(req: ChatCompletionRequest) -> Any:
     if pool is None:
         raise HTTPException(503, "qwen provider is not configured")
 
-    thinking = req.thinking if req.thinking is not None else True
+    thinking = _resolve_thinking(req, default=True)
     search = bool(req.search)
 
     context_seq = toolemu.context_sequence(req.messages, user=getattr(req, "user", None))
@@ -560,9 +578,11 @@ async def _chat_completions_qwen(req: ChatCompletionRequest) -> Any:
             getattr(req, "tool_choice", None),
             existing_sid is not None,
             getattr(req, "response_format", None),
+            tool_result_limit=settings.tool_result_max_chars,
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+    json_schema = toolemu.response_format_schema(getattr(req, "response_format", None))
 
     common = {
         "account": account,
@@ -577,6 +597,7 @@ async def _chat_completions_qwen(req: ChatCompletionRequest) -> Any:
         "tool_mode": tool_mode,
         "include_usage": _include_usage(req),
         "context_seq": context_seq,
+        "json_schema": json_schema,
     }
     if req.stream:
         return StreamingResponse(
@@ -843,6 +864,7 @@ async def _collect_non_stream(
     tool_schemas=None,
     include_usage=False,
     context_seq: tuple[str, ...] | None = None,
+    json_schema: dict | None = None,
 ):
     await _human_delay()
     async with account_lock(lock, settings.acquire_timeout):
@@ -953,6 +975,17 @@ async def _collect_non_stream(
             message = {"role": "assistant", "content": content}
             if reasoning:
                 message["reasoning_content"] = reasoning
+            # Validate JSON response against schema if present
+            if json_schema is not None and content.strip():
+                try:
+                    parsed_content = json.loads(content)
+                    toolemu.validate_json_response(parsed_content, json_schema)
+                except json.JSONDecodeError as exc:
+                    log.warning("JSON mode: invalid JSON response: %s", exc)
+                    raise HTTPException(400, f"Invalid JSON response: {exc}") from None
+                except ValueError as exc:
+                    log.warning("JSON mode: schema validation failed: %s", exc)
+                    raise HTTPException(400, str(exc)) from None
         return {
             "id": f"chatcmpl-{uuid.uuid4().hex}",
             "object": "chat.completion",
@@ -985,6 +1018,7 @@ async def _stream_openai(
     tool_schemas=None,
     include_usage=False,
     context_seq: tuple[str, ...] | None = None,
+    json_schema: dict | None = None,
 ):
     chunk_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
@@ -1112,9 +1146,8 @@ async def _stream_openai(
                             )
                         delta: dict = {}
                         if c_diff:
-                            if tool_mode:
-                                content_buf += c_diff
-                            else:
+                            content_buf += c_diff
+                            if not tool_mode:
                                 delta["content"] = c_diff
                         if r_diff:
                             delta["reasoning_content"] = r_diff
@@ -1199,9 +1232,8 @@ async def _stream_openai(
                 rec.extend_with(cont_rec)
                 cont_parent = cont_rec.id or cont_parent
                 if cont_rec.content:
-                    if tool_mode:
-                        content_buf += cont_rec.content
-                    else:
+                    content_buf += cont_rec.content
+                    if not tool_mode:
                         yield sse(
                             {
                                 "id": chunk_id,
@@ -1293,6 +1325,55 @@ async def _stream_openai(
                     )
                 finish = _finish_reason(rec.status)
         else:
+            # Validate JSON response against schema if present
+            if json_schema is not None and content_buf.strip():
+                try:
+                    parsed_content = json.loads(content_buf)
+                    toolemu.validate_json_response(parsed_content, json_schema)
+                except json.JSONDecodeError as exc:
+                    log.warning("JSON mode: invalid JSON response: %s", exc)
+                    yield sse(
+                        {
+                            "id": chunk_id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": model,
+                            "error": {"message": f"Invalid JSON response: {exc}"},
+                            "choices": [{"index": 0, "delta": {}, "finish_reason": "error"}],
+                        }
+                    )
+                    yield sse(
+                        {
+                            "id": chunk_id,
+                            "session_id": session_key,
+                            "object": "chat.completion.chunk",
+                            "choices": [],
+                        }
+                    )
+                    yield "data: [DONE]\n\n"
+                    return
+                except ValueError as exc:
+                    log.warning("JSON mode: schema validation failed: %s", exc)
+                    yield sse(
+                        {
+                            "id": chunk_id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": model,
+                            "error": {"message": str(exc)},
+                            "choices": [{"index": 0, "delta": {}, "finish_reason": "error"}],
+                        }
+                    )
+                    yield sse(
+                        {
+                            "id": chunk_id,
+                            "session_id": session_key,
+                            "object": "chat.completion.chunk",
+                            "choices": [],
+                        }
+                    )
+                    yield "data: [DONE]\n\n"
+                    return
             finish = _finish_reason(rec.status)
 
         yield sse(

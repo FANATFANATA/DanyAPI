@@ -45,11 +45,59 @@ DS_XML_SSE = (
     "\n"
 )
 
+DS_JSON_SSE = (
+    "event: ready\n"
+    'data: {"request_message_id":1,"response_message_id":2,"model_type":"default"}\n'
+    "\n"
+    'data: {"v":{"response":{"message_id":2,"parent_id":1,"status":"WIP","fragments":['
+    + '{"id":2,"type":"RESPONSE","content":'
+    + json.dumps('{"answer": 42}')
+    + "}]}}}\n"
+    "\n"
+    'data: {"p":"response/status","o":"SET","v":"FINISHED"}\n'
+    "\n"
+)
+
+DS_BAD_JSON_SSE = (
+    "event: ready\n"
+    'data: {"request_message_id":1,"response_message_id":2,"model_type":"default"}\n'
+    "\n"
+    'data: {"v":{"response":{"message_id":2,"parent_id":1,"status":"WIP","fragments":['
+    + '{"id":2,"type":"RESPONSE","content":'
+    + json.dumps("not json at all")
+    + "}]}}}\n"
+    "\n"
+    'data: {"p":"response/status","o":"SET","v":"FINISHED"}\n'
+    "\n"
+)
+
 QWEN_TOOL_SSE = (
     'data: {"response.created":{"chat_id":"c1","parent_id":"p0","response_id":"r1","response_index":"0"}} \n'
     "\n"
     'data: {"choices": [{"delta": {"role": "assistant", "content": '
     + json.dumps(TOOL_JSON)
+    + ', "phase": "answer", "status": "typing"}}], "response_id": "r1"}\n'
+    "\n"
+    'data: {"choices": [{"delta": {"content": "", "role": "assistant", "status": "finished", "phase": "answer"}}], "response_id": "r1"}\n'
+    "\n"
+)
+
+QWEN_JSON_SSE = (
+    'data: {"response.created":{"chat_id":"c1","parent_id":"p0","response_id":"r1","response_index":"0"}} \n'
+    "\n"
+    'data: {"choices": [{"delta": {"role": "assistant", "content": '
+    + json.dumps('{"answer": 42}')
+    + ', "phase": "answer", "status": "typing"}}], "response_id": "r1"}\n'
+    "\n"
+    'data: {"choices": [{"delta": {"content": "", "role": "assistant", "status": "finished", "phase": "answer"}}], "response_id": "r1"}\n'
+    "\n"
+)
+
+QWEN_BAD_JSON_SSE = (
+    'data: {"response.created":{"chat_id":"c1","parent_id":"p0","response_id":"r1","response_index":"0"}} \n'
+    "\n"
+    'data: {"choices": [{"delta": {"role": "assistant", "content": '
+    + json.dumps("not json at all")
     + ', "phase": "answer", "status": "typing"}}], "response_id": "r1"}\n'
     "\n"
     'data: {"choices": [{"delta": {"content": "", "role": "assistant", "status": "finished", "phase": "answer"}}], "response_id": "r1"}\n'
@@ -214,3 +262,104 @@ async def test_qwen_stream_emits_tool_call_deltas():
     assert '"tool_calls"' in joined
     assert '"finish_reason": "tool_calls"' in joined
     assert joined.rstrip().endswith("data: [DONE]")
+
+
+JSON_ANSWER_SCHEMA = {"type": "object", "required": ["answer"], "properties": {"answer": {"type": "integer"}}}
+
+
+async def test_json_schema_valid_response_passes():
+    acct = FakeAccount([DS_JSON_SSE])
+    result = await openai_mod._collect_non_stream(**{**_deepseek_args(acct, tool_mode=False), "json_schema": JSON_ANSWER_SCHEMA})
+    choice = result["choices"][0]
+    assert choice["finish_reason"] == "stop"
+    assert choice["message"]["content"] == '{"answer": 42}'
+
+
+async def test_json_schema_invalid_json_raises():
+    acct = FakeAccount([DS_BAD_JSON_SSE])
+    with pytest.raises(openai_mod.HTTPException) as exc:
+        await openai_mod._collect_non_stream(**{**_deepseek_args(acct, tool_mode=False), "json_schema": JSON_ANSWER_SCHEMA})
+    assert exc.value.status_code == 400
+    assert "Invalid JSON response" in str(exc.value.detail)
+
+
+async def test_json_schema_mismatch_raises():
+    acct = FakeAccount([DS_JSON_SSE])
+    with pytest.raises(openai_mod.HTTPException) as exc:
+        await openai_mod._collect_non_stream(**{**_deepseek_args(acct, tool_mode=False), "json_schema": {"type": "object", "required": ["score"]}})
+    assert exc.value.status_code == 400
+    assert "does not match JSON schema" in str(exc.value.detail)
+
+
+async def test_json_schema_no_schema_no_validation():
+    acct = FakeAccount([DS_BAD_JSON_SSE])
+    result = await openai_mod._collect_non_stream(**{**_deepseek_args(acct, tool_mode=False), "json_schema": None})
+    assert result["choices"][0]["finish_reason"] == "stop"
+
+
+async def test_stream_json_schema_error_terminates_stream():
+    acct = FakeAccount([DS_BAD_JSON_SSE])
+    gen = openai_mod._stream_openai(**{**_deepseek_args(acct, tool_mode=False), "json_schema": JSON_ANSWER_SCHEMA})
+    lines = await collect_stream(gen)
+    joined = "".join(lines)
+    assert '"finish_reason": "error"' in joined
+    assert "Invalid JSON response" in joined
+    assert joined.rstrip().endswith("data: [DONE]")
+
+
+async def test_qwen_json_schema_valid_response_passes():
+    acct = FakeAccount([QWEN_JSON_SSE])
+    result = await qwen_api.collect_non_stream(**{**_qwen_args(acct, tool_mode=False), "json_schema": JSON_ANSWER_SCHEMA})
+    choice = result["choices"][0]
+    assert choice["finish_reason"] == "stop"
+    assert choice["message"]["content"] == '{"answer": 42}'
+
+
+async def test_qwen_json_schema_invalid_json_raises():
+    acct = FakeAccount([QWEN_BAD_JSON_SSE])
+    with pytest.raises(openai_mod.HTTPException) as exc:
+        await qwen_api.collect_non_stream(**{**_qwen_args(acct, tool_mode=False), "json_schema": JSON_ANSWER_SCHEMA})
+    assert exc.value.status_code == 400
+
+
+async def test_qwen_stream_json_schema_error_terminates_stream():
+    acct = FakeAccount([QWEN_BAD_JSON_SSE])
+    gen = qwen_api.stream_openai(**{**_qwen_args(acct, tool_mode=False), "json_schema": JSON_ANSWER_SCHEMA})
+    lines = await collect_stream(gen)
+    joined = "".join(lines)
+    assert '"finish_reason": "error"' in joined
+    assert "Invalid JSON response" in joined
+    assert joined.rstrip().endswith("data: [DONE]")
+
+
+def test_resolve_thinking_explicit_flag_wins():
+    req = openai_mod.ChatCompletionRequest(thinking=False, reasoning_effort="high")
+    assert openai_mod._resolve_thinking(req, default=True) is False
+    req = openai_mod.ChatCompletionRequest(thinking=True, reasoning_effort="none")
+    assert openai_mod._resolve_thinking(req, default=False) is True
+
+
+@pytest.mark.parametrize("effort", ["low", "medium", "high"])
+def test_resolve_thinking_effort_enables_thinking(effort):
+    req = openai_mod.ChatCompletionRequest(reasoning_effort=effort)
+    assert openai_mod._resolve_thinking(req, default=False) is True
+
+
+@pytest.mark.parametrize("effort", ["none", "off", "", "   "])
+def test_resolve_thinking_off_effort_falls_back_to_default(effort):
+    req = openai_mod.ChatCompletionRequest(reasoning_effort=effort)
+    assert openai_mod._resolve_thinking(req, default=False) is False
+    assert openai_mod._resolve_thinking(req, default=True) is True
+
+
+def test_resolve_thinking_effort_is_case_and_space_insensitive():
+    req = openai_mod.ChatCompletionRequest(reasoning_effort="  High ")
+    assert openai_mod._resolve_thinking(req, default=False) is True
+    req = openai_mod.ChatCompletionRequest(reasoning_effort="NONE")
+    assert openai_mod._resolve_thinking(req, default=False) is False
+
+
+def test_resolve_thinking_no_effort_uses_default():
+    req = openai_mod.ChatCompletionRequest()
+    assert openai_mod._resolve_thinking(req, default=False) is False
+    assert openai_mod._resolve_thinking(req, default=True) is True

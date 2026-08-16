@@ -348,6 +348,7 @@ async def test_search_gated_to_flash_and_thinking_allowed():
                 model=model,
                 stream=False,
                 thinking=thinking,
+                reasoning_effort=None,
                 search=search,
                 session_id=None,
                 files=None,

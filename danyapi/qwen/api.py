@@ -222,6 +222,7 @@ async def collect_non_stream(
     tool_schemas=None,
     include_usage=False,
     context_seq: tuple[str, ...] | None = None,
+    json_schema: dict | None = None,
 ):
     await _human_delay()
     async with account_lock(lock, settings.acquire_timeout):
@@ -297,6 +298,17 @@ async def collect_non_stream(
             message = {"role": "assistant", "content": rec.content}
             if rec.reasoning:
                 message["reasoning_content"] = rec.reasoning
+            # Validate JSON response against schema if present
+            if json_schema is not None and (rec.content or "").strip():
+                try:
+                    parsed_content = json.loads(rec.content)
+                    toolemu.validate_json_response(parsed_content, json_schema)
+                except json.JSONDecodeError as exc:
+                    log.warning("JSON mode: invalid JSON response: %s", exc)
+                    raise HTTPException(400, f"Invalid JSON response: {exc}") from None
+                except ValueError as exc:
+                    log.warning("JSON mode: schema validation failed: %s", exc)
+                    raise HTTPException(400, str(exc)) from None
             finish = "stop"
         return {
             "id": f"chatcmpl-{uuid.uuid4().hex}",
@@ -323,6 +335,7 @@ async def stream_openai(
     tool_schemas=None,
     include_usage=False,
     context_seq: tuple[str, ...] | None = None,
+    json_schema: dict | None = None,
 ):
     chunk_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
@@ -457,9 +470,8 @@ async def stream_openai(
                             )
                         delta: dict = {}
                         if c_diff:
-                            if tool_mode:
-                                content_buf += c_diff
-                            else:
+                            content_buf += c_diff
+                            if not tool_mode:
                                 delta["content"] = c_diff
                         if r_diff:
                             delta["reasoning_content"] = r_diff
@@ -605,6 +617,55 @@ async def stream_openai(
                     )
                 finish = "stop"
         else:
+            # Validate JSON response against schema if present
+            if json_schema is not None and content_buf.strip():
+                try:
+                    parsed_content = json.loads(content_buf)
+                    toolemu.validate_json_response(parsed_content, json_schema)
+                except json.JSONDecodeError as exc:
+                    log.warning("JSON mode: invalid JSON response: %s", exc)
+                    yield sse(
+                        {
+                            "id": chunk_id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": model,
+                            "error": {"message": f"Invalid JSON response: {exc}"},
+                            "choices": [{"index": 0, "delta": {}, "finish_reason": "error"}],
+                        }
+                    )
+                    yield sse(
+                        {
+                            "id": chunk_id,
+                            "session_id": session_key,
+                            "object": "chat.completion.chunk",
+                            "choices": [],
+                        }
+                    )
+                    yield "data: [DONE]\n\n"
+                    return
+                except ValueError as exc:
+                    log.warning("JSON mode: schema validation failed: %s", exc)
+                    yield sse(
+                        {
+                            "id": chunk_id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": model,
+                            "error": {"message": str(exc)},
+                            "choices": [{"index": 0, "delta": {}, "finish_reason": "error"}],
+                        }
+                    )
+                    yield sse(
+                        {
+                            "id": chunk_id,
+                            "session_id": session_key,
+                            "object": "chat.completion.chunk",
+                            "choices": [],
+                        }
+                    )
+                    yield "data: [DONE]\n\n"
+                    return
             finish = "stop"
 
         yield sse(

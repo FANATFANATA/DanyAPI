@@ -4,6 +4,7 @@ from typing import Any
 import pytest
 
 from danyapi.tools import (
+    TOOL_RESULT_MAX_CHARS,
     ToolCall,
     _coerce_scalar,
     _content_fingerprint,
@@ -31,8 +32,10 @@ from danyapi.tools import (
     render_json_mode,
     render_message,
     render_tool_schema,
+    response_format_schema,
     tool_call_deltas,
     tool_schema_map,
+    validate_json_response,
 )
 
 WEATHER_TOOL = {
@@ -44,6 +47,55 @@ WEATHER_TOOL = {
             "type": "object",
             "properties": {"city": {"type": "string"}},
             "required": ["city"],
+        },
+    },
+}
+
+# Mirrors the kimi-code Read tool: line_offset is a union of two integer
+# ranges, so its JSON Schema has no top-level "type" — only an anyOf.
+READ_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "Read",
+        "description": "Read a text file",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "line_offset": {
+                    "anyOf": [
+                        {"type": "integer", "minimum": 1},
+                        {"type": "integer", "minimum": -1000, "maximum": -1},
+                    ]
+                },
+                "n_lines": {"type": "integer"},
+            },
+            "required": ["path"],
+        },
+    },
+}
+
+# Mirrors the kimi-code TodoList tool: a single array-typed property.
+TODO_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "TodoList",
+        "description": "Update the todo list",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "todos": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "title": {"type": "string"},
+                            "status": {"type": "string", "enum": ["pending", "in_progress", "done"]},
+                        },
+                        "required": ["title", "status"],
+                    },
+                }
+            },
         },
     },
 }
@@ -552,6 +604,35 @@ def test_render_json_mode_schema():
     assert '"type": "object"' in block
 
 
+def test_response_format_schema_returns_schema():
+    schema = {"type": "object", "required": ["answer"], "properties": {"answer": {"type": "integer"}}}
+    rf = {"type": "json_schema", "json_schema": {"name": "answer", "schema": schema}}
+    assert response_format_schema(rf) is schema
+
+
+def test_response_format_schema_rejects_other_shapes():
+    assert response_format_schema(None) is None
+    assert response_format_schema("json_object") is None
+    assert response_format_schema({"type": "json_object"}) is None
+    assert response_format_schema({"type": "json_schema"}) is None
+    assert response_format_schema({"type": "json_schema", "json_schema": {"schema": 42}}) is None
+
+
+def test_validate_json_response_none_schema_is_noop():
+    validate_json_response({"anything": "goes"}, None)
+
+
+def test_validate_json_response_valid():
+    schema = {"type": "object", "required": ["answer"], "properties": {"answer": {"type": "integer"}}}
+    validate_json_response({"answer": 42}, schema)
+
+
+def test_validate_json_response_invalid():
+    schema = {"type": "object", "required": ["answer"], "properties": {"answer": {"type": "integer"}}}
+    with pytest.raises(ValueError, match="does not match JSON schema"):
+        validate_json_response({"answer": "not a number"}, schema)
+
+
 def test_extract_system_collects_system():
     messages = [
         Message(role="system", content="one"),
@@ -862,7 +943,8 @@ def test_xml_invoke_inline_json():
 
     args = _xml_invoke_arguments('{"cmd": "ls"}')
     assert args == {"cmd": "ls"}
-    assert _xml_invoke_arguments("  ") is None
+    # Empty body = zero-argument call → {}, not "no call".
+    assert _xml_invoke_arguments("  ") == {}
 
 
 def test_xml_tag_attrs():
@@ -981,10 +1063,15 @@ def test_parse_two_objects_second_is_tool_call():
     assert calls[0].name == "f"
 
 
-def test_xml_invoke_empty_args_skipped():
+def test_xml_invoke_empty_args_zero_arg_call():
+    # Empty invoke body = zero-argument call → "{}", not a skipped call.
     text = '<tool_calls><invoke name="bash">   </invoke></tool_calls>'
     parsed = _parse_xml_tool_calls(text, {"bash": {"cmd": "string"}})
-    assert parsed == (None, "")
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert [c.name for c in calls] == ["bash"]
+    assert calls[0].arguments == "{}"
 
 
 def test_xml_open_pattern_overlap_skipped():
@@ -1073,3 +1160,287 @@ def test_iter_json_objects_skips_bad_candidates():
     text = '{"ok": 1} not-json {"bad": broken}'
     objs = [obj for obj, _, _ in _iter_json_objects(text)]
     assert objs == [{"ok": 1}]
+
+
+def _tool_result_msg(text: str) -> Message:
+    return Message(role="tool", content=text, tool_call_id="call_1")
+
+
+def test_tool_result_short_untouched():
+    assert render_message(_tool_result_msg("42")) == "Tool result (call_1): 42"
+
+
+def test_tool_result_long_truncated():
+    long_text = "x" * 20000
+    out = render_message(_tool_result_msg(long_text))
+    assert out.startswith("Tool result (call_1): " + "x" * TOOL_RESULT_MAX_CHARS)
+    assert f"[truncated: {20000 - TOOL_RESULT_MAX_CHARS} more characters]" in out
+    assert len(out) < len(long_text)
+
+
+def test_tool_result_custom_limit():
+    out = render_message(_tool_result_msg("y" * 100), tool_result_limit=40)
+    assert out.endswith("y" * 40 + " ... [truncated: 60 more characters]")
+
+
+def test_tool_result_limit_zero_disables():
+    long_text = "z" * 500
+    assert render_message(_tool_result_msg(long_text), tool_result_limit=0) == f"Tool result (call_1): {long_text}"
+
+
+def test_function_result_truncated():
+    msg = Message(role="function", content="f" * 9000, name="get_weather")
+    assert "[truncated:" in render_message(msg)
+
+
+def test_build_prompt_session_tail_truncates_tool_result():
+    messages = [
+        Message(role="user", content="read the file"),
+        Message(role="assistant", tool_calls=[{"id": "c1", "type": "function", "function": {"name": "Read", "arguments": "{}"}}]),
+        Message(role="tool", content="r" * 20000, tool_call_id="c1"),
+    ]
+    prompt, tool_mode = build_prompt(messages, None, None, has_session=True)
+    assert tool_mode
+    assert "[truncated:" in prompt
+    assert len(prompt) < TOOL_RESULT_MAX_CHARS + 500
+
+
+def test_build_prompt_full_history_custom_limit():
+    messages = [
+        Message(role="user", content="hi"),
+        Message(role="assistant", content="ok"),
+        Message(role="user", content="read it"),
+        Message(role="tool", content="t" * 5000, tool_call_id="c9"),
+    ]
+    prompt, tool_mode = build_prompt(messages, has_session=False, tool_result_limit=100)
+    assert tool_mode
+    assert "[truncated: 4900 more characters]" in prompt
+
+
+# --- corrupted "tool_calls" key separator ---
+
+
+def test_repair_tool_calls_key_inserts_colon_and_bracket():
+    from danyapi.tools import _repair_tool_calls_key
+
+    assert _repair_tool_calls_key('{"tool_calls"> {"name": "a"}}') == '{"tool_calls": [ {"name": "a"}}'
+    # Value already starts with "[" — only the colon is re-inserted.
+    assert _repair_tool_calls_key('{"tool_calls"> [1, 2]}') == '{"tool_calls":  [1, 2]}'
+    # A valid separator is left untouched.
+    assert _repair_tool_calls_key('{"tool_calls": [{"name": "a"}]}') == '{"tool_calls": [{"name": "a"}]}'
+
+
+def test_parse_tool_calls_corrupted_separator():
+    # DeepSeek Pro sometimes emits "tool_calls"> instead of "tool_calls": [
+    text = 'Still reading.\n\n```json\n{\n  "tool_calls">\n    {\n      "name": "get_weather",\n      "arguments": {"city": "London"}\n    }\n  ]\n}\n```'
+    parsed = parse_tool_calls(text)
+    assert parsed is not None
+    calls, wrapper = parsed
+    assert [c.name for c in calls] == ["get_weather"]
+    assert calls[0].arguments == '{"city": "London"}'
+    assert "Still reading" in wrapper
+
+
+def test_parse_tool_calls_corrupted_separator_multiple():
+    text = '```json\n{\n  "tool_calls">\n    {"name": "a", "arguments": {"x": 1}},\n    {"name": "b", "arguments": {"y": 2}}\n  ]\n}\n```'
+    parsed = parse_tool_calls(text)
+    assert parsed is not None
+    calls, _ = parsed
+    assert [c.name for c in calls] == ["a", "b"]
+
+
+def test_parse_tool_calls_corrupted_separator_missing_closer():
+    # Both the corrupted separator and the closing bracket are dropped.
+    text = '{"tool_calls"> {"name": "a", "arguments": {"x": 1}}}'
+    parsed = parse_tool_calls(text)
+    assert parsed is not None
+    calls, _ = parsed
+    assert [c.name for c in calls] == ["a"]
+
+
+# --- tool_schema_map declared types (anyOf/oneOf/allOf) ---
+
+
+def test_tool_schema_map_anyof_integer_union():
+    assert tool_schema_map([READ_TOOL])["Read"]["line_offset"] == "integer"
+
+
+def test_tool_schema_map_array_property_hint():
+    assert tool_schema_map([TODO_TOOL])["TodoList"]["todos"] == "array"
+
+
+def test_tool_schema_map_array_string_union_prefers_array():
+    tool = {
+        "type": "function",
+        "function": {
+            "name": "f",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "a": {"anyOf": [{"type": "string"}, {"type": "array"}]},
+                },
+            },
+        },
+    }
+    assert tool_schema_map([tool])["f"]["a"] == "array"
+
+
+def test_tool_schema_map_nullable_string_prefers_string():
+    tool = {
+        "type": "function",
+        "function": {
+            "name": "f",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "a": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                    "b": {"type": ["string", "null"]},
+                },
+            },
+        },
+    }
+    assert tool_schema_map([tool])["f"] == {"a": "string", "b": "string"}
+
+
+def test_tool_schema_map_property_without_type_skipped():
+    tool = {
+        "type": "function",
+        "function": {
+            "name": "f",
+            "parameters": {"type": "object", "properties": {"opts": {"description": "free form"}}},
+        },
+    }
+    assert "f" not in tool_schema_map([tool])
+
+
+# --- XML parameter coercion ---
+
+
+def test_coerce_scalar_array_object_hints():
+    assert _coerce_scalar("[1, 2]", "array") == [1, 2]
+    assert _coerce_scalar('{"a": 1}', "object") == {"a": 1}
+    # A failed JSON parse falls back to the raw string.
+    assert _coerce_scalar("plain text", "array") == "plain text"
+
+
+def test_coerce_json_container():
+    from danyapi.tools import _coerce_json_container
+
+    assert _coerce_json_container("[1, 2, 3]") == [1, 2, 3]
+    assert _coerce_json_container('{"a": 1}') == {"a": 1}
+    # Scalars and non-JSON stay strings.
+    assert _coerce_json_container("42") == "42"
+    assert _coerce_json_container("[ not json ]") == "[ not json ]"
+    assert _coerce_json_container("") == ""
+
+
+def test_coerce_untyped_literals():
+    from danyapi.tools import _coerce_untyped
+
+    assert _coerce_untyped("true") is True
+    assert _coerce_untyped("false") is False
+    assert _coerce_untyped("null") is None
+    assert _coerce_untyped("42") == 42
+    assert _coerce_untyped("3.5") == 3.5
+    assert _coerce_untyped("[1, 2]") == [1, 2]
+    assert _coerce_untyped("hello") == "hello"
+
+
+def test_xml_parameter_string_attrs_with_anyof_schema():
+    # DeepSeek emits non-string values annotated with string="false", and the
+    # client schema may declare the property only via anyOf (no top-level type).
+    text = (
+        "<tool_calls>\n"
+        '<invoke name="Read">\n'
+        '<parameter name="path" string="true">/home/u/proj/src/llm/mod.rs</parameter>\n'
+        '<parameter name="line_offset" string="false">370</parameter>\n'
+        '<parameter name="n_lines" string="false">40</parameter>\n'
+        "</invoke>\n"
+        "</tool_calls>"
+    )
+    parsed = parse_tool_calls(text, tool_schema_map([READ_TOOL]))
+    assert parsed is not None
+    calls, _ = parsed
+    args = json.loads(calls[0].arguments)
+    assert args["path"] == "/home/u/proj/src/llm/mod.rs"
+    assert args["line_offset"] == 370
+    assert args["n_lines"] == 40
+
+
+def test_xml_anyof_integer_coerced_from_schema_without_attrs():
+    text = '<tool_calls><invoke name="Read"><parameter name="path">a.rs</parameter><parameter name="line_offset">-100</parameter></invoke></tool_calls>'
+    parsed = parse_tool_calls(text, tool_schema_map([READ_TOOL]))
+    assert parsed is not None
+    calls, _ = parsed
+    args = json.loads(calls[0].arguments)
+    assert args["line_offset"] == -100
+
+
+def test_xml_string_attr_false_without_schema():
+    text = (
+        '<tool_calls><invoke name="f">'
+        '<parameter name="limit" string="false">42</parameter>'
+        '<parameter name="block" string="false">false</parameter>'
+        '<parameter name="note" string="true">42</parameter>'
+        "</invoke></tool_calls>"
+    )
+    parsed = parse_tool_calls(text)
+    assert parsed is not None
+    calls, _ = parsed
+    assert json.loads(calls[0].arguments) == {"limit": 42, "block": False, "note": "42"}
+
+
+def test_xml_empty_invoke_zero_arg_tool():
+    # EnterPlanMode (and similar zero-arg tools) are invoked with an empty
+    # body; before the fix the whole block stayed as plain text.
+    text = 'Let me call EnterPlanMode.\n\n<tool_calls><invoke name="EnterPlanMode"></invoke></tool_calls>'
+    parsed = parse_tool_calls(text)
+    assert parsed is not None
+    calls, wrapper = parsed
+    assert calls[0].name == "EnterPlanMode"
+    assert calls[0].arguments == "{}"
+    assert wrapper == "Let me call EnterPlanMode."
+
+
+def test_xml_array_param_json_string():
+    # DeepSeek emits nested arrays as pre-serialized JSON strings; the client
+    # schema (zod) rejects a string where an array is expected.
+    text = (
+        '<tool_calls><invoke name="TodoList">'
+        '<parameter name="todos">[{"title": "a", "status": "pending"}, {"title": "b", "status": "in_progress"}]</parameter>'
+        "</invoke></tool_calls>"
+    )
+    parsed = parse_tool_calls(text, tool_schema_map([TODO_TOOL]))
+    assert parsed is not None
+    calls, _ = parsed
+    args = json.loads(calls[0].arguments)
+    assert args["todos"][0] == {"title": "a", "status": "pending"}
+    assert args["todos"][1]["status"] == "in_progress"
+
+
+def test_xml_array_param_json_string_without_schema():
+    # No schema available, but the model marks the parameter string="false".
+    text = '<tool_calls><invoke name="TodoList"><parameter name="todos" string="false">[{"title": "a", "status": "pending"}]</parameter></invoke></tool_calls>'
+    parsed = parse_tool_calls(text)
+    assert parsed is not None
+    calls, _ = parsed
+    args = json.loads(calls[0].arguments)
+    assert args["todos"] == [{"title": "a", "status": "pending"}]
+
+
+def test_xml_array_param_plain_text_stays_string():
+    text = '<tool_calls><invoke name="TodoList"><parameter name="todos">[ -f /tmp/x ]</parameter></invoke></tool_calls>'
+    parsed = parse_tool_calls(text, tool_schema_map([TODO_TOOL]))
+    assert parsed is not None
+    calls, _ = parsed
+    args = json.loads(calls[0].arguments)
+    assert args["todos"] == "[ -f /tmp/x ]"
+
+
+def test_xml_bare_array_body():
+    text = '<tool_calls><invoke name="TodoList">[{"title": "a", "status": "pending"}]</invoke></tool_calls>'
+    parsed = parse_tool_calls(text, tool_schema_map([TODO_TOOL]))
+    assert parsed is not None
+    calls, _ = parsed
+    args = json.loads(calls[0].arguments)
+    assert args == [{"title": "a", "status": "pending"}]
