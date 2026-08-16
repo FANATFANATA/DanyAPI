@@ -26,6 +26,25 @@ _DSML_HIDDEN_NAKED = re.compile(
     rf"{_DSML_MARKER}\s*<({_DSML_HIDDEN_NAMES})\b[^<>]*>.*?</\1>\s*{_DSML_MARKER}",
     re.DOTALL | re.IGNORECASE,
 )
+_XML_ELEMENT = re.compile(r"<([a-zA-Z_][a-zA-Z0-9_-]*)\b([^>]*)>(.*?)</\1>", re.DOTALL | re.IGNORECASE)
+_XML_SELFCLOSE = re.compile(r"<([a-zA-Z_][a-zA-Z0-9_-]*)\b([^>]*?)/>", re.DOTALL | re.IGNORECASE)
+_XML_WRAPPER_OPEN = re.compile(r"<(?:tool_calls|tool_call|function_calls|function_call)\b[^>]*>", re.IGNORECASE)
+_XML_SKIP_ELEMENTS = frozenset(
+    {
+        "tool_calls",
+        "tool_call",
+        "function_calls",
+        "function_call",
+        "invoke",
+        "use_tool",
+        "tool_use",
+        "parameter",
+        "thinking",
+        "reasoning",
+        "thought",
+        "analysis",
+    }
+)
 
 
 def _replace_dsml_tag(match: re.Match) -> str:
@@ -58,9 +77,13 @@ TOOL_CALL_INSTRUCTION = (
     "When you need to call one or more functions, reply with ONLY a single valid JSON object "
     "(no markdown fences, no code blocks, no extra text, no explanation) in exactly this format:\n"
     '{{"tool_calls": [{{"name": "get_weather", "arguments": {{"city": "Moscow"}}}}]}}\n\n'
+    "Alternatively you may reply with ONLY an XML block in exactly this format:\n"
+    "<tool_calls>\n<get_weather>\n<city>Moscow</city>\n</get_weather>\n</tool_calls>\n\n"
     "Use the exact function names and JSON argument keys from the definitions above. "
     'The value of "arguments" must be a JSON object with only those keys. '
-    'You may include multiple entries in the "tool_calls" array to call several functions at once.\n'
+    "Each tool element inside the XML block may use parameter tags with the same names as the JSON argument keys. "
+    'You may include multiple entries in the "tool_calls" array or multiple tool elements '
+    "inside the XML block to call several functions at once.\n"
     "{choice}"
 )
 
@@ -762,7 +785,32 @@ def tool_schema_map(tools: list[Any] | None) -> dict[str, dict[str, Any]]:
     return result
 
 
-def _xml_invoke_arguments(body: str, param_types: dict[str, Any] | None = None) -> dict[str, Any] | None:
+def _xml_set_param(params: dict[str, Any], key: str, value: Any) -> None:
+    if key in params:
+        existing = params[key]
+        if isinstance(existing, list):
+            existing.append(value)
+        else:
+            params[key] = [existing, value]
+    else:
+        params[key] = value
+
+
+def _xml_value(raw: str, json_type: Any) -> Any:
+    stripped = raw.strip()
+    if stripped.startswith(("{", "[")):
+        try:
+            return _loads_lenient(stripped)
+        except ValueError:
+            pass
+    if re.search(r"<[a-zA-Z_]", stripped):
+        nested = _xml_invoke_arguments(stripped, None, False)
+        if nested is not None:
+            return nested
+    return _coerce_scalar(_unescape_xml(stripped), json_type)
+
+
+def _xml_invoke_arguments(body: str, param_types: dict[str, Any] | None = None, allow_content: bool = True) -> dict[str, Any] | None:
     stripped = body.strip()
     if stripped.startswith("{"):
         try:
@@ -773,16 +821,20 @@ def _xml_invoke_arguments(body: str, param_types: dict[str, Any] | None = None) 
             pass
     params: dict[str, Any] = {}
     for match in re.finditer(r'<parameter\s+name=["\']([^"\']+)["\']\s*>(.*?)</parameter>', body, re.DOTALL | re.IGNORECASE):
-        params[match.group(1).strip()] = _coerce_scalar(_unescape_xml(match.group(2).strip()), (param_types or {}).get(match.group(1).strip()))
+        key = match.group(1).strip()
+        _xml_set_param(params, key, _xml_value(match.group(2), (param_types or {}).get(key)))
     if params:
         return params
-    has_children = False
-    for match in re.finditer(r"<([a-zA-Z_][a-zA-Z0-9_-]*)\s*>([^<]*)</\1>", body, re.DOTALL | re.IGNORECASE):
-        params[match.group(1).strip()] = _coerce_scalar(_unescape_xml(match.group(2).strip()), (param_types or {}).get(match.group(1).strip()))
-        has_children = True
-    if has_children:
+    for match in _XML_ELEMENT.finditer(body):
+        key = match.group(1).strip()
+        if key.lower() in _XML_SKIP_ELEMENTS:
+            continue
+        _xml_set_param(params, key, _xml_value(match.group(3), (param_types or {}).get(key)))
+    if params:
         return params
-    inner = _unescape_xml(body.strip())
+    if not allow_content:
+        return None
+    inner = _unescape_xml(stripped)
     if inner:
         return {"content": inner}
     return None
@@ -797,6 +849,23 @@ def _xml_tag_attrs(body: str, param_types: dict[str, Any] | None = None) -> dict
         value = raw[1:-1]
         attrs[key] = _coerce_scalar(_unescape_xml(value), (param_types or {}).get(key))
     return attrs
+
+
+def _iter_xml_call_wrappers(text: str) -> Iterator[tuple[int, int, int, str]]:
+    pos = 0
+    length = len(text)
+    while pos < length:
+        match = _XML_WRAPPER_OPEN.search(text, pos)
+        if match is None:
+            return
+        content_start = match.end()
+        rest = text[content_start:]
+        close = re.search(r"</(?:tool_calls|tool_call|function_calls|function_call)\s*>", rest, re.IGNORECASE)
+        if close is None:
+            close = _XML_WRAPPER_OPEN.search(rest)
+        end = length if close is None else content_start + close.start()
+        yield match.start(), content_start, end, text[content_start:end]
+        pos = max(match.end(), end)
 
 
 def _parse_xml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | None = None) -> tuple[list[ToolCall] | None, str]:
@@ -826,6 +895,64 @@ def _parse_xml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | N
             calls.extend(extracted)
             remainder = remainder.replace(match.group(0), " ")
             consumed.append(match.span())
+    for start, content_start, end, inner in _iter_xml_call_wrappers(text):
+        if any(s <= start and end <= e for s, e in consumed):
+            continue
+        stripped_inner = inner.strip()
+        if stripped_inner.startswith("["):
+            array_calls = _parse_bare_array_calls(stripped_inner)
+            if array_calls:
+                calls.extend(array_calls)
+                remainder = remainder.replace(text[start:end], " ")
+                consumed.append((start, end))
+                continue
+        json_parsed = _extract_json_object(stripped_inner)
+        if json_parsed is not None:
+            extracted = _extract_calls(json_parsed[0])
+            if extracted:
+                calls.extend(extracted)
+                remainder = remainder.replace(text[start:end], " ")
+                consumed.append((start, end))
+                continue
+        elements = list(_XML_ELEMENT.finditer(inner))
+        top_level = [m for m in elements if not any(o is not m and o.start() < m.start() and o.end() > m.end() for o in elements)]
+        block_calls = 0
+        for element in top_level:
+            element_name = element.group(1).strip().lower()
+            if element_name in _XML_SKIP_ELEMENTS:
+                continue
+            element_start = content_start + element.start()
+            element_end = content_start + element.end()
+            if any(s <= element_start and element_end <= e for s, e in consumed):
+                continue
+            tool_name = element.group(1).strip()
+            param_types = (tool_schemas or {}).get(tool_name)
+            arguments = _xml_tag_attrs(element.group(2), param_types)
+            arguments.update(_xml_invoke_arguments(element.group(3), param_types) or {})
+            if not arguments:
+                continue
+            calls.append(ToolCall.create(tool_name, arguments))
+            consumed.append((element_start, element_end))
+            block_calls += 1
+        for element in _XML_SELFCLOSE.finditer(inner):
+            element_name = element.group(1).strip().lower()
+            if element_name in _XML_SKIP_ELEMENTS:
+                continue
+            element_start = content_start + element.start()
+            element_end = content_start + element.end()
+            if any(s <= element_start and element_end <= e for s, e in consumed):
+                continue
+            tool_name = element.group(1).strip()
+            param_types = (tool_schemas or {}).get(tool_name)
+            arguments = _xml_tag_attrs(element.group(2), param_types)
+            if not arguments:
+                continue
+            calls.append(ToolCall.create(tool_name, arguments))
+            consumed.append((element_start, element_end))
+            block_calls += 1
+        if block_calls:
+            remainder = remainder.replace(text[start:end], " ")
+            consumed.append((start, end))
     for tool_name, param_types in (tool_schemas or {}).items():
         escaped = re.escape(tool_name)
         open_pattern = re.compile(rf"<{escaped}(?=[\s/>])([^>]*?)>(.*?)</{escaped}>", re.DOTALL | re.IGNORECASE)
@@ -925,6 +1052,9 @@ def parse_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | None =
         if wrapped_calls is not None:
             wrapper_parts = []
             surrounding = (stripped[:start].strip() + " " + stripped[end + 1 :].strip()).strip()
+            surrounding = re.sub(r"<(?:tool_calls|function_calls|tool_call|function_call)>", " ", surrounding, flags=re.IGNORECASE)
+            surrounding = re.sub(r"</(?:tool_calls|function_calls|tool_call|function_call)>", " ", surrounding, flags=re.IGNORECASE)
+            surrounding = " ".join(surrounding.split())
             if surrounding:
                 wrapper_parts.append(surrounding)
             inner = obj.get("content")
