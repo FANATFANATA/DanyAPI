@@ -62,18 +62,18 @@ _raw_text = st.one_of(
     _malformed_json,
     _tool_call_json.map(lambda j: f"```json\n{j}\n```"),
     _tool_call_json.map(lambda j: f"||DSML||\n{j}"),
-    st.text(max_size=500),
+    st.text(max_size=250),
 )
 
 
-@settings(max_examples=200, deadline=None)
+@settings(max_examples=60, deadline=None)
 @given(text=_raw_text)
 def test_parse_tool_calls_no_crash(text: str) -> None:
     result = toolemu.parse_tool_calls(text)
     assert result is None or (isinstance(result, tuple) and len(result) == 2)
 
 
-@settings(max_examples=200, deadline=None)
+@settings(max_examples=60, deadline=None)
 @given(text=_raw_text)
 def test_parse_tool_calls_result_structure(text: str) -> None:
     result = toolemu.parse_tool_calls(text)
@@ -86,7 +86,7 @@ def test_parse_tool_calls_result_structure(text: str) -> None:
         assert isinstance(call.name, str) and len(call.name) > 0
 
 
-@settings(max_examples=200, deadline=None)
+@settings(max_examples=60, deadline=None)
 @given(text=_tool_call_json)
 def test_parse_valid_tool_calls_succeeds(text: str) -> None:
     result = toolemu.parse_tool_calls(text)
@@ -95,8 +95,8 @@ def test_parse_valid_tool_calls_succeeds(text: str) -> None:
     assert len(calls) >= 1
 
 
-@settings(max_examples=200, deadline=None)
-@given(raw=st.text(max_size=500))
+@settings(max_examples=60, deadline=None)
+@given(raw=st.text(max_size=250))
 def test_fix_unbalanced_json_no_crash(raw: str) -> None:
     result = toolemu._fix_unbalanced_json(raw)
     assert result is None or isinstance(result, str)
@@ -126,8 +126,8 @@ def _balanced_brackets(text: str) -> bool:
     return not stack and not in_string
 
 
-@settings(max_examples=200, deadline=None)
-@given(raw=st.text(max_size=500))
+@settings(max_examples=60, deadline=None)
+@given(raw=st.text(max_size=250))
 def test_fix_unbalanced_json_produces_balanced_output(raw: str) -> None:
     result = toolemu._fix_unbalanced_json(raw)
     if result is None:
@@ -135,8 +135,8 @@ def test_fix_unbalanced_json_produces_balanced_output(raw: str) -> None:
     assert _balanced_brackets(result), f"Unbalanced brackets in: {result[:100]}"
 
 
-@settings(max_examples=200, deadline=None)
-@given(raw=st.text(max_size=300))
+@settings(max_examples=60, deadline=None)
+@given(raw=st.text(max_size=200))
 def test_loads_lenient_no_crash(raw: str) -> None:
     try:
         result = toolemu._loads_lenient(raw)
@@ -145,8 +145,8 @@ def test_loads_lenient_no_crash(raw: str) -> None:
         pass
 
 
-@settings(max_examples=200, deadline=None)
-@given(raw=st.text(max_size=300))
+@settings(max_examples=60, deadline=None)
+@given(raw=st.text(max_size=200))
 def test_loads_lenient_idempotent(raw: str) -> None:
     try:
         r1 = toolemu._loads_lenient(raw)

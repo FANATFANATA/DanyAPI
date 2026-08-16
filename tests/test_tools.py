@@ -28,6 +28,7 @@ from danyapi.tools import (
     format_tool_message,
     is_tool_round,
     parse_tool_calls,
+    parse_tool_calls_debug,
     render_json_mode,
     render_message,
     render_tool_schema,
@@ -1109,6 +1110,632 @@ def test_parse_bare_array_broken_json():
 def test_iter_json_objects_skips_bad_candidates():
     from danyapi.tools import _iter_json_objects
 
-    text = '{"ok": 1} not-json {"bad": broken}'
+    text = '{"ok": 1} not-json {"bad": }'
     objs = [obj for obj, _, _ in _iter_json_objects(text)]
     assert objs == [{"ok": 1}]
+
+
+def test_parse_bare_keys_json():
+    parsed = parse_tool_calls('{"tool_calls": [{name: glob, arguments: {pattern: "*/"}}]}')
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert calls[0].name == "glob"
+    assert json.loads(calls[0].arguments) == {"pattern": "*/"}
+
+
+def test_parse_bare_keys_json_unquoted_values():
+    parsed = parse_tool_calls("{name: get_weather, arguments: {city: Moscow, temp: 22, sunny: true}}")
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert calls[0].name == "get_weather"
+    assert json.loads(calls[0].arguments) == {"city": "Moscow", "temp": 22, "sunny": True}
+
+
+def test_parse_alias_keys_json():
+    parsed = parse_tool_calls('{"tool": "glob", "input": {"pattern": "*/"}}')
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert calls[0].name == "glob"
+    assert json.loads(calls[0].arguments) == {"pattern": "*/"}
+
+
+def test_parse_alias_keys_json_bare_array():
+    parsed = parse_tool_calls('[{"action": "read", "args": {"filePath": "a.py"}}]')
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert calls[0].name == "read"
+    assert json.loads(calls[0].arguments) == {"filePath": "a.py"}
+
+
+def test_parse_xml_nameless_invoke_with_name_and_input():
+    text = '<tool_use><name>glob</name><input>{"pattern": "*/"}</input></tool_use>'
+    parsed = parse_tool_calls(text)
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert calls[0].name == "glob"
+    assert json.loads(calls[0].arguments) == {"pattern": "*/"}
+
+
+def test_parse_xml_nameless_invoke_with_parameter_children():
+    text = "<tool><name>get_weather</name><city>Moscow</city></tool>"
+    parsed = parse_tool_calls(text)
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert calls[0].name == "get_weather"
+    assert json.loads(calls[0].arguments) == {"city": "Moscow"}
+
+
+def test_parse_xml_function_wrapper():
+    text = '<functions><function name="glob"><pattern>*/</pattern></function></functions>'
+    parsed = parse_tool_calls(text)
+    assert parsed is not None
+    calls, wrapper = parsed
+    assert calls is not None
+    assert calls[0].name == "glob"
+    assert json.loads(calls[0].arguments) == {"pattern": "*/"}
+    assert wrapper == ""
+
+
+def test_parse_xml_arguments_container_unwrapped():
+    text = '<invoke name="bash"><arguments>{"cmd": "ls"}</arguments></invoke>'
+    parsed = parse_tool_calls(text)
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert calls[0].name == "bash"
+    assert json.loads(calls[0].arguments) == {"cmd": "ls"}
+
+
+def test_parse_xml_name_and_input_flat_wrapper():
+    text = "<tool_calls><name>glob</name><input><pattern>*/</pattern></input></tool_calls>"
+    parsed = parse_tool_calls(text)
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert calls[0].name == "glob"
+    assert json.loads(calls[0].arguments) == {"pattern": "*/"}
+
+
+def test_parse_python_call_single():
+    parsed = parse_tool_calls('get_weather(city="Moscow", units="celsius")')
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert calls[0].name == "get_weather"
+    assert json.loads(calls[0].arguments) == {"city": "Moscow", "units": "celsius"}
+
+
+def test_parse_python_call_typed_values():
+    parsed = parse_tool_calls("read(filePath='a.py', limit=10, cached=False, note=None)")
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert calls[0].name == "read"
+    assert json.loads(calls[0].arguments) == {"filePath": "a.py", "limit": 10, "cached": False, "note": None}
+
+
+def test_parse_python_call_multiline_and_multiple():
+    text = 'glob(pattern="*/")\nread(filePath="a.py", limit=5)'
+    parsed = parse_tool_calls(text)
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert [c.name for c in calls] == ["glob", "read"]
+    assert json.loads(calls[1].arguments) == {"filePath": "a.py", "limit": 5}
+
+
+def test_parse_python_call_not_detected_in_prose():
+    assert parse_tool_calls("The answer is read(filePath='a.py').") is None
+    assert parse_tool_calls("Just check read(filePath='a.py') please.") is None
+
+
+def test_parse_python_call_after_prose():
+    parsed = parse_tool_calls('Let me check.\n\nglob(pattern="*/")')
+    assert parsed is not None
+    calls, wrapper = parsed
+    assert calls is not None
+    assert calls[0].name == "glob"
+    assert json.loads(calls[0].arguments) == {"pattern": "*/"}
+    assert wrapper == "Let me check."
+
+
+def test_parse_yaml_block():
+    text = 'tool_calls:\n- name: glob\n  arguments:\n    pattern: "*/"\n- name: read\n  arguments:\n    filePath: a.py'
+    parsed = parse_tool_calls(text)
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert [c.name for c in calls] == ["glob", "read"]
+    assert json.loads(calls[0].arguments) == {"pattern": "*/"}
+    assert json.loads(calls[1].arguments) == {"filePath": "a.py"}
+
+
+def test_parse_yaml_inline_flow():
+    text = 'tool_calls:\n- name: glob\n  arguments: {pattern: "*/"}'
+    parsed = parse_tool_calls(text)
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert calls[0].name == "glob"
+    assert json.loads(calls[0].arguments) == {"pattern": "*/"}
+
+
+def test_parse_yaml_inline_array():
+    text = 'tool_calls: [{"name": "glob", "arguments": {"pattern": "*/"}}]'
+    parsed = parse_tool_calls(text)
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert calls[0].name == "glob"
+    assert json.loads(calls[0].arguments) == {"pattern": "*/"}
+
+
+def test_parse_tool_calls_debug():
+    report = parse_tool_calls_debug('glob(pattern="*/")')
+    assert report["parsed"]
+    assert report["strategies"] == ["python_call"]
+    assert report["calls"][0]["name"] == "glob"
+    assert report["calls"][0]["arguments"] == '{"pattern": "*/"}'
+    assert report["wrapper"] == ""
+
+    report = parse_tool_calls_debug("Just a normal answer.")
+    assert not report["parsed"]
+    assert report["strategies"] == []
+    assert report["calls"] == []
+    assert report["unrecognized"] == "Just a normal answer."
+
+
+def test_parse_tool_calls_debug_strategies():
+    assert parse_tool_calls_debug('{"tool_calls": [{"name": "a", "arguments": {}}]}')["strategies"] == ["json_wrapped"]
+    assert parse_tool_calls_debug('[{"name": "a", "arguments": {}}]')["strategies"] == ["json_array"]
+    assert parse_tool_calls_debug('<invoke name="a"><x>1</x></invoke>')["strategies"] == ["xml"]
+    assert parse_tool_calls_debug("tool_calls:\n- name: a\n  arguments: {x: 1}")["strategies"] == ["yaml"]
+    assert parse_tool_calls_debug('First check. {"name": "a", "arguments": {}}')["strategies"] == ["json_in_prose"]
+
+
+def test_parse_xml_repeated_parameters_become_list():
+    text = '<invoke name="t"><parameter name="x">1</parameter><parameter name="x">2</parameter><parameter name="x">3</parameter></invoke>'
+    parsed = parse_tool_calls(text)
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert json.loads(calls[0].arguments) == {"x": ["1", "2", "3"]}
+
+
+def test_parse_xml_broken_json_param_value():
+    text = '<invoke name="t"><x>{broken</x></invoke>'
+    parsed = parse_tool_calls(text)
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert json.loads(calls[0].arguments) == {"x": "{broken"}
+
+
+def test_parse_xml_nested_param_value():
+    text = '<invoke name="t"><filters><name>a</name></filters></invoke>'
+    parsed = parse_tool_calls(text)
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert json.loads(calls[0].arguments) == {"filters": {"name": "a"}}
+
+
+def test_parse_xml_skip_element_child():
+    text = '<invoke name="t"><thinking>z</thinking><city>Moscow</city></invoke>'
+    parsed = parse_tool_calls(text)
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert json.loads(calls[0].arguments) == {"city": "Moscow"}
+
+
+def test_parse_xml_unparseable_tag_child():
+    text = '<invoke name="t"><x><raw></x></invoke>'
+    parsed = parse_tool_calls(text)
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert json.loads(calls[0].arguments) == {"x": "<raw>"}
+
+
+def test_parse_xml_broken_wrapper_close():
+    text = "<tool_calls><glob><pattern>*/</pattern></glob><tool_calls>"
+    parsed = parse_tool_calls(text)
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert calls[0].name == "glob"
+    assert json.loads(calls[0].arguments) == {"pattern": "*/"}
+
+
+def test_parse_xml_invoke_child_name_empty():
+    assert parse_tool_calls("<invoke><name>   </name></invoke>") is None
+
+
+def test_parse_xml_invoke_without_name_or_child():
+    assert parse_tool_calls("<invoke><city>Moscow</city></invoke>") is None
+
+
+def test_parse_xml_selfclose_overlap_nested():
+    text = '<invoke name="a"><invoke/></invoke>'
+    parsed = parse_tool_calls(text)
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert calls[0].name == "a"
+
+
+def test_parse_xml_selfclose_no_name():
+    assert parse_tool_calls("<tool_use/>") is None
+
+
+def test_parse_xml_selfclose_with_attrs():
+    text = '<function name="x" pattern="*/"/>'
+    parsed = parse_tool_calls(text)
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert calls[0].name == "x"
+    assert json.loads(calls[0].arguments) == {"pattern": "*/"}
+
+
+def test_parse_xml_wrapper_array_json():
+    text = '<tool_calls>[{"name": "a", "arguments": {"x": 1}}]</tool_calls>'
+    parsed = parse_tool_calls(text)
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert calls[0].name == "a"
+    assert json.loads(calls[0].arguments) == {"x": 1}
+
+
+def test_parse_xml_wrapper_object_json():
+    text = '<tool_calls>{"name": "a", "arguments": {"x": 1}}</tool_calls>'
+    parsed = parse_tool_calls(text)
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert calls[0].name == "a"
+    assert json.loads(calls[0].arguments) == {"x": 1}
+
+
+def test_parse_xml_wrapper_element_overlap_mismatched_close():
+    text = '<tool_calls><invoke name="a"><x>1</x></use_tool></tool_calls>'
+    parsed = parse_tool_calls(text)
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert calls[0].name == "a"
+    assert json.loads(calls[0].arguments) == {"x": "1"}
+
+
+def test_parse_xml_wrapper_element_basic():
+    text = "<tool_calls><glob><pattern>*/</pattern></glob></tool_calls>"
+    parsed = parse_tool_calls(text)
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert calls[0].name == "glob"
+    assert json.loads(calls[0].arguments) == {"pattern": "*/"}
+
+
+def test_parse_xml_wrapper_element_empty_args():
+    text = "<tool_calls><glob></glob></tool_calls>"
+    parsed = parse_tool_calls(text)
+    assert parsed is None
+
+
+def test_parse_xml_wrapper_selfclose_skip_list():
+    text = "<tool_calls><invoke/></tool_calls>"
+    parsed = parse_tool_calls(text)
+    assert parsed is None
+
+
+def test_parse_xml_wrapper_selfclose_overlap():
+    text = "<tool_calls><glob><a/></glob></tool_calls>"
+    parsed = parse_tool_calls(text)
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert calls[0].name == "glob"
+
+
+def test_parse_xml_wrapper_selfclose_no_args():
+    text = "<tool_calls><glob/></tool_calls>"
+    parsed = parse_tool_calls(text)
+    assert parsed is None
+
+
+def test_parse_xml_generic_selfclose():
+    from danyapi.tools import _parse_xml_tool_calls
+
+    parsed = _parse_xml_tool_calls('<glob pattern="*/"/>', {"glob": {"pattern": "string"}})
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert calls[0].name == "glob"
+    assert json.loads(calls[0].arguments) == {"pattern": "*/"}
+
+
+def test_parse_python_call_escaped_quotes():
+    parsed = parse_tool_calls('f(a="x\\"y")')
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert json.loads(calls[0].arguments) == {"a": 'x"y'}
+
+
+def test_parse_python_call_nested_values():
+    parsed = parse_tool_calls('f(a={"b": 1}, c=[1, 2])')
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert json.loads(calls[0].arguments) == {"a": {"b": 1}, "c": [1, 2]}
+
+
+def test_parse_python_call_empty_value():
+    parsed = parse_tool_calls("f(a=)")
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert json.loads(calls[0].arguments) == {"a": None}
+
+
+def test_parse_python_call_broken_json_value():
+    parsed = parse_tool_calls("f(a={broken)")
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert json.loads(calls[0].arguments) == {"a": "{broken"}
+
+
+def test_parse_python_call_mismatched_quotes():
+    parsed = parse_tool_calls("f(a='x'x)")
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert json.loads(calls[0].arguments) == {"a": "'x'x"}
+
+
+def test_parse_python_call_invalid_escape():
+    parsed = parse_tool_calls('f(a="x\\q")')
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert json.loads(calls[0].arguments) == {"a": "x\\q"}
+
+
+def test_parse_python_call_single_quote_invalid_escape():
+    parsed = parse_tool_calls("f(a='x\\q')")
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert json.loads(calls[0].arguments) == {"a": "x\\q"}
+
+
+def test_parse_python_call_bare_value():
+    parsed = parse_tool_calls("f(city=Moscow)")
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert json.loads(calls[0].arguments) == {"city": "Moscow"}
+
+
+def test_parse_python_call_trailing_comma():
+    parsed = parse_tool_calls("f(a=1,)")
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert json.loads(calls[0].arguments) == {"a": 1}
+
+
+def test_parse_python_call_positional_rejected():
+    assert parse_tool_calls("f(1)") is None
+
+
+def test_parse_python_call_invalid_key():
+    assert parse_tool_calls("f(1a=2)") is None
+
+
+def test_parse_python_call_escaped_backslash():
+    parsed = parse_tool_calls('f(a="x\\\\y")')
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert json.loads(calls[0].arguments) == {"a": "x\\y"}
+
+
+def test_parse_python_call_nested_parens():
+    assert parse_tool_calls("f(g(x=1))") is None
+
+
+def test_parse_python_call_unclosed():
+    assert parse_tool_calls("f(a=1") is None
+
+
+def test_parse_python_call_no_args():
+    parsed = parse_tool_calls("f()")
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert calls[0].name == "f"
+    assert json.loads(calls[0].arguments) == {}
+
+
+def test_parse_python_call_empty_text():
+    from danyapi.tools import _parse_python_calls
+
+    assert _parse_python_calls("   ") is None
+
+
+def test_parse_python_call_prose_mid_lines():
+    assert parse_tool_calls("read(a=1)\nhello\nglob(b=2)") is None
+
+
+def test_parse_python_call_multi_no_args():
+    parsed = parse_tool_calls("glob()\nread(a=1)")
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert [c.name for c in calls] == ["glob", "read"]
+
+
+def test_parse_python_call_multi_bad_args():
+    assert parse_tool_calls("glob(a=1)\nread(1)") is None
+
+
+def test_parse_yaml_quoted_name():
+    text = 'tool_calls:\n- name: "glob"\n  arguments:\n    pattern: "*/"'
+    parsed = parse_tool_calls(text)
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert calls[0].name == "glob"
+    assert json.loads(calls[0].arguments) == {"pattern": "*/"}
+
+
+def test_parse_yaml_empty_arguments():
+    text = 'tool_calls:\n- name: glob\n  arguments:\n    pattern: "*/"\n- name: read\n  arguments:'
+    parsed = parse_tool_calls(text)
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert [c.name for c in calls] == ["glob", "read"]
+
+
+def test_parse_yaml_broken_flow_value():
+    text = "tool_calls:\n- name: glob\n  arguments: {broken"
+    parsed = parse_tool_calls(text)
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert calls[0].name == "glob"
+    assert json.loads(calls[0].arguments) == {}
+
+
+def test_parse_yaml_mismatched_quote():
+    text = 'tool_calls:\n- name: glob\n  arguments:\n    pattern: "unclosed'
+    parsed = parse_tool_calls(text)
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert json.loads(calls[0].arguments) == {"pattern": '"unclosed'}
+
+
+def test_parse_yaml_invalid_escape():
+    text = 'tool_calls:\n- name: glob\n  arguments:\n    pattern: "x\\q"'
+    parsed = parse_tool_calls(text)
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert json.loads(calls[0].arguments) == {"pattern": "x\\q"}
+
+
+def test_parse_yaml_bool_and_null_values():
+    text = "tool_calls:\n- name: glob\n  arguments:\n    flag: on\n    off: off\n    none: ~"
+    parsed = parse_tool_calls(text)
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert json.loads(calls[0].arguments) == {"flag": True, "off": False, "none": None}
+
+
+def test_parse_yaml_empty_text():
+    from danyapi.tools import _parse_yaml_calls
+
+    assert _parse_yaml_calls("") is None
+
+
+def test_parse_yaml_inline_non_array():
+    assert parse_tool_calls("tool_calls: hello") is None
+
+
+def test_parse_yaml_dash_colon_line():
+    text = "tool_calls:\n- : x\n- name: glob"
+    parsed = parse_tool_calls(text)
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert calls[0].name == "glob"
+
+
+def test_parse_yaml_dash_non_name():
+    text = 'tool_calls:\n- a: 1\n- name: glob\n  arguments:\n    pattern: "*/"'
+    parsed = parse_tool_calls(text)
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert calls[0].name == "glob"
+
+
+def test_parse_yaml_direct_args():
+    text = 'tool_calls:\n- name: glob\n  pattern: "*/"'
+    parsed = parse_tool_calls(text)
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert json.loads(calls[0].arguments) == {"pattern": "*/"}
+
+
+def test_parse_yaml_unknown_line():
+    text = "tool_calls:\n- name: glob\nhello"
+    parsed = parse_tool_calls(text)
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert calls[0].name == "glob"
+
+
+def test_parse_xml_selfclose_empty_attrs():
+    assert parse_tool_calls('<function name="x"/>') is None
+
+
+def test_parse_yaml_empty_name():
+    assert parse_tool_calls("tool_calls:\n- name:") is None
+
+
+def test_parse_yaml_empty_value_key():
+    text = "tool_calls:\n- name: glob\n  arguments:\n    pattern:"
+    parsed = parse_tool_calls(text)
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert json.loads(calls[0].arguments) == {"pattern": None}
+
+
+def test_parse_yaml_single_quoted_value():
+    text = "tool_calls:\n- name: glob\n  arguments:\n    pattern: '*/'"
+    parsed = parse_tool_calls(text)
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert json.loads(calls[0].arguments) == {"pattern": "*/"}
+
+
+def test_parse_yaml_empty_dash_item():
+    text = "tool_calls:\n- \n- name: glob"
+    parsed = parse_tool_calls(text)
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert calls[0].name == "glob"
+
+
+def test_parse_yaml_bare_name_item():
+    text = 'tool_calls:\n- glob\n  arguments:\n    pattern: "*/"'
+    parsed = parse_tool_calls(text)
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert calls[0].name == "glob"
+    assert json.loads(calls[0].arguments) == {"pattern": "*/"}
+
+
+def test_parse_yaml_key_before_any_item():
+    assert parse_tool_calls('tool_calls:\npattern: "*/"') is None

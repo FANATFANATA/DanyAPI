@@ -152,9 +152,15 @@ def test_handle_error_dict():
 
 def test_guard_executes_main():
     import runpy
+    import sys
 
-    import danyapi.__main__ as main_mod
+    import uvicorn
 
-    with patch.object(main_mod.uvicorn, "run") as run:
-        runpy.run_module("danyapi.__main__", run_name="__main__")
-        run.assert_called_once()
+    saved = sys.modules.pop("danyapi.__main__", None)
+    try:
+        with patch.object(uvicorn, "run") as run:
+            runpy.run_module("danyapi.__main__", run_name="__main__")
+            run.assert_called_once()
+    finally:
+        if saved is not None:
+            sys.modules["danyapi.__main__"] = saved
