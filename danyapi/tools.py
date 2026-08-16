@@ -8,17 +8,48 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
-_DSML_TAG = re.compile(
-    r"<\s*/?\s*(?:\||\uff5c){2}\s*DSML\s*(?:\||\uff5c){2}[^>]*>"
-    r"|(?:\||\uff5c){2}\s*DSML\s*(?:\||\uff5c){2}",
-    re.IGNORECASE,
+_DSML_PIPE = r"|\u00a6\u01c0\u01c1\u05c0\u2016\u2223\u2502\u2551\u2758\ufe31\uff5c"
+_DSML_MARKER = rf"[{_DSML_PIPE}]+\s*DSML\s*[{_DSML_PIPE}]+"
+_DSML_TAG = re.compile(rf"<\s*/?\s*{_DSML_MARKER}\s*[^<>]*>", re.IGNORECASE)
+_DSML_NAKED = re.compile(rf"{_DSML_MARKER}", re.IGNORECASE)
+_DSML_HIDDEN_NAMES = (
+    r"thinking|reasoning|thought|analysis|summary|abbreviation|"
+    r"ds_safety|ds_sensitive|ds_core|ds_middle|ds_end|ds_pii|ds_related|"
+    r"ds_rephrase|ds_translate|ds_bilingual|ds_inner|ds_header|ds_web_search|"
+    r"search|result|reference|quote"
 )
+_DSML_HIDDEN = re.compile(
+    rf"<{_DSML_MARKER}\s*({_DSML_HIDDEN_NAMES})\b[^<>]*>.*?</{_DSML_MARKER}\s*\1\s*>",
+    re.DOTALL | re.IGNORECASE,
+)
+_DSML_HIDDEN_NAKED = re.compile(
+    rf"{_DSML_MARKER}\s*<({_DSML_HIDDEN_NAMES})\b[^<>]*>.*?</\1>\s*{_DSML_MARKER}",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def _replace_dsml_tag(match: re.Match) -> str:
+    tag = match.group(0)
+    extracted = _extract_json_object(tag)
+    if extracted is not None:
+        obj, start, end = extracted
+        if _extract_calls(obj) is not None:
+            return tag[start : end + 1]
+    return " "
 
 
 def _strip_dsml(text: str) -> str:
     if not text:
         return text
-    return _DSML_TAG.sub(" ", text)
+    result = text
+    for _ in range(16):
+        updated = _DSML_HIDDEN.sub(" ", result)
+        updated = _DSML_HIDDEN_NAKED.sub(" ", updated)
+        if updated == result:
+            break
+        result = updated
+    result = _DSML_TAG.sub(_replace_dsml_tag, result)
+    return _DSML_NAKED.sub(" ", result)
 
 
 TOOL_CALL_INSTRUCTION = (
@@ -189,7 +220,7 @@ def _render_tool_call_mention(call: Any) -> str:
 
 def render_message(msg: Any) -> str:
     role = getattr(msg, "role", "user")
-    text = _content_text(getattr(msg, "content", ""))
+    text = _strip_dsml(_content_text(getattr(msg, "content", "")))
     if role in ("user", "system"):
         return text
     if role == "assistant":
@@ -247,7 +278,7 @@ def extract_last_user(messages: list[Any]) -> str:
         if getattr(msg, "role", None) in ("user", "system"):
             content = getattr(msg, "content", "")
             if isinstance(content, str):
-                return content
+                return _strip_dsml(content)
             if isinstance(content, list):
                 parts = []
                 for item in content:
@@ -258,7 +289,7 @@ def extract_last_user(messages: list[Any]) -> str:
                             parts.append(item["text"])
                         elif item.get("type") == "image_url":
                             continue
-                text = "".join(parts).strip()
+                text = _strip_dsml("".join(parts)).strip()
                 if text:
                     return text
                 continue
@@ -323,7 +354,7 @@ def extract_system(messages: list[Any]) -> str:
     parts = []
     for msg in messages:
         if getattr(msg, "role", None) == "system":
-            text = _content_text(getattr(msg, "content", "")).strip()
+            text = _strip_dsml(_content_text(getattr(msg, "content", ""))).strip()
             if text:
                 parts.append(text)
     return "\n".join(parts)

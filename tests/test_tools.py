@@ -726,6 +726,45 @@ def test_strip_dsml_empty():
     assert _strip_dsml(None) is None
 
 
+def test_strip_dsml_unicode_markers():
+    for pipe in ("\u2016", "\uff5c", "\u01c0", "\u01c1", "\u05c0", "\u00a6", "\u2551", "\ufe31", "\u2223", "\u2758"):
+        stripped = _strip_dsml(f"{pipe}DSML{pipe}<thinking>x</thinking>{pipe}DSML{pipe}\nHello")
+        assert "<thinking>" not in stripped
+        assert f"{pipe}DSML{pipe}" not in stripped
+        assert "Hello" in stripped
+
+
+def test_strip_dsml_tags_with_suffix_preserves_json():
+    text = '<\u2016DSML\u2016tool_calls>{"tool_calls":[{"name":"f","arguments":{"city":"Moscow"}}]}</\u2016DSML\u2016tool_calls>'
+    calls, wrapper = parse_tool_calls(text)
+    assert calls is not None
+    assert calls[0].name == "f"
+    assert wrapper == ""
+
+
+def test_strip_dsml_removes_hidden_reasoning():
+    text = '<||DSML||thinking>step 1 step 2</||DSML||thinking>\n{"tool_calls":[{"name":"f","arguments":{"x":1}}]}'
+    calls, wrapper = parse_tool_calls(text)
+    assert calls is not None
+    assert calls[0].name == "f"
+    assert "step 1" not in wrapper
+
+
+def test_strip_dsml_json_in_attrs_preserved():
+    text = '<||DSML||tool_calls {"tool_calls":[{"name":"f","arguments":{"city":"Moscow"}}]}>'
+    calls, _ = parse_tool_calls(text)
+    assert calls is not None
+    assert calls[0].name == "f"
+
+
+def test_strip_dsml_render_message_cleans_dsml():
+    msg = Message(role="assistant", content="<||DSML||thinking>secret</||DSML||thinking>answer")
+    rendered = render_message(msg)
+    assert "<thinking>" not in rendered
+    assert "DSML" not in rendered
+    assert "answer" in rendered
+
+
 def test_tool_call_create_variants():
     assert ToolCall.create("f", None).arguments == "{}"
     assert ToolCall.create("f", "raw").arguments == "raw"
