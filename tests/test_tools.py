@@ -937,6 +937,13 @@ def test_loads_lenient_paths():
         _loads_lenient("not json at all")
 
 
+def test_loads_lenient_bare_quote_fails_late():
+    with pytest.raises(ValueError):
+        _loads_lenient("{a: b c}")
+    with pytest.raises(ValueError):
+        _loads_lenient("{'a': b c}")
+
+
 def test_build_prompt_history_no_session():
     messages = [Message("user", "q1"), Message("assistant", "a1"), Message("user", "q2")]
     prompt, tool_mode = build_prompt(messages, has_session=False)
