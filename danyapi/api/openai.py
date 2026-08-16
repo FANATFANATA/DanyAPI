@@ -360,6 +360,7 @@ from .deepseek import (  # noqa: E402,F401
     RETRY_BACKOFF_MAX_SEC,
     RETRY_BACKOFF_SEC,
     RETRYABLE_FINISH_REASONS,
+    RETRYABLE_HTTP_STATUSES,
     _busy_error_body,
     _collect_continuation,
     _deepseek_error_detail,

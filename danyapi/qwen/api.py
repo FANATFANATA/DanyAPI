@@ -15,20 +15,19 @@ from .. import tools as toolemu
 from ..accounts import account_lock
 from ..config import settings
 from ..deepseek.stream import IncrementalSSE
+
+# Shared retry constants — imported as local names so monkeypatch in tests works.
+from ..retry import (
+    MAX_RETRIES,
+    RETRY_BACKOFF_MAX_SEC,
+    RETRY_BACKOFF_SEC,
+    _drop_session,
+    _is_retryable_http,
+)
 from .client import QwenClient, QwenError
 from .stream import QwenStreamReconstructor, error_code
 
 log = logging.getLogger("danyapi.qwen.api")
-
-MAX_RETRIES = 5
-RETRY_BACKOFF_SEC = 1.0
-RETRY_BACKOFF_MAX_SEC = 8.0
-
-RETRYABLE_HTTP_STATUSES = {408, 425, 429, 500, 502, 503, 504}
-
-
-def _is_retryable_http(exc: HTTPException) -> bool:
-    return exc.status_code in RETRYABLE_HTTP_STATUSES
 
 
 RETRYABLE_ERROR_CODES = {
@@ -72,12 +71,6 @@ def _is_context_limit_code(code) -> bool:
 
 def _is_context_limit(rec: QwenStreamReconstructor) -> bool:
     return _is_context_limit_code(error_code(rec.error))
-
-
-def _drop_session(pool, account, session_key) -> None:
-    pool.forget(session_key)
-    pool.forget_context(session_key)
-    account.sessions.forget(session_key)
 
 
 def _error_status(code) -> int:

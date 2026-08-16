@@ -12,6 +12,17 @@ from ..accounts import AccountPool, DeepSeekAccount
 from ..config import settings
 from ..deepseek.client import DeepSeekError, DeepSeekSession
 from ..deepseek.stream import IncrementalSSE, MessageReconstructor
+
+# Shared retry constants — imported as local names so monkeypatch in tests works.
+# RETRYABLE_HTTP_STATUSES and _drop_session are re-exported for openai.py/streaming.py consumers.
+from ..retry import (  # noqa: F401
+    MAX_RETRIES,
+    RETRY_BACKOFF_MAX_SEC,
+    RETRY_BACKOFF_SEC,
+    RETRYABLE_HTTP_STATUSES,
+    _drop_session,
+    _is_retryable_http,
+)
 from .models import CONTEXT_LENGTH_STATUS, CONTINUE_PROMPT, INPUT_EXCEEDS_LIMIT
 
 log = logging.getLogger("danyapi.api")
@@ -23,9 +34,6 @@ RETRYABLE_FINISH_REASONS = {
     "server_busy",
     "busy",
 }
-MAX_RETRIES = 5
-RETRY_BACKOFF_SEC = 1.0
-RETRY_BACKOFF_MAX_SEC = 8.0
 
 DEEPSEEK_AUTH_ERROR_CODES = {40001, 40002, 40003, 40012, 40029}
 
@@ -39,13 +47,6 @@ async def _human_delay() -> None:
 def _is_retryable_hint(rec: MessageReconstructor) -> bool:
     hint = rec.hint_error
     return bool(hint and hint.get("finish_reason") in RETRYABLE_FINISH_REASONS)
-
-
-RETRYABLE_HTTP_STATUSES = {408, 425, 429, 500, 502, 503, 504}
-
-
-def _is_retryable_http(exc: HTTPException) -> bool:
-    return exc.status_code in RETRYABLE_HTTP_STATUSES
 
 
 def _is_context_limit(rec: MessageReconstructor) -> bool:
@@ -78,12 +79,6 @@ def _input_exceeds_hint_from_http(exc: HTTPException) -> dict | None:
         "message": message if isinstance(message, str) else "Content is too long",
         "finish_reason": INPUT_EXCEEDS_LIMIT,
     }
-
-
-def _drop_session(pool, account, session_key) -> None:
-    pool.forget(session_key)
-    pool.forget_context(session_key)
-    account.sessions.forget(session_key)
 
 
 def _deepseek_status(exc: DeepSeekError) -> int:
