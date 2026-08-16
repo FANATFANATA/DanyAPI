@@ -1118,7 +1118,7 @@ async def test_chat_deepseek_busy_non_stream():
     pool, _ = make_pool()
     app.state.pool = pool
     client = TestClient(app)
-    with patch("danyapi.api.openai.account_lock", side_effect=AccountPoolBusy()):
+    with patch("danyapi.api.streaming.account_lock", side_effect=AccountPoolBusy()):
         resp = client.post(
             "/v1/chat/completions",
             json={"model": "deepseek-v4-flash", "messages": [{"role": "user", "content": "hi"}]},
