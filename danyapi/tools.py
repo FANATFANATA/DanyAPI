@@ -1291,8 +1291,8 @@ def _python_value(text: str) -> Any:
 
 def _parse_python_call_args(text: str) -> dict[str, Any] | None:
     args: dict[str, Any] = {}
-    for part in _split_top_level(text):
-        part = part.strip()
+    for raw_part in _split_top_level(text):
+        part = raw_part.strip()
         if not part:
             continue
         eq = part.find("=")
