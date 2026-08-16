@@ -48,8 +48,6 @@ JSON_MODE_INSTRUCTION = """You must reply with ONLY a valid JSON object, no mark
 {constraints}"""
 
 
-
-
 def _tool_function(tool: Any) -> dict | None:
     if not isinstance(tool, dict):
         return None
@@ -384,4 +382,3 @@ def build_prompt(
         blocks.append(json_block)
     blocks.append(base)
     return "\n\n".join(blocks), tools_present
-

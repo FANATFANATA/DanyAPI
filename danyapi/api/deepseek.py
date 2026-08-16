@@ -266,4 +266,3 @@ async def _send_completion(
             )
         raise HTTPException(502, "unexpected non-stream response")
     return resp
-

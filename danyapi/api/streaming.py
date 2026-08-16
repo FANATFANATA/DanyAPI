@@ -182,7 +182,6 @@ async def _collect_non_stream(
         }
 
 
-
 async def _stream_openai(
     account,
     pool,
