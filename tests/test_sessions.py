@@ -427,6 +427,46 @@ def test_deepseek_stateless_request_resolves_cached_session():
         openai_mod._collect_non_stream = orig
 
 
+def test_deepseek_cached_missing_session_renders_full_history():
+    captured = {}
+    orig = openai_mod._collect_non_stream
+
+    async def fake_collect(**kwargs):
+        captured.update(kwargs)
+        return {"ok": True}
+
+    openai_mod._collect_non_stream = fake_collect
+    try:
+        account = MagicMock()
+        account.sessions.get.return_value = None
+        pool = MagicMock()
+        pool.acquire = AsyncMock(return_value=(account, "sess-a"))
+        pool.resolve_context = MagicMock(return_value="sess-a")
+        openai_mod.app.state.pool = pool
+        req = SimpleNamespace(
+            model="deepseek-v4-flash",
+            stream=False,
+            thinking=False,
+            search=False,
+            session_id=None,
+            files=None,
+            tools=None,
+            tool_choice=None,
+            response_format=None,
+            messages=[
+                openai_mod.ChatMessage(role="user", content="remember alpha"),
+                openai_mod.ChatMessage(role="assistant", content="alpha noted"),
+                openai_mod.ChatMessage(role="user", content="what did I ask you to remember?"),
+            ],
+        )
+        asyncio.run(openai_mod._chat_completions_deepseek(req))
+        assert "remember alpha" in captured["prompt"]
+        assert "alpha noted" in captured["prompt"]
+        assert "what did I ask you to remember?" in captured["prompt"]
+    finally:
+        openai_mod._collect_non_stream = orig
+
+
 def test_deepseek_explicit_session_bypasses_context_resolution():
     captured = {}
     orig = openai_mod._collect_non_stream
@@ -490,6 +530,48 @@ def test_qwen_stateless_request_resolves_cached_session():
         asyncio.run(openai_mod._chat_completions_qwen(req))
         pool.resolve_context.assert_called_once()
         assert captured["existing_sid"] == "sess-q"
+    finally:
+        qwen_api.collect_non_stream = orig
+
+
+def test_qwen_cached_wrong_model_renders_full_history():
+    captured = {}
+    orig = qwen_api.collect_non_stream
+
+    async def fake_collect(**kwargs):
+        captured.update(kwargs)
+        return {"ok": True}
+
+    qwen_api.collect_non_stream = fake_collect
+    try:
+        account = MagicMock()
+        account.sessions.get.return_value = SimpleNamespace(id="sess-q", model="qwen-old")
+        account.sessions._reuse.return_value = False
+        pool = MagicMock()
+        pool.acquire = AsyncMock(return_value=(account, "sess-q"))
+        pool.resolve_context = MagicMock(return_value="sess-q")
+        openai_mod.app.state.qwen_pool = pool
+        req = SimpleNamespace(
+            model="qwen3.8-max",
+            stream=False,
+            thinking=False,
+            search=False,
+            session_id=None,
+            files=None,
+            tools=None,
+            tool_choice=None,
+            response_format=None,
+            messages=[
+                openai_mod.ChatMessage(role="user", content="remember beta"),
+                openai_mod.ChatMessage(role="assistant", content="beta noted"),
+                openai_mod.ChatMessage(role="user", content="what did I ask you to remember?"),
+            ],
+        )
+        asyncio.run(openai_mod._chat_completions_qwen(req))
+        account.sessions._reuse.assert_called_once()
+        assert "remember beta" in captured["prompt"]
+        assert "beta noted" in captured["prompt"]
+        assert "what did I ask you to remember?" in captured["prompt"]
     finally:
         qwen_api.collect_non_stream = orig
 

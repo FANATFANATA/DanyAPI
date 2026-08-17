@@ -437,6 +437,13 @@ async def _acquire_account(pool: AccountPool, session_id: str | None):
         raise HTTPException(503, str(exc)) from exc
 
 
+def _can_reuse_session(account: Any, session_id: str | None, **kwargs: Any) -> bool:
+    if not session_id:
+        return False
+    session = account.sessions.get(session_id)
+    return session is not None and account.sessions._reuse(session, session_id, **kwargs)
+
+
 def _include_usage(req: ChatCompletionRequest) -> bool:
     opts = getattr(req, "stream_options", None)
     return bool((opts or {}).get("include_usage"))
@@ -514,13 +521,14 @@ async def _chat_completions_deepseek(req: ChatCompletionRequest) -> Any:
     else:
         cached_sid = pool.resolve_context(context_seq) if context_seq else None
         account, existing_sid = await _acquire_account(pool, cached_sid)
+    has_session = _can_reuse_session(account, existing_sid)
 
     try:
         prompt, tool_mode = toolemu.build_prompt(
             req.messages,
             getattr(req, "tools", None),
             getattr(req, "tool_choice", None),
-            existing_sid is not None,
+            has_session,
             getattr(req, "response_format", None),
         )
     except ValueError as exc:
@@ -577,13 +585,14 @@ async def _chat_completions_qwen(req: ChatCompletionRequest) -> Any:
     else:
         cached_sid = pool.resolve_context(context_seq) if context_seq else None
         account, existing_sid = await _acquire_account(pool, cached_sid)
+    has_session = _can_reuse_session(account, existing_sid, model=req.model)
 
     try:
         prompt, tool_mode = toolemu.build_prompt(
             req.messages,
             getattr(req, "tools", None),
             getattr(req, "tool_choice", None),
-            existing_sid is not None,
+            has_session,
             getattr(req, "response_format", None),
         )
     except ValueError as exc:
@@ -800,8 +809,6 @@ async def _try_stop_stream(client, session_id: str, message_id: str | None) -> N
         await client.stop_stream(session_id, message_id)
     except Exception as exc:
         log.debug("stop_stream failed for %s: %s", session_id, exc)
-
-
 async def _collect_continuation(
     account,
     session,
