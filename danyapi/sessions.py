@@ -69,6 +69,8 @@ class SessionRegistry:
             else:
                 session_id = key
             if not session_id:
+                if prefix and key == prefix:
+                    self._store.discard(key)
                 continue
             try:
                 session = self._deserialize(record)

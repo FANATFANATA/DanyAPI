@@ -1022,8 +1022,12 @@ def _iter_xml_call_wrappers(text: str) -> Iterator[tuple[int, int, int, str]]:
 
 def _parse_xml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | None = None) -> tuple[list[ToolCall] | None, str]:
     calls: list[ToolCall] = []
-    remainder = text
+    mask = bytearray(len(text))
     consumed: list[tuple[int, int]] = []
+
+    def blank(start: int, end: int) -> None:
+        mask[start:end] = b" " * (end - start)
+
     tool_element_pattern = re.compile(
         r"<(?:invoke|use_tool|tool_use|function|tool)\b([^>]*)>(.*?)</(?:invoke|use_tool|tool_use|function|tool)>",
         re.DOTALL | re.IGNORECASE,
@@ -1054,7 +1058,7 @@ def _parse_xml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | N
         if not arguments:
             continue
         calls.append(ToolCall.create(tool_name, arguments))
-        remainder = remainder.replace(match.group(0), " ")
+        blank(start, end)
         consumed.append((start, end))
     for match in tool_selfclose_pattern.finditer(text):
         start, end = match.span()
@@ -1070,7 +1074,7 @@ def _parse_xml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | N
         if not arguments:
             continue
         calls.append(ToolCall.create(tool_name, arguments))
-        remainder = remainder.replace(match.group(0), " ")
+        blank(start, end)
         consumed.append((start, end))
     block_pattern = re.compile(r"<(?:tool_call|function_call)>(.*?)</(?:tool_call|function_call)>", re.DOTALL | re.IGNORECASE)
     for match in block_pattern.finditer(text):
@@ -1081,8 +1085,9 @@ def _parse_xml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | N
         extracted = _extract_calls(obj)
         if extracted:
             calls.extend(extracted)
-            remainder = remainder.replace(match.group(0), " ")
-            consumed.append(match.span())
+            start, end = match.span()
+            blank(start, end)
+            consumed.append((start, end))
     for start, content_start, end, inner in _iter_xml_call_wrappers(text):
         if any(s <= start and end <= e for s, e in consumed):
             continue
@@ -1091,7 +1096,7 @@ def _parse_xml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | N
             array_calls = _parse_bare_array_calls(stripped_inner)
             if array_calls:
                 calls.extend(array_calls)
-                remainder = remainder.replace(text[start:end], " ")
+                blank(start, end)
                 consumed.append((start, end))
                 continue
         json_parsed = _extract_json_object(stripped_inner)
@@ -1099,7 +1104,7 @@ def _parse_xml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | N
             extracted = _extract_calls(json_parsed[0])
             if extracted:
                 calls.extend(extracted)
-                remainder = remainder.replace(text[start:end], " ")
+                blank(start, end)
                 consumed.append((start, end))
                 continue
         elements = list(_XML_ELEMENT.finditer(inner))
@@ -1152,7 +1157,7 @@ def _parse_xml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | N
             consumed.append((element_start, element_end))
             block_calls += 1
         if block_calls:
-            remainder = remainder.replace(text[start:end], " ")
+            blank(start, end)
             consumed.append((start, end))
     for tool_name, param_types in (tool_schemas or {}).items():
         escaped = re.escape(tool_name)
@@ -1168,7 +1173,7 @@ def _parse_xml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | N
                 continue
             calls.append(ToolCall.create(tool_name, merged))
             consumed.append((start, end))
-            remainder = remainder.replace(match.group(0), " ")
+            blank(start, end)
         for match in selfclose_pattern.finditer(text):
             start, end = match.span()
             if any(s <= start and end <= e for s, e in consumed):
@@ -1178,9 +1183,10 @@ def _parse_xml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | N
                 continue
             calls.append(ToolCall.create(tool_name, arguments))
             consumed.append((start, end))
-            remainder = remainder.replace(match.group(0), " ")
+            blank(start, end)
     if not calls:
         return None, ""
+    remainder = "".join(text[i] if mask[i] == 0 else " " for i in range(len(text)))
     remainder = _XML_OPEN_TAG.sub(" ", remainder)
     remainder = _XML_CLOSE_TAG.sub(" ", remainder)
     wrapper = " ".join(remainder.split())

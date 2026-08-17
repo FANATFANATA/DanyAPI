@@ -48,7 +48,7 @@ class JsonStore:
             return
         try:
             raw = self._path.read_text(encoding="utf-8")
-        except (FileNotFoundError, OSError):
+        except (FileNotFoundError, OSError, UnicodeError):
             return
         try:
             data = json.loads(raw)
@@ -73,6 +73,8 @@ class JsonStore:
 
     def set(self, key: str, value: Any) -> None:
         with self._lock:
+            if key in self._data and self._data[key] == value:
+                return
             self._data[key] = value
             self._write()
 
@@ -92,6 +94,8 @@ class JsonStore:
 
     def clear(self) -> None:
         with self._lock:
+            if not self._data:
+                return
             self._data.clear()
             self._write()
 

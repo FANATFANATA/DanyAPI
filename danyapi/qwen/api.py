@@ -222,6 +222,7 @@ async def collect_non_stream(
     tool_schemas=None,
     include_usage=False,
     context_seq: tuple[str, ...] | None = None,
+    known_names: set[str] | None = None,
 ):
     await _human_delay()
     async with account_lock(lock, settings.acquire_timeout):
@@ -286,8 +287,16 @@ async def collect_non_stream(
             parsed = toolemu.parse_tool_calls(rec.content, tool_schemas)
             if parsed is not None:
                 tool_calls, tool_text = parsed
-                message = toolemu.format_tool_message(tool_calls, tool_text, rec.reasoning)
-                finish = "tool_calls"
+                if known_names:
+                    tool_calls = [call for call in tool_calls if call.name in known_names]
+                if tool_calls:
+                    message = toolemu.format_tool_message(tool_calls, tool_text, rec.reasoning)
+                    finish = "tool_calls"
+                else:
+                    message = {"role": "assistant", "content": rec.content}
+                    if rec.reasoning:
+                        message["reasoning_content"] = rec.reasoning
+                    finish = "stop"
             else:
                 message = {"role": "assistant", "content": rec.content}
                 if rec.reasoning:
@@ -323,6 +332,7 @@ async def stream_openai(
     tool_schemas=None,
     include_usage=False,
     context_seq: tuple[str, ...] | None = None,
+    known_names: set[str] | None = None,
 ):
     chunk_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
@@ -575,17 +585,38 @@ async def stream_openai(
             parsed = toolemu.parse_tool_calls(content_buf, tool_schemas)
             if parsed is not None:
                 tool_calls, tool_text = parsed
-                for delta in toolemu.tool_call_deltas(tool_calls, tool_text):
-                    yield sse(
-                        {
-                            "id": chunk_id,
-                            "object": "chat.completion.chunk",
-                            "created": created,
-                            "model": model,
-                            "choices": [{"index": 0, "delta": delta, "finish_reason": None}],
-                        }
-                    )
-                finish = "tool_calls"
+                if known_names:
+                    tool_calls = [call for call in tool_calls if call.name in known_names]
+                if tool_calls:
+                    for delta in toolemu.tool_call_deltas(tool_calls, tool_text):
+                        yield sse(
+                            {
+                                "id": chunk_id,
+                                "object": "chat.completion.chunk",
+                                "created": created,
+                                "model": model,
+                                "choices": [{"index": 0, "delta": delta, "finish_reason": None}],
+                            }
+                        )
+                    finish = "tool_calls"
+                else:
+                    if content_buf:
+                        yield sse(
+                            {
+                                "id": chunk_id,
+                                "object": "chat.completion.chunk",
+                                "created": created,
+                                "model": model,
+                                "choices": [
+                                    {
+                                        "index": 0,
+                                        "delta": {"content": content_buf},
+                                        "finish_reason": None,
+                                    }
+                                ],
+                            }
+                        )
+                    finish = "stop"
             else:
                 if content_buf:
                     yield sse(

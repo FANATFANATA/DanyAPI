@@ -67,6 +67,13 @@ class ContextIndex:
                 continue
             self._seqs[session_id] = sequence
             self._touch(session_id, now)
+        while len(self._seqs) > self._maxsize:
+            oldest = min(self._recency, key=lambda sid: self._recency[sid])
+            self._seqs.pop(oldest, None)
+            self._recency.pop(oldest, None)
+            self._ts.pop(oldest, None)
+            if self._store is not None:
+                self._store.discard(oldest)
 
     def _expired(self, session_id: str, now: float) -> bool:
         ts = self._ts.get(session_id)

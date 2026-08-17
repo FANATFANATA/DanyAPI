@@ -581,6 +581,7 @@ async def _chat_completions_qwen(req: ChatCompletionRequest) -> Any:
         "tool_mode": tool_mode,
         "include_usage": _include_usage(req),
         "context_seq": context_seq,
+        "known_names": toolemu.tool_names(getattr(req, "tools", None)),
     }
     if req.stream:
         return StreamingResponse(
