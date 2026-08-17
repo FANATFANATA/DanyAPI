@@ -524,6 +524,10 @@ async def _chat_completions_deepseek(req: ChatCompletionRequest) -> Any:
         "tool_mode": tool_mode,
         "include_usage": _include_usage(req),
         "context_seq": context_seq,
+        "reduced_prompts": _reduced_prompt_variants(
+            req.messages, getattr(req, "tools", None), getattr(req, "tool_choice", None), getattr(req, "response_format", None), prompt
+        ),
+        "known_names": toolemu.tool_names(getattr(req, "tools", None)),
     }
     if req.stream:
         return StreamingResponse(
@@ -828,6 +832,78 @@ async def _collect_continuation(
         return rec
 
 
+def _reduced_prompt_variants(
+    messages: list[Any], tools: list[Any] | None, tool_choice: Any, response_format: Any, original_prompt: str
+) -> list[tuple[str, bool, dict[str, Any]]]:
+    variants: list[tuple[str, bool, dict[str, Any]]] = []
+    if tools:
+        try:
+            prompt, tool_mode = toolemu.build_prompt(messages, None, None, False, response_format)
+            if prompt != original_prompt:
+                variants.append((prompt, tool_mode, {}))
+        except ValueError:
+            pass
+    system_msgs = [msg for msg in messages if getattr(msg, "role", None) == "system"]
+    last_user = None
+    for msg in reversed(messages):
+        if getattr(msg, "role", None) == "user":
+            last_user = msg
+            break
+    reduced_msgs = list(system_msgs)
+    if last_user is not None:
+        reduced_msgs.append(last_user)
+    if reduced_msgs:
+        try:
+            prompt, tool_mode = toolemu.build_prompt(reduced_msgs, None, None, False, response_format)
+            if prompt != original_prompt:
+                variants.append((prompt, tool_mode, {}))
+        except ValueError:
+            pass
+    return variants
+
+
+async def _collect_reduced(
+    account,
+    pool,
+    reduced_prompts: list[tuple[str, bool, dict[str, Any]]],
+    model_type,
+    thinking,
+    search,
+    ref_file_ids=None,
+):
+    for prompt, _tool_mode, _tool_schemas in reduced_prompts:
+        try:
+            session, session_key, parent_message_id = await _prepare_session(account, pool, None, None)
+            pow_headers = await _fresh_pow_headers(account)
+            resp = await _send_with_auth(
+                account,
+                account.client,
+                pow_headers,
+                session.id,
+                parent_message_id,
+                prompt,
+                model_type,
+                thinking,
+                search,
+                ref_file_ids,
+            )
+            rec = MessageReconstructor()
+            incremental = IncrementalSSE()
+            try:
+                async for chunk in resp.aiter_bytes():
+                    for event in incremental.feed(chunk):
+                        rec.handle(event)
+                for event in incremental.finish():
+                    rec.handle(event)
+            finally:
+                await resp.aclose()
+        except (HTTPException, httpx.HTTPError):
+            continue
+        if (rec.content or rec.reasoning) and not _is_input_exceeds_limit(rec):
+            return rec, session, session_key
+    return None
+
+
 async def _collect_non_stream(
     account,
     pool,
@@ -843,6 +919,8 @@ async def _collect_non_stream(
     tool_schemas=None,
     include_usage=False,
     context_seq: tuple[str, ...] | None = None,
+    reduced_prompts: list[tuple[str, bool, dict[str, Any]]] | None = None,
+    known_names: set[str] | None = None,
 ):
     await _human_delay()
     async with account_lock(lock, settings.acquire_timeout):
@@ -928,6 +1006,15 @@ async def _collect_non_stream(
                 cont_parent = cont_rec.id or cont_parent
                 if not _is_input_exceeds_limit(cont_rec):
                     break
+                if not cont_rec.content:
+                    break
+        if _is_input_exceeds_limit(rec) and not (rec.content or rec.reasoning) and reduced_prompts:
+            _drop_session(pool, account, session_key)
+            reduced = await _collect_reduced(account, pool, reduced_prompts, model_type, thinking, search, ref_file_ids)
+            if reduced is not None:
+                rec, session, session_key = reduced
+                response_message_id = rec.id or response_message_id
+                stop_message_id = response_message_id
         session.accumulated_tokens = max(getattr(session, "accumulated_tokens", 0) or 0, rec.accumulated_tokens)
         account.sessions.touch_last_message(session_key, rec.id or response_message_id)
         log.info("deepseek completion OK (%.0fms)", (time.monotonic() - started) * 1000)
@@ -941,8 +1028,16 @@ async def _collect_non_stream(
             parsed = toolemu.parse_tool_calls(content, tool_schemas)
             if parsed is not None:
                 tool_calls, tool_text = parsed
-                finish = "tool_calls"
-                message = toolemu.format_tool_message(tool_calls, tool_text, reasoning)
+                if known_names:
+                    tool_calls = [call for call in tool_calls if call.name in known_names]
+                if tool_calls:
+                    finish = "tool_calls"
+                    message = toolemu.format_tool_message(tool_calls, tool_text, reasoning)
+                else:
+                    message = {"role": "assistant", "content": content}
+                    if reasoning:
+                        message["reasoning_content"] = reasoning
+                    finish = _finish_reason(rec.status)
             else:
                 message = {"role": "assistant", "content": content}
                 if reasoning:
@@ -985,6 +1080,8 @@ async def _stream_openai(
     tool_schemas=None,
     include_usage=False,
     context_seq: tuple[str, ...] | None = None,
+    reduced_prompts: list[tuple[str, bool, dict[str, Any]]] | None = None,
+    known_names: set[str] | None = None,
 ):
     chunk_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
@@ -1223,6 +1320,35 @@ async def _stream_openai(
                     )
                 if not _is_input_exceeds_limit(cont_rec):
                     break
+                if not cont_rec.content:
+                    break
+        if _is_input_exceeds_limit(rec) and not (rec.content or rec.reasoning) and reduced_prompts:
+            _drop_session(pool, account, session_key)
+            reduced = await _collect_reduced(account, pool, reduced_prompts, model_type, thinking, search, ref_file_ids)
+            if reduced is not None:
+                rec, session, session_key = reduced
+                response_message_id = rec.id or response_message_id
+                stop_message_id = response_message_id
+                if rec.content:
+                    yield sse(
+                        {
+                            "id": chunk_id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": model,
+                            "choices": [{"index": 0, "delta": {"content": rec.content}, "finish_reason": None}],
+                        }
+                    )
+                if rec.reasoning:
+                    yield sse(
+                        {
+                            "id": chunk_id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": model,
+                            "choices": [{"index": 0, "delta": {"reasoning_content": rec.reasoning}, "finish_reason": None}],
+                        }
+                    )
         if not (rec.content or rec.reasoning) and rec.hint_error:
             hint = rec.hint_error
             yield sse(
@@ -1263,17 +1389,38 @@ async def _stream_openai(
             parsed = toolemu.parse_tool_calls(content_buf, tool_schemas)
             if parsed is not None:
                 tool_calls, tool_text = parsed
-                for delta in toolemu.tool_call_deltas(tool_calls, tool_text):
-                    yield sse(
-                        {
-                            "id": chunk_id,
-                            "object": "chat.completion.chunk",
-                            "created": created,
-                            "model": model,
-                            "choices": [{"index": 0, "delta": delta, "finish_reason": None}],
-                        }
-                    )
-                finish = "tool_calls"
+                if known_names:
+                    tool_calls = [call for call in tool_calls if call.name in known_names]
+                if tool_calls:
+                    for delta in toolemu.tool_call_deltas(tool_calls, tool_text):
+                        yield sse(
+                            {
+                                "id": chunk_id,
+                                "object": "chat.completion.chunk",
+                                "created": created,
+                                "model": model,
+                                "choices": [{"index": 0, "delta": delta, "finish_reason": None}],
+                            }
+                        )
+                    finish = "tool_calls"
+                else:
+                    if content_buf:
+                        yield sse(
+                            {
+                                "id": chunk_id,
+                                "object": "chat.completion.chunk",
+                                "created": created,
+                                "model": model,
+                                "choices": [
+                                    {
+                                        "index": 0,
+                                        "delta": {"content": content_buf},
+                                        "finish_reason": None,
+                                    }
+                                ],
+                            }
+                        )
+                    finish = _finish_reason(rec.status)
             else:
                 if content_buf:
                     yield sse(

@@ -33,6 +33,7 @@ from danyapi.tools import (
     render_message,
     render_tool_schema,
     tool_call_deltas,
+    tool_names,
     tool_schema_map,
 )
 
@@ -764,6 +765,99 @@ def test_strip_dsml_render_message_cleans_dsml():
     assert "<thinking>" not in rendered
     assert "DSML" not in rendered
     assert "answer" in rendered
+
+
+_DSML_JUNK_MARKER = "\u044f\u255c\u042c\u044f\u255c\u042c"
+
+
+def test_strip_dsml_junk_marker_normalizes_xml():
+    text = (
+        f"<{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}tool_calls>"
+        f'<{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}invoke name="edit">'
+        f'<{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}parameter name="filePath">a.py'
+        f"</{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}parameter>"
+        f"</{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}invoke>"
+        f"</{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}tool_calls>"
+    )
+    stripped = _strip_dsml(text)
+    assert "<tool_calls>" in stripped
+    assert '<invoke name="edit">' in stripped
+    assert '<parameter name="filePath">a.py</parameter>' in stripped
+    assert "DSML" not in stripped
+
+
+def test_parse_tool_calls_junk_marker_edit():
+    text = (
+        f"<{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}tool_calls>\n"
+        f'<{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}invoke name="edit">\n'
+        f'<{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}parameter name="filePath">D:\\steam\\a.lua</{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}parameter>\n'
+        f'<{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}parameter name="oldString">old</{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}parameter>\n'
+        f'<{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}parameter name="newString">new</{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}parameter>\n'
+        f"</{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}invoke>\n"
+        f"</{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}tool_calls>"
+    )
+    calls, wrapper = parse_tool_calls(text)
+    assert calls is not None
+    assert calls[0].name == "edit"
+    assert json.loads(calls[0].arguments) == {"filePath": "D:\\steam\\a.lua", "oldString": "old", "newString": "new"}
+    assert wrapper == ""
+
+
+def test_parse_tool_calls_junk_marker_glob():
+    text = (
+        f"<{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}tool_calls>\n"
+        f"<{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}glob>\n"
+        f"<{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}pattern>**/*.py</{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}pattern>\n"
+        f"</{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}glob>\n"
+        f"</{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}tool_calls>"
+    )
+    calls, wrapper = parse_tool_calls(text)
+    assert calls is not None
+    assert calls[0].name == "glob"
+    assert json.loads(calls[0].arguments) == {"pattern": "**/*.py"}
+    assert wrapper == ""
+
+
+def test_parse_tool_calls_junk_marker_json_preserved():
+    payload = json.dumps({"tool_calls": [{"name": "f", "arguments": {"city": "Moscow"}}]})
+    text = f"<{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}tool_calls>{payload}</{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}tool_calls>"
+    calls, wrapper = parse_tool_calls(text)
+    assert calls is not None
+    assert calls[0].name == "f"
+    assert json.loads(calls[0].arguments) == {"city": "Moscow"}
+    assert wrapper == ""
+
+
+def test_strip_dsml_junk_marker_hidden_reasoning():
+    text = f"<{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}ds_safety>secret</{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}ds_safety>answer"
+    stripped = _strip_dsml(text)
+    assert "secret" not in stripped
+    assert "DSML" not in stripped
+    assert "answer" in stripped
+
+
+def test_tool_names():
+    assert tool_names(None) == set()
+    assert tool_names([]) == set()
+    assert tool_names([{"function": {"name": "a"}}]) == {"a"}
+    assert tool_names([{"name": "b"}]) == {"b"}
+    assert tool_names([{"function": {}}, {"function": {"name": ""}}, "x"]) == set()
+
+
+def test_strip_dsml_tag_json_without_name_preserved():
+    text = '<|DSML|{"tool_calls":[{"name":"f","arguments":{"x":1}}]}>'
+    stripped = _strip_dsml(text)
+    assert stripped == '{"tool_calls":[{"name":"f","arguments":{"x":1}}]}'
+
+
+def test_strip_dsml_tag_without_name_replaced():
+    assert _strip_dsml("<|DSML|123>") == " "
+
+
+def test_strip_dsml_tag_json_without_calls_replaced():
+    text = '<|DSML|{"answer": 42}>'
+    stripped = _strip_dsml(text)
+    assert "answer" not in stripped
 
 
 def test_tool_call_create_variants():
