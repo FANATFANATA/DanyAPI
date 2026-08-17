@@ -33,7 +33,6 @@ from danyapi.tools import (
     render_message,
     render_tool_schema,
     tool_call_deltas,
-    tool_names,
     tool_schema_map,
 )
 
@@ -1019,14 +1018,6 @@ def test_strip_dsml_render_message_paired_tags():
     assert "DSML" not in rendered
     assert "ds_middle" not in rendered
     assert "answer" in rendered
-
-
-def test_tool_names():
-    assert tool_names(None) == set()
-    assert tool_names([]) == set()
-    assert tool_names([{"function": {"name": "a"}}]) == {"a"}
-    assert tool_names([{"name": "b"}]) == {"b"}
-    assert tool_names([{"function": {}}, {"function": {"name": ""}}, "x"]) == set()
 
 
 def test_strip_dsml_tag_json_without_name_preserved():

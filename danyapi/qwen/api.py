@@ -222,7 +222,6 @@ async def collect_non_stream(
     tool_schemas=None,
     include_usage=False,
     context_seq: tuple[str, ...] | None = None,
-    known_names: set[str] | None = None,
 ):
     await _human_delay()
     async with account_lock(lock, settings.acquire_timeout):
@@ -290,8 +289,6 @@ async def collect_non_stream(
             parsed = toolemu.parse_tool_calls(rec.content, tool_schemas)
             if parsed is not None:
                 tool_calls, tool_text = parsed
-                if known_names:
-                    tool_calls = [call for call in tool_calls if call.name in known_names]
                 if tool_calls:
                     message = toolemu.format_tool_message(tool_calls, tool_text, rec.reasoning)
                     finish = "tool_calls"
@@ -335,7 +332,6 @@ async def stream_openai(
     tool_schemas=None,
     include_usage=False,
     context_seq: tuple[str, ...] | None = None,
-    known_names: set[str] | None = None,
 ):
     chunk_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
@@ -591,8 +587,6 @@ async def stream_openai(
             parsed = toolemu.parse_tool_calls(content_buf, tool_schemas)
             if parsed is not None:
                 tool_calls, tool_text = parsed
-                if known_names:
-                    tool_calls = [call for call in tool_calls if call.name in known_names]
                 if tool_calls:
                     for delta in toolemu.tool_call_deltas(tool_calls, tool_text):
                         yield sse(

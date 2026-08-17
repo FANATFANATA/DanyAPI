@@ -549,7 +549,6 @@ async def _chat_completions_deepseek(req: ChatCompletionRequest) -> Any:
         "reduced_prompts": _reduced_prompt_variants(
             req.messages, getattr(req, "tools", None), getattr(req, "tool_choice", None), getattr(req, "response_format", None), prompt
         ),
-        "known_names": toolemu.tool_names(getattr(req, "tools", None)),
     }
     if req.stream:
         return StreamingResponse(
@@ -603,7 +602,6 @@ async def _chat_completions_qwen(req: ChatCompletionRequest) -> Any:
         "tool_mode": tool_mode,
         "include_usage": _include_usage(req),
         "context_seq": context_seq,
-        "known_names": toolemu.tool_names(getattr(req, "tools", None)),
     }
     if req.stream:
         return StreamingResponse(
@@ -951,7 +949,6 @@ async def _collect_non_stream(
     include_usage=False,
     context_seq: tuple[str, ...] | None = None,
     reduced_prompts: list[tuple[str, bool, dict[str, Any]]] | None = None,
-    known_names: set[str] | None = None,
 ):
     await _human_delay()
     async with account_lock(lock, settings.acquire_timeout):
@@ -1062,8 +1059,6 @@ async def _collect_non_stream(
             parsed = toolemu.parse_tool_calls(content, tool_schemas)
             if parsed is not None:
                 tool_calls, tool_text = parsed
-                if known_names:
-                    tool_calls = [call for call in tool_calls if call.name in known_names]
                 if tool_calls:
                     finish = "tool_calls"
                     message = toolemu.format_tool_message(tool_calls, tool_text, reasoning)
@@ -1115,7 +1110,6 @@ async def _stream_openai(
     include_usage=False,
     context_seq: tuple[str, ...] | None = None,
     reduced_prompts: list[tuple[str, bool, dict[str, Any]]] | None = None,
-    known_names: set[str] | None = None,
 ):
     chunk_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
@@ -1352,8 +1346,6 @@ async def _stream_openai(
             parsed = toolemu.parse_tool_calls(content_buf or rec.content, tool_schemas)
             if parsed is not None:
                 tool_calls, tool_text = parsed
-                if known_names:
-                    tool_calls = [call for call in tool_calls if call.name in known_names]
                 if tool_calls:
                     for delta in toolemu.tool_call_deltas(tool_calls, tool_text):
                         yield _sse(

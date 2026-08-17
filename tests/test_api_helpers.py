@@ -1889,7 +1889,7 @@ TOOL_JSON_SSE = (
 )
 
 
-async def test_stream_tool_mode_reduced_filtered():
+async def test_stream_tool_mode_reduced_emits_tool_calls():
     acct = FakeAccount([])
     acct.client.completion = AsyncMock(
         side_effect=[
@@ -1910,9 +1910,9 @@ async def test_stream_tool_mode_reduced_filtered():
         thinking=False,
         search=False,
         tool_mode=True,
-        known_names={"other_tool"},
         reduced_prompts=[("short prompt", False, {})],
     )
     joined = "".join(await _collect_agen(gen))
-    assert '"finish_reason": "stop"' in joined
+    assert '"tool_calls"' in joined
+    assert '"finish_reason": "tool_calls"' in joined
     assert joined.rstrip().endswith("data: [DONE]")

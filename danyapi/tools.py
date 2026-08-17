@@ -1002,15 +1002,6 @@ def _coerce_scalar(value: str, json_type: Any) -> Any:
     return value
 
 
-def tool_names(tools: list[Any] | None) -> set[str]:
-    names: set[str] = set()
-    for tool in tools or []:
-        fn = _tool_function(tool)
-        if fn is not None and isinstance(fn.get("name"), str) and fn["name"]:
-            names.add(fn["name"])
-    return names
-
-
 def tool_schema_map(tools: list[Any] | None) -> dict[str, dict[str, Any]]:
     result: dict[str, dict[str, Any]] = {}
     if not tools:

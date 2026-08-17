@@ -626,31 +626,6 @@ async def test_non_stream_tool_mode_with_reasoning():
     assert message["reasoning_content"] == "Think step"
 
 
-async def test_non_stream_tool_mode_known_names_filters_all():
-    acct = FakeAccount([TOOL_SSE])
-    args = _args(acct, tool_mode=True)
-    args["known_names"] = {"other_tool"}
-    result = await qwen_api.collect_non_stream(**args)
-    choice = result["choices"][0]
-    assert choice["finish_reason"] == "stop"
-    assert "tool_calls" not in choice["message"]
-    assert choice["message"]["content"] == TOOL_JSON
-    assert choice["message"]["reasoning_content"] == "Think step"
-
-
-async def test_stream_tool_mode_known_names_filters_all():
-    acct = FakeAccount([TOOL_SSE])
-    args = _args(acct, tool_mode=True)
-    args["known_names"] = {"other_tool"}
-    gen = qwen_api.stream_openai(**args)
-    lines = await _collect(gen)
-    joined = "".join(lines)
-    assert '"tool_calls"' not in joined
-    assert json.dumps(TOOL_JSON)[1:-1] in joined
-    assert '"finish_reason": "stop"' in joined
-    assert joined.rstrip().endswith("data: [DONE]")
-
-
 async def test_json_non_dict_payload():
     with pytest.raises(Exception) as excinfo:
         await _send(JsonResp("[]"))
@@ -677,23 +652,6 @@ async def test_stream_without_response_id():
     joined = "".join(await _collect(gen))
     assert '"content": "Hi"' in joined
     assert joined.rstrip().endswith("data: [DONE]")
-
-
-async def test_non_stream_tool_mode_no_reasoning_filtered():
-    tool_sse = (
-        'data: {"response.created":{"chat_id":"c1","parent_id":"p0","response_id":"r1"}} \n'
-        "\n"
-        f'data: {{"choices": [{{"delta": {{"content": {json.dumps(TOOL_JSON)}, "phase": "answer"}}}}], "response_id": "r1"}}\n'
-        "\n"
-    )
-    acct = FakeAccount([tool_sse])
-    args = _args(acct, tool_mode=True)
-    args["known_names"] = {"other_tool"}
-    result = await qwen_api.collect_non_stream(**args)
-    choice = result["choices"][0]
-    assert choice["finish_reason"] == "stop"
-    assert choice["message"]["content"] == TOOL_JSON
-    assert "reasoning_content" not in choice["message"]
 
 
 async def test_stream_tool_mode_reasoning_only():
