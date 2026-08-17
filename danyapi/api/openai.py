@@ -809,8 +809,6 @@ async def _try_stop_stream(client, session_id: str, message_id: str | None) -> N
         await client.stop_stream(session_id, message_id)
     except Exception as exc:
         log.debug("stop_stream failed for %s: %s", session_id, exc)
-
-# ненавижу
 async def _collect_continuation(
     account,
     session,
