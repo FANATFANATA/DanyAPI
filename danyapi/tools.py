@@ -49,7 +49,7 @@ _DSML_HIDDEN_NAKED = re.compile(
 )
 _XML_ELEMENT = re.compile(r"<([a-zA-Z_][a-zA-Z0-9_-]*)\b([^>]*)>(.*?)</\1>", re.DOTALL | re.IGNORECASE)
 _XML_SELFCLOSE = re.compile(r"<([a-zA-Z_][a-zA-Z0-9_-]*)\b([^>]*?)/>", re.DOTALL | re.IGNORECASE)
-_XML_WRAPPER_OPEN = re.compile(r"<(?:tool_calls|tool_call|function_calls|function_call)\b[^>]*>", re.IGNORECASE)
+_XML_WRAPPER_OPEN = re.compile(r"<(?:tool_calls|tool_call|function_calls|function_call|tools)\b[^>]*>", re.IGNORECASE)
 _XML_SKIP_ELEMENTS = frozenset(
     {
         "tool_calls",
@@ -57,6 +57,7 @@ _XML_SKIP_ELEMENTS = frozenset(
         "function_calls",
         "function_call",
         "functions",
+        "tools",
         "invoke",
         "use_tool",
         "tool_use",
@@ -69,8 +70,9 @@ _XML_SKIP_ELEMENTS = frozenset(
         "analysis",
     }
 )
-_XML_OPEN_TAG = re.compile(r"<(?:tool_calls|tool_call|function_calls|function_call|functions|function)\b[^>]*>", re.IGNORECASE)
-_XML_CLOSE_TAG = re.compile(r"</(?:tool_calls|tool_call|function_calls|function_call|functions|function)\s*>", re.IGNORECASE)
+_XML_GENERIC_TOOL_TAGS = frozenset({"invoke", "toolinvoke", "tool_invoke", "use_tool", "tool_use", "call", "tool_call", "function_call", "action", "run"})
+_XML_OPEN_TAG = re.compile(r"<(?:tool_calls|tool_call|function_calls|function_call|functions|function|tools)\b[^>]*>", re.IGNORECASE)
+_XML_CLOSE_TAG = re.compile(r"</(?:tool_calls|tool_call|function_calls|function_call|functions|function|tools)\s*>", re.IGNORECASE)
 _XML_HTML_TAGS = frozenset(
     {
         "a",
@@ -189,6 +191,7 @@ _XML_HTML_TAGS = frozenset(
 )
 _ARGS_ALIASES = ("arguments", "args", "params", "parameters", "input")
 _NAME_ALIASES = ("name", "tool", "action", "tool_name", "call")
+_JSON_TYPE_ATTRS = frozenset({"string", "boolean", "integer", "number", "object", "array", "null"})
 
 
 def _replace_dsml_tag(match: re.Match) -> str:
@@ -221,19 +224,20 @@ def _strip_dsml(text: str) -> str:
 TOOL_CALL_INSTRUCTION = (
     "You have access to the following functions. Call them when the user's request requires it.\n\n"
     "{functions}\n\n"
-    "When you need to call one or more functions, reply with ONLY one of the following formats "
-    "(no markdown fences, no code blocks, no extra text, no explanation):\n"
-    "1. A single valid JSON object:\n"
-    '{{"tool_calls": [{{"name": "get_weather", "arguments": {{"city": "Moscow"}}}}]}}\n'
-    "2. An XML block:\n"
-    "<tool_calls>\n<get_weather>\n<city>Moscow</city>\n</get_weather>\n</tool_calls>\n"
-    "3. A plain function call:\n"
-    'get_weather(city="Moscow")\n\n'
-    "Use the exact function names and JSON argument keys from the definitions above. "
-    'The value of "arguments" must be a JSON object with only those keys. '
-    "Parameter values may be plain text or JSON values. "
-    'You may include multiple entries in the "tool_calls" array, multiple tool elements '
-    "inside the XML block, or multiple function calls on separate lines to call several functions at once.\n"
+    "When you need to call one or more functions, reply with ONLY an XML block in exactly this format:\n"
+    "<tool_calls>\n"
+    '<invoke name="TOOL_NAME">\n'
+    '<parameter name="ARG_NAME">value</parameter>\n'
+    "</invoke>\n"
+    "</tool_calls>\n\n"
+    "Example:\n"
+    "{example}\n\n"
+    "Rules:\n"
+    "- Use the exact function names and argument keys from the definitions above.\n"
+    "- Put every function call in its own <invoke> element inside the <tool_calls> block.\n"
+    "- Put every argument in its own <parameter> element; the name attribute must be the exact argument key.\n"
+    "- Omit optional arguments you do not need.\n"
+    "- No markdown fences, no code blocks, no comments, no text before or after the XML block, no other XML tags.\n"
     "{choice}"
 )
 
@@ -287,6 +291,19 @@ def _choice_name(tool_choice: Any) -> str | None:
     return None
 
 
+def _example_tool_call(fn: dict) -> str:
+    name = fn.get("name") or "tool"
+    params = fn.get("parameters")
+    properties = params.get("properties") if isinstance(params, dict) else None
+    if isinstance(properties, dict) and properties:
+        key = next(iter(properties))
+        spec = properties[key]
+        ptype = spec.get("type") if isinstance(spec, dict) else None
+        value = {"string": "value", "integer": "1", "number": "1", "boolean": "true"}.get(ptype if isinstance(ptype, str) else "", "value")
+        return f'<invoke name="{name}">\n<parameter name="{key}">{value}</parameter>\n</invoke>'
+    return f'<invoke name="{name}"></invoke>'
+
+
 def render_tool_schema(tools: list[Any] | None, tool_choice: Any = None) -> str | None:
     if not tools:
         return None
@@ -320,7 +337,12 @@ def render_tool_schema(tools: list[Any] | None, tool_choice: Any = None) -> str 
         choice_line = f"You MUST call exactly the function {choice} and no other functions."
     else:
         choice_line = "If you do not need to call any function, reply normally with your answer."
-    return TOOL_CALL_INSTRUCTION.format(functions="\n".join(lines), choice=choice_line)
+    example = _example_tool_call(functions[0])
+    return TOOL_CALL_INSTRUCTION.format(
+        functions="\n".join(lines),
+        example=f"<tool_calls>\n{example}\n</tool_calls>",
+        choice=choice_line,
+    )
 
 
 def _content_text(content: Any) -> str:
@@ -1002,6 +1024,26 @@ def _coerce_scalar(value: str, json_type: Any) -> Any:
     return value
 
 
+def _schema_for_name(tool_schemas: dict[str, dict[str, Any]] | None, name: str) -> dict[str, Any] | None:
+    if not tool_schemas:
+        return None
+    if name in tool_schemas:
+        return tool_schemas[name]
+    for known, spec in tool_schemas.items():
+        if known.casefold() == name.casefold():
+            return spec
+    return None
+
+
+def _normalize_call_name(name: str, tool_schemas: dict[str, dict[str, Any]] | None) -> str:
+    if not tool_schemas or name in tool_schemas:
+        return name
+    for known in tool_schemas:
+        if known.casefold() == name.casefold():
+            return known
+    return name
+
+
 def tool_schema_map(tools: list[Any] | None) -> dict[str, dict[str, Any]]:
     result: dict[str, dict[str, Any]] = {}
     if not tools:
@@ -1069,9 +1111,9 @@ def _xml_invoke_arguments(body: str, param_types: dict[str, Any] | None = None, 
         except ValueError:
             pass
     params: dict[str, Any] = {}
-    for match in re.finditer(r'<parameter\s+name=["\']([^"\']+)["\']\s*>(.*?)</parameter>', body, re.DOTALL | re.IGNORECASE):
-        key = match.group(1).strip()
-        _xml_set_param(params, key, _xml_value(match.group(2), (param_types or {}).get(key)))
+    for match in re.finditer(r'<parameter\b[^>]*?\bname\s*=\s*(["\'])([^"\']+)\1[^>]*>(.*?)</parameter\s*>', body, re.DOTALL | re.IGNORECASE):
+        key = match.group(2).strip()
+        _xml_set_param(params, key, _xml_value(match.group(3), (param_types or {}).get(key)))
     if params:
         return params
     for match in _XML_ELEMENT.finditer(body):
@@ -1100,6 +1142,8 @@ def _xml_tag_attrs(body: str, param_types: dict[str, Any] | None = None) -> dict
         key = match.group(1)
         raw = match.group(2)
         value = raw[1:-1]
+        if key.casefold() in _JSON_TYPE_ATTRS and value.casefold() in ("true", "false", "null"):
+            continue
         attrs[key] = _coerce_scalar(_unescape_xml(value), (param_types or {}).get(key))
     return attrs
 
@@ -1113,7 +1157,7 @@ def _iter_xml_call_wrappers(text: str) -> Iterator[tuple[int, int, int, str]]:
             return
         content_start = match.end()
         rest = text[content_start:]
-        close = re.search(r"</(?:tool_calls|tool_call|function_calls|function_call)\s*>", rest, re.IGNORECASE)
+        close = re.search(r"</(?:tool_calls|tool_call|function_calls|function_call|tools)\s*>", rest, re.IGNORECASE)
         if close is None:
             close = _XML_WRAPPER_OPEN.search(rest)
         end = length if close is None else content_start + close.start()
@@ -1130,11 +1174,11 @@ def _parse_xml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | N
         mask[start:end] = b" " * (end - start)
 
     tool_element_pattern = re.compile(
-        r"<(?:invoke|use_tool|tool_use|function|tool)\b([^>]*)>(.*?)</(?:invoke|use_tool|tool_use|function|tool)>",
+        r"<(?:invoke|toolinvoke|tool_invoke|use_tool|tool_use|call|function|tool)\b([^>]*)>(.*?)</(?:invoke|toolinvoke|tool_invoke|use_tool|tool_use|call|function|tool)\s*>",
         re.DOTALL | re.IGNORECASE,
     )
     tool_selfclose_pattern = re.compile(
-        r"<(?:invoke|use_tool|tool_use|function|tool)\b([^>]*?)/>",
+        r"<(?:invoke|toolinvoke|tool_invoke|use_tool|tool_use|call|function|tool)\b([^>]*?)/>",
         re.DOTALL | re.IGNORECASE,
     )
     name_attr_pattern = re.compile(r"\bname\s*=\s*([\"']?)([^\s>\"']+)\1", re.IGNORECASE)
@@ -1153,7 +1197,7 @@ def _parse_xml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | N
             body = body[: child_name.start()] + " " + body[child_name.end() :]
         if not tool_name:
             continue
-        param_types = (tool_schemas or {}).get(tool_name)
+        param_types = _schema_for_name(tool_schemas, tool_name)
         arguments = _xml_tag_attrs(name_attr_strip.sub("", attrs_text), param_types)
         arguments.update(_xml_invoke_arguments(body, param_types) or {})
         if not arguments:
@@ -1170,7 +1214,7 @@ def _parse_xml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | N
         if name_match is None:
             continue
         tool_name = name_match.group(2)
-        param_types = (tool_schemas or {}).get(tool_name)
+        param_types = _schema_for_name(tool_schemas, tool_name)
         arguments = _xml_tag_attrs(name_attr_strip.sub("", attrs_text), param_types)
         if not arguments:
             continue
@@ -1233,13 +1277,18 @@ def _parse_xml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | N
                     block_calls += 1
                     pending_name = None
                 continue
-            tool_name = element.group(1).strip()
-            param_types = (tool_schemas or {}).get(tool_name)
+            raw_name = element.group(1).strip()
+            param_types = _schema_for_name(tool_schemas, raw_name)
             arguments = _xml_tag_attrs(element.group(2), param_types)
             arguments.update(_xml_invoke_arguments(element.group(3), param_types) or {})
+            if param_types is None and isinstance(arguments.get("name"), str) and arguments["name"].strip():
+                raw_name = arguments.pop("name")
+                param_types = _schema_for_name(tool_schemas, raw_name)
+            elif param_types is None and raw_name.casefold() in _XML_GENERIC_TOOL_TAGS:
+                continue
             if not arguments:
                 continue
-            calls.append(ToolCall.create(tool_name, arguments))
+            calls.append(ToolCall.create(raw_name, arguments))
             consumed.append((element_start, element_end))
             block_calls += 1
         for element in _XML_SELFCLOSE.finditer(inner):
@@ -1298,16 +1347,21 @@ def _parse_xml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | N
         element_name = match.group(1).strip().lower()
         if element_name in _XML_SKIP_ELEMENTS or element_name in _XML_HTML_TAGS:
             continue
-        tool_name = match.group(1).strip()
-        param_types = (tool_schemas or {}).get(tool_name)
+        raw_name = match.group(1).strip()
+        param_types = _schema_for_name(tool_schemas, raw_name)
         if self_closed:
             arguments = _xml_tag_attrs(match.group(2), param_types)
         else:
             arguments = _xml_tag_attrs(match.group(2), param_types)
             arguments.update(_xml_invoke_arguments(match.group(3), param_types, False) or {})
+        if param_types is None and isinstance(arguments.get("name"), str) and arguments["name"].strip():
+            raw_name = arguments.pop("name")
+            param_types = _schema_for_name(tool_schemas, raw_name)
+        elif param_types is None and raw_name.casefold() in _XML_GENERIC_TOOL_TAGS:
+            continue
         if not arguments:
             continue
-        calls.append(ToolCall.create(tool_name, arguments))
+        calls.append(ToolCall.create(raw_name, arguments))
         consumed.append((start, end))
         blank(start, end)
     if not calls:
@@ -1646,7 +1700,7 @@ def _parse_dsml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | 
         tool_name = inv.group(2).strip()
         body = inv.group(3)
         params: dict[str, Any] = {}
-        param_types = (tool_schemas or {}).get(tool_name)
+        param_types = _schema_for_name(tool_schemas, tool_name)
         for param in _DSML_PARAMETER.finditer(body):
             key = param.group(2).strip()
             params[key] = _xml_value(param.group(3), (param_types or {}).get(key))
@@ -1733,7 +1787,11 @@ def _parse_tool_calls_impl(
 
 
 def parse_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | None = None) -> tuple[list[ToolCall], str] | None:
-    return _parse_tool_calls_impl(text, tool_schemas, None)
+    result = _parse_tool_calls_impl(text, tool_schemas, None)
+    if result is None:
+        return None
+    calls, wrapper = result
+    return [ToolCall(call.id, _normalize_call_name(call.name, tool_schemas), call.arguments) for call in calls], wrapper
 
 
 def parse_tool_calls_debug(text: str, tool_schemas: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
@@ -1750,7 +1808,7 @@ def parse_tool_calls_debug(text: str, tool_schemas: dict[str, dict[str, Any]] | 
     if result is not None:
         calls, wrapper = result
         report["parsed"] = True
-        report["calls"] = [{"id": call.id, "name": call.name, "arguments": call.arguments} for call in calls]
+        report["calls"] = [{"id": call.id, "name": _normalize_call_name(call.name, tool_schemas), "arguments": call.arguments} for call in calls]
         report["wrapper"] = wrapper
         report["unrecognized"] = wrapper
     return report

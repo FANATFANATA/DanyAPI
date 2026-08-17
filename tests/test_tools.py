@@ -65,7 +65,9 @@ def test_render_tool_schema_basic():
     assert schema is not None
     assert "get_weather" in schema
     assert '"city"' in schema
-    assert '"tool_calls"' in schema
+    assert "<tool_calls>" in schema
+    assert "<invoke" in schema
+    assert "<parameter" in schema
 
 
 def test_render_tool_schema_empty_tools():
