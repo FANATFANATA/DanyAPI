@@ -836,6 +836,45 @@ def test_strip_dsml_junk_marker_hidden_reasoning():
     assert "answer" in stripped
 
 
+def test_strip_dsml_any_unicode_marker():
+    markers = (
+        "\u03b1\u03b2",
+        "\u4e2d\u6587",
+        "\U0001f600",
+        "\u3042\u3044",
+        "\u20ac\u00a9",
+        "\u05e9\u05dc",
+        "\u0627\u0628",
+        "\u00e9\u00ea",
+        "\u2500\u2501",
+        "\uff0d\uff3f",
+        "\u0416\u0419",
+        "\u0301\u0300",
+    )
+    for junk in markers:
+        text = (
+            f"<{junk}DSML{junk}tool_calls>"
+            f'<{junk}DSML{junk}invoke name="f">'
+            f'<{junk}DSML{junk}parameter name="x">1</{junk}DSML{junk}parameter>'
+            f"</{junk}DSML{junk}invoke>"
+            f"</{junk}DSML{junk}tool_calls>"
+        )
+        calls, wrapper = parse_tool_calls(text)
+        assert calls is not None
+        assert calls[0].name == "f"
+        assert json.loads(calls[0].arguments) == {"x": "1"}
+        assert wrapper == ""
+
+
+def test_strip_dsml_any_unicode_marker_hidden():
+    for junk in ("\u03b1", "\U0001f600", "\u4e2d"):
+        text = f"<{junk}DSML{junk}thinking>secret</{junk}DSML{junk}thinking>answer"
+        stripped = _strip_dsml(text)
+        assert "secret" not in stripped
+        assert "DSML" not in stripped
+        assert "answer" in stripped
+
+
 def test_tool_names():
     assert tool_names(None) == set()
     assert tool_names([]) == set()

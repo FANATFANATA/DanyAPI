@@ -8,11 +8,9 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
-_DSML_PIPE = (
-    r"|\u00a6\u01c0\u01c1\u05c0\u2016\u2223\u2502\u2551\u2758\ufe31\uff5c"
-    r"\u2500-\u257f\u2580-\u259f\u0400-\u04ff\uff00-\uffef"
-)
-_DSML_MARKER = rf"[{_DSML_PIPE}]+\s*DSML\s*[{_DSML_PIPE}]+"
+_DSML_PIPE = r"|\u00a6\u01c0\u01c1\u05c0\u2016\u2223\u2502\u2551\u2758\ufe31\uff5c"
+_DSML_JUNK = r"[^\x00-\x7f]"
+_DSML_MARKER = rf"(?:[{_DSML_PIPE}]|{_DSML_JUNK})+\s*DSML\s*(?:[{_DSML_PIPE}]|{_DSML_JUNK})+"
 _DSML_XML_NORMALIZE = re.compile(rf"<\s*(/?)\s*{_DSML_MARKER}\s*([a-zA-Z_][^<>]*)>", re.IGNORECASE)
 _DSML_TAG = re.compile(rf"<\s*/?\s*{_DSML_MARKER}\s*[^<>]*>", re.IGNORECASE)
 _DSML_NAKED = re.compile(rf"{_DSML_MARKER}", re.IGNORECASE)
