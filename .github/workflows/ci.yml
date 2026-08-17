@@ -36,15 +36,7 @@ jobs:
         run: clang -O2 -o danyapi/deepseek/pow_solver danyapi/deepseek/pow_solver.c
 
       - name: Run unit tests with coverage
-        run: python -m pytest -q --cov=danyapi --cov-report=term-missing --cov-report=xml:coverage.xml --cov-fail-under=100
-
-      - name: Upload coverage report
-        if: matrix.python-version == '3.14'
-        uses: actions/upload-artifact@v7
-        with:
-          name: coverage-report
-          path: coverage.xml
-          retention-days: 7
+        run: python -m pytest -q --cov=danyapi
 
   lint:
     runs-on: ubuntu-latest

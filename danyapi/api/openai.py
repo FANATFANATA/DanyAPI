@@ -35,6 +35,8 @@ MODEL_TYPE_BY_NAME = {
     "deepseek-v4-vision": "vision",
 }
 
+REASONING_SUFFIXES = ("-reasoning", "-thinking")
+
 QWEN_DEFAULT_MODELS = [
     {
         "id": "qwen3.8-max",
@@ -333,9 +335,19 @@ async def _upload_attachments(account, attachments: list[Attachment], model_type
 
 def _resolve_model(model: str) -> str:
     model_type = MODEL_TYPE_BY_NAME.get(model)
-    if model_type is None:
-        raise HTTPException(404, f"Unknown model: {model}")
-    return model_type
+    if model_type is not None:
+        return model_type
+    for suffix in REASONING_SUFFIXES:
+        if model.endswith(suffix):
+            base_type = MODEL_TYPE_BY_NAME.get(model[: -len(suffix)])
+            if base_type is not None:
+                return base_type
+            break
+    raise HTTPException(404, f"Unknown model: {model}")
+
+
+def _is_reasoning_model(model: str) -> bool:
+    return any(model.endswith(suffix) for suffix in REASONING_SUFFIXES)
 
 
 def _finish_reason(status: Any) -> str:
@@ -368,16 +380,27 @@ async def health() -> dict:
 
 @app.get("/v1/models")
 async def list_models() -> dict:
-    models = [
-        {
-            "id": name,
-            "object": "model",
-            "created": 0,
-            "owned_by": "deepseek",
-            "model_type": model_type,
-        }
-        for name, model_type in MODEL_TYPE_BY_NAME.items()
-    ]
+    models: list[dict] = []
+    for name, model_type in MODEL_TYPE_BY_NAME.items():
+        models.append(
+            {
+                "id": name,
+                "object": "model",
+                "created": 0,
+                "owned_by": "deepseek",
+                "model_type": model_type,
+            }
+        )
+        for suffix in REASONING_SUFFIXES:
+            models.append(
+                {
+                    "id": f"{name}{suffix}",
+                    "object": "model",
+                    "created": 0,
+                    "owned_by": "deepseek",
+                    "model_type": model_type,
+                }
+            )
     qwen_models: list[dict] = getattr(app.state, "qwen_models", [])
     for model in qwen_models:
         models.append(
@@ -505,7 +528,7 @@ async def _chat_completions_deepseek(req: ChatCompletionRequest) -> Any:
         raise HTTPException(503, "deepseek provider is not configured")
 
     model_type = _resolve_model(req.model)
-    thinking = req.thinking if req.thinking is not None else (model_type == "expert")
+    thinking = req.thinking if req.thinking is not None else _is_reasoning_model(req.model)
     search = bool(req.search) and model_type == "default"
 
     context_seq = toolemu.context_sequence(req.messages, user=getattr(req, "user", None))

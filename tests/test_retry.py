@@ -363,6 +363,21 @@ async def test_search_gated_to_flash_and_thinking_allowed():
         await run("deepseek-v4-pro", search=True, thinking=None)
         assert captured["model_type"] == "expert"
         assert captured["search"] is False
+        assert captured["thinking"] is False
+
+        await run("deepseek-v4-pro-reasoning", search=True, thinking=None)
+        assert captured["model_type"] == "expert"
+        assert captured["search"] is False
+        assert captured["thinking"] is True
+
+        await run("deepseek-v4-flash-reasoning", search=True, thinking=None)
+        assert captured["model_type"] == "default"
+        assert captured["search"] is True
+        assert captured["thinking"] is True
+
+        await run("deepseek-v4-pro-thinking", search=True, thinking=None)
+        assert captured["model_type"] == "expert"
+        assert captured["search"] is False
         assert captured["thinking"] is True
 
         await run("deepseek-v4-vision", search=True, thinking=True)
