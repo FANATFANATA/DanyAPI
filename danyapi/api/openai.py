@@ -246,6 +246,8 @@ def _split_data_uri(uri: str) -> tuple[str, bytes]:
     if not uri.startswith("data:"):
         raise HTTPException(400, "image_url must be a data URI (data:<mime>;base64,...)")
     meta, _, payload = uri[5:].partition(",")
+    if not payload:
+        raise HTTPException(400, "invalid data URI: missing base64 payload")
     content_type = meta.split(";", 1)[0] or "application/octet-stream"
     try:
         data = base64.b64decode(payload, validate=True)
@@ -280,7 +282,7 @@ def _collect_attachments(req: ChatCompletionRequest) -> list[Attachment]:
             data = base64.b64decode(f.content)
         except ValueError as exc:
             raise HTTPException(400, f"invalid base64 in file {f.name}") from exc
-        attachments.append(Attachment(data, f.name, f.content_type or "application/octet-stream", f.content_type.startswith("image/")))
+        attachments.append(Attachment(data, f.name, f.content_type or "application/octet-stream", (f.content_type or "").startswith("image/")))
     return attachments
 
 
@@ -449,32 +451,52 @@ def _sse(data: dict) -> str:
     return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
+def _stream_error_sse(
+    chunk_id: str,
+    created: int,
+    model: str,
+    message: str,
+    session_key: str | None = None,
+    error_finish: str | None = None,
+    choice_finish: str | None = None,
+) -> tuple[str, str, str]:
+    error: dict = {"message": message}
+    if error_finish is not None:
+        error["finish_reason"] = error_finish
+    error_chunk = _sse(
+        {
+            "id": chunk_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model,
+            "error": error,
+            "choices": [{"index": 0, "delta": {}, "finish_reason": choice_finish or error_finish or "error"}],
+        }
+    )
+    tail_chunk = _sse(
+        {
+            "id": chunk_id,
+            "session_id": session_key,
+            "object": "chat.completion.chunk",
+            "choices": [],
+        }
+    )
+    return error_chunk, tail_chunk, "data: [DONE]\n\n"
+
+
 async def _stream_guard(gen, model: str):
+    chunk_id = f"chatcmpl-{uuid.uuid4().hex}"
+    created = int(time.time())
     try:
         async for item in gen:
             yield item
     except AccountPoolBusy:
-        chunk_id = f"chatcmpl-{uuid.uuid4().hex}"
-        created = int(time.time())
-        yield _sse(
-            {
-                "id": chunk_id,
-                "object": "chat.completion.chunk",
-                "created": created,
-                "model": model,
-                "error": {"message": "all accounts are busy, try again later"},
-                "choices": [{"index": 0, "delta": {}, "finish_reason": "error"}],
-            }
-        )
-        yield _sse(
-            {
-                "id": chunk_id,
-                "session_id": None,
-                "object": "chat.completion.chunk",
-                "choices": [],
-            }
-        )
-        yield "data: [DONE]\n\n"
+        for line in _stream_error_sse(chunk_id, created, model, "all accounts are busy, try again later"):
+            yield line
+    except Exception as exc:
+        log.exception("stream generator failed: %s", exc)
+        for line in _stream_error_sse(chunk_id, created, model, f"stream error: {exc}"):
+            yield line
 
 
 async def _chat_completions_deepseek(req: ChatCompletionRequest) -> Any:
@@ -1098,34 +1120,14 @@ async def _stream_openai(
     chunk_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
 
-    def sse(data: dict) -> str:
-        return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
-
     await _human_delay()
     async with account_lock(lock, settings.acquire_timeout):
         try:
             session, session_key, parent_message_id = await _prepare_session(account, pool, existing_sid, context_seq)
         except HTTPException as exc:
             detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
-            yield sse(
-                {
-                    "id": chunk_id,
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": model,
-                    "error": {"message": detail},
-                    "choices": [{"index": 0, "delta": {}, "finish_reason": "error"}],
-                }
-            )
-            yield sse(
-                {
-                    "id": chunk_id,
-                    "session_id": None,
-                    "object": "chat.completion.chunk",
-                    "choices": [],
-                }
-            )
-            yield "data: [DONE]\n\n"
+            for line in _stream_error_sse(chunk_id, created, model, detail):
+                yield line
             return
 
         rec: MessageReconstructor | None = None
@@ -1167,25 +1169,8 @@ async def _stream_openai(
                     )
                     continue
                 detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
-                yield sse(
-                    {
-                        "id": chunk_id,
-                        "object": "chat.completion.chunk",
-                        "created": created,
-                        "model": model,
-                        "error": {"message": detail},
-                        "choices": [{"index": 0, "delta": {}, "finish_reason": "error"}],
-                    }
-                )
-                yield sse(
-                    {
-                        "id": chunk_id,
-                        "session_id": session_key,
-                        "object": "chat.completion.chunk",
-                        "choices": [],
-                    }
-                )
-                yield "data: [DONE]\n\n"
+                for line in _stream_error_sse(chunk_id, created, model, detail, session_key):
+                    yield line
                 return
             rec = MessageReconstructor()
             incremental = IncrementalSSE()
@@ -1205,7 +1190,7 @@ async def _stream_openai(
                             got_content = True
                         if not pending:
                             pending.append(
-                                sse(
+                                _sse(
                                     {
                                         "id": chunk_id,
                                         "object": "chat.completion.chunk",
@@ -1231,7 +1216,7 @@ async def _stream_openai(
                             delta["reasoning_content"] = r_diff
                         if delta:
                             pending.append(
-                                sse(
+                                _sse(
                                     {
                                         "id": chunk_id,
                                         "object": "chat.completion.chunk",
@@ -1273,34 +1258,16 @@ async def _stream_openai(
         assert rec is not None
         if _is_context_limit(rec) and not (rec.content or rec.reasoning):
             _drop_session(pool, account, session_key)
-            yield sse(
-                {
-                    "id": chunk_id,
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": model,
-                    "error": {
-                        "message": "context length exceeded: conversation too long, start a new conversation",
-                        "finish_reason": CONTEXT_LENGTH_STATUS,
-                    },
-                    "choices": [
-                        {
-                            "index": 0,
-                            "delta": {},
-                            "finish_reason": "length",
-                        }
-                    ],
-                }
-            )
-            yield sse(
-                {
-                    "id": chunk_id,
-                    "session_id": session_key,
-                    "object": "chat.completion.chunk",
-                    "choices": [],
-                }
-            )
-            yield "data: [DONE]\n\n"
+            for line in _stream_error_sse(
+                chunk_id,
+                created,
+                model,
+                "context length exceeded: conversation too long, start a new conversation",
+                session_key,
+                CONTEXT_LENGTH_STATUS,
+                "length",
+            ):
+                yield line
             return
         if _is_input_exceeds_limit(rec):
             cont_parent = rec.id or response_message_id or parent_message_id
@@ -1314,7 +1281,7 @@ async def _stream_openai(
                     if tool_mode:
                         content_buf += cont_rec.content
                     else:
-                        yield sse(
+                        yield _sse(
                             {
                                 "id": chunk_id,
                                 "object": "chat.completion.chunk",
@@ -1324,7 +1291,7 @@ async def _stream_openai(
                             }
                         )
                 if cont_rec.reasoning:
-                    yield sse(
+                    yield _sse(
                         {
                             "id": chunk_id,
                             "object": "chat.completion.chunk",
@@ -1345,7 +1312,7 @@ async def _stream_openai(
                 response_message_id = rec.id or response_message_id
                 stop_message_id = response_message_id
                 if rec.content:
-                    yield sse(
+                    yield _sse(
                         {
                             "id": chunk_id,
                             "object": "chat.completion.chunk",
@@ -1355,7 +1322,7 @@ async def _stream_openai(
                         }
                     )
                 if rec.reasoning:
-                    yield sse(
+                    yield _sse(
                         {
                             "id": chunk_id,
                             "object": "chat.completion.chunk",
@@ -1366,34 +1333,15 @@ async def _stream_openai(
                     )
         if not (rec.content or rec.reasoning) and rec.hint_error:
             hint = rec.hint_error
-            yield sse(
-                {
-                    "id": chunk_id,
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": model,
-                    "error": {
-                        "message": hint.get("message") or "DeepSeek server is busy, try again later",
-                        "finish_reason": hint.get("finish_reason"),
-                    },
-                    "choices": [
-                        {
-                            "index": 0,
-                            "delta": {},
-                            "finish_reason": hint.get("finish_reason") or "error",
-                        }
-                    ],
-                }
-            )
-            yield sse(
-                {
-                    "id": chunk_id,
-                    "session_id": session_key,
-                    "object": "chat.completion.chunk",
-                    "choices": [],
-                }
-            )
-            yield "data: [DONE]\n\n"
+            for line in _stream_error_sse(
+                chunk_id,
+                created,
+                model,
+                hint.get("message") or "DeepSeek server is busy, try again later",
+                session_key,
+                hint.get("finish_reason"),
+            ):
+                yield line
             return
 
         session.accumulated_tokens = max(getattr(session, "accumulated_tokens", 0) or 0, rec.accumulated_tokens)
@@ -1408,7 +1356,7 @@ async def _stream_openai(
                     tool_calls = [call for call in tool_calls if call.name in known_names]
                 if tool_calls:
                     for delta in toolemu.tool_call_deltas(tool_calls, tool_text):
-                        yield sse(
+                        yield _sse(
                             {
                                 "id": chunk_id,
                                 "object": "chat.completion.chunk",
@@ -1420,7 +1368,7 @@ async def _stream_openai(
                     finish = "tool_calls"
                 else:
                     if content_buf:
-                        yield sse(
+                        yield _sse(
                             {
                                 "id": chunk_id,
                                 "object": "chat.completion.chunk",
@@ -1438,7 +1386,7 @@ async def _stream_openai(
                     finish = _finish_reason(rec.status)
             else:
                 if content_buf:
-                    yield sse(
+                    yield _sse(
                         {
                             "id": chunk_id,
                             "object": "chat.completion.chunk",
@@ -1457,7 +1405,7 @@ async def _stream_openai(
         else:
             finish = _finish_reason(rec.status)
 
-        yield sse(
+        yield _sse(
             {
                 "id": chunk_id,
                 "object": "chat.completion.chunk",
@@ -1467,7 +1415,7 @@ async def _stream_openai(
             }
         )
         if include_usage:
-            yield sse(
+            yield _sse(
                 {
                     "id": chunk_id,
                     "object": "chat.completion.chunk",
@@ -1477,7 +1425,7 @@ async def _stream_openai(
                     "usage": _deepseek_usage(getattr(session, "accumulated_tokens", 0)),
                 }
             )
-        yield sse(
+        yield _sse(
             {
                 "id": chunk_id,
                 "session_id": session_key,

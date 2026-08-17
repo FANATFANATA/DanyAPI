@@ -777,34 +777,29 @@ def _normalize_bare_json(text: str) -> str | None:
     return "".join(out)
 
 
-def _loads_lenient(text: str) -> Any:
-    text = text.strip()
-    try:
-        return json.loads(text)
-    except (json.JSONDecodeError, TypeError, ValueError):
-        pass
-    try:
-        return json.loads(_strip_trailing_commas(text))
-    except (json.JSONDecodeError, TypeError, ValueError):
-        pass
-    normalized = _normalize_single_quotes(_strip_trailing_commas(text))
-    if normalized != text:
-        try:
-            return json.loads(normalized)
-        except (json.JSONDecodeError, TypeError, ValueError):
-            pass
+def _json_candidates(text: str) -> Iterator[str]:
+    yield text
+    no_trailing = _strip_trailing_commas(text)
+    if no_trailing != text:
+        yield no_trailing
+    normalized = _normalize_single_quotes(no_trailing)
+    if normalized != no_trailing:
+        yield normalized
     bare = _normalize_bare_json(normalized)
     if bare is not None and bare != normalized:
+        yield bare
+    fixed = _fix_unbalanced_json(normalized)
+    if fixed is not None and fixed != normalized:
+        yield fixed
+
+
+def _loads_lenient(text: str) -> Any:
+    text = text.strip()
+    for candidate in _json_candidates(text):
         try:
-            return json.loads(bare)
+            return json.loads(candidate)
         except (json.JSONDecodeError, TypeError, ValueError):
-            pass
-    fixed = _fix_unbalanced_json(text)
-    if fixed is not None and fixed != text:
-        try:
-            return json.loads(fixed)
-        except (json.JSONDecodeError, TypeError, ValueError):
-            pass
+            continue
     raise ValueError("invalid json")
 
 
@@ -1245,6 +1240,7 @@ def _parse_xml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | N
                     calls.append(ToolCall.create(pending_name, container))
                     consumed.append((element_start, element_end))
                     block_calls += 1
+                    pending_name = None
                 continue
             tool_name = element.group(1).strip()
             param_types = (tool_schemas or {}).get(tool_name)
