@@ -14,6 +14,19 @@ _DSML_MARKER = rf"(?:[{_DSML_PIPE}]|{_DSML_JUNK})+\s*DSML\s*(?:[{_DSML_PIPE}]|{_
 _DSML_XML_NORMALIZE = re.compile(rf"<\s*(/?)\s*{_DSML_MARKER}\s*([a-zA-Z_][^<>]*)>", re.IGNORECASE)
 _DSML_TAG = re.compile(rf"<\s*/?\s*{_DSML_MARKER}\s*[^<>]*>", re.IGNORECASE)
 _DSML_NAKED = re.compile(rf"{_DSML_MARKER}", re.IGNORECASE)
+
+_DSML_TOOL_CALLS_BLOCK = re.compile(
+    rf"<{_DSML_MARKER}\s*tool_calls\b[^<>]*>(.*?)</{_DSML_MARKER}\s*tool_calls\s*>",
+    re.DOTALL | re.IGNORECASE,
+)
+_DSML_INVOKE = re.compile(
+    rf"<{_DSML_MARKER}\s*invoke\s+name=([\"']?)([^\s>\"']+)\1\s*>(.*?)</{_DSML_MARKER}\s*invoke\s*>",
+    re.DOTALL | re.IGNORECASE,
+)
+_DSML_PARAMETER = re.compile(
+    rf"<{_DSML_MARKER}\s*parameter\s+name=([\"']?)([^\"']+)\1\s*>(.*?)</{_DSML_MARKER}\s*parameter\s*>",
+    re.DOTALL | re.IGNORECASE,
+)
 _DSML_HIDDEN_NAMES = (
     r"thinking|reasoning|thought|analysis|summary|abbreviation|"
     r"ds_safety|ds_sensitive|ds_core|ds_middle|ds_end|ds_pii|ds_related|"
@@ -1493,6 +1506,34 @@ def _parse_yaml_calls(text: str) -> list[ToolCall] | None:
     return calls or None
 
 
+# Пиздец я наебался с этим парсингом
+def _parse_dsml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | None = None) -> tuple[list[ToolCall], str] | None:
+    block_match = _DSML_TOOL_CALLS_BLOCK.search(text)
+    if block_match is None:
+        return None
+    calls: list[ToolCall] = []
+    for inv in _DSML_INVOKE.finditer(block_match.group(1)):
+        tool_name = inv.group(2).strip()
+        body = inv.group(3)
+        params: dict[str, Any] = {}
+        param_types = (tool_schemas or {}).get(tool_name)
+        for param in _DSML_PARAMETER.finditer(body):
+            key = param.group(2).strip()
+            params[key] = _xml_value(param.group(3), (param_types or {}).get(key))
+        if not params:
+            parsed = _xml_invoke_arguments(body, param_types)
+            if parsed:
+                params = parsed
+        if params:
+            calls.append(ToolCall.create(tool_name, params))
+    if not calls:
+        return None
+    before = text[: block_match.start()]
+    after = text[block_match.end() :]
+    wrapper = _strip_dsml((before + " " + after).strip()).strip()
+    return calls, wrapper
+
+
 def _parse_tool_calls_impl(
     text: str,
     tool_schemas: dict[str, dict[str, Any]] | None,
@@ -1500,6 +1541,12 @@ def _parse_tool_calls_impl(
 ) -> tuple[list[ToolCall], str] | None:
     if not text or not text.strip():
         return None
+    # Сначала проверяем DSML-формат (до strip_dsml, который его уничтожит)
+    dsml_parsed = _parse_dsml_tool_calls(text, tool_schemas)
+    if dsml_parsed is not None:
+        if report is not None:
+            report["strategies"].append("dsml")
+        return dsml_parsed
     stripped = _strip_fences(_strip_dsml(text))
     extracted = _extract_json_object(stripped)
     if extracted is not None:
