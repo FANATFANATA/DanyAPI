@@ -145,6 +145,21 @@ def _qwen_args(acct, tool_mode=True):
     }
 
 
+DS_TOOL_REASONING_SSE = (
+    "event: ready\n"
+    'data: {"request_message_id":1,"response_message_id":2,"model_type":"default"}\n'
+    "\n"
+    'data: {"v":{"response":{"message_id":2,"parent_id":1,"status":"WIP","fragments":['
+    '{"id":2,"type":"THINK","content":"why"},{"id":3,"type":"RESPONSE","content":"{\\"tool_calls\\": [{\\"name\\": \\"get_weather\\""}]}}}\n'
+    "\n"
+    'data: {"p":"response/fragments/-1/content","o":"APPEND","v":", \\"arguments\\": '
+    '{\\"city\\": \\"Moscow\\"}}]}"}\n'
+    "\n"
+    'data: {"p":"response/status","o":"SET","v":"FINISHED"}\n'
+    "\n"
+)
+
+
 async def test_non_stream_formats_tool_calls():
     acct = FakeAccount([DS_TOOL_SSE])
     result = await openai_mod._collect_non_stream(**_deepseek_args(acct))
@@ -165,6 +180,63 @@ async def test_non_stream_falls_back_to_content():
     assert choice["finish_reason"] == "stop"
     assert "tool_calls" not in choice["message"]
     assert "22C" in choice["message"]["content"]
+
+
+async def test_non_stream_known_names_filters_unknown_calls():
+    acct = FakeAccount([DS_TOOL_SSE])
+    args = _deepseek_args(acct)
+    args["known_names"] = {"other_tool"}
+    result = await openai_mod._collect_non_stream(**args)
+    choice = result["choices"][0]
+    assert choice["finish_reason"] == "stop"
+    assert "tool_calls" not in choice["message"]
+    assert "get_weather" in choice["message"]["content"]
+
+
+async def test_non_stream_known_names_keeps_known_calls():
+    acct = FakeAccount([DS_TOOL_SSE])
+    args = _deepseek_args(acct)
+    args["known_names"] = {"get_weather"}
+    result = await openai_mod._collect_non_stream(**args)
+    choice = result["choices"][0]
+    assert choice["finish_reason"] == "tool_calls"
+    assert choice["message"]["tool_calls"][0]["function"]["name"] == "get_weather"
+
+
+async def test_non_stream_known_names_filters_unknown_with_reasoning():
+    acct = FakeAccount([DS_TOOL_REASONING_SSE])
+    args = _deepseek_args(acct)
+    args["known_names"] = {"other_tool"}
+    result = await openai_mod._collect_non_stream(**args)
+    choice = result["choices"][0]
+    assert choice["finish_reason"] == "stop"
+    message = choice["message"]
+    assert "tool_calls" not in message
+    assert "get_weather" in message["content"]
+    assert message["reasoning_content"] == "why"
+
+
+async def test_stream_known_names_filters_unknown_calls():
+    acct = FakeAccount([DS_TOOL_SSE])
+    args = _deepseek_args(acct)
+    args["known_names"] = {"other_tool"}
+    gen = openai_mod._stream_openai(**args)
+    lines = await collect_stream(gen)
+    joined = "".join(lines)
+    assert '"tool_calls": [{"index"' not in joined
+    assert '"finish_reason": "stop"' in joined
+    assert joined.rstrip().endswith("data: [DONE]")
+
+
+async def test_stream_known_names_keeps_known_calls():
+    acct = FakeAccount([DS_TOOL_SSE])
+    args = _deepseek_args(acct)
+    args["known_names"] = {"get_weather"}
+    gen = openai_mod._stream_openai(**args)
+    lines = await collect_stream(gen)
+    joined = "".join(lines)
+    assert '"tool_calls"' in joined
+    assert '"finish_reason": "tool_calls"' in joined
 
 
 async def test_stream_emits_tool_call_deltas():

@@ -8,8 +8,12 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
-_DSML_PIPE = r"|\u00a6\u01c0\u01c1\u05c0\u2016\u2223\u2502\u2551\u2758\ufe31\uff5c"
+_DSML_PIPE = (
+    r"|\u00a6\u01c0\u01c1\u05c0\u2016\u2223\u2502\u2551\u2758\ufe31\uff5c"
+    r"\u2500-\u257f\u2580-\u259f\u0400-\u04ff\uff00-\uffef"
+)
 _DSML_MARKER = rf"[{_DSML_PIPE}]+\s*DSML\s*[{_DSML_PIPE}]+"
+_DSML_XML_NORMALIZE = re.compile(rf"<\s*(/?)\s*{_DSML_MARKER}\s*([a-zA-Z_][^<>]*)>", re.IGNORECASE)
 _DSML_TAG = re.compile(rf"<\s*/?\s*{_DSML_MARKER}\s*[^<>]*>", re.IGNORECASE)
 _DSML_NAKED = re.compile(rf"{_DSML_MARKER}", re.IGNORECASE)
 _DSML_HIDDEN_NAMES = (
@@ -74,6 +78,7 @@ def _strip_dsml(text: str) -> str:
         if updated == result:
             break
         result = updated
+    result = _DSML_XML_NORMALIZE.sub(r"<\1\2>", result)
     result = _DSML_TAG.sub(_replace_dsml_tag, result)
     return _DSML_NAKED.sub(" ", result)
 
@@ -872,6 +877,15 @@ def _coerce_scalar(value: str, json_type: Any) -> Any:
     if json_type == "null":
         return None
     return value
+
+
+def tool_names(tools: list[Any] | None) -> set[str]:
+    names: set[str] = set()
+    for tool in tools or []:
+        fn = _tool_function(tool)
+        if fn is not None and isinstance(fn.get("name"), str) and fn["name"]:
+            names.add(fn["name"])
+    return names
 
 
 def tool_schema_map(tools: list[Any] | None) -> dict[str, dict[str, Any]]:
