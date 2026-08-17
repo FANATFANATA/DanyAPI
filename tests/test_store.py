@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -136,3 +137,18 @@ def test_write_error_logged(cache_dir, monkeypatch):
     monkeypatch.setattr(os, "replace", lambda *a, **k: (_ for _ in ()).throw(OSError("denied")))
     store.set("k", "v")
     assert store.get("k") == "v"
+
+
+def test_set_unchanged_skips_write(cache_dir):
+    store = JsonStore("g", "default")
+    store.set("k", "v")
+    store._write = MagicMock()
+    store.set("k", "v")
+    store._write.assert_not_called()
+    assert store.get("k") == "v"
+
+
+def test_clear_empty_returns_early(cache_dir):
+    store = JsonStore("h", "default")
+    store.clear()
+    assert len(store) == 0

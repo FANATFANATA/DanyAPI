@@ -818,6 +818,88 @@ def test_parse_tool_calls_junk_marker_glob():
     assert wrapper == ""
 
 
+def test_parse_tool_calls_wrapped_xml_tag_as_tool_name():
+    text = "<tool_calls>\n<glob>\n<pattern>*/</pattern>\n</glob>\n</tool_calls>"
+    calls, wrapper = parse_tool_calls(text)
+    assert calls is not None
+    assert calls[0].name == "glob"
+    assert json.loads(calls[0].arguments) == {"pattern": "*/"}
+    assert wrapper == ""
+
+
+def test_parse_tool_calls_bare_xml_tag_as_tool_name():
+    text = "<glob>\n<pattern>*/</pattern>\n</glob>"
+    calls, wrapper = parse_tool_calls(text)
+    assert calls is not None
+    assert calls[0].name == "glob"
+    assert json.loads(calls[0].arguments) == {"pattern": "*/"}
+    assert wrapper == ""
+
+
+def test_parse_tool_calls_bare_xml_multiple_calls():
+    text = "<glob><pattern>a</pattern></glob>\n<glob><pattern>b</pattern></glob>"
+    calls, wrapper = parse_tool_calls(text)
+    assert calls is not None
+    assert [call.name for call in calls] == ["glob", "glob"]
+    assert [json.loads(call.arguments) for call in calls] == [{"pattern": "a"}, {"pattern": "b"}]
+    assert wrapper == ""
+
+
+def test_parse_tool_calls_bare_xml_selfclose():
+    text = '<glob pattern="*/*.py"/>'
+    calls, wrapper = parse_tool_calls(text)
+    assert calls is not None
+    assert calls[0].name == "glob"
+    assert json.loads(calls[0].arguments) == {"pattern": "*/*.py"}
+    assert wrapper == ""
+
+
+def test_parse_tool_calls_bare_xml_attrs_and_children():
+    text = '<glob recursive="true"><pattern>**/*.py</pattern></glob>'
+    calls, wrapper = parse_tool_calls(text)
+    assert calls is not None
+    assert calls[0].name == "glob"
+    assert json.loads(calls[0].arguments) == {"recursive": "true", "pattern": "**/*.py"}
+    assert wrapper == ""
+
+
+def test_parse_tool_calls_bare_xml_with_prose():
+    text = "Search now\n<glob>\n<pattern>*.py</pattern>\n</glob>\nDone"
+    calls, wrapper = parse_tool_calls(text)
+    assert calls is not None
+    assert calls[0].name == "glob"
+    assert json.loads(calls[0].arguments) == {"pattern": "*.py"}
+    assert wrapper == "Search now Done"
+
+
+def test_parse_tool_calls_bare_xml_skips_html():
+    assert parse_tool_calls("<b>bold</b>") is None
+    assert parse_tool_calls('<div class="x">text</div>') is None
+    assert parse_tool_calls("<code>func(x)</code>") is None
+
+
+def test_parse_tool_calls_bare_xml_skips_content_only():
+    assert parse_tool_calls("<custom>hello</custom>") is None
+    assert parse_tool_calls("<tool><pattern>*/</pattern></tool>") is None
+
+
+def test_parse_tool_calls_bare_xml_param_selfclose_ignored():
+    assert parse_tool_calls('<glob><pattern value="*"/></glob>') is None
+
+
+def test_parse_tool_calls_bare_xml_junk_marker():
+    text = (
+        f"<{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}glob>\n"
+        f"<{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}pattern>**/*.py</{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}pattern>\n"
+        f"</{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}glob>"
+    )
+    calls, wrapper = parse_tool_calls(text)
+    assert calls is not None
+    assert calls[0].name == "glob"
+    assert json.loads(calls[0].arguments) == {"pattern": "**/*.py"}
+    assert wrapper == ""
+
+
 def test_parse_tool_calls_junk_marker_json_preserved():
     payload = json.dumps({"tool_calls": [{"name": "f", "arguments": {"city": "Moscow"}}]})
     text = f"<{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}tool_calls>{payload}</{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}tool_calls>"

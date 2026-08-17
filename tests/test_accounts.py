@@ -176,6 +176,17 @@ def test_eviction_discards_from_store(ctx_store):
     assert "s1" not in ctx_store
 
 
+def test_restore_evicts_oldest_from_store(ctx_store):
+    ctx_store.set("s1", ["a"])
+    ctx_store.set("s2", ["b"])
+    ctx_store.set("s3", ["c"])
+    idx = ContextIndex(1, store=ctx_store)
+    assert "s1" not in ctx_store
+    assert "s2" not in ctx_store
+    assert "s3" in ctx_store
+    assert idx.lookup(("c",)) == "s3"
+
+
 def test_forget_discards_from_store(ctx_store):
     idx = ContextIndex(16, store=ctx_store)
     idx.index("s1", ("a",))

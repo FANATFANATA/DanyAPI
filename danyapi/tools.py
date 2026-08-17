@@ -65,6 +65,122 @@ _XML_SKIP_ELEMENTS = frozenset(
 )
 _XML_OPEN_TAG = re.compile(r"<(?:tool_calls|tool_call|function_calls|function_call|functions|function)\b[^>]*>", re.IGNORECASE)
 _XML_CLOSE_TAG = re.compile(r"</(?:tool_calls|tool_call|function_calls|function_call|functions|function)\s*>", re.IGNORECASE)
+_XML_HTML_TAGS = frozenset(
+    {
+        "a",
+        "abbr",
+        "address",
+        "area",
+        "article",
+        "aside",
+        "audio",
+        "b",
+        "base",
+        "bdi",
+        "bdo",
+        "blockquote",
+        "body",
+        "br",
+        "button",
+        "canvas",
+        "caption",
+        "cite",
+        "code",
+        "col",
+        "colgroup",
+        "data",
+        "datalist",
+        "dd",
+        "del",
+        "details",
+        "dfn",
+        "dialog",
+        "div",
+        "dl",
+        "dt",
+        "em",
+        "embed",
+        "fieldset",
+        "figcaption",
+        "figure",
+        "footer",
+        "form",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "head",
+        "header",
+        "hgroup",
+        "hr",
+        "html",
+        "i",
+        "iframe",
+        "img",
+        "input",
+        "ins",
+        "kbd",
+        "label",
+        "legend",
+        "li",
+        "link",
+        "main",
+        "map",
+        "mark",
+        "menu",
+        "meta",
+        "meter",
+        "nav",
+        "noscript",
+        "object",
+        "ol",
+        "optgroup",
+        "option",
+        "output",
+        "p",
+        "param",
+        "picture",
+        "pre",
+        "progress",
+        "q",
+        "rp",
+        "rt",
+        "ruby",
+        "s",
+        "samp",
+        "script",
+        "section",
+        "select",
+        "slot",
+        "small",
+        "source",
+        "span",
+        "strong",
+        "style",
+        "sub",
+        "summary",
+        "sup",
+        "table",
+        "tbody",
+        "td",
+        "template",
+        "textarea",
+        "tfoot",
+        "th",
+        "thead",
+        "time",
+        "title",
+        "tr",
+        "track",
+        "u",
+        "ul",
+        "var",
+        "video",
+        "wbr",
+    }
+)
 _ARGS_ALIASES = ("arguments", "args", "params", "parameters", "input")
 _NAME_ALIASES = ("name", "tool", "action", "tool_name", "call")
 
@@ -1184,6 +1300,30 @@ def _parse_xml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | N
             calls.append(ToolCall.create(tool_name, arguments))
             consumed.append((start, end))
             blank(start, end)
+    bare_candidates: list[tuple[int, int, bool, re.Match]] = []
+    bare_candidates.extend((m.start(), m.end(), False, m) for m in _XML_ELEMENT.finditer(text))
+    bare_candidates.extend((m.start(), m.end(), True, m) for m in _XML_SELFCLOSE.finditer(text))
+    bare_candidates.sort(key=lambda item: (item[0], -item[1]))
+    for start, end, self_closed, match in bare_candidates:
+        if any(s <= start and end <= e for s, e, _, _ in bare_candidates if (s, e) != (start, end)):
+            continue
+        if any(s <= start and end <= e for s, e in consumed):
+            continue
+        element_name = match.group(1).strip().lower()
+        if element_name in _XML_SKIP_ELEMENTS or element_name in _XML_HTML_TAGS:
+            continue
+        tool_name = match.group(1).strip()
+        param_types = (tool_schemas or {}).get(tool_name)
+        if self_closed:
+            arguments = _xml_tag_attrs(match.group(2), param_types)
+        else:
+            arguments = _xml_tag_attrs(match.group(2), param_types)
+            arguments.update(_xml_invoke_arguments(match.group(3), param_types, False) or {})
+        if not arguments:
+            continue
+        calls.append(ToolCall.create(tool_name, arguments))
+        consumed.append((start, end))
+        blank(start, end)
     if not calls:
         return None, ""
     remainder = "".join(text[i] if mask[i] == 0 else " " for i in range(len(text)))
