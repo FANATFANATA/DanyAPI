@@ -101,7 +101,7 @@ def run_pip(req):
         sys.exit(rc)
 
 
-def prompt(key, label, kind, current):
+def prompt(key, label, kind, current, default=""):
     while True:
         if current:
             raw = input(f"  {key} - {label} [{current}]: ").strip()
@@ -111,6 +111,8 @@ def prompt(key, label, kind, current):
             return current
         if raw == "!clear":
             return ""
+        if raw == "!reset":
+            return default
         try:
             if kind == "int":
                 int(raw)
@@ -141,11 +143,11 @@ def quote(value):
     return value
 
 
-def load_env():
+def parse_env(path):
     values = {}
-    if not ENV_FILE.exists():
+    if not path.exists():
         return values
-    for line in ENV_FILE.read_text(encoding="utf-8").splitlines():
+    for line in path.read_text(encoding="utf-8").splitlines():
         m = re.match(r"^\s*([A-Za-z0-9_]+)\s*=\s*(.*)$", line)
         if not m:
             continue
@@ -154,6 +156,14 @@ def load_env():
             val = val[1:-1]
         values[key] = val
     return values
+
+
+def load_env():
+    return parse_env(ENV_FILE)
+
+
+def load_defaults():
+    return parse_env(EXAMPLE_FILE)
 
 
 def update_env(values):
@@ -304,7 +314,18 @@ def split_tokens(raw):
     return [t.strip() for t in re.split(r"[, ]+", raw) if t.strip()]
 
 
-def collect_provider(name, current):
+def read_value(message, current, default=""):
+    raw = input(message).strip()
+    if raw == "":
+        return current
+    if raw == "!clear":
+        return ""
+    if raw == "!reset":
+        return default
+    return raw
+
+
+def collect_provider(name, current, defaults):
     upper = name.upper()
     tokens_key = upper + "_TOKENS"
     single_key = upper + "_TOKEN"
@@ -315,15 +336,21 @@ def collect_provider(name, current):
     print()
     print(f"[ {name} ]")
     print(f"  Grab a token: open {host} -> DevTools -> Application -> Local Storage -> {storage}")
-    tokens = input(f"  {name} tokens, comma-separated [{current.get(tokens_key, '') or '(empty)'}]: ").strip()
-    if tokens == "":
-        tokens = current.get(tokens_key, "")
-    single = input(f"  {name} single token, fallback [{current.get(single_key, '') or '(empty)'}]: ").strip()
-    if single == "":
-        single = current.get(single_key, "")
-    email = input(f"  {name} email, login fallback [{current.get(email_key, '') or '(empty)'}]: ").strip()
-    if email == "":
-        email = current.get(email_key, "")
+    tokens = read_value(
+        f"  {name} tokens, comma-separated [{current.get(tokens_key, '') or '(empty)'}]: ",
+        current.get(tokens_key, ""),
+        defaults.get(tokens_key, ""),
+    )
+    single = read_value(
+        f"  {name} single token, fallback [{current.get(single_key, '') or '(empty)'}]: ",
+        current.get(single_key, ""),
+        defaults.get(single_key, ""),
+    )
+    email = read_value(
+        f"  {name} email, login fallback [{current.get(email_key, '') or '(empty)'}]: ",
+        current.get(email_key, ""),
+        defaults.get(email_key, ""),
+    )
     if current.get(password_key, ""):
         print(f"  {name} password (current set, Enter keeps, !clear erases):")
     else:
@@ -369,7 +396,7 @@ def check_provider(name, creds):
     return True, ""
 
 
-def validate_provider(name, creds):
+def validate_provider(name, creds, defaults):
     while True:
         ok, detail = check_provider(name, creds)
         if ok:
@@ -379,7 +406,7 @@ def validate_provider(name, creds):
         if not ask(f"  Re-enter {name} credentials?", True):
             print(f"  Keeping {name} credentials as entered; the server may fail at startup.")
             return creds
-        creds = collect_provider(name, creds)
+        creds = collect_provider(name, creds, defaults)
 
 
 def _desktop_dir():
@@ -448,19 +475,20 @@ def main():
         run_pip("requirements-dev.txt")
 
     current = load_env()
+    defaults = load_defaults()
     values = dict(current)
-    deepseek = validate_provider("DeepSeek", collect_provider("DeepSeek", current))
-    qwen = validate_provider("Qwen", collect_provider("Qwen", current))
+    deepseek = validate_provider("DeepSeek", collect_provider("DeepSeek", current, defaults), defaults)
+    qwen = validate_provider("Qwen", collect_provider("Qwen", current, defaults), defaults)
     values.update(deepseek)
     values.update(qwen)
 
     print()
-    print("Now the rest of the settings. Enter to keep the current value, !clear to erase.")
+    print("Now the rest of the settings. Enter to keep the current value, !clear to erase, !reset to restore the default.")
     for title, fields in GROUPS:
         print()
         print(f"[ {title} ]")
         for key, label, kind in fields:
-            values[key] = prompt(key, label, kind, values.get(key, ""))
+            values[key] = prompt(key, label, kind, values.get(key, ""), defaults.get(key, ""))
 
     update_env(values)
     print()
