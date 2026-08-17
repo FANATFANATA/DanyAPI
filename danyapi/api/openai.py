@@ -440,6 +440,10 @@ def _resolve_provider(model: str) -> str:
         return "qwen"
     if model in MODEL_TYPE_BY_NAME or model.startswith("deepseek"):
         return "deepseek"
+    qwen_models = getattr(app.state, "qwen_models", [])
+    for m in qwen_models:
+        if m.get("id") == model:
+            return "qwen"
     raise HTTPException(404, f"Unknown model: {model}")
 
 
@@ -843,6 +847,48 @@ async def _try_stop_stream(client, session_id: str, message_id: str | None) -> N
         log.debug("stop_stream failed for %s: %s", session_id, exc)
 
 
+def _build_assistant_message(
+    content: str,
+    reasoning: str | None,
+    tool_mode: bool,
+    tool_schemas: dict | None,
+) -> tuple[dict, str]:
+    if tool_mode:
+        parsed = toolemu.parse_tool_calls(content, tool_schemas)
+        if parsed is not None:
+            tool_calls, tool_text = parsed
+            if tool_calls:
+                return toolemu.format_tool_message(tool_calls, tool_text, reasoning), "tool_calls"
+    message = {"role": "assistant", "content": content}
+    if reasoning:
+        message["reasoning_content"] = reasoning
+    return message, "stop"
+
+
+def _build_completion_response(
+    model: str,
+    message: dict,
+    finish: str,
+    session,
+    session_key: str | None,
+) -> dict:
+    return {
+        "id": f"chatcmpl-{uuid.uuid4().hex}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [
+            {
+                "index": 0,
+                "message": message,
+                "finish_reason": finish,
+            }
+        ],
+        "usage": _deepseek_usage(getattr(session, "accumulated_tokens", 0)),
+        "session_id": session_key,
+    }
+
+
 async def _collect_continuation(
     account,
     session,
@@ -922,6 +968,13 @@ def _reduced_prompt_variants(
             prompt, tool_mode = toolemu.build_prompt(reduced_msgs, None, None, False, response_format)
             if prompt != original_prompt:
                 variants.append((prompt, tool_mode, {}))
+        except ValueError:
+            pass
+    if reduced_msgs and tools:
+        try:
+            prompt, tool_mode = toolemu.build_prompt(reduced_msgs, tools, tool_choice, False, response_format)
+            if prompt != original_prompt and not any(v[0] == prompt for v in variants):
+                variants.append((prompt, tool_mode, toolemu.tool_schema_map(tools)))
         except ValueError:
             pass
     return variants
@@ -1101,48 +1154,14 @@ async def _collect_non_stream(
         account.sessions.touch_last_message(session_key, rec.id or response_message_id)
         log.info("deepseek completion OK (%.0fms)", (time.monotonic() - started) * 1000)
 
-        if not (rec.content or rec.reasoning) and rec.hint_error:
-            raise HTTPException(429, _busy_error_body(rec))
-
         content = rec.content
         reasoning = rec.reasoning
-        if tool_mode:
-            parsed = toolemu.parse_tool_calls(content, tool_schemas)
-            if parsed is not None:
-                tool_calls, tool_text = parsed
-                if tool_calls:
-                    finish = "tool_calls"
-                    message = toolemu.format_tool_message(tool_calls, tool_text, reasoning)
-                else:
-                    message = {"role": "assistant", "content": content}
-                    if reasoning:
-                        message["reasoning_content"] = reasoning
-                    finish = _finish_reason(rec.status)
-            else:
-                message = {"role": "assistant", "content": content}
-                if reasoning:
-                    message["reasoning_content"] = reasoning
-                finish = _finish_reason(rec.status)
-        else:
+        if not (rec.content or rec.reasoning) and rec.hint_error:
+            raise HTTPException(429, _busy_error_body(rec))
+        message, finish = _build_assistant_message(content, reasoning, tool_mode, tool_schemas)
+        if finish == "stop":
             finish = _finish_reason(rec.status)
-            message = {"role": "assistant", "content": content}
-            if reasoning:
-                message["reasoning_content"] = reasoning
-        return {
-            "id": f"chatcmpl-{uuid.uuid4().hex}",
-            "object": "chat.completion",
-            "created": int(time.time()),
-            "model": model,
-            "choices": [
-                {
-                    "index": 0,
-                    "message": message,
-                    "finish_reason": finish,
-                }
-            ],
-            "usage": _deepseek_usage(getattr(session, "accumulated_tokens", 0)),
-            "session_id": session_key,
-        }
+        return _build_completion_response(model, message, finish, session, session_key)
 
 
 async def _stream_openai(

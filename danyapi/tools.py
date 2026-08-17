@@ -192,6 +192,25 @@ _XML_HTML_TAGS = frozenset(
 _ARGS_ALIASES = ("arguments", "args", "params", "parameters", "input")
 _NAME_ALIASES = ("name", "tool", "action", "tool_name", "call")
 _JSON_TYPE_ATTRS = frozenset({"string", "boolean", "integer", "number", "object", "array", "null"})
+_FENCES_RE = re.compile(r"^```[a-zA-Z0-9_-]*\s*\n?(.*?)\n?```$", re.DOTALL | re.IGNORECASE)
+_XML_PARAM_RE = re.compile(r'<parameter\b[^>]*?\bname\s*=\s*(["\'])([^"\']+)\1[^>]*>(.*?)</parameter\s*>', re.DOTALL | re.IGNORECASE)
+_XML_ATTR_RE = re.compile(r"([a-zA-Z_][a-zA-Z0-9_.-]*)\s*=\s*(\"[^\"]*\"|'[^']*')", re.IGNORECASE)
+_XML_NESTED_RE = re.compile(r"<[a-zA-Z_]")
+_PYTHON_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*")
+_PYTHON_CALL_RE = re.compile(r"\s*([A-Za-z_][A-Za-z0-9_-]*)\s*\(")
+_XML_WRAPPER_CLOSE_RE = re.compile(r"</(?:tool_calls|tool_call|function_calls|function_call|tools)\s*>", re.IGNORECASE)
+_XML_TOOL_ELEMENT_RE = re.compile(
+    r"<(?:invoke|toolinvoke|tool_invoke|use_tool|tool_use|call|function|tool)\b([^>]*)>(.*?)</(?:invoke|toolinvoke|tool_invoke|use_tool|tool_use|call|function|tool)\s*>",
+    re.DOTALL | re.IGNORECASE,
+)
+_XML_TOOL_SELFCLOSE_RE = re.compile(
+    r"<(?:invoke|toolinvoke|tool_invoke|use_tool|tool_use|call|function|tool)\b([^>]*?)/>",
+    re.DOTALL | re.IGNORECASE,
+)
+_XML_NAME_ATTR_RE = re.compile(r"\bname\s*=\s*([\"']?)([^\s>\"']+)\1", re.IGNORECASE)
+_XML_NAME_ATTR_STRIP_RE = re.compile(r"\bname\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s>]+)", re.IGNORECASE)
+_XML_TOOL_CALL_BLOCK_RE = re.compile(r"<(?:tool_call|function_call)>(.*?)</(?:tool_call|function_call)>", re.DOTALL | re.IGNORECASE)
+_XML_CHILD_NAME_RE = re.compile(r"<name\b[^>]*>(.*?)</name\s*>", re.DOTALL | re.IGNORECASE)
 
 
 def _replace_dsml_tag(match: re.Match) -> str:
@@ -208,7 +227,7 @@ def _strip_dsml(text: str) -> str:
     if not text:
         return text
     result = text
-    while True:
+    for _ in range(10):
         updated = _DSML_BLOCK.sub(" ", result)
         updated = _DSML_WRAP.sub(" ", updated)
         updated = _DSML_HIDDEN.sub(" ", updated)
@@ -528,17 +547,7 @@ def _tail_after_last_user(messages: list[Any]) -> list[Any]:
 
 
 def _is_tool_round_tail(messages: list[Any]) -> bool:
-    for msg in messages:
-        role = getattr(msg, "role", None)
-        if role in ("tool", "function"):
-            return True
-        if role == "assistant" and getattr(msg, "tool_calls", None):
-            return True
-        if role == "assistant" and isinstance(getattr(msg, "content", None), list):
-            for item in msg.content:
-                if isinstance(item, dict) and item.get("type") == "tool_call":
-                    return True
-    return False
+    return is_tool_round(messages)
 
 
 def extract_system(messages: list[Any]) -> str:
@@ -622,7 +631,7 @@ def build_prompt(
 
 def _strip_fences(text: str) -> str:
     stripped = text.strip()
-    match = re.match(r"^```[a-zA-Z0-9_-]*\s*\n?(.*?)\n?```$", stripped, re.DOTALL | re.IGNORECASE)
+    match = _FENCES_RE.match(stripped)
     if match:
         return match.group(1).strip()
     return stripped
@@ -1096,7 +1105,7 @@ def _xml_value(raw: str, json_type: Any) -> Any:
             return _loads_lenient(stripped)
         except ValueError:
             pass
-    if re.search(r"<[a-zA-Z_]", stripped):
+    if _XML_NESTED_RE.search(stripped):
         nested = _xml_invoke_arguments(stripped, None, False)
         if nested is not None:
             return nested
@@ -1111,7 +1120,7 @@ def _xml_invoke_arguments(body: str, param_types: dict[str, Any] | None = None, 
         except ValueError:
             pass
     params: dict[str, Any] = {}
-    for match in re.finditer(r'<parameter\b[^>]*?\bname\s*=\s*(["\'])([^"\']+)\1[^>]*>(.*?)</parameter\s*>', body, re.DOTALL | re.IGNORECASE):
+    for match in _XML_PARAM_RE.finditer(body):
         key = match.group(2).strip()
         _xml_set_param(params, key, _xml_value(match.group(3), (param_types or {}).get(key)))
     if params:
@@ -1137,8 +1146,7 @@ def _xml_invoke_arguments(body: str, param_types: dict[str, Any] | None = None, 
 
 def _xml_tag_attrs(body: str, param_types: dict[str, Any] | None = None) -> dict[str, Any]:
     attrs: dict[str, Any] = {}
-    pattern = re.compile(r"([a-zA-Z_][a-zA-Z0-9_.-]*)\s*=\s*(\"[^\"]*\"|'[^']*')", re.IGNORECASE)
-    for match in pattern.finditer(body):
+    for match in _XML_ATTR_RE.finditer(body):
         key = match.group(1)
         raw = match.group(2)
         value = raw[1:-1]
@@ -1157,7 +1165,7 @@ def _iter_xml_call_wrappers(text: str) -> Iterator[tuple[int, int, int, str]]:
             return
         content_start = match.end()
         rest = text[content_start:]
-        close = re.search(r"</(?:tool_calls|tool_call|function_calls|function_call|tools)\s*>", rest, re.IGNORECASE)
+        close = _XML_WRAPPER_CLOSE_RE.search(rest)
         if close is None:
             close = _XML_WRAPPER_OPEN.search(rest)
         end = length if close is None else content_start + close.start()
@@ -1173,24 +1181,14 @@ def _parse_xml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | N
     def blank(start: int, end: int) -> None:
         mask[start:end] = b" " * (end - start)
 
-    tool_element_pattern = re.compile(
-        r"<(?:invoke|toolinvoke|tool_invoke|use_tool|tool_use|call|function|tool)\b([^>]*)>(.*?)</(?:invoke|toolinvoke|tool_invoke|use_tool|tool_use|call|function|tool)\s*>",
-        re.DOTALL | re.IGNORECASE,
-    )
-    tool_selfclose_pattern = re.compile(
-        r"<(?:invoke|toolinvoke|tool_invoke|use_tool|tool_use|call|function|tool)\b([^>]*?)/>",
-        re.DOTALL | re.IGNORECASE,
-    )
-    name_attr_pattern = re.compile(r"\bname\s*=\s*([\"']?)([^\s>\"']+)\1", re.IGNORECASE)
-    name_attr_strip = re.compile(r"\bname\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s>]+)", re.IGNORECASE)
-    for match in tool_element_pattern.finditer(text):
+    for match in _XML_TOOL_ELEMENT_RE.finditer(text):
         start, end = match.span()
         attrs_text = match.group(1)
         body = match.group(2)
-        name_match = name_attr_pattern.search(attrs_text)
+        name_match = _XML_NAME_ATTR_RE.search(attrs_text)
         tool_name = name_match.group(2) if name_match else None
         if not tool_name:
-            child_name = re.search(r"<name\b[^>]*>(.*?)</name\s*>", body, re.DOTALL | re.IGNORECASE)
+            child_name = _XML_CHILD_NAME_RE.search(body)
             if child_name is None:
                 continue
             tool_name = _unescape_xml(child_name.group(1).strip())
@@ -1198,31 +1196,30 @@ def _parse_xml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | N
         if not tool_name:
             continue
         param_types = _schema_for_name(tool_schemas, tool_name)
-        arguments = _xml_tag_attrs(name_attr_strip.sub("", attrs_text), param_types)
+        arguments = _xml_tag_attrs(_XML_NAME_ATTR_STRIP_RE.sub("", attrs_text), param_types)
         arguments.update(_xml_invoke_arguments(body, param_types) or {})
         if not arguments:
             continue
         calls.append(ToolCall.create(tool_name, arguments))
         blank(start, end)
         consumed.append((start, end))
-    for match in tool_selfclose_pattern.finditer(text):
+    for match in _XML_TOOL_SELFCLOSE_RE.finditer(text):
         start, end = match.span()
         if any(s <= start and end <= e for s, e in consumed):
             continue
         attrs_text = match.group(1)
-        name_match = name_attr_pattern.search(attrs_text)
+        name_match = _XML_NAME_ATTR_RE.search(attrs_text)
         if name_match is None:
             continue
         tool_name = name_match.group(2)
         param_types = _schema_for_name(tool_schemas, tool_name)
-        arguments = _xml_tag_attrs(name_attr_strip.sub("", attrs_text), param_types)
+        arguments = _xml_tag_attrs(_XML_NAME_ATTR_STRIP_RE.sub("", attrs_text), param_types)
         if not arguments:
             continue
         calls.append(ToolCall.create(tool_name, arguments))
         blank(start, end)
         consumed.append((start, end))
-    block_pattern = re.compile(r"<(?:tool_call|function_call)>(.*?)</(?:tool_call|function_call)>", re.DOTALL | re.IGNORECASE)
-    for match in block_pattern.finditer(text):
+    for match in _XML_TOOL_CALL_BLOCK_RE.finditer(text):
         parsed = _extract_json_object(match.group(1))
         if parsed is None:
             continue
@@ -1509,14 +1506,14 @@ def _parse_python_call_args(text: str) -> dict[str, Any] | None:
         if eq <= 0:
             return None
         key = part[:eq].strip()
-        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]*", key):
+        if not _PYTHON_KEY_RE.fullmatch(key):
             return None
         args[key] = _python_value(part[eq + 1 :])
     return args
 
 
 def _python_call_match(text: str) -> tuple[str, str] | None:
-    match = re.match(r"\s*([A-Za-z_][A-Za-z0-9_-]*)\s*\(", text)
+    match = _PYTHON_CALL_RE.match(text)
     if match is None:
         return None
     depth = 1

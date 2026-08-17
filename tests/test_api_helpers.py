@@ -1077,14 +1077,17 @@ def test_reduced_prompt_variants():
         ChatMessage(role="user", content="world"),
     ]
     variants = openai_mod._reduced_prompt_variants(msgs, [REDUCED_TOOL], None, None, "original")
-    assert len(variants) == 2
-    for prompt, tool_mode, schemas in variants:
+    assert len(variants) == 3
+    for prompt, tool_mode, schemas in variants[:2]:
         assert not tool_mode
         assert schemas == {}
         assert "world" in prompt
     assert "hello" in variants[0][0]
     assert "hello" not in variants[1][0]
     assert "sys" in variants[1][0]
+    assert variants[2][1] is True
+    assert "get_weather" in variants[2][0]
+    assert "world" in variants[2][0]
     variants = openai_mod._reduced_prompt_variants(msgs, None, None, None, "original")
     assert len(variants) == 1
     assert "hello" not in variants[0][0]
@@ -1729,7 +1732,9 @@ def test_reduced_prompt_variants_original_matches():
     msgs = [openai_mod.ChatMessage(role="user", content="hello")]
     original, _ = toolemu.build_prompt(msgs, None, None, False, None)
     variants = openai_mod._reduced_prompt_variants(msgs, [REDUCED_TOOL], None, None, original)
-    assert variants == []
+    assert len(variants) == 1
+    assert variants[0][1] is True
+    assert "get_weather" in variants[0][0]
 
 
 def test_reduced_prompt_variants_no_user():

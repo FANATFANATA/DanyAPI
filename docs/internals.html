@@ -61,7 +61,6 @@
         <aside class="sidebar">
             <nav class="page-nav" aria-label="Sections">
                 <div class="page-nav-title" data-i18n="sidebar_label">Pages</div>
-                <a href="index.html" data-i18n="nav_setup">Setup</a>
                 <a href="overview.html" data-i18n="nav_overview">Overview</a>
                 <a href="setup.html" data-i18n="nav_install">Install &amp; accounts</a>
                 <a href="configuration.html" data-i18n="nav_config">Configuration</a>
@@ -77,7 +76,7 @@
                 </p>
 
                 <h2 id="deepseek" data-i18n="pl_in_ds">DeepSeek</h2>
-                <p data-i18n-html="in_ds_p">Protocol reverse-engineered from the chat.deepseek.com main bundle (<code>fe-static.deepseek.com/chat/static/main.4e922c397f.js</code>) and the wasm module <code>sha3_wasm_bg.7b9ca65ddd.wasm</code>:</p>
+                <p data-i18n-html="in_ds_p">Protocol reverse-engineered from the chat.deepseek.com main bundle and its sha3 wasm module:</p>
                 <ul>
                     <li data-i18n-html="in_ds_b1">Auth: <code>POST /api/v0/users/login</code> → <code>data.biz_data.user.token</code>, then <code>Authorization: Bearer &lt;token&gt;</code>.</li>
                     <li data-i18n-html="in_ds_b2">Headers: <code>x-client-bundle-id</code>, <code>x-client-platform</code>, <code>x-client-version</code>, <code>x-client-locale</code>, <code>x-client-timezone-offset</code>.</li>
@@ -93,10 +92,10 @@
                 </ul>
 
                 <h2 id="qwen" data-i18n="pl_in_qw">Qwen</h2>
-                <p data-i18n-html="in_qw_p">Protocol reverse-engineered from the chat.qwen.ai frontend bundle (<code>assets.alicdn.com/g/qwenweb/qwen-chat-fe/0.2.83/js/main.js</code>):</p>
+                <p data-i18n-html="in_qw_p">Protocol reverse-engineered from the chat.qwen.ai frontend bundle:</p>
                 <ul>
                     <li data-i18n-html="in_qw_b1">Auth: <code>POST /api/v2/auths/signin</code> with <code>{email, password}</code> where the password is SHA-256 hex of the plain text → <code>data.token</code> (JWT). Requests send it as <code>Authorization: Bearer &lt;token&gt;</code> and the <code>token</code> cookie.</li>
-                    <li data-i18n-html="in_qw_b2">Headers: <code>source: web</code>, <code>version: 0.2.83</code>, <code>X-Request-Id</code>, <code>Timezone</code>, browser <code>sec-ch-ua</code>/<code>User-Agent</code>/<code>Origin</code>/<code>Referer</code>.</li>
+                    <li data-i18n-html="in_qw_b2">Headers: <code>source: web</code>, <code>version</code>, <code>X-Request-Id</code>, <code>Timezone</code>, browser <code>sec-ch-ua</code>/<code>User-Agent</code>/<code>Origin</code>/<code>Referer</code>.</li>
                     <li data-i18n-html="in_qw_b3">Session: <code>POST /api/v2/chats/new</code> (<code>{chatId, models, chat_type: "t2t", chat_mode: "normal", timestamp}</code>) → <code>data.id</code> (the chat id).</li>
                     <li data-i18n-html="in_qw_b4">
                         Generation: <code>POST /api/v2/chat/completions?chat_id=&lt;id&gt;</code> with
