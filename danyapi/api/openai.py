@@ -525,7 +525,8 @@ async def _stream_guard(gen, model: str):
             yield line
     except Exception as exc:
         log.exception("stream generator failed: %s", exc)
-        for line in _stream_error_sse(chunk_id, created, model, f"stream error: {exc}"):
+        msg = str(exc) or repr(exc) or "unknown stream error"
+        for line in _stream_error_sse(chunk_id, created, model, f"stream error: {msg}"):
             yield line
 
 
@@ -580,6 +581,10 @@ async def _chat_completions_deepseek(req: ChatCompletionRequest) -> Any:
         "reduced_prompts": _reduced_prompt_variants(
             req.messages, getattr(req, "tools", None), getattr(req, "tool_choice", None), getattr(req, "response_format", None), prompt
         ),
+        "messages": req.messages,
+        "tools": getattr(req, "tools", None),
+        "tool_choice": getattr(req, "tool_choice", None),
+        "response_format": getattr(req, "response_format", None),
     }
     if req.stream:
         return StreamingResponse(
@@ -634,6 +639,10 @@ async def _chat_completions_qwen(req: ChatCompletionRequest) -> Any:
         "tool_mode": tool_mode,
         "include_usage": _include_usage(req),
         "context_seq": context_seq,
+        "messages": req.messages,
+        "tools": getattr(req, "tools", None),
+        "tool_choice": getattr(req, "tool_choice", None),
+        "response_format": getattr(req, "response_format", None),
     }
     if req.stream:
         return StreamingResponse(
@@ -832,6 +841,8 @@ async def _try_stop_stream(client, session_id: str, message_id: str | None) -> N
         await client.stop_stream(session_id, message_id)
     except Exception as exc:
         log.debug("stop_stream failed for %s: %s", session_id, exc)
+
+
 async def _collect_continuation(
     account,
     session,
@@ -979,10 +990,20 @@ async def _collect_non_stream(
     include_usage=False,
     context_seq: tuple[str, ...] | None = None,
     reduced_prompts: list[tuple[str, bool, dict[str, Any]]] | None = None,
+    messages=None,
+    tools=None,
+    tool_choice=None,
+    response_format=None,
 ):
     await _human_delay()
     async with account_lock(lock, settings.acquire_timeout):
         session, session_key, parent_message_id = await _prepare_session(account, pool, existing_sid, context_seq)
+        if session_key != existing_sid and messages is not None:
+            try:
+                prompt, tool_mode = toolemu.build_prompt(messages, tools, tool_choice, False, response_format)
+            except ValueError:
+                pass
+            tool_schemas = toolemu.tool_schema_map(tools)
         stop_message_id: str | None = None
         started = time.monotonic()
         try:
@@ -1140,6 +1161,10 @@ async def _stream_openai(
     include_usage=False,
     context_seq: tuple[str, ...] | None = None,
     reduced_prompts: list[tuple[str, bool, dict[str, Any]]] | None = None,
+    messages=None,
+    tools=None,
+    tool_choice=None,
+    response_format=None,
 ):
     chunk_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
@@ -1153,6 +1178,13 @@ async def _stream_openai(
             for line in _stream_error_sse(chunk_id, created, model, detail):
                 yield line
             return
+
+        if session_key != existing_sid and messages is not None:
+            try:
+                prompt, tool_mode = toolemu.build_prompt(messages, tools, tool_choice, False, response_format)
+            except ValueError:
+                pass
+            tool_schemas = toolemu.tool_schema_map(tools)
 
         rec: MessageReconstructor | None = None
         response_message_id = None

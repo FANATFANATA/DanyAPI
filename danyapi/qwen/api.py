@@ -222,10 +222,20 @@ async def collect_non_stream(
     tool_schemas=None,
     include_usage=False,
     context_seq: tuple[str, ...] | None = None,
+    messages=None,
+    tools=None,
+    tool_choice=None,
+    response_format=None,
 ):
     await _human_delay()
     async with account_lock(lock, settings.acquire_timeout):
         session, session_key = await _prepare_session(account, pool, existing_sid, model_id, context_seq)
+        if session_key != existing_sid and messages is not None:
+            try:
+                prompt, tool_mode = toolemu.build_prompt(messages, tools, tool_choice, False, response_format)
+            except ValueError:
+                pass
+            tool_schemas = toolemu.tool_schema_map(tools)
         stop_response_id: str | None = None
         try:
             rec: QwenStreamReconstructor | None = None
@@ -332,6 +342,10 @@ async def stream_openai(
     tool_schemas=None,
     include_usage=False,
     context_seq: tuple[str, ...] | None = None,
+    messages=None,
+    tools=None,
+    tool_choice=None,
+    response_format=None,
 ):
     chunk_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
@@ -365,6 +379,13 @@ async def stream_openai(
             )
             yield "data: [DONE]\n\n"
             return
+
+        if session_key != existing_sid and messages is not None:
+            try:
+                prompt, tool_mode = toolemu.build_prompt(messages, tools, tool_choice, False, response_format)
+            except ValueError:
+                pass
+            tool_schemas = toolemu.tool_schema_map(tools)
 
         rec: QwenStreamReconstructor | None = None
         content_buf = ""

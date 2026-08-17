@@ -1199,6 +1199,16 @@ hr {
     }
     .topbar-inner {
         padding: 0.6rem 0.9rem;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+    }
+    .top-controls {
+        flex-wrap: wrap;
+        justify-content: flex-end;
+    }
+    .docs-dropdown {
+        right: -0.5rem;
+        min-width: 200px;
     }
 }
 
@@ -1209,8 +1219,33 @@ hr {
     .brand {
         font-size: 1rem;
     }
+    .brand-name {
+        font-size: 0.95rem;
+    }
     .top-controls {
-        gap: 0.35rem;
+        gap: 0.3rem;
+    }
+    .docs-btn {
+        padding: 0.35rem 0.7rem;
+        font-size: 0.78rem;
+    }
+    .lang-btn {
+        padding: 0.15rem 0.45rem;
+        font-size: 0.7rem;
+    }
+    .theme-select {
+        padding: 0.2rem 1.4rem 0.2rem 0.55rem;
+        font-size: 0.72rem;
+    }
+    .theme-switcher {
+        padding: 0.25rem 0.45rem 0.25rem 0.55rem;
+        gap: 0.3rem;
+    }
+    .docs-dropdown {
+        position: fixed;
+        left: 0.5rem;
+        right: 0.5rem;
+        min-width: unset;
     }
 }
 

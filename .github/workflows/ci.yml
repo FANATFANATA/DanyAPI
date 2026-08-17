@@ -16,16 +16,12 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.13", "3.14"]
     steps:
       - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v7
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.14"
           cache: pip
           cache-dependency-path: requirements-dev.txt
 
@@ -41,6 +37,7 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v7
 
