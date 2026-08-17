@@ -1439,6 +1439,86 @@ def test_parse_tool_calls_debug_strategies():
     assert parse_tool_calls_debug('First check. {"name": "a", "arguments": {}}')["strategies"] == ["json_in_prose"]
 
 
+def test_parse_dsml_strategy_debug():
+    text = (
+        f"<{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}tool_calls>"
+        f'<{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}invoke name="a">'
+        f'<{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}parameter name="x">1</{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}parameter>'
+        f"</{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}invoke>"
+        f"</{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}tool_calls>"
+    )
+    report = parse_tool_calls_debug(text)
+    assert report["parsed"]
+    assert report["strategies"] == ["dsml"]
+    assert report["calls"][0]["name"] == "a"
+    assert json.loads(report["calls"][0]["arguments"]) == {"x": "1"}
+
+
+def test_parse_dsml_invoke_attrs_before_after_name():
+    for attrs in ('type="function" name="edit"', 'name="edit" type="function"', 'name = "edit"'):
+        text = (
+            f"<{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}tool_calls>"
+            f"<{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}invoke {attrs}>"
+            f'<{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}parameter name="filePath">a.py</{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}parameter>'
+            f"</{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}invoke>"
+            f"</{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}tool_calls>"
+        )
+        calls, wrapper = parse_tool_calls(text)
+        assert calls is not None
+        assert calls[0].name == "edit"
+        assert json.loads(calls[0].arguments) == {"filePath": "a.py"}
+        assert wrapper == ""
+
+
+def test_parse_dsml_invoke_child_elements_without_parameter():
+    text = (
+        f"<{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}tool_calls>"
+        f'<{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}invoke name="glob">'
+        f"<{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}pattern>**/*.py</{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}pattern>"
+        f"</{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}invoke>"
+        f"</{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}tool_calls>"
+    )
+    calls, wrapper = parse_tool_calls(text)
+    assert calls is not None
+    assert calls[0].name == "glob"
+    assert json.loads(calls[0].arguments) == {"pattern": "**/*.py"}
+    assert wrapper == ""
+
+
+def test_parse_dsml_multiple_invokes():
+    text = (
+        f"<{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}tool_calls>"
+        f'<{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}invoke name="a">'
+        f'<{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}parameter name="x">1</{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}parameter>'
+        f"</{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}invoke>"
+        f'<{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}invoke name="b">'
+        f'<{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}parameter name="y">2</{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}parameter>'
+        f"</{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}invoke>"
+        f"</{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}tool_calls>"
+    )
+    calls, wrapper = parse_tool_calls(text)
+    assert calls is not None
+    assert [c.name for c in calls] == ["a", "b"]
+    assert json.loads(calls[0].arguments) == {"x": "1"}
+    assert json.loads(calls[1].arguments) == {"y": "2"}
+    assert wrapper == ""
+
+
+def test_parse_dsml_reasoning_stripped_from_wrapper():
+    text = (
+        f"<{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}thinking>secret</{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}thinking>"
+        f"<{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}tool_calls>"
+        f'<{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}invoke name="a">'
+        f'<{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}parameter name="x">1</{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}parameter>'
+        f"</{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}invoke>"
+        f"</{_DSML_JUNK_MARKER}DSML{_DSML_JUNK_MARKER}tool_calls>"
+    )
+    calls, wrapper = parse_tool_calls(text)
+    assert calls is not None
+    assert calls[0].name == "a"
+    assert "secret" not in wrapper
+
+
 def test_parse_xml_repeated_parameters_become_list():
     text = '<invoke name="t"><parameter name="x">1</parameter><parameter name="x">2</parameter><parameter name="x">3</parameter></invoke>'
     parsed = parse_tool_calls(text)

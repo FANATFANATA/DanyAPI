@@ -20,11 +20,11 @@ _DSML_TOOL_CALLS_BLOCK = re.compile(
     re.DOTALL | re.IGNORECASE,
 )
 _DSML_INVOKE = re.compile(
-    rf"<{_DSML_MARKER}\s*invoke\s+name=([\"']?)([^\s>\"']+)\1\s*>(.*?)</{_DSML_MARKER}\s*invoke\s*>",
+    rf"<{_DSML_MARKER}\s*invoke\b[^>]*?\sname\s*=\s*([\"']?)([^\s>\"']+)\1[^>]*>(.*?)</{_DSML_MARKER}\s*invoke\s*>",
     re.DOTALL | re.IGNORECASE,
 )
 _DSML_PARAMETER = re.compile(
-    rf"<{_DSML_MARKER}\s*parameter\s+name=([\"']?)([^\"']+)\1\s*>(.*?)</{_DSML_MARKER}\s*parameter\s*>",
+    rf"<{_DSML_MARKER}\s*parameter\s+name\s*=\s*([\"']?)([^\"']+)\1[^>]*>(.*?)</{_DSML_MARKER}\s*parameter\s*>",
     re.DOTALL | re.IGNORECASE,
 )
 _DSML_HIDDEN_NAMES = (
@@ -1506,7 +1506,6 @@ def _parse_yaml_calls(text: str) -> list[ToolCall] | None:
     return calls or None
 
 
-# Пиздец я наебался с этим парсингом
 def _parse_dsml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | None = None) -> tuple[list[ToolCall], str] | None:
     block_match = _DSML_TOOL_CALLS_BLOCK.search(text)
     if block_match is None:
@@ -1521,7 +1520,8 @@ def _parse_dsml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | 
             key = param.group(2).strip()
             params[key] = _xml_value(param.group(3), (param_types or {}).get(key))
         if not params:
-            parsed = _xml_invoke_arguments(body, param_types)
+            normalized = _DSML_XML_NORMALIZE.sub(r"<\1\2>", body)
+            parsed = _xml_invoke_arguments(normalized, param_types)
             if parsed:
                 params = parsed
         if params:
@@ -1541,7 +1541,6 @@ def _parse_tool_calls_impl(
 ) -> tuple[list[ToolCall], str] | None:
     if not text or not text.strip():
         return None
-    # Сначала проверяем DSML-формат (до strip_dsml, который его уничтожит)
     dsml_parsed = _parse_dsml_tool_calls(text, tool_schemas)
     if dsml_parsed is not None:
         if report is not None:
