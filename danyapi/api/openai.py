@@ -876,6 +876,7 @@ async def _collect_reduced(
     ref_file_ids=None,
 ):
     for prompt, _tool_mode, _tool_schemas in reduced_prompts:
+        session_key = None
         try:
             session, session_key, parent_message_id = await _prepare_session(account, pool, None, None)
             pow_headers = await _fresh_pow_headers(account)
@@ -902,9 +903,13 @@ async def _collect_reduced(
             finally:
                 await resp.aclose()
         except (HTTPException, httpx.HTTPError):
+            if session_key is not None:
+                _drop_session(pool, account, session_key)
             continue
         if (rec.content or rec.reasoning) and not _is_input_exceeds_limit(rec):
             return rec, session, session_key
+        if session_key is not None:
+            _drop_session(pool, account, session_key)
     return None
 
 

@@ -169,9 +169,16 @@ def update_env(values):
         if not found:
             lines.append(f"{key}={quote(value)}\n")
     fd, path = tempfile.mkstemp(dir=str(ROOT), suffix=".env.tmp")
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.writelines(lines)
-    os.replace(path, ENV_FILE)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+        os.replace(path, ENV_FILE)
+    except OSError:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        raise
 
 
 def _request(url, headers, payload=None, timeout=25):

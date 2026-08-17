@@ -22,7 +22,6 @@ class QwenStreamReconstructor:
         self.usage: dict = {}
         self._prev_content: str = ""
         self._prev_reasoning: str = ""
-        self._summary_mode: bool = False
 
     def handle(self, event: SSEEvent) -> None:
         data = event.data
@@ -60,9 +59,7 @@ class QwenStreamReconstructor:
             text = _delta_text(delta, "content")
             if text:
                 self.reasoning += text
-                self._summary_mode = False
         elif phase == SUMMARY_PHASE:
-            self._summary_mode = True
             extra = delta.get("extra")
             if isinstance(extra, dict):
                 summary = extra.get("summary_thought")

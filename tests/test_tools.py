@@ -2221,7 +2221,7 @@ def test_xml_invoke_arguments_parameter_tags():
 
 def test_parse_xml_block_pattern_no_calls():
     text = '<tool_call>{"answer": 42}</tool_call><tool_call>{"tool_calls":[{"name":"f","arguments":{"x":1}}]}</tool_call>'
-    calls, wrapper = parse_tool_calls(text)
+    calls, _ = parse_tool_calls(text)
     assert calls is not None
     assert calls[0].name == "f"
 
@@ -2232,7 +2232,7 @@ def test_parse_wrapper_array_no_calls():
 
 def test_parse_wrapper_empty_name_element():
     text = "<tool_calls><name></name><get_weather><city>Moscow</city></get_weather></tool_calls>"
-    calls, wrapper = parse_tool_calls(text)
+    calls, _ = parse_tool_calls(text)
     assert calls is not None
     assert calls[0].name == "get_weather"
 
@@ -2278,7 +2278,7 @@ def test_parse_dsml_invoke_empty():
         '<||DSML||invoke name="g"><||DSML||parameter name="x">1</||DSML||parameter></||DSML||invoke>'
         "</||DSML||tool_calls>"
     )
-    calls, wrapper = parse_tool_calls(text)
+    calls, _ = parse_tool_calls(text)
     assert calls is not None
     assert calls[0].name == "g"
     assert json.loads(calls[0].arguments) == {"x": "1"}

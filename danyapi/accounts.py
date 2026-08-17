@@ -79,6 +79,14 @@ class ContextIndex:
         ts = self._ts.get(session_id)
         return ts is not None and self._ttl > 0 and now - ts > self._ttl
 
+    @property
+    def size(self) -> int:
+        return len(self._seqs)
+
+    @property
+    def max_size(self) -> int:
+        return self._maxsize
+
     def lookup(self, sequence: tuple[str, ...]) -> str | None:
         if not sequence:
             return None
@@ -271,10 +279,10 @@ class AccountPool:
             "healthy": len(self.healthy),
             "broken": len(self.accounts) - len(self.healthy),
             "session_affinities": len(self._by_session),
-            "context_entries": len(self._contexts._seqs),
+            "context_entries": self._contexts.size,
             "context_hits": self._contexts.hits,
             "context_misses": self._contexts.misses,
-            "context_cache_size": self._contexts._maxsize,
+            "context_cache_size": self._contexts.max_size,
             "ttl_seconds": self._ttl,
         }
 
