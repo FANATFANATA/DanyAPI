@@ -1,6 +1,6 @@
 -r requirements.txt
-ruff>=0.16.2
-pytest>=8.0
+ruff>=0.16.3
+pytest>=9.1.1
 pytest-asyncio>=1.4
-pytest-cov>=7.0
-hypothesis>=6.100
+pytest-cov>=7.1.0
+hypothesis>=6.165.6
