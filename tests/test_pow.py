@@ -148,6 +148,40 @@ def test_refill_failure_logged():
     asyncio.run(run())
 
 
+def test_refill_skips_when_header_present():
+    from danyapi.pow import PowManager
+
+    async def run():
+        pm = PowManager()
+        pm._header = {"X-DS-PoW-Response": "x"}
+        fetch = AsyncMock(side_effect=RuntimeError("must not be called"))
+        with patch("danyapi.pow.solve_challenge", new=AsyncMock(return_value=42)):
+            await pm._refill_if_empty(fetch)
+        assert pm._header == {"X-DS-PoW-Response": "x"}
+        fetch.assert_not_called()
+
+    asyncio.run(run())
+
+
+def test_kick_refill_skips_running_task():
+    from danyapi.pow import PowManager
+
+    async def run():
+        pm = PowManager()
+        pm._refill = asyncio.create_task(asyncio.sleep(1))
+        fetch = AsyncMock()
+        pm._kick_refill(fetch)
+        task = pm._refill
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        fetch.assert_not_called()
+
+    asyncio.run(run())
+
+
 def test_find_native_solver_missing():
     with patch("danyapi.pow._SOLVER_DIR", Path(tempfile.mkdtemp())):
         assert _find_native_solver() is None

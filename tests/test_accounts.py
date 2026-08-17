@@ -457,3 +457,28 @@ def test_restore_affinities_variants(pool_store):
     assert pool.account_for_session("bad-bool") is None
     assert pool.account_for_session("bad-str") is None
     assert pool.account_for_session("out-of-range") is None
+
+
+def test_lookup_keeps_best_key():
+    idx = ContextIndex(16)
+    idx.index("s1", ("a", "b"))
+    idx.index("s2", ("a",))
+    assert idx.lookup(("a", "b", "c")) == "s1"
+
+
+def test_lookup_removes_multiple_expired(ctx_store):
+    idx = ContextIndex(16, ttl=0.1, store=ctx_store)
+    idx.index("s1", ("a",))
+    idx.index("s2", ("b",))
+    idx._ts["s1"] = time.monotonic() - 10
+    idx._ts["s2"] = time.monotonic() - 10
+    assert idx.lookup(("c",)) is None
+    assert "s1" not in ctx_store
+    assert "s2" not in ctx_store
+
+
+def test_lookup_expired_without_store():
+    idx = ContextIndex(16, ttl=0.1)
+    idx.index("s1", ("a",))
+    idx._ts["s1"] = time.monotonic() - 10
+    assert idx.lookup(("a",)) is None

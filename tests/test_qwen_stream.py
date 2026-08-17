@@ -159,3 +159,33 @@ def test_handle_unknown_phase():
     rec = QwenStreamReconstructor()
     rec.handle(SSEEvent(None, {"choices": [{"delta": {"phase": "other", "content": "x"}}]}))
     assert rec.content == ""
+
+
+def test_think_empty_text():
+    rec = QwenStreamReconstructor()
+    rec.handle(SSEEvent(None, {"choices": [{"delta": {"content": "", "phase": "think"}}]}))
+    assert rec.reasoning == ""
+
+
+def test_summary_extra_not_dict():
+    rec = QwenStreamReconstructor()
+    rec.handle(SSEEvent(None, {"choices": [{"delta": {"phase": "thinking_summary", "extra": "x"}}]}))
+    assert rec.reasoning == ""
+
+
+def test_summary_thought_not_dict():
+    rec = QwenStreamReconstructor()
+    rec.handle(SSEEvent(None, {"choices": [{"delta": {"phase": "thinking_summary", "extra": {"summary_thought": "x"}}}]}))
+    assert rec.reasoning == ""
+
+
+def test_summary_content_not_list():
+    rec = QwenStreamReconstructor()
+    rec.handle(SSEEvent(None, {"choices": [{"delta": {"phase": "thinking_summary", "extra": {"summary_thought": {"content": "x"}}}}]}))
+    assert rec.reasoning == ""
+
+
+def test_summary_content_empty():
+    rec = QwenStreamReconstructor()
+    rec.handle(SSEEvent(None, {"choices": [{"delta": {"phase": "thinking_summary", "extra": {"summary_thought": {"content": []}}}}]}))
+    assert rec.reasoning == ""

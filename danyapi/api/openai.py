@@ -791,7 +791,8 @@ async def _collect_continuation(
     search,
     ref_file_ids=None,
 ) -> MessageReconstructor | None:
-    for attempt in range(MAX_RETRIES + 1):
+    attempt = 0
+    while True:
         if attempt:
             await asyncio.sleep(min(RETRY_BACKOFF_SEC * (2 ** (attempt - 1)), RETRY_BACKOFF_MAX_SEC))
         try:
@@ -810,10 +811,11 @@ async def _collect_continuation(
             )
         except HTTPException as exc:
             if _is_retryable_http(exc) and attempt < MAX_RETRIES:
+                attempt += 1
                 log.warning(
                     "deepseek continuation error (%s), attempt %d/%d",
                     exc.status_code,
-                    attempt + 1,
+                    attempt,
                     MAX_RETRIES,
                 )
                 continue
@@ -829,6 +831,7 @@ async def _collect_continuation(
         finally:
             await resp.aclose()
         if not (rec.content or rec.reasoning) and _is_retryable_hint(rec) and attempt < MAX_RETRIES:
+            attempt += 1
             continue
         return rec
 
@@ -931,7 +934,8 @@ async def _collect_non_stream(
         try:
             rec: MessageReconstructor | None = None
             response_message_id = None
-            for attempt in range(MAX_RETRIES + 1):
+            attempt = 0
+            while True:
                 if attempt:
                     await asyncio.sleep(min(RETRY_BACKOFF_SEC * (2 ** (attempt - 1)), RETRY_BACKOFF_MAX_SEC))
                 try:
@@ -955,10 +959,11 @@ async def _collect_non_stream(
                         rec.hint_error = input_hint
                         break
                     if _is_retryable_http(exc) and attempt < MAX_RETRIES:
+                        attempt += 1
                         log.warning(
                             "deepseek provider error (%s), attempt %d/%d",
                             exc.status_code,
-                            attempt + 1,
+                            attempt,
                             MAX_RETRIES,
                         )
                         continue
@@ -981,10 +986,11 @@ async def _collect_non_stream(
                 if rec.id:
                     stop_message_id = rec.id
                 if not (rec.content or rec.reasoning) and _is_retryable_hint(rec) and attempt < MAX_RETRIES:
+                    attempt += 1
                     log.warning(
                         "retryable hint (%s), attempt %d/%d",
                         (rec.hint_error or {}).get("finish_reason"),
-                        attempt + 1,
+                        attempt,
                         MAX_RETRIES,
                     )
                     continue
@@ -1122,7 +1128,8 @@ async def _stream_openai(
         stop_message_id: str | None = None
         content_buf = ""
         started = time.monotonic()
-        for attempt in range(MAX_RETRIES + 1):
+        attempt = 0
+        while True:
             if attempt:
                 await asyncio.sleep(min(RETRY_BACKOFF_SEC * (2 ** (attempt - 1)), RETRY_BACKOFF_MAX_SEC))
             try:
@@ -1146,10 +1153,11 @@ async def _stream_openai(
                     rec.hint_error = input_hint
                     break
                 if _is_retryable_http(exc) and attempt < MAX_RETRIES:
+                    attempt += 1
                     log.warning(
                         "deepseek provider error (%s), attempt %d/%d",
                         exc.status_code,
-                        attempt + 1,
+                        attempt,
                         MAX_RETRIES,
                     )
                     continue
@@ -1247,10 +1255,11 @@ async def _stream_openai(
             if got_content:
                 break
             if _is_retryable_hint(rec) and attempt < MAX_RETRIES:
+                attempt += 1
                 log.warning(
                     "retryable hint (%s), attempt %d/%d",
                     (rec.hint_error or {}).get("finish_reason"),
-                    attempt + 1,
+                    attempt,
                     MAX_RETRIES,
                 )
                 continue
@@ -1387,7 +1396,7 @@ async def _stream_openai(
         log.info("deepseek completion OK (%.0fms)", (time.monotonic() - started) * 1000)
 
         if tool_mode:
-            parsed = toolemu.parse_tool_calls(content_buf, tool_schemas)
+            parsed = toolemu.parse_tool_calls(content_buf or rec.content, tool_schemas)
             if parsed is not None:
                 tool_calls, tool_text = parsed
                 if known_names:

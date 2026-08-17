@@ -649,3 +649,65 @@ async def test_stream_tool_mode_known_names_filters_all():
     assert json.dumps(TOOL_JSON)[1:-1] in joined
     assert '"finish_reason": "stop"' in joined
     assert joined.rstrip().endswith("data: [DONE]")
+
+
+async def test_json_non_dict_payload():
+    with pytest.raises(Exception) as excinfo:
+        await _send(JsonResp("[]"))
+    assert excinfo.value.status_code == 502
+
+
+NO_RID_SSE = (
+    'data: {"choices": [{"delta": {"content": "Hi", "phase": "answer"}}]}\n'
+    "\n"
+    'data: {"choices": [{"delta": {"content": "", "status": "finished", "phase": "answer"}}]}\n'
+    "\n"
+)
+
+
+async def test_non_stream_without_response_id():
+    acct = FakeAccount([NO_RID_SSE])
+    result = await qwen_api.collect_non_stream(**_args(acct))
+    assert result["choices"][0]["message"]["content"] == "Hi"
+
+
+async def test_stream_without_response_id():
+    acct = FakeAccount([NO_RID_SSE])
+    gen = qwen_api.stream_openai(**_args(acct))
+    joined = "".join(await _collect(gen))
+    assert '"content": "Hi"' in joined
+    assert joined.rstrip().endswith("data: [DONE]")
+
+
+async def test_non_stream_tool_mode_no_reasoning_filtered():
+    tool_sse = (
+        'data: {"response.created":{"chat_id":"c1","parent_id":"p0","response_id":"r1"}} \n'
+        "\n"
+        f'data: {{"choices": [{{"delta": {{"content": {json.dumps(TOOL_JSON)}, "phase": "answer"}}}}], "response_id": "r1"}}\n'
+        "\n"
+    )
+    acct = FakeAccount([tool_sse])
+    args = _args(acct, tool_mode=True)
+    args["known_names"] = {"other_tool"}
+    result = await qwen_api.collect_non_stream(**args)
+    choice = result["choices"][0]
+    assert choice["finish_reason"] == "stop"
+    assert choice["message"]["content"] == TOOL_JSON
+    assert "reasoning_content" not in choice["message"]
+
+
+async def test_stream_tool_mode_reasoning_only():
+    sse = (
+        'data: {"response.created":{"chat_id":"c1","parent_id":"p0","response_id":"r1"}} \n'
+        "\n"
+        'data: {"choices": [{"delta": {"content": "step", "phase": "think"}}], "response_id": "r1"}\n'
+        "\n"
+        'data: {"choices": [{"delta": {"content": "", "status": "finished", "phase": "answer"}}], "response_id": "r1"}\n'
+        "\n"
+    )
+    acct = FakeAccount([sse])
+    args = _args(acct, tool_mode=True)
+    gen = qwen_api.stream_openai(**args)
+    joined = "".join(await _collect(gen))
+    assert "reasoning_content" in joined
+    assert '"finish_reason": "stop"' in joined

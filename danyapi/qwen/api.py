@@ -230,7 +230,8 @@ async def collect_non_stream(
         stop_response_id: str | None = None
         try:
             rec: QwenStreamReconstructor | None = None
-            for attempt in range(MAX_RETRIES + 1):
+            attempt = 0
+            while True:
                 if attempt:
                     await asyncio.sleep(min(RETRY_BACKOFF_SEC * (2 ** (attempt - 1)), RETRY_BACKOFF_MAX_SEC))
                 try:
@@ -240,10 +241,11 @@ async def collect_non_stream(
                     raise HTTPException(400, "context length exceeded: conversation too long, start a new conversation") from None
                 except HTTPException as exc:
                     if _is_retryable_http(exc) and attempt < MAX_RETRIES:
+                        attempt += 1
                         log.warning(
                             "qwen provider error (%s), attempt %d/%d",
                             exc.status_code,
-                            attempt + 1,
+                            attempt,
                             MAX_RETRIES,
                         )
                         continue
@@ -261,10 +263,11 @@ async def collect_non_stream(
                         stop_response_id = rec.response_id
                     await resp.aclose()
                 if _is_retryable_error(rec) and attempt < MAX_RETRIES:
+                    attempt += 1
                     log.warning(
                         "qwen retryable error (%s), attempt %d/%d",
                         error_code(rec.error),
-                        attempt + 1,
+                        attempt,
                         MAX_RETRIES,
                     )
                     continue
@@ -370,7 +373,8 @@ async def stream_openai(
         rec: QwenStreamReconstructor | None = None
         content_buf = ""
         stop_response_id: str | None = None
-        for attempt in range(MAX_RETRIES + 1):
+        attempt = 0
+        while True:
             if attempt:
                 await asyncio.sleep(min(RETRY_BACKOFF_SEC * (2 ** (attempt - 1)), RETRY_BACKOFF_MAX_SEC))
             try:
@@ -408,10 +412,11 @@ async def stream_openai(
                 return
             except HTTPException as exc:
                 if _is_retryable_http(exc) and attempt < MAX_RETRIES:
+                    attempt += 1
                     log.warning(
                         "qwen provider error (%s), attempt %d/%d",
                         exc.status_code,
-                        attempt + 1,
+                        attempt,
                         MAX_RETRIES,
                     )
                     continue
@@ -504,10 +509,11 @@ async def stream_openai(
             if got_content:
                 break
             if _is_retryable_error(rec) and attempt < MAX_RETRIES:
+                attempt += 1
                 log.warning(
                     "qwen retryable error (%s), attempt %d/%d",
                     error_code(rec.error),
-                    attempt + 1,
+                    attempt,
                     MAX_RETRIES,
                 )
                 continue
@@ -600,22 +606,21 @@ async def stream_openai(
                         )
                     finish = "tool_calls"
                 else:
-                    if content_buf:
-                        yield sse(
-                            {
-                                "id": chunk_id,
-                                "object": "chat.completion.chunk",
-                                "created": created,
-                                "model": model,
-                                "choices": [
-                                    {
-                                        "index": 0,
-                                        "delta": {"content": content_buf},
-                                        "finish_reason": None,
-                                    }
-                                ],
-                            }
-                        )
+                    yield sse(
+                        {
+                            "id": chunk_id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": model,
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {"content": content_buf},
+                                    "finish_reason": None,
+                                }
+                            ],
+                        }
+                    )
                     finish = "stop"
             else:
                 if content_buf:

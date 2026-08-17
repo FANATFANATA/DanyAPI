@@ -506,3 +506,34 @@ def test_reasoning_and_content_types():
     rec.message = {"fragments": [{"type": "THINK", "content": "why"}, {"type": "RESPONSE", "content": "because"}]}
     assert rec.reasoning == "why"
     assert rec.content == "because"
+
+
+def test_parse_sse_ignores_non_event_lines():
+    events = parse_sse(": comment\nignored line\ndata: {}\n\n")
+    assert len(events) == 1
+    assert events[0].data == {}
+
+
+def test_set_path_empty_parts():
+    target = {"a": 1}
+    _set_path(target, [], 99)
+    assert target == {"a": 1}
+
+
+def test_apply_delta_unknown_op():
+    rec = MessageReconstructor()
+    rec.handle(SSEEvent(None, {"o": "OTHER", "p": "response/x", "v": 1}))
+    assert rec.message == {}
+
+
+def test_apply_delta_append_to_response_root():
+    rec = MessageReconstructor()
+    rec.handle(SSEEvent(None, {"o": "APPEND", "p": "response", "v": 1}))
+    assert rec.message == {}
+
+
+def test_append_non_str_in_list():
+    rec = MessageReconstructor()
+    rec.message = {"items": [5]}
+    rec.handle(SSEEvent(None, {"p": "response/items/0", "o": "APPEND", "v": "x"}))
+    assert rec.message["items"] == [5]

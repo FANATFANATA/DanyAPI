@@ -957,6 +957,70 @@ def test_strip_dsml_any_unicode_marker_hidden():
         assert "answer" in stripped
 
 
+def test_strip_dsml_paired_tag_block():
+    text = "hello <|ds_middle|>DSML<|ds_end|> world"
+    stripped = _strip_dsml(text)
+    assert "DSML" not in stripped
+    assert "ds_middle" not in stripped
+    assert "ds_end" not in stripped
+    assert stripped == "hello   world"
+
+
+def test_strip_dsml_paired_tag_same_name():
+    text = "<|ds_safety|>DSML<|ds_safety|>secret<|ds_safety|>DSML<|ds_safety|>answer"
+    stripped = _strip_dsml(text)
+    assert "DSML" not in stripped
+    assert "ds_safety" not in stripped
+    assert "answer" in stripped
+
+
+def test_strip_dsml_paired_tag_spaces():
+    text = "a <|ds_middle|> DSML <|ds_end|> b"
+    stripped = _strip_dsml(text)
+    assert "DSML" not in stripped
+    assert "ds_middle" not in stripped
+    assert "ds_end" not in stripped
+
+
+def test_strip_dsml_two_char_wrap():
+    text = "before |>DSML<| after"
+    stripped = _strip_dsml(text)
+    assert "DSML" not in stripped
+    assert "before" in stripped
+    assert "after" in stripped
+
+
+def test_strip_dsml_two_char_pipe_wrap():
+    text = "before ||DSML|| after"
+    stripped = _strip_dsml(text)
+    assert "DSML" not in stripped
+    assert "before" in stripped
+    assert "after" in stripped
+
+
+def test_strip_dsml_json_tag_untouched_by_paired_rules():
+    text = '<|DSML|{"tool_calls":[{"name":"f","arguments":{"x":1}}]}>'
+    stripped = _strip_dsml(text)
+    assert stripped == '{"tool_calls":[{"name":"f","arguments":{"x":1}}]}'
+
+
+def test_parse_tool_calls_paired_tag_block_cleaned():
+    text = '<|ds_middle|>DSML<|ds_end|>{"tool_calls":[{"name":"f","arguments":{"x":1}}]}'
+    calls, wrapper = parse_tool_calls(text)
+    assert calls is not None
+    assert calls[0].name == "f"
+    assert json.loads(calls[0].arguments) == {"x": 1}
+    assert wrapper == ""
+
+
+def test_strip_dsml_render_message_paired_tags():
+    msg = Message(role="assistant", content="<|ds_middle|>DSML<|ds_end|>answer")
+    rendered = render_message(msg)
+    assert "DSML" not in rendered
+    assert "ds_middle" not in rendered
+    assert "answer" in rendered
+
+
 def test_tool_names():
     assert tool_names(None) == set()
     assert tool_names([]) == set()
@@ -1018,6 +1082,9 @@ def test_content_text_variants():
 def test_content_fingerprint_variants():
     assert _content_fingerprint(42) == ""
     assert _content_fingerprint([{"type": "image_url", "image_url": "data:x"}]) == "data:x"
+    assert _content_fingerprint([42, "str"]) == "str"
+    assert _content_fingerprint([{"type": "other", "text": 5}]) == ""
+    assert _content_fingerprint([{"type": "image_url", "image_url": 42}]) == ""
 
 
 def test_render_tool_call_mention_variants():
@@ -2041,3 +2108,185 @@ def test_parse_yaml_bare_name_item():
 
 def test_parse_yaml_key_before_any_item():
     assert parse_tool_calls('tool_calls:\npattern: "*/"') is None
+
+
+def test_choice_name_unknown_dict():
+    schema = render_tool_schema([{"function": {"name": "a"}}], tool_choice={"function": {}})
+    assert schema is not None
+    assert "1. name: a" in schema
+
+
+def test_render_schema_tool_without_parameters():
+    schema = render_tool_schema([{"function": {"name": "a", "description": "d"}}])
+    assert schema is not None
+    assert "parameters" not in schema
+
+
+def test_render_message_tool_calls_non_dict():
+    msg = Message(role="assistant", content="x", tool_calls=[42, {"function": {"name": "f", "arguments": '{"a":1}'}}])
+    rendered = render_message(msg)
+    assert "[assistant called f" in rendered
+
+
+def test_render_message_content_list_no_tool_call():
+    msg = Message(role="assistant", content=[{"type": "text", "text": "hi"}])
+    assert render_message(msg) == "hi"
+
+
+def test_render_message_content_tool_call_item():
+    msg = Message(role="assistant", content=[{"type": "tool_call", "name": "f", "arguments": '{"x": 1}'}])
+    rendered = render_message(msg)
+    assert "[assistant called f" in rendered
+
+
+def test_render_tool_tail_empty():
+    from danyapi.tools import _render_tool_tail
+
+    text = _render_tool_tail([Message("tool", "", tool_call_id="c1"), Message("assistant", "done")])
+    assert "Continue" in text
+
+
+def test_extract_last_user_content_variants():
+    msg = Message("user", [42, {"type": "other"}, {"type": "text", "text": "go"}])
+    assert extract_last_user([msg]) == "go"
+
+
+def test_is_tool_round_content_list():
+    msg = Message("assistant", content=[{"type": "text", "text": "x"}, {"type": "tool_call"}])
+    assert is_tool_round([msg])
+
+
+def test_is_tool_round_non_list_content():
+    assert not is_tool_round([Message("assistant", "plain"), Message("user", "x")])
+
+
+def test_is_tool_round_content_without_calls():
+    assert not is_tool_round([Message("assistant", content=[{"type": "text", "text": "x"}])])
+
+
+def test_is_tool_round_tail_content_list():
+    msg = Message("assistant", content=[{"type": "text", "text": "x"}])
+    assert not _is_tool_round_tail([msg])
+
+
+def test_extract_system_empty_text():
+    assert extract_system([Message("system", [42])]) == ""
+
+
+def test_render_json_mode_json_object():
+    result = render_json_mode({"type": "json_object"})
+    assert result is not None
+    assert "JSON object" in result
+
+
+def test_extract_json_object_non_dict():
+    from danyapi.tools import _extract_json_object
+
+    assert _extract_json_object("x {[1, 2]} y") is None
+
+
+def test_extract_wrapped_calls_variants():
+    from danyapi.tools import _extract_wrapped_calls
+
+    calls = _extract_wrapped_calls({"tool_calls": [42, {"name": "f", "arguments": {"x": 1}}]})
+    assert calls is not None
+    assert [call.name for call in calls] == ["f"]
+    assert _extract_wrapped_calls({"tool_calls": {"bad": 1}}) is None
+    assert _extract_wrapped_calls({"function_call": {"bad": 1}}) is None
+
+
+def test_tool_schema_map_type_lists():
+    tools = [
+        {"function": {"name": "a", "parameters": {"type": "object", "properties": {"x": {"type": ["array"]}}}}},
+        {"function": {"name": "b", "parameters": {"type": "object", "properties": {"y": {"type": ["string", "null"]}}}}},
+    ]
+    result = tool_schema_map(tools)
+    assert result["a"]["x"] == ["array"]
+    assert result["b"]["y"] == "null"
+
+
+def test_xml_invoke_arguments_broken_json():
+    from danyapi.tools import _xml_invoke_arguments
+
+    result = _xml_invoke_arguments('{"a": 1}, {"b": 2}')
+    assert result == {"content": '{"a": 1}, {"b": 2}'}
+
+
+def test_xml_invoke_arguments_parameter_tags():
+    from danyapi.tools import _xml_invoke_arguments
+
+    result = _xml_invoke_arguments('<parameter name="x">1</parameter>')
+    assert result == {"x": "1"}
+
+
+def test_parse_xml_block_pattern_no_calls():
+    text = '<tool_call>{"answer": 42}</tool_call><tool_call>{"tool_calls":[{"name":"f","arguments":{"x":1}}]}</tool_call>'
+    calls, wrapper = parse_tool_calls(text)
+    assert calls is not None
+    assert calls[0].name == "f"
+
+
+def test_parse_wrapper_array_no_calls():
+    assert parse_tool_calls('<tool_calls>[{"bad": 1}]</tool_calls>') is None
+
+
+def test_parse_wrapper_empty_name_element():
+    text = "<tool_calls><name></name><get_weather><city>Moscow</city></get_weather></tool_calls>"
+    calls, wrapper = parse_tool_calls(text)
+    assert calls is not None
+    assert calls[0].name == "get_weather"
+
+
+def test_parse_wrapper_arguments_without_name():
+    assert parse_tool_calls('<tool_calls><arguments>{"x": 1}</arguments></tool_calls>') is None
+
+
+def test_parse_bare_array_bad_item():
+    from danyapi.tools import _parse_bare_array_calls
+
+    calls = _parse_bare_array_calls('[{"bad": 1}, {"name": "f", "arguments": {"x": 1}}]')
+    assert calls is not None
+    assert calls[0].name == "f"
+
+
+def test_iter_json_objects_non_dict():
+    from danyapi.tools import _iter_json_objects
+
+    assert list(_iter_json_objects("x {[1, 2]} y")) == []
+
+
+def test_parse_yaml_inline_not_array():
+    from danyapi.tools import _parse_yaml_calls
+
+    assert _parse_yaml_calls("tool_calls: something") is None
+    assert _parse_yaml_calls("tool_calls: [bad]") is None
+
+
+def test_parse_yaml_duplicate_name_key():
+    from danyapi.tools import _parse_yaml_calls
+
+    calls = _parse_yaml_calls("tool_calls:\n- name: f\n  name: g\n  x: 1")
+    assert calls is not None
+    assert calls[0].name == "f"
+    assert json.loads(calls[0].arguments) == {"x": 1}
+
+
+def test_parse_dsml_invoke_empty():
+    text = (
+        "<||DSML||tool_calls>"
+        '<||DSML||invoke name="f"></||DSML||invoke>'
+        '<||DSML||invoke name="g"><||DSML||parameter name="x">1</||DSML||parameter></||DSML||invoke>'
+        "</||DSML||tool_calls>"
+    )
+    calls, wrapper = parse_tool_calls(text)
+    assert calls is not None
+    assert calls[0].name == "g"
+    assert json.loads(calls[0].arguments) == {"x": "1"}
+
+
+def test_tool_call_deltas_empty_arguments():
+    call = ToolCall("id1", "f", "")
+    deltas = tool_call_deltas([call], "text")
+    assert len(deltas) == 2
+    assert deltas[0] == {"role": "assistant", "content": "text"}
+    assert deltas[1]["tool_calls"][0]["function"]["arguments"] == ""

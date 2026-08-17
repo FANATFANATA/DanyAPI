@@ -500,3 +500,22 @@ def test_deepseek_non_stream_accepts_include_usage():
 
 def test_qwen_non_stream_accepts_include_usage():
     assert "include_usage" in qwen_api.collect_non_stream.__code__.co_varnames
+
+
+def test_restore_empty_key_without_prefix(sessions_store):
+    sessions_store.set("", {"id": "cs1"})
+    reg = SessionRegistry(FakeSessionClient(), store=JsonStore("sessions", "default"))
+    assert len(reg._sessions) == 0
+
+
+def test_touch_last_message_missing():
+    reg = SessionRegistry(FakeSessionClient())
+    reg.touch_last_message("nope", "m1")
+    assert reg.get("nope") is None
+
+
+def test_close_all_without_store():
+    reg = SessionRegistry(FakeSessionClient())
+    asyncio.run(reg.obtain(None))
+    reg.close_all()
+    assert len(reg._sessions) == 0

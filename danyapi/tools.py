@@ -11,6 +11,12 @@ from typing import Any
 _DSML_PIPE = r"|\u00a6\u01c0\u01c1\u05c0\u2016\u2223\u2502\u2551\u2758\ufe31\uff5c"
 _DSML_JUNK = r"[^\x00-\x7f]"
 _DSML_MARKER = rf"(?:[{_DSML_PIPE}]|{_DSML_JUNK})+\s*DSML\s*(?:[{_DSML_PIPE}]|{_DSML_JUNK})+"
+_DSML_PIPE_ANGLE = rf"[{_DSML_PIPE}<>]"
+_DSML_BLOCK = re.compile(
+    rf"<{_DSML_PIPE_ANGLE}+\s*[a-zA-Z_][^<>]*\s*{_DSML_PIPE_ANGLE}+>\s*DSML\s*<{_DSML_PIPE_ANGLE}+\s*[a-zA-Z_][^<>]*\s*{_DSML_PIPE_ANGLE}+>",
+    re.IGNORECASE,
+)
+_DSML_WRAP = re.compile(rf"(?:[{_DSML_PIPE}]|{_DSML_JUNK})+\s*>\s*DSML\s*<\s*(?:[{_DSML_PIPE}]|{_DSML_JUNK})+", re.IGNORECASE)
 _DSML_XML_NORMALIZE = re.compile(rf"<\s*(/?)\s*{_DSML_MARKER}\s*([a-zA-Z_][^<>]*)>", re.IGNORECASE)
 _DSML_TAG = re.compile(rf"<\s*/?\s*{_DSML_MARKER}\s*[^<>]*>", re.IGNORECASE)
 _DSML_NAKED = re.compile(rf"{_DSML_MARKER}", re.IGNORECASE)
@@ -199,8 +205,10 @@ def _strip_dsml(text: str) -> str:
     if not text:
         return text
     result = text
-    for _ in range(16):
-        updated = _DSML_HIDDEN.sub(" ", result)
+    while True:
+        updated = _DSML_BLOCK.sub(" ", result)
+        updated = _DSML_WRAP.sub(" ", updated)
+        updated = _DSML_HIDDEN.sub(" ", updated)
         updated = _DSML_HIDDEN_NAKED.sub(" ", updated)
         if updated == result:
             break
@@ -400,9 +408,7 @@ def render_message(msg: Any) -> str:
         if isinstance(content, list):
             for item in content:
                 if isinstance(item, dict) and item.get("type") == "tool_call":
-                    mention = _render_tool_call_mention(item)
-                    if mention:
-                        parts.append(mention)
+                    parts.append(_render_tool_call_mention(item))
         return "; ".join(parts)
     if role == "tool":
         tool_call_id = getattr(msg, "tool_call_id", None) or ""
@@ -429,9 +435,7 @@ def _render_tool_tail(messages: list[Any]) -> str:
     for msg in messages:
         role = getattr(msg, "role", None)
         if role in ("tool", "function"):
-            text = render_message(msg)
-            if text:
-                parts.append(text)
+            parts.append(render_message(msg))
     parts.append("Continue the conversation and provide the final answer based on the tool results.")
     return "\n".join(parts)
 
@@ -901,8 +905,7 @@ def _extract_json_object(text: str) -> tuple[dict, int, int] | None:
         obj = _loads_lenient(stripped[start : end + 1])
     except ValueError:
         return None
-    if isinstance(obj, dict):
-        return obj, start, end
+    return obj, start, end
 
 
 def _call_item_fields(item: dict) -> tuple[Any, Any]:
@@ -972,9 +975,7 @@ def _extract_calls(obj: dict) -> list[ToolCall] | None:
         return calls
     name, arguments = _call_item_fields(obj)
     if isinstance(name, str) and name and _is_jsonish_arguments(arguments):
-        call = _extract_one_call(obj)
-        if call is not None:
-            return [call]
+        return [ToolCall.create(name, arguments)]
     return None
 
 
@@ -1078,9 +1079,7 @@ def _xml_invoke_arguments(body: str, param_types: dict[str, Any] | None = None, 
     stripped = body.strip()
     if stripped.startswith("{"):
         try:
-            parsed = _loads_lenient(stripped)
-            if isinstance(parsed, dict):
-                return parsed
+            return _loads_lenient(stripped)
         except ValueError:
             pass
     params: dict[str, Any] = {}
@@ -1379,8 +1378,7 @@ def _iter_json_objects(text: str) -> Iterator[tuple[dict, int, int]]:
                     candidate = text[start : end + 1]
                     try:
                         obj = _loads_lenient(candidate)
-                        if isinstance(obj, dict):
-                            yield obj, start, end
+                        yield obj, start, end
                     except ValueError:
                         pass
                     break

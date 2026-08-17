@@ -9,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import danyapi.api.openai as openai_mod
+from danyapi import tools as toolemu
 from danyapi.accounts import AccountPoolBusy
 from danyapi.api.openai import app, settings
 from danyapi.deepseek.client import DeepSeekError
@@ -1722,3 +1723,196 @@ async def test_stream_input_exceeds_continuation_none():
     )
     lines = await _collect_agen(gen)
     assert "".join(lines).rstrip().endswith("data: [DONE]")
+
+
+def test_reduced_prompt_variants_original_matches():
+    msgs = [openai_mod.ChatMessage(role="user", content="hello")]
+    original, _ = toolemu.build_prompt(msgs, None, None, False, None)
+    variants = openai_mod._reduced_prompt_variants(msgs, [REDUCED_TOOL], None, None, original)
+    assert variants == []
+
+
+def test_reduced_prompt_variants_no_user():
+    msgs = [openai_mod.ChatMessage(role="assistant", content="hi"), openai_mod.ChatMessage(role="assistant", content="yo")]
+    variants = openai_mod._reduced_prompt_variants(msgs, [REDUCED_TOOL], None, None, "original")
+    assert len(variants) == 1
+
+
+async def test_collect_reduced_second_variant_succeeds():
+    acct = FakeAccount([OK_SSE])
+    acct.client.completion = AsyncMock(
+        side_effect=[
+            openai_mod.HTTPException(404, "gone"),
+            FakeResp(sse_text=OK_SSE),
+        ]
+    )
+    acct.sessions.obtain = AsyncMock(return_value=(FakeSession(), "s1"))
+    result = await openai_mod._collect_reduced(acct, MagicMock(), [("p1", False, {}), ("p2", False, {})], "default", False, False)
+    assert result is not None
+    assert result[0].content == "Hi"
+
+
+async def test_collect_reduced_input_exceeds_then_success():
+    acct = FakeAccount([INPUT_SSE, OK_SSE])
+    acct.sessions.obtain = AsyncMock(return_value=(FakeSession(), "s1"))
+    result = await openai_mod._collect_reduced(acct, MagicMock(), [("p1", False, {}), ("p2", False, {})], "default", False, False)
+    assert result is not None
+    assert result[0].content == "Hi"
+
+
+NO_RID_READY_SSE = 'event: ready\ndata: {"request_message_id":1,"model_type":"default"}\n\ndata: {"p":"response/status","o":"SET","v":"FINISHED"}\n\n'
+
+
+async def test_non_stream_ready_without_message_id():
+    acct = FakeAccount([NO_RID_READY_SSE])
+    acct.sessions.obtain = AsyncMock(return_value=(FakeSession(), "s1"))
+    result = await openai_mod._collect_non_stream(
+        account=acct,
+        pool=MagicMock(),
+        existing_sid="s1",
+        lock=acct.sem,
+        prompt="x",
+        model="deepseek-v4-flash",
+        model_type="default",
+        thinking=False,
+        search=False,
+    )
+    assert result["choices"][0]["message"]["content"] == ""
+
+
+async def test_stream_ready_without_message_id():
+    acct = FakeAccount([NO_RID_READY_SSE])
+    acct.sessions.obtain = AsyncMock(return_value=(FakeSession(), "s1"))
+    gen = openai_mod._stream_openai(
+        account=acct,
+        pool=MagicMock(),
+        existing_sid="s1",
+        lock=acct.sem,
+        prompt="x",
+        model="deepseek-v4-flash",
+        model_type="default",
+        thinking=False,
+        search=False,
+    )
+    joined = "".join(await _collect_agen(gen))
+    assert '"finish_reason": "stop"' in joined
+
+
+INPUT_CONT_SSE = (
+    "event: ready\n"
+    'data: {"request_message_id":1,"response_message_id":2,"model_type":"default"}\n'
+    "\n"
+    'data: {"v":{"response":{"message_id":2,"parent_id":1,"status":"input_exceeds_limit","fragments":[{"id":2,"type":"RESPONSE","content":"part"}]}}}\n'
+    "\n"
+)
+
+
+async def test_non_stream_continuation_rounds_exhausted():
+    acct = FakeAccount([INPUT_SSE] + [INPUT_CONT_SSE] * openai_mod.MAX_CONTINUE_ROUNDS)
+    acct.sessions.obtain = AsyncMock(return_value=(FakeSession(), "s1"))
+    result = await openai_mod._collect_non_stream(
+        account=acct,
+        pool=MagicMock(),
+        existing_sid="s1",
+        lock=acct.sem,
+        prompt="x",
+        model="deepseek-v4-flash",
+        model_type="default",
+        thinking=False,
+        search=False,
+    )
+    assert "part" in result["choices"][0]["message"]["content"]
+    assert acct.client.completion.await_count == 1 + openai_mod.MAX_CONTINUE_ROUNDS
+
+
+async def test_stream_continuation_rounds_exhausted():
+    acct = FakeAccount([INPUT_SSE] + [INPUT_CONT_SSE] * openai_mod.MAX_CONTINUE_ROUNDS)
+    acct.sessions.obtain = AsyncMock(return_value=(FakeSession(), "s1"))
+    gen = openai_mod._stream_openai(
+        account=acct,
+        pool=MagicMock(),
+        existing_sid="s1",
+        lock=acct.sem,
+        prompt="x",
+        model="deepseek-v4-flash",
+        model_type="default",
+        thinking=False,
+        search=False,
+    )
+    joined = "".join(await _collect_agen(gen))
+    assert '"content": "part"' in joined
+
+
+THINK_ONLY_SSE = (
+    "event: ready\n"
+    'data: {"request_message_id":1,"response_message_id":2,"model_type":"default"}\n'
+    "\n"
+    'data: {"v":{"response":{"message_id":2,"parent_id":1,"status":"FINISHED","fragments":[{"id":2,"type":"THINK","content":"why"}]}}}\n'
+    "\n"
+)
+
+
+async def test_stream_input_exceeds_reduced_reasoning_only():
+    acct = FakeAccount([])
+    acct.client.completion = AsyncMock(
+        side_effect=[
+            openai_mod.HTTPException(400, INPUT_HTTP_BODY),
+            openai_mod.HTTPException(404, "gone"),
+            FakeResp(sse_text=THINK_ONLY_SSE),
+        ]
+    )
+    acct.sessions.obtain = AsyncMock(return_value=(FakeSession(), "s1"))
+    gen = openai_mod._stream_openai(
+        account=acct,
+        pool=MagicMock(),
+        existing_sid="s1",
+        lock=acct.sem,
+        prompt="x",
+        model="deepseek-v4-flash",
+        model_type="default",
+        thinking=False,
+        search=False,
+        reduced_prompts=[("short prompt", False, {})],
+    )
+    joined = "".join(await _collect_agen(gen))
+    assert '"reasoning_content": "why"' in joined
+    assert '"content": "Answer"' not in joined
+
+
+TOOL_JSON_SSE = (
+    "event: ready\n"
+    'data: {"request_message_id":1,"response_message_id":2,"model_type":"default"}\n'
+    "\n"
+    'data: {"v":{"response":{"message_id":2,"parent_id":1,"status":"FINISHED","fragments":'
+    '[{"id":2,"type":"RESPONSE","content":"{\\"tool_calls\\": [{\\"name\\": \\"get_weather\\", \\"arguments\\": {\\"city\\": \\"Moscow\\"}}]}"}]}}}\n'
+    "\n"
+)
+
+
+async def test_stream_tool_mode_reduced_filtered():
+    acct = FakeAccount([])
+    acct.client.completion = AsyncMock(
+        side_effect=[
+            openai_mod.HTTPException(400, INPUT_HTTP_BODY),
+            openai_mod.HTTPException(404, "gone"),
+            FakeResp(sse_text=TOOL_JSON_SSE),
+        ]
+    )
+    acct.sessions.obtain = AsyncMock(return_value=(FakeSession(), "s1"))
+    gen = openai_mod._stream_openai(
+        account=acct,
+        pool=MagicMock(),
+        existing_sid="s1",
+        lock=acct.sem,
+        prompt="x",
+        model="deepseek-v4-flash",
+        model_type="default",
+        thinking=False,
+        search=False,
+        tool_mode=True,
+        known_names={"other_tool"},
+        reduced_prompts=[("short prompt", False, {})],
+    )
+    joined = "".join(await _collect_agen(gen))
+    assert '"finish_reason": "stop"' in joined
+    assert joined.rstrip().endswith("data: [DONE]")

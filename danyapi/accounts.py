@@ -54,10 +54,11 @@ class ContextIndex:
         self._restore()
 
     def _restore(self) -> None:
-        if self._store is None:
+        store = self._store
+        if store is None:
             return
         now = time.monotonic()
-        for session_id, record in self._store.items():
+        for session_id, record in store.items():
             if not isinstance(session_id, str) or not session_id:
                 continue
             if not isinstance(record, list):
@@ -72,8 +73,7 @@ class ContextIndex:
             self._seqs.pop(oldest, None)
             self._recency.pop(oldest, None)
             self._ts.pop(oldest, None)
-            if self._store is not None:
-                self._store.discard(oldest)
+            store.discard(oldest)
 
     def _expired(self, session_id: str, now: float) -> bool:
         ts = self._ts.get(session_id)
@@ -83,6 +83,7 @@ class ContextIndex:
         if not sequence:
             return None
         now = time.monotonic()
+        store = self._store
         with self._lock:
             if not self._seqs:
                 self.misses += 1
@@ -106,8 +107,8 @@ class ContextIndex:
                 self._seqs.pop(sid, None)
                 self._recency.pop(sid, None)
                 self._ts.pop(sid, None)
-                if self._store is not None:
-                    self._store.discard(sid)
+                if store is not None:
+                    store.discard(sid)
             if best_sid is not None:
                 self.hits += 1
                 self._touch(best_sid, now)
