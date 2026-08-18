@@ -177,6 +177,141 @@ body::after {
     }
 }
 
+@keyframes topbar-slide-down {
+    from { transform: translateY(-100%); opacity: 0; }
+    to { transform: translateY(0); opacity: 1; }
+}
+
+@keyframes slide-in-left {
+    from { opacity: 0; transform: translateX(-20px); }
+    to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes slide-in-right {
+    from { opacity: 0; transform: translateX(20px); }
+    to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes slide-in-up {
+    from { opacity: 0; transform: translateY(24px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slide-in-down {
+    from { opacity: 0; transform: translateY(-10px) scaleY(0.96); }
+    to { opacity: 1; transform: translateY(0) scaleY(1); }
+}
+
+@keyframes scale-in {
+    from { opacity: 0; transform: scale(0.93); }
+    to { opacity: 1; transform: scale(1); }
+}
+
+@keyframes dropdown-pop {
+    0% { opacity: 0; transform: translateY(-6px) scale(0.96); }
+    60% { transform: translateY(1px) scale(1.01); }
+    100% { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes glow-pulse {
+    0%, 100% { box-shadow: inset 0 1px 0 color-mix(in srgb, var(--text) 9%, transparent), 0 6px 20px -10px var(--shadow); }
+    50% { box-shadow: inset 0 1px 0 color-mix(in srgb, var(--text) 9%, transparent), 0 0 18px 4px color-mix(in srgb, var(--link) 30%, transparent), 0 6px 20px -10px var(--shadow); }
+}
+
+@keyframes border-glow-cycle {
+    0%, 100% { border-color: color-mix(in srgb, var(--border-strong) 55%, transparent); }
+    50% { border-color: var(--link); }
+}
+
+@keyframes badge-pop {
+    0% { transform: scale(0); }
+    55% { transform: scale(1.15); }
+    75% { transform: scale(0.95); }
+    100% { transform: scale(1); }
+}
+
+@keyframes badge-glow {
+    0%, 100% { box-shadow: 0 0 0 0 transparent; }
+    50% { box-shadow: 0 0 10px 2px color-mix(in srgb, var(--badge-blue-text) 30%, transparent); }
+}
+
+@keyframes float-subtle {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-5px); }
+}
+
+@keyframes expand-hr {
+    from { transform: scaleX(0); opacity: 0; }
+    to { transform: scaleX(1); opacity: 1; }
+}
+
+@keyframes click-bounce {
+    0% { transform: scale(1); }
+    35% { transform: scale(0.94); }
+    100% { transform: scale(1); }
+}
+
+@keyframes logo-spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
+@keyframes heading-border-glow {
+    from { border-left-color: transparent; opacity: 0; transform: translateX(-10px); }
+    to { border-left-color: var(--blockquote-border); opacity: 1; transform: translateX(0); }
+}
+
+@keyframes terminal-slide-in {
+    from { opacity: 0; transform: translateY(20px) scale(0.96); }
+    to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes theme-flash {
+    0% { filter: brightness(1); }
+    40% { filter: brightness(1.4); }
+    100% { filter: brightness(1); }
+}
+
+@keyframes code-reveal {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes row-slide-in {
+    from { opacity: 0; transform: translateX(-12px); }
+    to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes list-item-in {
+    from { opacity: 0; transform: translateX(-14px); }
+    to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes footer-fade {
+    from { opacity: 0; transform: translateY(12px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes link-underline-glow {
+    from { background-size: 0% 2px; }
+    to { background-size: 100% 2px; }
+}
+
+@keyframes pulse-ring {
+    0% { transform: scale(0.8); opacity: 1; }
+    100% { transform: scale(1.6); opacity: 0; }
+}
+
+@keyframes card-shine {
+    0% { background-position: -200% center; }
+    100% { background-position: 200% center; }
+}
+
+@keyframes stagger-in {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
 ::selection {
     background: color-mix(in srgb, var(--link) 25%, transparent);
 }
@@ -194,6 +329,11 @@ body::after {
 ::-webkit-scrollbar-thumb {
     background: var(--border-strong);
     border-radius: 5px;
+    transition: background 0.2s ease;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: var(--text-faint);
 }
 
 ::-webkit-scrollbar-track {
@@ -209,7 +349,12 @@ body::after {
     -webkit-backdrop-filter: blur(22px) saturate(180%);
     border-bottom: 1px solid color-mix(in srgb, var(--border-strong) 55%, transparent);
     box-shadow: 0 1px 0 color-mix(in srgb, var(--text) 4%, transparent), 0 10px 30px -22px var(--shadow);
-    transition: background-color 0.3s ease, border-color 0.3s ease;
+    transition: background-color 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease;
+    animation: topbar-slide-down 0.5s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.topbar.scrolled {
+    box-shadow: 0 1px 0 color-mix(in srgb, var(--text) 4%, transparent), 0 10px 30px -22px var(--shadow), 0 0 20px 4px color-mix(in srgb, var(--link) 5%, transparent);
 }
 
 .topbar-inner {
@@ -228,16 +373,23 @@ body::after {
     gap: 0.5rem;
     text-decoration: none;
     border-bottom: none;
+    transition: transform 0.2s ease;
 }
 
 .brand:hover {
     border-bottom: none;
+    transform: scale(1.02);
 }
 
 .brand-logo {
     width: 28px;
     height: 28px;
     display: block;
+    transition: transform 0.5s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.brand:hover .brand-logo {
+    animation: logo-spin 0.6s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .brand-name {
@@ -284,6 +436,7 @@ html[data-theme="black"] .brand-name {
     display: flex;
     align-items: center;
     gap: 0.5rem;
+    animation: slide-in-right 0.5s cubic-bezier(0.22, 1, 0.36, 1) 0.1s both;
 }
 
 .lang-switcher {
@@ -297,7 +450,12 @@ html[data-theme="black"] .brand-name {
     border-radius: 999px;
     padding: 0.25rem;
     box-shadow: inset 0 1px 0 color-mix(in srgb, var(--text) 9%, transparent), 0 6px 20px -10px var(--shadow);
-    transition: background-color 0.3s ease, border-color 0.3s ease;
+    transition: background-color 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease, transform 0.2s ease;
+}
+
+.lang-switcher:hover {
+    border-color: color-mix(in srgb, var(--link) 40%, transparent);
+    box-shadow: 0 0 12px 2px color-mix(in srgb, var(--link) 12%, transparent), inset 0 1px 0 color-mix(in srgb, var(--text) 9%, transparent), 0 6px 20px -10px var(--shadow);
 }
 
 .docs-nav {
@@ -326,11 +484,17 @@ html[data-theme="black"] .brand-name {
     border-color: var(--link);
     color: var(--link);
     transform: translateY(-1px);
+    box-shadow: 0 0 12px 2px color-mix(in srgb, var(--link) 20%, transparent);
+}
+
+.docs-btn:active {
+    animation: click-bounce 0.25s ease;
 }
 
 .docs-btn.active {
     border-color: var(--link);
     color: var(--link);
+    box-shadow: 0 0 10px 2px color-mix(in srgb, var(--link) 15%, transparent);
 }
 
 .docs-dropdown {
@@ -349,10 +513,12 @@ html[data-theme="black"] .brand-name {
     flex-direction: column;
     gap: 0.15rem;
     z-index: 60;
+    transform-origin: top right;
 }
 
 .docs-nav.open .docs-dropdown {
     display: flex;
+    animation: dropdown-pop 0.3s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .docs-dropdown a {
@@ -362,12 +528,14 @@ html[data-theme="black"] .brand-name {
     color: var(--text-muted);
     text-decoration: none;
     font-size: 0.88rem;
-    transition: background-color 0.15s, color 0.15s;
+    transition: background-color 0.15s, color 0.15s, transform 0.15s, padding-left 0.2s;
 }
 
 .docs-dropdown a:hover {
     color: var(--text);
     background: color-mix(in srgb, var(--text) 6%, transparent);
+    padding-left: 1rem;
+    transform: translateX(2px);
 }
 
 .docs-dropdown a.active {
@@ -395,7 +563,13 @@ html[data-theme="black"] .brand-name {
     border-radius: 20px;
     padding: 3rem 2.75rem;
     box-shadow: inset 0 1px 0 color-mix(in srgb, var(--text) 11%, transparent), 0 40px 90px -45px var(--shadow);
-    animation: fade-in 0.4s ease;
+    animation: scale-in 0.6s cubic-bezier(0.22, 1, 0.36, 1), float-subtle 6s ease-in-out 1.5s infinite;
+    transition: box-shadow 0.3s ease, border-color 0.3s ease;
+}
+
+.home-card:hover {
+    box-shadow: inset 0 1px 0 color-mix(in srgb, var(--text) 11%, transparent), 0 40px 90px -45px var(--shadow), 0 0 30px 6px color-mix(in srgb, var(--link) 10%, transparent);
+    border-color: color-mix(in srgb, var(--link) 20%, transparent);
 }
 
 .home .cmd-row {
@@ -425,16 +599,22 @@ html[data-theme="black"] .brand-name {
     padding: 0.2rem 0.6rem;
     border-radius: 999px;
     font-family: inherit;
-    transition: background-color 0.2s, color 0.2s;
+    transition: background-color 0.2s, color 0.2s, transform 0.15s, box-shadow 0.2s;
 }
 
 .lang-btn:hover {
     color: var(--text);
+    transform: scale(1.05);
+}
+
+.lang-btn:active {
+    animation: click-bounce 0.2s ease;
 }
 
 .lang-btn.active {
     background: var(--badge-blue-bg);
     color: var(--badge-blue-text);
+    animation: badge-glow 2s ease-in-out infinite;
 }
 
 .theme-switcher {
@@ -448,7 +628,22 @@ html[data-theme="black"] .brand-name {
     border-radius: 999px;
     padding: 0.35rem 0.6rem 0.35rem 0.9rem;
     box-shadow: inset 0 1px 0 color-mix(in srgb, var(--text) 9%, transparent), 0 6px 20px -10px var(--shadow);
-    transition: background-color 0.3s ease, border-color 0.3s ease;
+    transition: background-color 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease, transform 0.2s ease;
+}
+
+.theme-switcher:hover {
+    border-color: color-mix(in srgb, var(--link) 50%, transparent);
+    transform: translateY(-1px);
+    box-shadow: 0 0 14px 3px color-mix(in srgb, var(--link) 18%, transparent), inset 0 1px 0 color-mix(in srgb, var(--text) 9%, transparent), 0 6px 20px -10px var(--shadow);
+}
+
+.theme-switcher:has(.theme-select:focus) {
+    animation: glow-pulse 1.5s ease-in-out infinite;
+    border-color: var(--link);
+}
+
+.theme-switcher.flash {
+    animation: theme-flash 0.4s ease;
 }
 
 .theme-label {
@@ -458,11 +653,18 @@ html[data-theme="black"] .brand-name {
     letter-spacing: 0.06em;
     color: var(--text-faint);
     white-space: nowrap;
+    transition: color 0.2s ease;
+}
+
+.theme-label:hover {
+    color: var(--text-muted);
 }
 
 .theme-select-wrap {
     position: relative;
     display: inline-flex;
+    border-radius: 999px;
+    overflow: hidden;
 }
 
 .theme-select {
@@ -476,7 +678,23 @@ html[data-theme="black"] .brand-name {
     font-size: 0.8rem;
     font-family: inherit;
     cursor: pointer;
-    transition: background-color 0.3s ease, border-color 0.3s ease, color 0.3s ease;
+    transition: background-color 0.3s ease, border-color 0.3s ease, color 0.3s ease, transform 0.2s ease, box-shadow 0.3s ease;
+    outline: none;
+}
+
+.theme-select:hover {
+    border-color: var(--link);
+    transform: scale(1.03);
+    box-shadow: 0 0 10px 2px color-mix(in srgb, var(--link) 15%, transparent);
+}
+
+.theme-select:focus {
+    border-color: var(--link);
+    box-shadow: 0 0 12px 3px color-mix(in srgb, var(--link) 25%, transparent);
+}
+
+.theme-select:active {
+    animation: click-bounce 0.2s ease;
 }
 
 .theme-select-wrap::after {
@@ -490,11 +708,19 @@ html[data-theme="black"] .brand-name {
     border-bottom: 2px solid var(--text-soft);
     transform: translateY(-70%) rotate(45deg);
     pointer-events: none;
+    transition: transform 0.25s ease, border-color 0.25s ease;
+}
+
+.theme-select-wrap:hover::after {
+    transform: translateY(-50%) rotate(45deg);
+    border-color: var(--link);
 }
 
 .theme-select option {
     background: var(--select-bg);
     color: var(--select-text);
+    border-radius: 8px;
+    padding: 6px 10px;
 }
 
 .layout {
@@ -533,6 +759,12 @@ html[data-theme="black"] .brand-name {
     letter-spacing: 0.1em;
     color: var(--text-faint);
     margin: 0 0 0.5rem 0.6rem;
+    transition: color 0.2s ease;
+    animation: slide-in-left 0.4s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.page-nav-title:hover {
+    color: var(--text-muted);
 }
 
 .page-nav a {
@@ -544,12 +776,15 @@ html[data-theme="black"] .brand-name {
     font-size: 0.86rem;
     font-weight: 500;
     border: 1px solid transparent;
-    transition: background-color 0.15s, color 0.15s, border-color 0.15s;
+    transition: background-color 0.15s, color 0.15s, border-color 0.15s, transform 0.15s, padding-left 0.2s, box-shadow 0.2s;
 }
 
 .page-nav a:hover {
     color: var(--text);
     background: color-mix(in srgb, var(--text) 6%, transparent);
+    transform: translateX(3px);
+    padding-left: 0.9rem;
+    box-shadow: 0 0 8px 1px color-mix(in srgb, var(--link) 10%, transparent);
 }
 
 .page-nav a.active {
@@ -557,6 +792,7 @@ html[data-theme="black"] .brand-name {
     background: var(--badge-blue-bg);
     border-color: color-mix(in srgb, var(--badge-blue-text) 35%, transparent);
     font-weight: 600;
+    box-shadow: 0 0 12px 2px color-mix(in srgb, var(--badge-blue-text) 15%, transparent);
 }
 
 .main {
@@ -572,7 +808,7 @@ html[data-theme="black"] .brand-name {
     box-shadow: inset 0 1px 0 color-mix(in srgb, var(--text) 9%, transparent), 0 24px 60px -32px var(--shadow);
     padding: 2.25rem 2.5rem;
     transition: background-color 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease;
-    animation: fade-in 0.4s ease;
+    animation: scale-in 0.55s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 @keyframes fade-in {
@@ -613,7 +849,8 @@ html[data-theme="black"] .brand-name {
     padding: 0.85rem 0.95rem;
     box-shadow: inset 0 1px 0 color-mix(in srgb, var(--text) 9%, transparent), 0 12px 30px -20px var(--shadow);
     font-size: 0.8rem;
-    transition: background-color 0.3s ease, border-color 0.3s ease;
+    transition: background-color 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease;
+    animation: slide-in-right 0.5s cubic-bezier(0.22, 1, 0.36, 1) 0.15s both;
 }
 
 .toc-title {
@@ -623,6 +860,12 @@ html[data-theme="black"] .brand-name {
     letter-spacing: 0.1em;
     color: var(--text-faint);
     margin-bottom: 0.5rem;
+    transition: color 0.2s ease;
+    animation: slide-in-right 0.4s cubic-bezier(0.22, 1, 0.36, 1) 0.1s both;
+}
+
+.toc-title:hover {
+    color: var(--text-muted);
 }
 
 .toc-list {
@@ -648,11 +891,13 @@ html[data-theme="black"] .brand-name {
     color: var(--text-muted);
     text-decoration: none;
     border-left: 2px solid transparent;
-    transition: color 0.15s, background-color 0.15s, border-color 0.15s;
+    transition: color 0.15s, background-color 0.15s, border-color 0.15s, transform 0.15s, padding-left 0.2s;
 }
 
 .toc-list a:hover {
     color: var(--text);
+    transform: translateX(2px);
+    padding-left: 0.65rem;
 }
 
 .toc-list a.active {
@@ -660,6 +905,7 @@ html[data-theme="black"] .brand-name {
     border-left-color: var(--link);
     background: color-mix(in srgb, var(--link) 8%, transparent);
     font-weight: 600;
+    box-shadow: 0 0 8px 1px color-mix(in srgb, var(--link) 10%, transparent);
 }
 
 .toc-list ul a {
@@ -709,32 +955,59 @@ h2[id],
 h3[id],
 h4[id] {
     scroll-margin-top: 76px;
+    position: relative;
+    cursor: default;
+}
+
+h2[id]:hover::after,
+h3[id]:hover::after,
+h4[id]:hover::after {
+    content: '#';
+    position: absolute;
+    left: -1.3em;
+    color: var(--link);
+    font-weight: 400;
+    opacity: 0;
+    animation: slide-in-left 0.2s ease forwards;
 }
 
 .subtitle {
     font-size: 1.02rem;
     color: var(--text-soft);
     margin-bottom: 1.25rem;
+    transition: color 0.2s ease;
+}
+
+.subtitle:hover {
+    color: var(--text);
 }
 
 p {
     margin-bottom: 1rem;
+    transition: color 0.2s ease;
 }
 
 a {
     color: var(--link);
     text-decoration: none;
     border-bottom: 1px solid transparent;
-    transition: border-color 0.2s, color 0.2s;
+    transition: border-color 0.2s, color 0.2s, text-shadow 0.2s;
 }
 
 a:hover {
     border-bottom-color: var(--link-hover);
     color: var(--link-hover);
+    text-shadow: 0 0 8px color-mix(in srgb, var(--link) 30%, transparent);
 }
 
 strong {
     font-weight: 600;
+    color: var(--heading);
+    transition: text-shadow 0.2s ease;
+}
+
+strong:hover {
+    text-shadow: 0 0 6px color-mix(in srgb, var(--link) 15%, transparent);
 }
 
 code {
@@ -746,6 +1019,12 @@ code {
     color: var(--code-inline-text);
     white-space: normal;
     overflow-wrap: anywhere;
+    transition: background-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+code:hover {
+    background: color-mix(in srgb, var(--code-inline-bg) 60%, var(--link) 15%);
+    box-shadow: 0 0 6px 1px color-mix(in srgb, var(--link) 12%, transparent);
 }
 
 pre {
@@ -760,6 +1039,13 @@ pre {
     font-family: "SF Mono", "Fira Code", "Cascadia Code", "JetBrains Mono", Consolas, monospace;
     white-space: pre;
     word-break: normal;
+    border: 1px solid color-mix(in srgb, var(--border-strong) 30%, transparent);
+    transition: border-color 0.3s ease, box-shadow 0.3s ease;
+}
+
+pre:hover {
+    border-color: color-mix(in srgb, var(--link) 25%, transparent);
+    box-shadow: 0 0 14px 2px color-mix(in srgb, var(--link) 8%, transparent);
 }
 
 pre code {
@@ -777,6 +1063,11 @@ ol {
 
 li {
     margin-bottom: 0.35rem;
+    transition: color 0.15s ease;
+}
+
+li:hover {
+    color: var(--text);
 }
 
 li>ul,
@@ -808,20 +1099,32 @@ th {
     font-size: 0.68rem;
     text-transform: uppercase;
     letter-spacing: 0.05em;
+    transition: color 0.2s ease, border-color 0.2s ease;
+}
+
+th:hover {
+    color: var(--text);
+    border-bottom-color: var(--link);
 }
 
 td {
     padding: 0.5rem 0.8rem;
     border-bottom: 1px solid var(--td-border);
     vertical-align: top;
+    transition: background-color 0.15s ease, color 0.15s ease;
 }
 
 tbody tr {
-    transition: background-color 0.15s;
+    transition: background-color 0.15s, transform 0.15s;
 }
 
 tbody tr:hover td {
     background: color-mix(in srgb, var(--text) 3%, transparent);
+    box-shadow: 0 0 8px 1px color-mix(in srgb, var(--link) 6%, transparent);
+}
+
+tbody tr:hover {
+    transform: scale(1.005);
 }
 
 tr:last-child td {
@@ -835,6 +1138,12 @@ blockquote {
     background: var(--blockquote-bg);
     border-radius: 0 10px 10px 0;
     color: var(--blockquote-text);
+    transition: border-color 0.3s ease, background-color 0.3s ease, box-shadow 0.3s ease;
+}
+
+blockquote:hover {
+    border-left-width: 6px;
+    box-shadow: 0 0 16px 3px color-mix(in srgb, var(--blockquote-border) 15%, transparent);
 }
 
 blockquote p:last-child {
@@ -845,6 +1154,8 @@ hr {
     border: none;
     border-top: 2px solid var(--border);
     margin: 2.5rem 0;
+    animation: expand-hr 0.6s cubic-bezier(0.22, 1, 0.36, 1) both;
+    transform-origin: center;
 }
 
 .badge {
@@ -856,6 +1167,12 @@ hr {
     border-radius: 20px;
     color: var(--badge-text);
     letter-spacing: 0.01em;
+    transition: transform 0.2s ease, box-shadow 0.2s ease, background-color 0.2s ease;
+}
+
+.badge:hover {
+    transform: scale(1.08);
+    box-shadow: 0 0 8px 2px color-mix(in srgb, var(--badge-text) 15%, transparent);
 }
 
 .badge-green {
@@ -866,11 +1183,18 @@ hr {
 .badge-blue {
     background: var(--badge-blue-bg);
     color: var(--badge-blue-text);
+    animation: badge-glow 3s ease-in-out infinite;
 }
 
 .model {
     font-weight: 600;
     color: var(--model);
+    transition: text-shadow 0.2s ease, color 0.2s ease;
+}
+
+.model:hover {
+    text-shadow: 0 0 8px color-mix(in srgb, var(--link) 20%, transparent);
+    color: var(--link);
 }
 
 .env-var {
@@ -881,12 +1205,26 @@ hr {
     font-size: 0.8rem;
     white-space: nowrap;
     color: var(--code-inline-text);
+    transition: background-color 0.2s ease, box-shadow 0.2s ease, transform 0.15s ease;
+}
+
+.env-var:hover {
+    background: color-mix(in srgb, var(--code-inline-bg) 60%, var(--link) 15%);
+    box-shadow: 0 0 6px 1px color-mix(in srgb, var(--link) 12%, transparent);
+    transform: translateY(-1px);
 }
 
 .table-wrap {
     overflow-x: auto;
     margin: 1.25rem 0;
     border-radius: 12px;
+    border: 1px solid color-mix(in srgb, var(--border-strong) 30%, transparent);
+    transition: border-color 0.3s ease, box-shadow 0.3s ease;
+}
+
+.table-wrap:hover {
+    border-color: color-mix(in srgb, var(--link) 15%, transparent);
+    box-shadow: 0 0 14px 2px color-mix(in srgb, var(--link) 6%, transparent);
 }
 
 .table-wrap table {
@@ -897,6 +1235,11 @@ hr {
     font-size: 0.8rem;
     color: var(--text-muted);
     margin-top: 1rem;
+    transition: color 0.2s ease;
+}
+
+.footnote:hover {
+    color: var(--text);
 }
 
 .footer-note {
@@ -904,6 +1247,12 @@ hr {
     font-size: 0.8rem;
     text-align: center;
     margin-top: 1.75rem;
+    animation: footer-fade 0.5s ease 0.3s both;
+    transition: color 0.2s ease;
+}
+
+.footer-note:hover {
+    color: var(--text-muted);
 }
 
 .code-header {
@@ -920,6 +1269,11 @@ hr {
     border-radius: 12px 12px 0 0;
     margin-bottom: -1px;
     font-family: inherit;
+    transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+.code-header:hover {
+    background: color-mix(in srgb, var(--code-header-bg) 80%, var(--link) 10%);
 }
 
 .code-header+pre {
@@ -951,6 +1305,13 @@ hr {
     white-space: normal;
     overflow-wrap: anywhere;
     font-size: 0.85rem;
+    border: 1px solid color-mix(in srgb, var(--border-strong) 30%, transparent);
+    transition: border-color 0.3s ease, box-shadow 0.3s ease;
+}
+
+.cmd-code:hover {
+    border-color: color-mix(in srgb, var(--link) 25%, transparent);
+    box-shadow: 0 0 10px 2px color-mix(in srgb, var(--link) 10%, transparent);
 }
 
 .copy-btn {
@@ -975,6 +1336,11 @@ hr {
     border-color: var(--link);
     color: var(--link);
     transform: translateY(-1px);
+    box-shadow: 0 0 12px 2px color-mix(in srgb, var(--link) 18%, transparent);
+}
+
+.copy-btn:active {
+    animation: click-bounce 0.25s ease;
 }
 
 .cmd-chips {
@@ -1006,7 +1372,12 @@ hr {
 .chip:hover {
     border-color: var(--link);
     color: var(--link);
-    transform: translateY(-1px);
+    transform: translateY(-2px) scale(1.02);
+    box-shadow: 0 0 14px 3px color-mix(in srgb, var(--link) 18%, transparent);
+}
+
+.chip:active {
+    animation: click-bounce 0.25s ease;
 }
 
 .chip code {
@@ -1038,7 +1409,12 @@ hr {
 .btn:hover {
     border-color: var(--link);
     color: var(--link);
-    transform: translateY(-1px);
+    transform: translateY(-2px) scale(1.02);
+    box-shadow: 0 0 14px 3px color-mix(in srgb, var(--link) 18%, transparent);
+}
+
+.btn:active {
+    animation: click-bounce 0.25s ease;
 }
 
 .btn-primary {
@@ -1051,6 +1427,7 @@ hr {
     color: var(--badge-blue-text);
     border-color: var(--badge-blue-text);
     filter: brightness(1.05);
+    box-shadow: 0 0 14px 3px color-mix(in srgb, var(--badge-blue-text) 25%, transparent);
 }
 
 .terminal {
@@ -1064,6 +1441,13 @@ hr {
     font-size: 0.82rem;
     line-height: 1.6;
     border: 1px solid rgba(255, 255, 255, 0.08);
+    animation: terminal-slide-in 0.6s cubic-bezier(0.22, 1, 0.36, 1);
+    transition: border-color 0.3s ease, box-shadow 0.3s ease;
+}
+
+.terminal:hover {
+    border-color: rgba(255, 255, 255, 0.15);
+    box-shadow: 0 24px 70px -12px var(--shadow), 0 0 20px 4px rgba(63, 185, 80, 0.08);
 }
 
 .terminal-bar {
@@ -1079,6 +1463,12 @@ hr {
     width: 0.7rem;
     height: 0.7rem;
     border-radius: 50%;
+    transition: transform 0.2s ease, filter 0.2s ease;
+}
+
+.terminal-dot:hover {
+    transform: scale(1.25);
+    filter: brightness(1.3);
 }
 
 .terminal-dot:nth-child(1) {
@@ -1108,6 +1498,8 @@ hr {
     min-height: 210px;
     overflow-y: auto;
     max-height: 340px;
+    scrollbar-width: thin;
+    scrollbar-color: #30363d transparent;
 }
 
 .term-line {
@@ -1158,12 +1550,127 @@ hr {
     font-weight: 600;
     font-family: inherit;
     white-space: nowrap;
-    transition: border-color 0.2s, color 0.2s;
+    transition: border-color 0.2s, color 0.2s, transform 0.15s, box-shadow 0.2s;
 }
 
 .terminal-copy:hover {
     border-color: #8b949e;
     color: #f0f6fc;
+    transform: translateY(-1px);
+    box-shadow: 0 0 8px 2px rgba(139, 148, 158, 0.2);
+}
+
+.terminal-copy:active {
+    animation: click-bounce 0.2s ease;
+}
+
+.reveal {
+    opacity: 0;
+    transform: translateY(20px);
+    transition: opacity 0.5s cubic-bezier(0.22, 1, 0.36, 1), transform 0.5s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.reveal.revealed {
+    opacity: 1;
+    transform: translateY(0);
+}
+
+.reveal-left {
+    opacity: 0;
+    transform: translateX(-20px);
+    transition: opacity 0.5s cubic-bezier(0.22, 1, 0.36, 1), transform 0.5s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.reveal-left.revealed {
+    opacity: 1;
+    transform: translateX(0);
+}
+
+.reveal-right {
+    opacity: 0;
+    transform: translateX(20px);
+    transition: opacity 0.5s cubic-bezier(0.22, 1, 0.36, 1), transform 0.5s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.reveal-right.revealed {
+    opacity: 1;
+    transform: translateX(0);
+}
+
+.reveal-scale {
+    opacity: 0;
+    transform: scale(0.93);
+    transition: opacity 0.5s cubic-bezier(0.22, 1, 0.36, 1), transform 0.5s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.reveal-scale.revealed {
+    opacity: 1;
+    transform: scale(1);
+}
+
+.reveal-stagger > * {
+    opacity: 0;
+    transform: translateX(-12px);
+    transition: opacity 0.4s cubic-bezier(0.22, 1, 0.36, 1), transform 0.4s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.reveal-stagger.revealed > * {
+    opacity: 1;
+    transform: translateX(0);
+}
+
+.reveal-stagger.revealed > *:nth-child(1) { transition-delay: 0.03s; }
+.reveal-stagger.revealed > *:nth-child(2) { transition-delay: 0.06s; }
+.reveal-stagger.revealed > *:nth-child(3) { transition-delay: 0.09s; }
+.reveal-stagger.revealed > *:nth-child(4) { transition-delay: 0.12s; }
+.reveal-stagger.revealed > *:nth-child(5) { transition-delay: 0.15s; }
+.reveal-stagger.revealed > *:nth-child(6) { transition-delay: 0.18s; }
+.reveal-stagger.revealed > *:nth-child(7) { transition-delay: 0.21s; }
+.reveal-stagger.revealed > *:nth-child(8) { transition-delay: 0.24s; }
+.reveal-stagger.revealed > *:nth-child(9) { transition-delay: 0.27s; }
+.reveal-stagger.revealed > *:nth-child(10) { transition-delay: 0.3s; }
+.reveal-stagger.revealed > *:nth-child(11) { transition-delay: 0.33s; }
+.reveal-stagger.revealed > *:nth-child(12) { transition-delay: 0.36s; }
+.reveal-stagger.revealed > *:nth-child(13) { transition-delay: 0.39s; }
+.reveal-stagger.revealed > *:nth-child(14) { transition-delay: 0.42s; }
+.reveal-stagger.revealed > *:nth-child(15) { transition-delay: 0.45s; }
+
+.reveal-code {
+    opacity: 0;
+    transform: translateY(10px) scale(0.98);
+    transition: opacity 0.55s cubic-bezier(0.22, 1, 0.36, 1), transform 0.55s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.reveal-code.revealed {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+}
+
+@keyframes sidebar-stagger {
+    from { opacity: 0; transform: translateX(-16px); }
+    to { opacity: 1; transform: translateX(0); }
+}
+
+.page-nav a:nth-child(2) { animation: sidebar-stagger 0.4s cubic-bezier(0.22, 1, 0.36, 1) 0.05s both; }
+.page-nav a:nth-child(3) { animation: sidebar-stagger 0.4s cubic-bezier(0.22, 1, 0.36, 1) 0.1s both; }
+.page-nav a:nth-child(4) { animation: sidebar-stagger 0.4s cubic-bezier(0.22, 1, 0.36, 1) 0.15s both; }
+.page-nav a:nth-child(5) { animation: sidebar-stagger 0.4s cubic-bezier(0.22, 1, 0.36, 1) 0.2s both; }
+.page-nav a:nth-child(6) { animation: sidebar-stagger 0.4s cubic-bezier(0.22, 1, 0.36, 1) 0.25s both; }
+
+@media (prefers-reduced-motion: reduce) {
+    .reveal,
+    .reveal-left,
+    .reveal-right,
+    .reveal-scale,
+    .reveal-stagger > *,
+    .reveal-code {
+        opacity: 1;
+        transform: none;
+        transition: none;
+    }
+    .page-nav a {
+        animation: none;
+    }
 }
 
 @media (max-width: 900px) {
@@ -1250,6 +1757,10 @@ hr {
 }
 
 @media print {
+    *, *::before, *::after {
+        animation: none !important;
+        transition: none !important;
+    }
     html[data-theme] {
         --bg-body: #fff;
         --bg-container: #fff;

@@ -135,6 +135,22 @@ async def test_check_auth_ok():
     assert await client.check_auth()
 
 
+async def test_check_auth_ok_user_object():
+    client = QwenClient()
+    resp = SimpleNamespace(status_code=200)
+    resp.json = MagicMock(return_value={"id": "u1", "email": "a@b.c", "name": "test"})
+    client.http.get = AsyncMock(return_value=resp)
+    assert await client.check_auth()
+
+
+async def test_check_auth_no_id_no_success():
+    client = QwenClient()
+    resp = SimpleNamespace(status_code=200)
+    resp.json = MagicMock(return_value={"foo": "bar"})
+    client.http.get = AsyncMock(return_value=resp)
+    assert not await client.check_auth()
+
+
 async def test_check_auth_non_200():
     client = QwenClient()
     resp = SimpleNamespace(status_code=403)

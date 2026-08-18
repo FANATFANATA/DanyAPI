@@ -28,6 +28,13 @@
             sel.addEventListener('change', function () {
                 applyTheme(sel.value);
                 writeTheme(sel.value);
+                var sw = document.querySelector('.theme-switcher');
+                if (sw) {
+                    sw.classList.remove('flash');
+                    void sw.offsetWidth;
+                    sw.classList.add('flash');
+                    setTimeout(function () { sw.classList.remove('flash'); }, 450);
+                }
             });
         }
     }
@@ -103,6 +110,9 @@
     function initCopy() {
         document.querySelectorAll('[data-copy]').forEach(function (btn) {
             btn.addEventListener('click', function () {
+                btn.style.animation = 'none';
+                void btn.offsetWidth;
+                btn.style.animation = 'click-bounce 0.25s ease';
                 copyText(btn.getAttribute('data-copy'), btn);
             });
         });
@@ -209,6 +219,78 @@
     var termVersion = 0;
 
     var tocItems = [];
+
+    function initScrollReveal() {
+        if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+
+        var selectors = [
+            { sel: '.reveal, .reveal-left, .reveal-right, .reveal-scale, .reveal-code', cls: 'revealed' },
+            { sel: '.reveal-stagger', cls: 'revealed' }
+        ];
+
+        var all = [];
+        selectors.forEach(function (s) {
+            document.querySelectorAll(s.sel).forEach(function (el) {
+                all.push({ el: el, cls: s.cls });
+            });
+        });
+
+        if (!all.length) return;
+
+        if (!('IntersectionObserver' in window)) {
+            all.forEach(function (item) { item.el.classList.add(item.cls); });
+            return;
+        }
+
+        var observer = new IntersectionObserver(function (entries) {
+            entries.forEach(function (entry) {
+                if (entry.isIntersecting) {
+                    var item = all.find(function (i) { return i.el === entry.target; });
+                    if (item) {
+                        setTimeout(function () {
+                            item.el.classList.add(item.cls);
+                        }, 50);
+                    }
+                    observer.unobserve(entry.target);
+                }
+            });
+        }, { threshold: 0.08, rootMargin: '0px 0px -40px 0px' });
+
+        all.forEach(function (item) { observer.observe(item.el); });
+    }
+
+    function autoMarkReveal() {
+        if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+
+        var main = document.querySelector('.main');
+        if (!main) return;
+
+        var container = main.querySelector('.container');
+        if (!container) return;
+
+        Array.prototype.forEach.call(container.children, function (el) {
+            if (el.classList.contains('reveal') || el.classList.contains('reveal-left') ||
+                el.classList.contains('reveal-right') || el.classList.contains('reveal-scale') ||
+                el.classList.contains('reveal-stagger') || el.classList.contains('reveal-code') ||
+                el.tagName === 'HR') return;
+
+            var tag = el.tagName.toLowerCase();
+
+            if (tag === 'h1' || tag === 'h2' || tag === 'h3' || tag === 'h4') {
+                el.classList.add('reveal');
+            } else if (tag === 'p' || tag === 'blockquote') {
+                el.classList.add('reveal');
+            } else if (tag === 'ul' || tag === 'ol') {
+                el.classList.add('reveal-stagger');
+            } else if (tag === 'div' && (el.classList.contains('table-wrap') || el.classList.contains('code-header'))) {
+                el.classList.add('reveal-scale');
+            } else if (tag === 'pre') {
+                el.classList.add('reveal-code');
+            } else if (tag === 'div') {
+                el.classList.add('reveal');
+            }
+        });
+    }
 
     function buildToc() {
         tocItems = [];
@@ -333,6 +415,16 @@
         initDownload();
         renderTerminal();
         buildToc();
+        autoMarkReveal();
+        initScrollReveal();
+        var topbar = document.querySelector('.topbar');
+        if (topbar) {
+            window.addEventListener('scroll', function () {
+                requestAnimationFrame(function () {
+                    topbar.classList.toggle('scrolled', window.scrollY > 20);
+                });
+            }, { passive: true });
+        }
         window.addEventListener('scroll', function () {
             requestAnimationFrame(updateToc);
         }, { passive: true });
