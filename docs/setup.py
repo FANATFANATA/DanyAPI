@@ -79,10 +79,25 @@ GROUPS = [
 ]
 
 
+_EOF_SEEN = False
+
+
+def _read_input(prompt):
+    global _EOF_SEEN
+    try:
+        return input(prompt)
+    except EOFError:
+        _EOF_SEEN = True
+        return None
+
+
 def ask(question, default):
     suffix = " [Y/n]" if default else " [y/N]"
     while True:
-        raw = input(f"{question}{suffix}: ").strip().lower()
+        raw = _read_input(f"{question}{suffix}: ")
+        if raw is None:
+            return default
+        raw = raw.strip().lower()
         if raw == "":
             return default
         if raw in ("y", "yes"):
@@ -104,9 +119,12 @@ def run_pip(req):
 def prompt(key, label, kind, current, default=""):
     while True:
         if current:
-            raw = input(f"  {key} - {label} [{current}]: ").strip()
+            raw = _read_input(f"  {key} - {label} [{current}]: ")
         else:
-            raw = input(f"  {key} - {label}: ").strip()
+            raw = _read_input(f"  {key} - {label}: ")
+        if raw is None:
+            return current
+        raw = raw.strip()
         if raw == "":
             return current
         if raw == "!clear":
@@ -315,7 +333,10 @@ def split_tokens(raw):
 
 
 def read_value(message, current, default=""):
-    raw = input(message).strip()
+    raw = _read_input(message)
+    if raw is None:
+        return current
+    raw = raw.strip()
     if raw == "":
         return current
     if raw == "!clear":
@@ -326,6 +347,7 @@ def read_value(message, current, default=""):
 
 
 def collect_provider(name, current, defaults):
+    global _EOF_SEEN
     upper = name.upper()
     tokens_key = upper + "_TOKENS"
     single_key = upper + "_TOKEN"
@@ -355,7 +377,11 @@ def collect_provider(name, current, defaults):
         print(f"  {name} password (current set, Enter keeps, !clear erases):")
     else:
         print(f"  {name} password (empty keeps unset):")
-    password = getpass.getpass("    ").strip()
+    try:
+        password = getpass.getpass("    ").strip()
+    except EOFError, OSError:
+        _EOF_SEEN = True
+        password = ""
     if password == "":
         password = current.get(password_key, "")
     elif password == "!clear":
@@ -403,7 +429,7 @@ def validate_provider(name, creds, defaults):
             print(f"  {name} credentials OK.")
             return creds
         print(f"  {name} credentials INVALID: {detail}")
-        if not ask(f"  Re-enter {name} credentials?", True):
+        if _EOF_SEEN or not ask(f"  Re-enter {name} credentials?", True):
             print(f"  Keeping {name} credentials as entered; the server may fail at startup.")
             return creds
         creds = collect_provider(name, creds, defaults)
