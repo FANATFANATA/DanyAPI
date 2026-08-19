@@ -1737,6 +1737,13 @@ hr {
 }
 .landing .btn-ghost:hover { background: rgba(255,255,255,0.08); border-color: rgba(255,255,255,0.28); }
 .landing .btn-lg { padding: 0.85rem 1.5rem; font-size: 1rem; border-radius: 13px; }
+.landing .star-count {
+    margin-left: 0.4rem;
+    opacity: 0;
+    transition: opacity 0.3s ease;
+    font-size: 0.9em;
+    color: var(--text-soft);
+}
 .landing .btn-icon { padding: 0.62rem 0.72rem; }
 
 /* -- landing hero -- */

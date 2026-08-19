@@ -210,7 +210,7 @@
             hero_h1_c: "Ноль затрат.",
             hero_sub: "DanyAPI — это OpenAI-совместимый HTTP API на Python + FastAPI. Вместо платных API он работает с внутренними API бесплатных веб-клиентов chat.deepseek.com и chat.qwen.ai через серверные аккаунты. Вашим пользователям не нужен ни один API-ключ.",
             hero_cta_start: "Быстрый старт",
-            hero_cta_gh: "Стар на GitHub",
+            hero_cta_gh: "на GitHub",
             hero_term_note: "Одна команда устанавливает, настраивает и запускает сервер. Запросы обслуживаются бесплатными серверными аккаунтами.",
             stat_zero: "за токен, навсегда",
             stat_providers: "бесплатных провайдера",
@@ -363,8 +363,31 @@
         restartTerminal();
     }
 
+    function formatStarCount(n) {
+        if (n >= 1000000) return (n / 1000000).toFixed(1).replace(/\.0$/, "") + "M";
+        if (n >= 1000) return (n / 1000).toFixed(1).replace(/\.0$/, "") + "k";
+        return n.toString();
+    }
+
+    function fetchGitHubStars() {
+        var starsEl = document.getElementById("gh-stars");
+        if (!starsEl) return;
+        fetch("https://api.github.com/repos/FANATFANATA/DanyAPI")
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+                if (data && data.stargazers_count != null) {
+                    starsEl.textContent = "★ " + formatStarCount(data.stargazers_count) + " ";
+                    starsEl.style.opacity = "1";
+                }
+            })
+            .catch(function () {
+                starsEl.style.opacity = "0";
+            });
+    }
+
     var currentLang = detectLang();
     applyLang(currentLang);
+    fetchGitHubStars();
 
     document.querySelectorAll(".lang-btn").forEach(function (btn) {
         btn.addEventListener("click", function () {
