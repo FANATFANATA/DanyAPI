@@ -1,23 +1,30 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="black" data-title-key="title_index">
+<html lang="en" data-theme="black">
 <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>DanyAPI</title>
-    <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2040%2040'%3E%3Cpath%20d='M20%202.5L35%2011V29L20%2037.5L5%2029V11Z'%20fill='%232563eb'/%3E%3Ccircle%20cx='20'%20cy='20'%20r='5'%20fill='%23ffffff'/%3E%3C/svg%3E" />
-    <link rel="stylesheet" href="style.css" />
-    <script src="theme.js"></script>
-    <script src="i18n.js"></script>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>DanyAPI — Free OpenAI-compatible API, no keys</title>
+<meta name="description" content="OpenAI-compatible HTTP API on top of the free web clients chat.deepseek.com and chat.qwen.ai. No keys. Free. FastAPI + Python." />
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2040%2040'%3E%3Cdefs%3E%3ClinearGradient%20id='g'%20x1='0'%20y1='0'%20x2='1'%20y2='1'%3E%3Cstop%20offset='0'%20stop-color='%236c7bff'/%3E%3Cstop%20offset='1'%20stop-color='%2322d3ee'/%3E%3C/linearGradient%3E%3C/defs%3E%3Cpath%20d='M20%202.5L35%2011V29L20%2037.5L5%2029V11Z'%20fill='none'%20stroke='url(%23g)'%20stroke-width='2.6'%20stroke-linejoin='round'/%3E%3Cpath%20d='M20%2013.5L12.5%2026.5H27.5Z'%20fill='none'%20stroke='url(%23g)'%20stroke-width='1.8'%20stroke-linejoin='round'/%3E%3Ccircle%20cx='20'%20cy='13.5'%20r='3'%20fill='url(%23g)'/%3E%3Ccircle%20cx='12.5'%20cy='26.5'%20r='3'%20fill='url(%23g)'/%3E%3Ccircle%20cx='27.5'%20cy='26.5'%20r='3'%20fill='url(%23g)'/%3E%3C/svg%3E" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Unbounded:wght@500;700;900&family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="style.css" />
 </head>
-<body>
-    <header class="topbar">
-        <div class="topbar-inner">
-            <a class="brand" href="index.html">
+<body class="landing">
+<div class="bg-grid" aria-hidden="true"></div>
+<div class="bg-glow bg-glow-a" aria-hidden="true"></div>
+<div class="bg-glow bg-glow-b" aria-hidden="true"></div>
+<div class="noise" aria-hidden="true"></div>
+
+<header class="nav" id="nav">
+    <div class="nav-inner">
+        <a class="brand" href="#top">
             <svg class="brand-logo" viewBox="0 0 40 40" aria-hidden="true">
                 <defs>
                     <linearGradient id="brand-grad" x1="0" y1="0" x2="1" y2="1">
-                        <stop offset="0" stop-color="var(--link)"></stop>
-                        <stop offset="1" stop-color="var(--link-hover)"></stop>
+                        <stop offset="0" stop-color="#6c7bff"></stop>
+                        <stop offset="1" stop-color="#22d3ee"></stop>
                     </linearGradient>
                 </defs>
                 <path d="M20 2.5 L35 11 V29 L20 37.5 L5 29 V11 Z" fill="none" stroke="url(#brand-grad)" stroke-width="2.6" stroke-linejoin="round"></path>
@@ -25,54 +32,438 @@
                 <circle cx="20" cy="13.5" r="3" fill="url(#brand-grad)"></circle>
                 <circle cx="12.5" cy="26.5" r="3" fill="url(#brand-grad)"></circle>
                 <circle cx="27.5" cy="26.5" r="3" fill="url(#brand-grad)"></circle>
-                <circle cx="20" cy="26.5" r="1.8" fill="var(--bg-container)"></circle>
             </svg>
-            <span class="brand-name">DanyAPI</span>
+            <span class="brand-name">Dany<span class="brand-accent">API</span></span>
         </a>
-            <div class="top-controls">
-                <div class="docs-nav">
-                    <button type="button" class="docs-btn" aria-expanded="false" data-i18n="nav_docs">Docs</button>
-                    <div class="docs-dropdown">
-                        <a href="overview.html" data-i18n="nav_overview">Overview</a>
-                        <a href="setup.html" data-i18n="nav_install">Install &amp; accounts</a>
-                        <a href="configuration.html" data-i18n="nav_config">Configuration</a>
-                        <a href="usage.html" data-i18n="nav_usage">Usage</a>
-                        <a href="internals.html" data-i18n="nav_internals">How it works</a>
+        <nav class="nav-links" id="navLinks">
+            <a href="#features" data-i18n="nav_features">Features</a>
+            <a href="#models" data-i18n="nav_models">Models</a>
+            <a href="#quickstart" data-i18n="nav_quickstart">Quick start</a>
+            <a href="#how" data-i18n="nav_how">How it works</a>
+            <a href="#faq" data-i18n="nav_faq">FAQ</a>
+            <div class="docs-nav">
+                <button type="button" class="docs-btn" aria-expanded="false" data-i18n="nav_docs">Docs</button>
+                <div class="docs-dropdown">
+                    <a href="overview.html" data-i18n="nav_overview">Overview</a>
+                    <a href="setup.html" data-i18n="nav_install">Install &amp; accounts</a>
+                    <a href="configuration.html" data-i18n="nav_config">Configuration</a>
+                    <a href="usage.html" data-i18n="nav_usage">Usage</a>
+                    <a href="internals.html" data-i18n="nav_internals">How it works</a>
+                </div>
+            </div>
+        </nav>
+        <div class="nav-actions">
+            <div class="lang-switch" role="group" aria-label="Language">
+                <button type="button" class="lang-btn" data-lang="en" data-i18n-aria="lang_en" aria-label="English">EN</button>
+                <button type="button" class="lang-btn" data-lang="ru" data-i18n-aria="lang_ru" aria-label="Русский">RU</button>
+            </div>
+            <a class="btn btn-ghost btn-icon" href="https://github.com/FANATFANATA/DanyAPI" target="_blank" rel="noopener" aria-label="GitHub">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true"><path d="M12 .5A11.5 11.5 0 0 0 .5 12a11.5 11.5 0 0 0 7.86 10.91c.58.11.79-.25.79-.56v-2c-3.2.7-3.87-1.54-3.87-1.54-.52-1.34-1.28-1.7-1.28-1.7-1.05-.71.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.55-.29-5.23-1.28-5.23-5.69 0-1.26.45-2.28 1.19-3.09-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.18 1.18a11.1 11.1 0 0 1 5.79 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.11 3.05.74.81 1.19 1.83 1.19 3.09 0 4.42-2.69 5.39-5.25 5.68.41.35.77 1.05.77 2.12v3.15c0 .31.21.67.8.56A11.5 11.5 0 0 0 23.5 12 11.5 11.5 0 0 0 12 .5Z"/></svg>
+            </a>
+            <a class="btn btn-ghost btn-icon" href="https://t.me/DanyAPIFree" target="_blank" rel="noopener" aria-label="Telegram">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true"><path d="M21.9 4.3 18.6 19.6c-.2 1.1-.9 1.4-1.8.9l-5-3.7-2.4 2.3c-.3.3-.5.5-1 .5l.4-5.1L18.3 6c.4-.4-.1-.6-.6-.2L6.5 13.9l-4.9-1.5c-1-.3-1-.9.2-1.4L20.6 3c.9-.3 1.6.2 1.3 1.3Z"/></svg>
+            </a>
+            <a class="btn btn-primary" href="#quickstart" data-i18n="hero_cta_start">Get started</a>
+        </div>
+    </div>
+</header>
+
+<main id="top">
+
+    <!-- HERO -->
+    <section class="hero">
+        <div class="hero-inner">
+            <div class="hero-copy">
+                <span class="hero-badge reveal">
+                    <span class="dot"></span>
+                    <span data-i18n="hero_badge">Free · Open source · OpenAI-compatible</span>
+                </span>
+                <h1 class="hero-title reveal" data-delay="1">
+                    <span data-i18n="hero_h1_a">Big-model API.</span>
+                    <span class="grad-text" data-i18n="hero_h1_b">Zero keys.</span>
+                    <span data-i18n="hero_h1_c">Zero cost.</span>
+                </h1>
+                <p class="hero-sub reveal" data-delay="2" data-i18n="hero_sub">
+                    DanyAPI is an OpenAI-compatible HTTP API built on Python + FastAPI. Instead of the paid
+                    APIs it talks to the internal APIs of the free web clients chat.deepseek.com and
+                    chat.qwen.ai using server-side accounts. Your users never need an API key.
+                </p>
+                <div class="hero-cta reveal" data-delay="3">
+                    <a class="btn btn-primary btn-lg" href="#quickstart" data-i18n="hero_cta_start">Quick start</a>
+                    <a class="btn btn-ghost btn-lg" href="https://github.com/FANATFANATA/DanyAPI" target="_blank" rel="noopener">
+                        <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true"><path d="M12 .5A11.5 11.5 0 0 0 .5 12a11.5 11.5 0 0 0 7.86 10.91c.58.11.79-.25.79-.56v-2c-3.2.7-3.87-1.54-3.87-1.54-.52-1.34-1.28-1.7-1.28-1.7-1.05-.71.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.55-.29-5.23-1.28-5.23-5.69 0-1.26.45-2.28 1.19-3.09-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.18 1.18a11.1 11.1 0 0 1 5.79 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.11 3.05.74.81 1.19 1.83 1.19 3.09 0 4.42-2.69 5.39-5.25 5.68.41.35.77 1.05.77 2.12v3.15c0 .31.21.67.8.56A11.5 11.5 0 0 0 23.5 12 11.5 11.5 0 0 0 12 .5Z"/></svg>
+                        <span data-i18n="hero_cta_gh">Star on GitHub</span>
+                    </a>
+                </div>
+                <div class="hero-meta reveal" data-delay="4">
+                    <span class="pill"><code>Python 3.13+</code></span>
+                    <span class="pill"><code>FastAPI</code></span>
+                    <span class="pill"><code>SSE streaming</code></span>
+                    <span class="pill"><code>Docker · GHCR</code></span>
+                </div>
+            </div>
+
+            <div class="hero-terminal reveal" data-delay="2">
+                <div class="terminal">
+                    <div class="terminal-bar">
+                        <span class="t-dot t-red"></span>
+                        <span class="t-dot t-yellow"></span>
+                        <span class="t-dot t-green"></span>
+                        <span class="terminal-title">danyapi — live demo</span>
+                    </div>
+                    <div class="terminal-body" id="termBody" aria-live="polite"></div>
+                </div>
+                <div class="hero-terminal-note" data-i18n="hero_term_note">One command installs, configures and launches the server. Requests are served by server-side free accounts.</div>
+            </div>
+        </div>
+
+        <div class="stats reveal" data-delay="3">
+            <div class="stat"><div class="stat-num">$0</div><div class="stat-label" data-i18n="stat_zero">per token, forever</div></div>
+            <div class="stat"><div class="stat-num">2</div><div class="stat-label" data-i18n="stat_providers">free providers</div></div>
+            <div class="stat"><div class="stat-num">1</div><div class="stat-label" data-i18n="stat_cmd">command to install</div></div>
+            <div class="stat"><div class="stat-num">5</div><div class="stat-label" data-i18n="stat_retries">auto retries w/ backoff</div></div>
+            <div class="stat"><div class="stat-num">128</div><div class="stat-label" data-i18n="stat_cache">server-side chats cached</div></div>
+        </div>
+    </section>
+
+    <!-- FEATURES -->
+    <section class="section" id="features">
+        <div class="section-head reveal">
+            <span class="eyebrow" data-i18n="features_eyebrow">Features</span>
+            <h2 class="section-title" data-i18n="features_title">Everything the paid APIs have.<br /><span class="grad-text" data-i18n="features_title_hi">None of the bills.</span></h2>
+            <p class="section-sub" data-i18n="features_sub">A drop-in replacement for the official OpenAI API — your existing client code just works.</p>
+        </div>
+
+        <div class="features-grid">
+            <article class="card reveal">
+                <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg></div>
+                <h3 data-i18n="f1_t">OpenAI-compatible</h3>
+                <p data-i18n="f1_d"><code>GET /v1/models</code> and <code>POST /v1/chat/completions</code> with the official request format. Swap <code>base_url</code>, keep your client.</p>
+            </article>
+            <article class="card reveal">
+                <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><path d="M5.64 18.36A9 9 0 1 1 18.36 5.64"/><path d="M5.64 18.36L8.1 15.9"/><path d="M5.64 18.36L3 21"/><path d="M18.36 5.64L15.9 8.1"/><path d="M18.36 5.64L21 3"/></svg></div>
+                <h3 data-i18n="f2_t">SSE streaming</h3>
+                <p data-i18n="f2_d">Real-time streaming via <code>data:</code> chunks and <code>data: [DONE]</code>, with live thinking traces as <code>reasoning_content</code>.</p>
+            </article>
+            <article class="card reveal">
+                <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><path d="M12 2a7 7 0 0 0-4.6 12.3c.8.7 1.3 1.6 1.3 2.2V18a1 1 0 0 0 1 1h3.6a1 1 0 0 0 1-1v-1.5c0-.6.5-1.5 1.3-2.2A7 7 0 0 0 12 2z"/><path d="M9 21h6"/></svg></div>
+                <h3 data-i18n="f3_t">Thinking traces</h3>
+                <p data-i18n="f3_d">DeepSeek and Qwen reasoning exposed to your app — streamed live, both providers, exactly like the official API.</p>
+            </article>
+            <article class="card reveal">
+                <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg></div>
+                <h3 data-i18n="f4_t">Tool calling</h3>
+                <p data-i18n="f4_d">Emulated <code>tools</code>, <code>tool_choice</code> and <code>parallel_tool_calls</code> with proper <code>finish_reason: "tool_calls"</code> responses.</p>
+            </article>
+            <article class="card reveal">
+                <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><path d="M8 13h3"/><path d="M16 13h-2"/><path d="M8 17h8"/></svg></div>
+                <h3 data-i18n="f5_t">JSON mode</h3>
+                <p data-i18n="f5_d"><code>response_format</code> with <code>json_object</code> and <code>json_schema</code> — structured output for your agents.</p>
+            </article>
+            <article class="card reveal">
+                <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></div>
+                <h3 data-i18n="f6_t">Server-side sessions</h3>
+                <p data-i18n="f6_d">Multi-turn chats live on the server. Stateless clients keep context automatically via message fingerprinting.</p>
+            </article>
+            <article class="card reveal">
+                <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg></div>
+                <h3 data-i18n="f7_t">Web search</h3>
+                <p data-i18n="f7_d">Turn on grounded, up-to-date answers with the <code>search</code> flag on DeepSeek models.</p>
+            </article>
+            <article class="card reveal">
+                <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></div>
+                <h3 data-i18n="f8_t">File attachments</h3>
+                <p data-i18n="f8_d">Images and text files as base64 or data URIs. Vision, OCR and file analysis per model — up to 50 files, 100 MB each.</p>
+            </article>
+            <article class="card reveal">
+                <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg></div>
+                <h3 data-i18n="f9_t">Real token usage</h3>
+                <p data-i18n="f9_d">OpenAI-style <code>usage</code> accumulated per conversation, including streaming via <code>stream_options.include_usage</code>.</p>
+            </article>
+            <article class="card reveal">
+                <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg></div>
+                <h3 data-i18n="f10_t">Survives restarts</h3>
+                <p data-i18n="f10_d">Sessions, affinities and usage counters are persisted to disk. Conversations survive server restarts.</p>
+            </article>
+            <article class="card reveal">
+                <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg></div>
+                <h3 data-i18n="f11_t">Account pool</h3>
+                <p data-i18n="f11_d">N tokens = N parallel generations. Requests are distributed round-robin, retried with exponential backoff.</p>
+            </article>
+            <article class="card reveal">
+                <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7z"/></svg></div>
+                <h3 data-i18n="f12_t">Health ready</h3>
+                <p data-i18n="f12_d"><code>GET /health</code> reports provider status and cache stats — perfect for readiness probes and load balancers.</p>
+            </article>
+        </div>
+    </section>
+
+    <!-- MODELS -->
+    <section class="section" id="models">
+        <div class="section-head reveal">
+            <span class="eyebrow" data-i18n="models_eyebrow">Models</span>
+            <h2 class="section-title" data-i18n="models_title">Two free providers.<br /><span class="grad-text" data-i18n="models_title_hi">One OpenAI API.</span></h2>
+            <p class="section-sub" data-i18n="models_sub">Route by model name — <code>deepseek-*</code> or <code>qwen*</code>. Both providers optional, both can run together.</p>
+        </div>
+
+        <div class="models-grid">
+            <article class="model-card reveal model-ds">
+                <div class="model-head">
+                    <span class="model-logo model-logo-ds"><img src="deepseek-logo.svg" alt="DeepSeek" /></span>
+                    <div>
+                        <h3>DeepSeek</h3>
+                        <span class="model-tag" data-i18n="models_ds_tag">chat.deepseek.com</span>
                     </div>
                 </div>
-                <div class="lang-switcher" role="group" data-i18n-aria="lang_group" aria-label="Language">
-                    <button type="button" class="lang-btn" data-lang-btn="en" aria-label="English">EN</button>
-                    <button type="button" class="lang-btn" data-lang-btn="ru" aria-label="Русский">RU</button>
-                </div>
-                <div class="theme-switcher" role="group" data-i18n-aria="theme_group" aria-label="Theme">
-                    <label for="theme-select" class="theme-label" data-i18n="theme_label">Theme</label>
-                    <div class="theme-select-wrap">
-                        <select id="theme-select" class="theme-select">
-                            <option value="black">Black</option>
-                            <option value="hacker">Hacker</option>
-                            <option value="monokai">Monokai</option>
-                        </select>
+                <ul class="model-list">
+                    <li><code>deepseek-v4-flash</code> <span class="model-chip" data-i18n="models_ds_flash">default · search · OCR</span></li>
+                    <li><code>deepseek-v4-pro</code> <span class="model-chip" data-i18n="models_ds_pro">expert · thinking</span></li>
+                    <li><code>deepseek-v4-vision</code> <span class="model-chip" data-i18n="models_ds_vision">vision</span></li>
+                </ul>
+                <p class="model-note" data-i18n="models_ds_note">Thinking on all models. Web search on flash. Files: vision = images, flash = images + text, pro = none.</p>
+            </article>
+
+            <article class="model-card reveal model-qw">
+                <div class="model-head">
+                    <span class="model-logo-tile model-logo-tile-qw"><img src="qwen-logo.svg" alt="Qwen" /></span>
+                    <div>
+                        <h3>Qwen</h3>
+                        <span class="model-tag" data-i18n="models_qw_tag">chat.qwen.ai</span>
                     </div>
                 </div>
+                <ul class="model-list">
+                    <li><code>qwen3.8-max</code> <span class="model-chip" data-i18n="models_qw_1">top model</span></li>
+                    <li><code>qwen3.7-plus</code> <span class="model-chip" data-i18n="models_qw_2">fast</span></li>
+                    <li><code>…</code> <span class="model-chip" data-i18n="models_qw_3">fetched live from the account</span></li>
+                </ul>
+                <p class="model-note" data-i18n="models_qw_note">Thinking and search built in. The model list is fetched from your account at startup, so new models appear automatically.</p>
+            </article>
+        </div>
+    </section>
+
+    <!-- QUICKSTART -->
+    <section class="section" id="quickstart">
+        <div class="section-head reveal">
+            <span class="eyebrow" data-i18n="qs_eyebrow">Quick start</span>
+            <h2 class="section-title" data-i18n="qs_title">Up and running in<br /><span class="grad-text" data-i18n="qs_title_hi">under a minute.</span></h2>
+            <p class="section-sub" data-i18n="qs_sub">One-command install on Windows, Linux and macOS. No Python setup gymnastics required.</p>
+        </div>
+
+        <div class="code-tabs reveal">
+            <div class="tab-bar">
+                <button class="tab active" data-tab="install" data-i18n="qs_tab_install">Install</button>
+                <button class="tab" data-tab="python" data-i18n="qs_tab_python">OpenAI SDK</button>
+                <button class="tab" data-tab="curl" data-i18n="qs_tab_curl">curl streaming</button>
+                <button class="tab" data-tab="docker" data-i18n="qs_tab_docker">Docker</button>
+            </div>
+            <div class="code-pane active" data-pane="install">
+                <div class="pane-head">
+                    <span data-i18n="qs_pane_install">PowerShell</span>
+                    <button class="copy-btn" data-copy='irm https://raw.githubusercontent.com/FANATFANATA/DanyAPI/main/docs/install.ps1 | iex' data-i18n="copy">Copy</button>
+                </div>
+                <pre><code>irm https://raw.githubusercontent.com/FANATFANATA/DanyAPI/main/docs/install.ps1 | iex</code></pre>
+                <div class="pane-head">
+                    <span data-i18n="qs_pane_install_alt">Linux / macOS</span>
+                    <button class="copy-btn" data-copy='curl -fsSL https://raw.githubusercontent.com/FANATFANATA/DanyAPI/main/docs/install.sh | bash' data-i18n="copy">Copy</button>
+                </div>
+                <pre><code>curl -fsSL https://raw.githubusercontent.com/FANATFANATA/DanyAPI/main/docs/install.sh | bash</code></pre>
+                <p class="pane-note" data-i18n="qs_install_note">The script clones the repo, installs dependencies, creates <code>.env</code>, live-checks your provider tokens and launches the server. It even auto-updates itself on each start.</p>
+            </div>
+            <div class="code-pane" data-pane="python">
+                <div class="pane-head">
+                    <span>Python</span>
+                    <button class="copy-btn" data-copy='from openai import OpenAI
+
+client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="dummy")
+r = client.chat.completions.create(
+    model="deepseek-v4-flash",
+    messages=[{"role": "user", "content": "Hello!"}],
+)
+print(r.choices[0].message.content)' data-i18n="copy">Copy</button>
+                </div>
+                <pre><code><span class="c-cmt"># works with any OpenAI-compatible client</span>
+<span class="c-kw">from</span> openai <span class="c-kw">import</span> OpenAI
+
+client = OpenAI(base_url=<span class="c-str">"http://127.0.0.1:8000/v1"</span>, api_key=<span class="c-str">"dummy"</span>)
+r = client.chat.completions.create(
+    model=<span class="c-str">"deepseek-v4-flash"</span>,
+    messages=[{<span class="c-str">"role"</span>: <span class="c-str">"user"</span>, <span class="c-str">"content"</span>: <span class="c-str">"Hello!"</span>}],
+)
+<span class="c-fn">print</span>(r.choices[<span class="c-num">0</span>].message.content)</code></pre>
+                <p class="pane-note" data-i18n="qs_python_note"><code>api_key</code> is required by the SDK but never checked — all requests are made by the server-side accounts.</p>
+            </div>
+            <div class="code-pane" data-pane="curl">
+                <div class="pane-head">
+                    <span>curl</span>
+                    <button class="copy-btn" data-copy='curl http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '"'"'{"model": "deepseek-v4-flash", "messages": [{"role": "user", "content": "Hello!"}]}'"'"'' data-i18n="copy">Copy</button>
+                </div>
+                <pre><code>curl http://127.0.0.1:8000/v1/chat/completions \
+  -H <span class="c-str">"Content-Type: application/json"</span> \
+  -d <span class="c-str">'{"model": "deepseek-v4-flash", "messages": [{"role": "user", "content": "Hello!"}]}'</span></code></pre>
+                <div class="pane-head">
+                    <span>curl + thinking + stream</span>
+                    <button class="copy-btn" data-copy='curl http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '"'"'{"model": "deepseek-v4-pro", "messages": [{"role": "user", "content": "2+2?"}], "thinking": true, "stream": true}'"'"'' data-i18n="copy">Copy</button>
+                </div>
+                <pre><code>curl http://127.0.0.1:8000/v1/chat/completions \
+  -H <span class="c-str">"Content-Type: application/json"</span> \
+  -d <span class="c-str">'{"model": "deepseek-v4-pro", "messages": [{"role": "user", "content": "2+2?"}], "thinking": true, "stream": true}'</span></code></pre>
+                <p class="pane-note" data-i18n="qs_curl_note">Thinking traces stream live as <code>reasoning_content</code>. Add <code>"stream_options": {"include_usage": true}</code> for usage in the final chunk.</p>
+            </div>
+            <div class="code-pane" data-pane="docker">
+                <div class="pane-head">
+                    <span>Docker · GHCR</span>
+                    <button class="copy-btn" data-copy='docker run -d -p 8000:8000 \
+  -e DEEPSEEK_TOKENS="token1,token2" \
+  -e QWEN_TOKENS="token3" \
+  ghcr.io/fanatfanata/danyapi:latest' data-i18n="copy">Copy</button>
+                </div>
+                <pre><code>docker run -d -p <span class="c-num">8000</span>:<span class="c-num">8000</span> \
+  -e DEEPSEEK_TOKENS=<span class="c-str">"token1,token2"</span> \
+  -e QWEN_TOKENS=<span class="c-str">"token3"</span> \
+  ghcr.io/fanatfanata/danyapi:latest</code></pre>
+                <p class="pane-note" data-i18n="qs_docker_note">Prebuilt image, pushed on every commit and every version tag. The native PoW solver is compiled into the image for maximum speed.</p>
             </div>
         </div>
-    </header>
-    <main class="home">
-        <div class="home-card">
-            <div class="cmd-row">
-                <code class="cmd-code">irm https://raw.githubusercontent.com/FANATFANATA/DanyAPI/main/docs/install.ps1 | iex</code>
-                <button type="button" class="copy-btn" data-copy="irm https://raw.githubusercontent.com/FANATFANATA/DanyAPI/main/docs/install.ps1 | iex" data-i18n="copy">Copy</button>
-            </div>
-            <p class="footnote" data-i18n="idx_cmd_hint">Or pick your platform:</p>
-<div class="cmd-chips">
-                <button type="button" class="chip copy-btn" data-copy="irm https://raw.githubusercontent.com/FANATFANATA/DanyAPI/main/docs/install.ps1 | iex"><code>PowerShell</code></button>
-                <button type="button" class="chip copy-btn" data-copy="powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/FANATFANATA/DanyAPI/main/docs/install.ps1 | iex""><code>cmd</code></button>
-                <button type="button" class="chip copy-btn" data-copy="curl -fsSL https://raw.githubusercontent.com/FANATFANATA/DanyAPI/main/docs/install.sh | bash"><code>Linux / macOS</code></button>
-            </div>
-            <p class="footnote" data-i18n-html="idx_creator"><a href="https://t.me/DanyaVoredom" target="_blank">Creator</a> · <a href="https://t.me/DanyAPIFree" target="_blank">Telegram channel</a></p>
+    </section>
+
+    <!-- HOW -->
+    <section class="section" id="how">
+        <div class="section-head reveal">
+            <span class="eyebrow" data-i18n="how_eyebrow">How it works</span>
+            <h2 class="section-title" data-i18n="how_title">A smart proxy to<br /><span class="grad-text" data-i18n="how_title_hi">free models.</span></h2>
+            <p class="section-sub" data-i18n="how_sub">Reverse-engineered provider protocols, an account pool, PoW solving and session caching — all hidden behind a clean OpenAI API.</p>
         </div>
+
+        <div class="flow reveal">
+            <div class="flow-node flow-in">
+                <span class="flow-ico">🧑‍💻</span>
+                <strong data-i18n="flow_in">Your app</strong>
+                <span class="flow-detail">OpenAI SDK / curl</span>
+            </div>
+            <div class="flow-arrow" aria-hidden="true">→</div>
+            <div class="flow-node flow-api">
+                <span class="flow-ico">🔑</span>
+                <strong>DanyAPI</strong>
+                <span class="flow-detail" data-i18n="flow_api">FastAPI · /v1</span>
+            </div>
+            <div class="flow-arrow" aria-hidden="true">→</div>
+            <div class="flow-node flow-pool">
+                <span class="flow-ico">🗄️</span>
+                <strong data-i18n="flow_pool">Account pool</strong>
+                <span class="flow-detail" data-i18n="flow_pool_detail">round-robin · retries · PoW</span>
+            </div>
+            <div class="flow-arrow" aria-hidden="true">→</div>
+            <div class="flow-node flow-prov">
+                <span class="flow-ico">🐋</span>
+                <strong>DeepSeek</strong>
+                <span class="flow-detail">chat.deepseek.com</span>
+            </div>
+            <div class="flow-node flow-prov">
+                <span class="flow-ico">🐉</span>
+                <strong>Qwen</strong>
+                <span class="flow-detail">chat.qwen.ai</span>
+            </div>
         </div>
-    </main>
-    <script src="site.js"></script>
+
+        <div class="how-grid">
+            <div class="how-card reveal">
+                <h3 data-i18n="how1_t">No keys for your users</h3>
+                <p data-i18n="how1_d">All requests are made by server-side accounts. Your API consumers just point their client at your instance — <code>api_key</code> is never checked.</p>
+            </div>
+            <div class="how-card reveal">
+                <h3 data-i18n="how2_t">Parallel by design</h3>
+                <p data-i18n="how2_d">One account = one message at a time. DanyAPI keeps a pool of tokens and distributes concurrent requests across accounts, queuing when all are busy.</p>
+            </div>
+            <div class="how-card reveal">
+                <h3 data-i18n="how3_t">Sessions that survive</h3>
+                <p data-i18n="how3_d">Chats live server-side like the web clients. <code>session_id</code> pins a conversation; stateless clients are matched by message fingerprint automatically.</p>
+            </div>
+            <div class="how-card reveal">
+                <h3 data-i18n="how4_t">Emulated, normalized</h3>
+                <p data-i18n="how4_d">Tool calling and JSON mode are emulated at the proxy layer with prompt injection, then normalized to perfect OpenAI-shaped responses.</p>
+            </div>
+        </div>
+    </section>
+
+    <!-- FAQ -->
+    <section class="section" id="faq">
+        <div class="section-head reveal">
+            <span class="eyebrow" data-i18n="faq_eyebrow">FAQ</span>
+            <h2 class="section-title" data-i18n="faq_title">Questions?<br /><span class="grad-text" data-i18n="faq_title_hi">Answered.</span></h2>
+        </div>
+        <div class="faq-list reveal">
+            <details class="faq">
+                <summary data-i18n="q1">Is it really free?</summary>
+                <p data-i18n="a1">Yes. DanyAPI talks to the internal APIs of the free web clients chat.deepseek.com and chat.qwen.ai using server-side accounts. There is no billing, no quotas, no keys.</p>
+            </details>
+            <details class="faq">
+                <summary data-i18n="q2">Do my users need an API key?</summary>
+                <p data-i18n="a2">No. The OpenAI SDK requires the <code>api_key</code> field, but DanyAPI never checks it — pass any dummy value. All upstream requests are made by the server accounts you configure.</p>
+            </details>
+            <details class="faq">
+                <summary data-i18n="q3">Which providers and models?</summary>
+                <p data-i18n="a3">DeepSeek (<code>deepseek-v4-flash</code>, <code>deepseek-v4-pro</code>, <code>deepseek-v4-vision</code>) and Qwen (<code>qwen3.8-max</code>, <code>qwen3.7-plus</code>, … — fetched live from the account). Route by model name; both can run at once.</p>
+            </details>
+            <details class="faq">
+                <summary data-i18n="q4">Can I use it with agents and tool calling?</summary>
+                <p data-i18n="a4">Yes — emulated <code>tools</code>, <code>tool_choice</code> and <code>parallel_tool_calls</code> with <code>finish_reason: "tool_calls"</code>. Clients that ship many tools (like opencode) work out of the box.</p>
+            </details>
+            <details class="faq">
+                <summary data-i18n="q5">What are the account limits?</summary>
+                <p data-i18n="a5">One account generates one message at a time, so a pool of N tokens gives N parallel generations. DeepSeek and Qwen pools are independent. Busy errors are retried automatically up to 5 times with backoff.</p>
+            </details>
+            <details class="faq">
+                <summary data-i18n="q6">Do conversations survive restarts?</summary>
+                <p data-i18n="a6">Yes. Session ids, context fingerprints, account affinity and token usage are persisted to disk (JSON files) with atomic writes. In Docker, mount <code>DANYAPI_CACHE_DIR</code> as a volume.</p>
+            </details>
+        </div>
+    </section>
+
+    <!-- CTA -->
+    <section class="cta reveal">
+        <div class="cta-inner">
+            <h2 data-i18n="cta_title">Free models.<br />Your API.</h2>
+            <p data-i18n="cta_sub">Install it now, or drop a star and follow the channel.</p>
+            <div class="cta-btns">
+                <a class="btn btn-primary btn-lg" href="https://github.com/FANATFANATA/DanyAPI" target="_blank" rel="noopener">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true"><path d="M12 .5A11.5 11.5 0 0 0 .5 12a11.5 11.5 0 0 0 7.86 10.91c.58.11.79-.25.79-.56v-2c-3.2.7-3.87-1.54-3.87-1.54-.52-1.34-1.28-1.7-1.28-1.7-1.05-.71.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.55-.29-5.23-1.28-5.23-5.69 0-1.26.45-2.28 1.19-3.09-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.18 1.18a11.1 11.1 0 0 1 5.79 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.11 3.05.74.81 1.19 1.83 1.19 3.09 0 4.42-2.69 5.39-5.25 5.68.41.35.77 1.05.77 2.12v3.15c0 .31.21.67.8.56A11.5 11.5 0 0 0 23.5 12 11.5 11.5 0 0 0 12 .5Z"/></svg>
+                    <span data-i18n="cta_gh">GitHub</span>
+                </a>
+                <a class="btn btn-ghost btn-lg" href="https://t.me/DanyAPIFree" target="_blank" rel="noopener">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true"><path d="M21.9 4.3 18.6 19.6c-.2 1.1-.9 1.4-1.8.9l-5-3.7-2.4 2.3c-.3.3-.5.5-1 .5l.4-5.1L18.3 6c.4-.4-.1-.6-.6-.2L6.5 13.9l-4.9-1.5c-1-.3-1-.9.2-1.4L20.6 3c.9-.3 1.6.2 1.3 1.3Z"/></svg>
+                    <span data-i18n="cta_tg">Telegram channel</span>
+                </a>
+            </div>
+        </div>
+    </section>
+</main>
+
+<footer class="footer">
+    <div class="footer-inner">
+        <div class="footer-brand">
+            <svg class="brand-logo" viewBox="0 0 40 40" aria-hidden="true">
+                <path d="M20 2.5 L35 11 V29 L20 37.5 L5 29 V11 Z" fill="none" stroke="url(#brand-grad)" stroke-width="2.6" stroke-linejoin="round"></path>
+                <path d="M20 13.5 L12.5 26.5 H27.5 Z" fill="none" stroke="url(#brand-grad)" stroke-width="1.8" stroke-linejoin="round"></path>
+                <circle cx="20" cy="13.5" r="3" fill="url(#brand-grad)"></circle>
+                <circle cx="12.5" cy="26.5" r="3" fill="url(#brand-grad)"></circle>
+                <circle cx="27.5" cy="26.5" r="3" fill="url(#brand-grad)"></circle>
+            </svg>
+            <span>DanyAPI</span>
+        </div>
+        <div class="footer-links">
+            <a href="https://github.com/FANATFANATA/DanyAPI" target="_blank" rel="noopener">GitHub</a>
+            <a href="https://t.me/DanyaVoredom" target="_blank" rel="noopener" data-i18n="footer_creator">Creator</a>
+            <a href="https://t.me/DanyAPIFree" target="_blank" rel="noopener" data-i18n="footer_channel">Telegram channel</a>
+            <a href="https://fanatfanata.github.io/DanyAPI/" target="_blank" rel="noopener" data-i18n="footer_docs">Docs</a>
+        </div>
+        <div class="footer-note" data-i18n="footer_note">Built with FastAPI &amp; Python · reverse-engineered, not affiliated with DeepSeek or Alibaba</div>
+    </div>
+</footer>
+
+<script src="script.js"></script>
 </body>
 </html>
