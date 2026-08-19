@@ -82,7 +82,10 @@ GROUPS = [
 def ask(question, default):
     suffix = " [Y/n]" if default else " [y/N]"
     while True:
-        raw = input(f"{question}{suffix}: ").strip().lower()
+        try:
+            raw = input(f"{question}{suffix}: ").strip().lower()
+        except EOFError:
+            return default
         if raw == "":
             return default
         if raw in ("y", "yes"):
@@ -103,10 +106,13 @@ def run_pip(req):
 
 def prompt(key, label, kind, current, default=""):
     while True:
-        if current:
-            raw = input(f"  {key} - {label} [{current}]: ").strip()
-        else:
-            raw = input(f"  {key} - {label}: ").strip()
+        try:
+            if current:
+                raw = input(f"  {key} - {label} [{current}]: ").strip()
+            else:
+                raw = input(f"  {key} - {label}: ").strip()
+        except EOFError:
+            return current
         if raw == "":
             return current
         if raw == "!clear":
@@ -315,7 +321,10 @@ def split_tokens(raw):
 
 
 def read_value(message, current, default=""):
-    raw = input(message).strip()
+    try:
+        raw = input(message).strip()
+    except EOFError:
+        return current
     if raw == "":
         return current
     if raw == "!clear":
