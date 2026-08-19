@@ -1,4 +1,4 @@
-*,
+﻿*,
 *::before,
 *::after {
     box-sizing: border-box;
@@ -184,12 +184,12 @@ body::after {
 }
 
 @keyframes slide-in-left {
-    from { opacity: 0; transform: translateX(-20px); }
+    from { opacity: 0; transform: translateX(-12px); }
     to { opacity: 1; transform: translateX(0); }
 }
 
 @keyframes slide-in-right {
-    from { opacity: 0; transform: translateX(20px); }
+    from { opacity: 0; transform: translateX(12px); }
     to { opacity: 1; transform: translateX(0); }
 }
 
@@ -204,19 +204,18 @@ body::after {
 }
 
 @keyframes scale-in {
-    from { opacity: 0; transform: scale(0.93); }
+    from { opacity: 0; transform: scale(0.97); }
     to { opacity: 1; transform: scale(1); }
 }
 
 @keyframes dropdown-pop {
-    0% { opacity: 0; transform: translateY(-6px) scale(0.96); }
-    60% { transform: translateY(1px) scale(1.01); }
-    100% { opacity: 1; transform: translateY(0) scale(1); }
+    from { opacity: 0; transform: translateY(-4px); }
+    to { opacity: 1; transform: translateY(0); }
 }
 
 @keyframes click-bounce {
     0% { transform: scale(1); }
-    35% { transform: scale(0.94); }
+    40% { transform: scale(0.97); }
     100% { transform: scale(1); }
 }
 
@@ -226,18 +225,18 @@ body::after {
 }
 
 @keyframes terminal-slide-in {
-    from { opacity: 0; transform: translateY(20px) scale(0.96); }
-    to { opacity: 1; transform: translateY(0) scale(1); }
+    from { opacity: 0; transform: translateY(14px); }
+    to { opacity: 1; transform: translateY(0); }
 }
 
 @keyframes theme-flash {
     0% { filter: brightness(1); }
-    40% { filter: brightness(1.4); }
+    40% { filter: brightness(1.25); }
     100% { filter: brightness(1); }
 }
 
 @keyframes footer-fade {
-    from { opacity: 0; transform: translateY(12px); }
+    from { opacity: 0; transform: translateY(8px); }
     to { opacity: 1; transform: translateY(0); }
 }
 
@@ -289,7 +288,7 @@ body::after {
     -webkit-backdrop-filter: blur(16px) saturate(150%);
     border-bottom: 1px solid var(--border);
     transition: box-shadow 0.25s ease, border-color 0.25s ease;
-    animation: topbar-slide-down 0.4s cubic-bezier(0.22, 1, 0.36, 1);
+    animation: topbar-slide-down 0.4s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .topbar.scrolled {
@@ -325,11 +324,11 @@ body::after {
     height: 30px;
     display: block;
     filter: drop-shadow(0 2px 8px var(--accent-soft));
-    transition: transform 0.5s cubic-bezier(0.22, 1, 0.36, 1);
+    transition: transform 0.5s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .brand:hover .brand-logo {
-    animation: logo-spin 0.6s cubic-bezier(0.22, 1, 0.36, 1);
+    animation: logo-spin 0.6s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .brand-name {
@@ -359,7 +358,7 @@ body::after {
     display: flex;
     align-items: center;
     gap: 0.5rem;
-    animation: slide-in-right 0.5s cubic-bezier(0.22, 1, 0.36, 1) 0.1s both;
+    animation: slide-in-right 0.5s cubic-bezier(0.4, 0, 0.2, 1) 0.1s both;
 }
 
 .lang-switcher {
@@ -431,7 +430,7 @@ body::after {
 
 .docs-nav.open .docs-dropdown {
     display: flex;
-    animation: dropdown-pop 0.2s cubic-bezier(0.22, 1, 0.36, 1);
+    animation: dropdown-pop 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .docs-dropdown a {
@@ -472,7 +471,7 @@ body::after {
     border-radius: 20px;
     padding: 3rem 2.75rem;
     box-shadow: 0 1px 0 color-mix(in srgb, var(--text) 4%, transparent), 0 40px 90px -45px var(--shadow);
-    animation: scale-in 0.45s cubic-bezier(0.22, 1, 0.36, 1);
+    animation: scale-in 0.45s cubic-bezier(0.4, 0, 0.2, 1);
     transition: border-color 0.2s ease;
 }
 
@@ -636,7 +635,7 @@ body::after {
     letter-spacing: 0.1em;
     color: var(--text-faint);
     margin: 0 0 0.5rem 0.7rem;
-    animation: slide-in-left 0.4s cubic-bezier(0.22, 1, 0.36, 1);
+    animation: slide-in-left 0.4s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .page-nav a {
@@ -674,7 +673,7 @@ body::after {
     box-shadow: 0 1px 0 color-mix(in srgb, var(--text) 4%, transparent), 0 24px 60px -32px var(--shadow);
     padding: 2.5rem 2.75rem;
     transition: border-color 0.2s ease, background-color 0.25s ease;
-    animation: scale-in 0.4s cubic-bezier(0.22, 1, 0.36, 1);
+    animation: scale-in 0.4s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 @keyframes fade-in {
@@ -712,7 +711,7 @@ body::after {
     border-radius: 12px;
     padding: 0.85rem 0.95rem;
     font-size: 0.8rem;
-    animation: slide-in-right 0.5s cubic-bezier(0.22, 1, 0.36, 1) 0.15s both;
+    animation: slide-in-right 0.5s cubic-bezier(0.4, 0, 0.2, 1) 0.15s both;
 }
 
 .toc-title {
@@ -959,7 +958,7 @@ hr {
     border: none;
     border-top: 1px solid var(--border);
     margin: 2.5rem 0;
-    animation: expand-hr 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
+    animation: expand-hr 0.5s cubic-bezier(0.4, 0, 0.2, 1) both;
     transform-origin: center;
 }
 
@@ -1188,7 +1187,7 @@ hr {
     font-size: 0.82rem;
     line-height: 1.6;
     border: 1px solid var(--border-strong);
-    animation: terminal-slide-in 0.5s cubic-bezier(0.22, 1, 0.36, 1);
+    animation: terminal-slide-in 0.5s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .terminal-bar {
@@ -1308,7 +1307,7 @@ hr {
 .reveal {
     opacity: 0;
     transform: translateY(20px);
-    transition: opacity 0.5s cubic-bezier(0.22, 1, 0.36, 1), transform 0.5s cubic-bezier(0.22, 1, 0.36, 1);
+    transition: opacity 0.5s cubic-bezier(0.4, 0, 0.2, 1), transform 0.5s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .reveal.revealed {
@@ -1319,7 +1318,7 @@ hr {
 .reveal-left {
     opacity: 0;
     transform: translateX(-20px);
-    transition: opacity 0.5s cubic-bezier(0.22, 1, 0.36, 1), transform 0.5s cubic-bezier(0.22, 1, 0.36, 1);
+    transition: opacity 0.5s cubic-bezier(0.4, 0, 0.2, 1), transform 0.5s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .reveal-left.revealed {
@@ -1330,7 +1329,7 @@ hr {
 .reveal-right {
     opacity: 0;
     transform: translateX(20px);
-    transition: opacity 0.5s cubic-bezier(0.22, 1, 0.36, 1), transform 0.5s cubic-bezier(0.22, 1, 0.36, 1);
+    transition: opacity 0.5s cubic-bezier(0.4, 0, 0.2, 1), transform 0.5s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .reveal-right.revealed {
@@ -1341,7 +1340,7 @@ hr {
 .reveal-scale {
     opacity: 0;
     transform: scale(0.93);
-    transition: opacity 0.5s cubic-bezier(0.22, 1, 0.36, 1), transform 0.5s cubic-bezier(0.22, 1, 0.36, 1);
+    transition: opacity 0.5s cubic-bezier(0.4, 0, 0.2, 1), transform 0.5s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .reveal-scale.revealed {
@@ -1352,7 +1351,7 @@ hr {
 .reveal-stagger > * {
     opacity: 0;
     transform: translateX(-12px);
-    transition: opacity 0.4s cubic-bezier(0.22, 1, 0.36, 1), transform 0.4s cubic-bezier(0.22, 1, 0.36, 1);
+    transition: opacity 0.4s cubic-bezier(0.4, 0, 0.2, 1), transform 0.4s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .reveal-stagger.revealed > * {
@@ -1379,7 +1378,7 @@ hr {
 .reveal-code {
     opacity: 0;
     transform: translateY(10px) scale(0.98);
-    transition: opacity 0.55s cubic-bezier(0.22, 1, 0.36, 1), transform 0.55s cubic-bezier(0.22, 1, 0.36, 1);
+    transition: opacity 0.55s cubic-bezier(0.4, 0, 0.2, 1), transform 0.55s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .reveal-code.revealed {
@@ -1392,11 +1391,11 @@ hr {
     to { opacity: 1; transform: translateX(0); }
 }
 
-.page-nav a:nth-child(2) { animation: sidebar-stagger 0.4s cubic-bezier(0.22, 1, 0.36, 1) 0.05s both; }
-.page-nav a:nth-child(3) { animation: sidebar-stagger 0.4s cubic-bezier(0.22, 1, 0.36, 1) 0.1s both; }
-.page-nav a:nth-child(4) { animation: sidebar-stagger 0.4s cubic-bezier(0.22, 1, 0.36, 1) 0.15s both; }
-.page-nav a:nth-child(5) { animation: sidebar-stagger 0.4s cubic-bezier(0.22, 1, 0.36, 1) 0.2s both; }
-.page-nav a:nth-child(6) { animation: sidebar-stagger 0.4s cubic-bezier(0.22, 1, 0.36, 1) 0.25s both; }
+.page-nav a:nth-child(2) { animation: sidebar-stagger 0.4s cubic-bezier(0.4, 0, 0.2, 1) 0.05s both; }
+.page-nav a:nth-child(3) { animation: sidebar-stagger 0.4s cubic-bezier(0.4, 0, 0.2, 1) 0.1s both; }
+.page-nav a:nth-child(4) { animation: sidebar-stagger 0.4s cubic-bezier(0.4, 0, 0.2, 1) 0.15s both; }
+.page-nav a:nth-child(5) { animation: sidebar-stagger 0.4s cubic-bezier(0.4, 0, 0.2, 1) 0.2s both; }
+.page-nav a:nth-child(6) { animation: sidebar-stagger 0.4s cubic-bezier(0.4, 0, 0.2, 1) 0.25s both; }
 
 @media (prefers-reduced-motion: reduce) {
     .reveal,
