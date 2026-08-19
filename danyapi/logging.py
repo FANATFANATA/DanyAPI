@@ -1,10 +1,30 @@
 from __future__ import annotations
 
 import logging
+import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-DEFAULT_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+DEFAULT_FORMAT = "(%(asctime)s) %(message)s"
+DEFAULT_DATEFMT = "%H:%M:%S"
+RESET = "\033[0m"
+LEVEL_COLORS = {
+    "INFO": "\033[37m",
+    "WARNING": "\033[33m",
+    "ERROR": "\033[31m",
+    "CRITICAL": "\033[31m",
+}
+SUCCESS_COLOR = "\033[32m"
+SUCCESS_MARKERS = (" ok", "ready", "success")
+LIFECYCLE_MESSAGES = {
+    "Waiting for application startup.",
+    "Application startup complete.",
+    "Waiting for application shutdown.",
+    "Application shutdown complete.",
+}
+LIFECYCLE_PREFIXES = ("Started server process", "Finished server process")
+UVICORN_RUNNING = "Uvicorn running on"
+DANYAPI_RUNNING = "DanyAPI running on"
 CONSOLE_HANDLER_NAME = "danyapi-console"
 FILE_HANDLER_NAME = "danyapi-file"
 DEFAULT_LOG_LEVEL = "INFO"
@@ -40,8 +60,45 @@ def _make_file_handler(log_file: str, max_bytes: int, backup_count: int) -> Rota
         backupCount=backup_count,
         encoding="utf-8",
     )
-    handler.setFormatter(logging.Formatter(DEFAULT_FORMAT))
+    handler.setFormatter(logging.Formatter(DEFAULT_FORMAT, DEFAULT_DATEFMT))
     return handler
+
+
+class _LifecycleFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.name == "uvicorn.access":
+            return False
+        message = record.getMessage()
+        if message in LIFECYCLE_MESSAGES:
+            return False
+        if message.startswith(LIFECYCLE_PREFIXES):
+            return False
+        if UVICORN_RUNNING in message:
+            record.msg = message.replace(UVICORN_RUNNING, DANYAPI_RUNNING)
+            record.args = ()
+        return True
+
+
+def _is_success(message: str) -> bool:
+    lowered = message.lower()
+    return any(marker in lowered for marker in SUCCESS_MARKERS)
+
+
+class _ColorFormatter(logging.Formatter):
+    def __init__(self) -> None:
+        super().__init__(DEFAULT_FORMAT, DEFAULT_DATEFMT)
+        self._use_color = sys.stdout.isatty()
+
+    def format(self, record: logging.LogRecord) -> str:
+        text = super().format(record)
+        if not self._use_color:
+            return text
+        color = LEVEL_COLORS.get(record.levelname, "")
+        if record.levelname == "INFO" and _is_success(record.getMessage()):
+            color = SUCCESS_COLOR
+        if not color:
+            return text
+        return f"{color}{text}{RESET}"
 
 
 def _has_handler(root: logging.Logger, name: str) -> bool:
@@ -62,7 +119,8 @@ def configure() -> None:
         console = logging.StreamHandler()
         console.name = CONSOLE_HANDLER_NAME
         console.setLevel(level)
-        console.setFormatter(logging.Formatter(DEFAULT_FORMAT))
+        console.setFormatter(_ColorFormatter())
+        console.addFilter(_LifecycleFilter())
         root.addHandler(console)
 
     if settings.log_file and not _has_handler(root, FILE_HANDLER_NAME):
@@ -80,6 +138,7 @@ def configure() -> None:
             )
             file_handler.name = FILE_HANDLER_NAME
             file_handler.setLevel(level)
+            file_handler.addFilter(_LifecycleFilter())
             root.addHandler(file_handler)
 
 

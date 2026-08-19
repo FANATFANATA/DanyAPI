@@ -145,7 +145,7 @@ class DeepSeekClient:
         biz = self._biz(resp)
         raw = biz["chat_session"]
         session = DeepSeekSession(id=raw["id"], title=raw.get("title") or "")
-        log.info("deepseek create session OK (%.0fms)", (time.monotonic() - started) * 1000)
+        log.info("deepseek create session success (%.0fms)", (time.monotonic() - started) * 1000)
         return session
 
     async def fetch_page(self, pinned: bool = False, count: int = 20) -> list[dict]:
@@ -191,7 +191,7 @@ class DeepSeekClient:
         file_info = biz.get("id") if isinstance(biz, dict) else None
         if not isinstance(biz, dict) or not file_info:
             raise DeepSeekError(-1, "file upload failed: no file id in response")
-        log.info("deepseek upload file OK: %s (%.0fms)", filename, (time.monotonic() - started) * 1000)
+        log.info("deepseek upload file success: %s (%.0fms)", filename, (time.monotonic() - started) * 1000)
         return biz
 
     async def fetch_files(self, file_ids: list[str]) -> list[dict]:
