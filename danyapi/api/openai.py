@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -141,7 +141,7 @@ async def lifespan(app: FastAPI):
                 password=settings.deepseek_password,
             )
             accounts.append(DeepSeekAccount(0, client))
-            log.info("deepseek login ok, device_id=%s", client.device_id)
+            log.info("deepseek login success, device_id=%s", client.device_id)
         if settings.qwen_tokens:
             for i, token in enumerate(settings.qwen_tokens):
                 client = QwenClient(token=token, timeout=settings.timeout)
@@ -166,7 +166,7 @@ async def lifespan(app: FastAPI):
                 password=settings.qwen_password,
             )
             qwen_accounts.append(QwenAccount(0, client))
-            log.info("qwen login ok")
+            log.info("qwen login success")
         if accounts:
             app.state.pool = AccountPool(
                 accounts,
@@ -230,6 +230,73 @@ async def _fetch_qwen_models(client: QwenClient) -> list[dict]:
 
 
 app = FastAPI(title="DanyAPI", lifespan=lifespan)
+
+
+async def _extract_request_model(request: Request) -> str | None:
+    try:
+        body = await request.body()
+    except Exception:
+        return None
+    if not body:
+        return None
+    try:
+        payload = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
+        return None
+    if isinstance(payload, dict):
+        model = payload.get("model")
+        if isinstance(model, str):
+            return model
+    return None
+
+
+def _log_request_failure(request: Request, model: str | None, duration: float, status: int | None = None, exc: Exception | None = None) -> None:
+    model_part = f"model={model}" if model else "model=?"
+    if status is not None:
+        reason = f"status={status}"
+    else:
+        reason = f"error={exc!r}"
+    log.warning(
+        "%s %s failed: %s %s (%.0fms)",
+        request.method,
+        request.url.path,
+        model_part,
+        reason,
+        duration,
+    )
+
+
+def _log_request_success(request: Request, duration: float) -> None:
+    log.info(
+        "%s success (%.0fms)",
+        request.url.path,
+        duration,
+    )
+
+
+@app.middleware("http")
+async def _log_request_failures(request: Request, call_next):
+    started = time.monotonic()
+    try:
+        response = await call_next(request)
+    except Exception as exc:
+        _log_request_failure(
+            request,
+            await _extract_request_model(request),
+            (time.monotonic() - started) * 1000,
+            exc=exc,
+        )
+        raise
+    if response.status_code >= 400:
+        _log_request_failure(
+            request,
+            await _extract_request_model(request),
+            (time.monotonic() - started) * 1000,
+            status=response.status_code,
+        )
+    elif request.url.path == "/v1/chat/completions":
+        _log_request_success(request, (time.monotonic() - started) * 1000)
+    return response
 
 
 MAX_FILES_PER_REQUEST = 50
@@ -1152,7 +1219,7 @@ async def _collect_non_stream(
                 stop_message_id = response_message_id
         session.accumulated_tokens = max(getattr(session, "accumulated_tokens", 0) or 0, rec.accumulated_tokens)
         account.sessions.touch_last_message(session_key, rec.id or response_message_id)
-        log.info("deepseek completion OK (%.0fms)", (time.monotonic() - started) * 1000)
+        log.info("deepseek completion success (%.0fms)", (time.monotonic() - started) * 1000)
 
         content = rec.content
         reasoning = rec.reasoning
@@ -1421,7 +1488,7 @@ async def _stream_openai(
 
         session.accumulated_tokens = max(getattr(session, "accumulated_tokens", 0) or 0, rec.accumulated_tokens)
         account.sessions.touch_last_message(session_key, rec.id or response_message_id)
-        log.info("deepseek completion OK (%.0fms)", (time.monotonic() - started) * 1000)
+        log.info("deepseek completion success (%.0fms)", (time.monotonic() - started) * 1000)
 
         if tool_mode:
             parsed = toolemu.parse_tool_calls(content_buf or rec.content, tool_schemas)

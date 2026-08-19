@@ -171,7 +171,7 @@ class QwenClient:
         chat_id = biz.get("id")
         if not chat_id:
             raise QwenError(-1, "create chat failed: no chat id in response")
-        log.info("qwen create chat OK (%.0fms)", (time.monotonic() - started) * 1000)
+        log.info("qwen create chat success (%.0fms)", (time.monotonic() - started) * 1000)
         return chat_id
 
     async def completion(
