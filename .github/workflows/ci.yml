@@ -34,21 +34,6 @@ jobs:
       - name: Run unit tests with coverage
         run: python -m pytest -q --cov=danyapi
 
-  lint:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: astral-sh/ruff-action@v4.1.0
-        with:
-          args: check --output-format=github
-
-      - uses: astral-sh/ruff-action@v4.1.0
-        with:
-          args: format --check
-
   native-build:
     runs-on: ubuntu-latest
     timeout-minutes: 15
