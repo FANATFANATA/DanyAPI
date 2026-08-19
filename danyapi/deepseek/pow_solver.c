@@ -3,6 +3,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(_WIN32)
+#include <windows.h>
+#else
+#include <pthread.h>
+#include <unistd.h>
+#endif
+
 #define RATE 136
 #define ROUNDS 23
 
@@ -65,39 +72,103 @@ static void absorb_prefix(uint64_t st[25], const uint8_t *prefix, size_t len) {
         st[i / 8] ^= (uint64_t)prefix[off + i] << (8 * (i % 8));
 }
 
-static int check_counter(const uint64_t base[25], size_t prefix_len, uint64_t c,
-                         const uint8_t target[32]) {
-    char digits[24];
-    int dlen = snprintf(digits, sizeof(digits), "%llu", (unsigned long long)c);
+static int to_digits(uint64_t v, char *buf) {
+    char tmp[20];
+    int n = 0;
+    do {
+        tmp[n++] = (char)('0' + (int)(v % 10));
+        v /= 10;
+    } while (v > 0);
+    for (int i = 0; i < n; i++)
+        buf[i] = tmp[n - 1 - i];
+    return n;
+}
 
+static void inc_digits(char *buf, int *dlen) {
+    int i = *dlen - 1;
+    while (i >= 0 && buf[i] == '9') {
+        buf[i] = '0';
+        i--;
+    }
+    if (i < 0) {
+        buf[0] = '1';
+        for (int j = 1; j <= *dlen; j++)
+            buf[j] = '0';
+        (*dlen)++;
+    } else {
+        buf[i]++;
+    }
+}
+
+static int check_counter(const uint64_t base[25], size_t off0, const char *digits, int dlen, const uint8_t target[32]) {
     uint64_t st[25];
     memcpy(st, base, sizeof(st));
-
-    size_t off = prefix_len % RATE;
+    size_t off = off0;
     for (int i = 0; i < dlen; i++) {
-        st[off / 8] ^= (uint64_t)(uint8_t)digits[i] << (8 * (off % 8));
+        st[off >> 3] ^= (uint64_t)(uint8_t)digits[i] << (8 * (off & 7));
         off++;
         if (off == RATE) {
             keccak_f(st);
             off = 0;
         }
     }
-
-    st[off / 8] ^= (uint64_t)0x06 << (8 * (off % 8));
+    st[off >> 3] ^= (uint64_t)0x06 << (8 * (off & 7));
     off++;
     if (off == RATE) {
         keccak_f(st);
         off = 0;
     }
-    st[16] ^= (uint64_t)0x80 << (8 * 7);
-
+    st[16] ^= (uint64_t)0x80 << 56;
     keccak_f(st);
+    return memcmp(st, target, 32) == 0;
+}
 
-    for (int i = 0; i < 32; i++) {
-        if (((st[i / 8] >> (8 * (i % 8))) & 0xff) != target[i])
-            return 0;
+typedef struct {
+    const uint64_t *base;
+    size_t off0;
+    const uint8_t *target;
+    uint64_t start;
+    uint64_t end;
+    uint64_t result;
+} WorkerArgs;
+
+static void run_worker(WorkerArgs *a) {
+    a->result = UINT64_MAX;
+    if (a->start >= a->end)
+        return;
+    char digits[20];
+    int dlen = to_digits(a->start, digits);
+    for (uint64_t c = a->start; c < a->end; c++) {
+        if (check_counter(a->base, a->off0, digits, dlen, a->target)) {
+            a->result = c;
+            return;
+        }
+        inc_digits(digits, &dlen);
     }
-    return 1;
+}
+
+#if defined(_WIN32)
+static DWORD WINAPI worker(LPVOID arg) {
+    run_worker((WorkerArgs *)arg);
+    return 0;
+}
+#else
+static void *worker(void *arg) {
+    run_worker((WorkerArgs *)arg);
+    return NULL;
+}
+#endif
+
+static int detect_threads(void) {
+#if defined(_WIN32)
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    int n = (int)si.dwNumberOfProcessors;
+    return n > 0 ? n : 1;
+#else
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    return n > 0 ? (int)n : 1;
+#endif
 }
 
 static int hex_to_bytes(const char *hex, uint8_t *out) {
@@ -173,13 +244,85 @@ int main(void) {
 
     uint64_t base[25];
     absorb_prefix(base, (const uint8_t *)prefix, (size_t)plen);
+    size_t off0 = (size_t)plen % RATE;
 
-    long long limit = difficulty < 2000000000LL ? difficulty : 2000000000LL;
-    for (long long c = 0; c < limit; c++) {
-        if (check_counter(base, (size_t)plen, (uint64_t)c, target)) {
-            printf("{\"answer\":%lld}\n", c);
-            return 0;
+    uint64_t limit = difficulty < 2000000000LL ? (uint64_t)difficulty : 2000000000ULL;
+    if (limit == 0) {
+        puts("{\"error\":\"answer not found in range\"}");
+        return 1;
+    }
+
+    int nthreads = detect_threads();
+    const char *env = getenv("POW_SOLVER_THREADS");
+    if (env && env[0]) {
+        int v = atoi(env);
+        if (v > 0)
+            nthreads = v;
+    }
+#if defined(_WIN32)
+    if (nthreads > 64)
+        nthreads = 64;
+#endif
+    if ((uint64_t)nthreads > limit)
+        nthreads = (int)limit;
+
+    WorkerArgs *args = (WorkerArgs *)calloc((size_t)nthreads, sizeof(WorkerArgs));
+    if (!args) {
+        puts("{\"error\":\"out of memory\"}");
+        return 1;
+    }
+#if defined(_WIN32)
+    HANDLE *threads = (HANDLE *)calloc((size_t)nthreads, sizeof(HANDLE));
+#else
+    pthread_t *threads = (pthread_t *)calloc((size_t)nthreads, sizeof(pthread_t));
+#endif
+    if (!threads) {
+        free(args);
+        puts("{\"error\":\"out of memory\"}");
+        return 1;
+    }
+
+    uint64_t chunk = (limit + (uint64_t)nthreads - 1) / (uint64_t)nthreads;
+    for (int i = 0; i < nthreads; i++) {
+        args[i].base = base;
+        args[i].off0 = off0;
+        args[i].target = target;
+        args[i].start = (uint64_t)i * chunk;
+        uint64_t end = args[i].start + chunk;
+        args[i].end = end > limit ? limit : end;
+        args[i].result = UINT64_MAX;
+#if defined(_WIN32)
+        threads[i] = CreateThread(NULL, 0, worker, &args[i], 0, NULL);
+        if (!threads[i])
+            run_worker(&args[i]);
+#else
+        pthread_create(&threads[i], NULL, worker, &args[i]);
+#endif
+    }
+
+#if defined(_WIN32)
+    for (int i = 0; i < nthreads; i++) {
+        if (threads[i]) {
+            WaitForSingleObject(threads[i], INFINITE);
+            CloseHandle(threads[i]);
         }
+    }
+#else
+    for (int i = 0; i < nthreads; i++)
+        pthread_join(threads[i], NULL);
+#endif
+
+    uint64_t best = UINT64_MAX;
+    for (int i = 0; i < nthreads; i++)
+        if (args[i].result < best)
+            best = args[i].result;
+
+    free(threads);
+    free(args);
+
+    if (best != UINT64_MAX) {
+        printf("{\"answer\":%llu}\n", (unsigned long long)best);
+        return 0;
     }
     puts("{\"error\":\"answer not found in range\"}");
     return 1;

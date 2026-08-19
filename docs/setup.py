@@ -457,6 +457,33 @@ def create_shortcut():
     return path
 
 
+def build_pow_solver():
+    src = ROOT / "danyapi" / "deepseek" / "pow_solver.c"
+    out = ROOT / "danyapi" / "deepseek" / ("pow_solver.exe" if os.name == "nt" else "pow_solver")
+    cc = shutil.which("clang") or shutil.which("gcc") or shutil.which("cc")
+    if cc is None:
+        print("No C compiler (clang/gcc/cc) found; skipping the native PoW solver build.")
+        print("The Python and Node fallbacks will still solve challenges, just slower.")
+        return
+    if sys.platform == "darwin":
+        flags = ["-O3"]
+    elif os.name == "nt":
+        flags = ["-O3", "-march=native"]
+    else:
+        flags = ["-O3", "-pthread", "-march=native"]
+    cmd = [cc, *flags, "-o", str(out), str(src)]
+    print(f"Building native PoW solver: {' '.join(cmd)}")
+    rc = subprocess.call(cmd, cwd=str(ROOT))
+    if rc != 0 and flags[-1] == "-march=native":
+        cmd = [cc, *flags[:-1], "-o", str(out), str(src)]
+        print(f"Native arch flags failed, retrying: {' '.join(cmd)}")
+        rc = subprocess.call(cmd, cwd=str(ROOT))
+    if rc == 0:
+        print(f"Native PoW solver built: {out}")
+    else:
+        print(f"Native PoW solver build failed (exit {rc}); Python/Node fallbacks still work.")
+
+
 def main():
     print("DanyAPI setup")
     print("==============")
@@ -473,6 +500,8 @@ def main():
         run_pip("requirements.txt")
     if ask("Install development dependencies (tests + linting)?", False):
         run_pip("requirements-dev.txt")
+
+    build_pow_solver()
 
     current = load_env()
     defaults = load_defaults()
