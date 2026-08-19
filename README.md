@@ -6,6 +6,7 @@ OpenAI-compatible HTTP API built on Python + FastAPI. Instead of the paid APIs i
 [![GitHub Release](https://img.shields.io/github/v/release/FANATFANATA/DanyAPI?sort=semver)](https://github.com/FANATFANATA/DanyAPI/releases)
 [![Python](https://img.shields.io/badge/Python-blue)](https://www.python.org/)
 [![Docker](https://img.shields.io/badge/GHCR-ghcr.io%2Ffanatfanata%2Fdanyapi-blue)](https://github.com/FANATFANATA/DanyAPI/pkgs/container/danyapi)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/FANATFANATA/DanyAPI/blob/main/LICENSE)
 
 ## Install
 
