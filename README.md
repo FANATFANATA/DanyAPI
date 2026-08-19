@@ -8,7 +8,7 @@ OpenAI-compatible HTTP API built on Python + FastAPI. Instead of the paid APIs i
 [![Docker](https://img.shields.io/badge/GHCR-ghcr.io%2Ffanatfanata%2Fdanyapi-blue)](https://github.com/FANATFANATA/DanyAPI/pkgs/container/danyapi)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/FANATFANATA/DanyAPI/blob/main/LICENSE)
 
-## Install
+## Install & Upgrade
 
 Windows (PowerShell):
 
