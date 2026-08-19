@@ -29,7 +29,7 @@ jobs:
         run: pip install -r requirements-dev.txt
 
       - name: Build native PoW solver
-        run: clang -O3 -pthread -funroll-loops -o danyapi/deepseek/pow_solver danyapi/deepseek/pow_solver.c
+        run: clang -O3 -pthread -funroll-loops -flto -march=native -mtune=native -o danyapi/deepseek/pow_solver danyapi/deepseek/pow_solver.c
 
       - name: Run unit tests with coverage
         run: python -m pytest -q --cov=danyapi

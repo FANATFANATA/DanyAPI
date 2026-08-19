@@ -465,23 +465,31 @@ def build_pow_solver():
         print("No C compiler (clang/gcc/cc) found; skipping the native PoW solver build.")
         print("The Python and Node fallbacks will still solve challenges, just slower.")
         return
+    cc_name = os.path.basename(cc)
     if sys.platform == "darwin":
-        flags = ["-O3"]
+        base = ["-O3", "-funroll-loops", "-flto", "-fomit-frame-pointer"]
     elif os.name == "nt":
-        flags = ["-O3", "-march=native"]
+        base = ["-O3", "-funroll-loops", "-flto", "-fomit-frame-pointer", "-march=native", "-mtune=native"]
+        if "clang" in cc_name:
+            base.append("-fuse-ld=lld")
     else:
-        flags = ["-O3", "-pthread", "-march=native"]
+        base = ["-O3", "-pthread", "-funroll-loops", "-flto", "-fomit-frame-pointer", "-march=native", "-mtune=native"]
+    variants = [base]
+    if cc_name in ("gcc", "cc") or "gcc" in cc_name:
+        variants.insert(0, [*base, "-ffast-math"])
+    for i, flags in enumerate(variants):
+        cmd = [cc, *flags, "-o", str(out), str(src)]
+        print(f"Building native PoW solver ({'gcc tuned' if i == 0 and len(variants) > 1 else 'base'}): {' '.join(cmd)}")
+        if subprocess.call(cmd, cwd=str(ROOT)) == 0:
+            print(f"Native PoW solver built: {out}")
+            return
+    flags = [f for f in base if f not in ("-march=native", "-mtune=native", "-flto", "-ffast-math")]
     cmd = [cc, *flags, "-o", str(out), str(src)]
-    print(f"Building native PoW solver: {' '.join(cmd)}")
-    rc = subprocess.call(cmd, cwd=str(ROOT))
-    if rc != 0 and flags[-1] == "-march=native":
-        cmd = [cc, *flags[:-1], "-o", str(out), str(src)]
-        print(f"Native arch flags failed, retrying: {' '.join(cmd)}")
-        rc = subprocess.call(cmd, cwd=str(ROOT))
-    if rc == 0:
+    print(f"Falling back to portable build: {' '.join(cmd)}")
+    if subprocess.call(cmd, cwd=str(ROOT)) == 0:
         print(f"Native PoW solver built: {out}")
     else:
-        print(f"Native PoW solver build failed (exit {rc}); Python/Node fallbacks still work.")
+        print("Native PoW solver build failed; Python/Node fallbacks still work.")
 
 
 def main():
