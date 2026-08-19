@@ -79,7 +79,10 @@ class DeepSeekClient:
             resp.raise_for_status()
         except httpx.HTTPStatusError as exc:
             raise DeepSeekError(exc.response.status_code, exc.response.text[:300]) from exc
-        return resp.json()
+        try:
+            return resp.json()
+        except ValueError as exc:
+            raise DeepSeekError(-1, f"invalid JSON response from {path}: {resp.text[:300]}") from exc
 
     @staticmethod
     def _biz(resp: dict) -> dict:
