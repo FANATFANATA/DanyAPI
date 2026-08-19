@@ -107,10 +107,51 @@ def ask(question, default):
         print("    answer y or n")
 
 
+def is_termux():
+    return "com.termux" in sys.prefix or Path("/data/data/com.termux").exists()
+
+
+def ensure_rust_on_termux():
+    if shutil.which("rustc"):
+        return True
+    pkg = shutil.which("pkg")
+    if pkg is None:
+        print("Termux detected but 'pkg' is missing; cannot install Rust automatically.")
+        print("Run: pkg install -y rust binutils clang cmake")
+        return False
+    print("Rust not found. Installing Rust toolchain for Termux (needed to build pydantic-core)...")
+    rc = subprocess.call([pkg, "install", "-y", "rust", "binutils", "clang", "cmake"])
+    return rc == 0
+
+
+def rustup_target_reachable():
+    try:
+        proc = subprocess.run(
+            ["rustup", "target", "list", "--installed"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except OSError, subprocess.TimeoutExpired:
+        return True
+    lines = {line.strip() for line in proc.stdout.splitlines() if line.strip()}
+    return bool(lines) and "aarch64-unknown-linux-android" not in lines
+
+
 def run_pip(req):
     cmd = [sys.executable, "-m", "pip", "install", "-r", req]
+    env = os.environ.copy()
+    if is_termux():
+        if not ensure_rust_on_termux():
+            print(f"Rust unavailable; skipping {req} install.")
+            return
+        env["CRATE_CC_NO_DEFAULTS"] = "1"
+        env["CARGO_BUILD_TARGET"] = "aarch64-linux-android"
+    elif not rustup_target_reachable():
+        print("Rustup lacks the required target; relying on a system Rust toolchain.")
+        print("Install it with: rustup target add aarch64-unknown-linux-android")
     print(f"Running: {' '.join(cmd)}")
-    rc = subprocess.call(cmd, cwd=str(ROOT))
+    rc = subprocess.call(cmd, cwd=str(ROOT), env=env)
     if rc != 0:
         print(f"pip install failed for {req} (exit {rc})")
         sys.exit(rc)
