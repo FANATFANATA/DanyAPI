@@ -131,8 +131,8 @@
                 <h2 id="native-pow-solver" data-i18n="pl_pow">Native PoW solver (optional)</h2>
                 <p data-i18n-html="cf_pow_p1">If you have a C compiler (<code>clang</code> or <code>gcc</code>), build the binary for maximum speed:</p>
                 <div class="code-header">bash</div>
-                <pre><code>clang -O2 -o danyapi/deepseek/pow_solver.exe danyapi/deepseek/pow_solver.c  # Windows
-                    clang -O2 -o danyapi/deepseek/pow_solver danyapi/deepseek/pow_solver.c      # Linux/macOS</code></pre>
+                <pre><code>clang -O3 -funroll-loops -o danyapi/deepseek/pow_solver.exe danyapi/deepseek/pow_solver.c  # Windows
+                    clang -O3 -pthread -funroll-loops -o danyapi/deepseek/pow_solver danyapi/deepseek/pow_solver.c      # Linux/macOS</code></pre>
                 <p data-i18n-html="cf_pow_p2">
                     The prebuilt Docker image compiles this binary at build time, so container
                     users get the native solver out of the box.

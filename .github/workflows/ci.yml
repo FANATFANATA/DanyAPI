@@ -29,31 +29,10 @@ jobs:
         run: pip install -r requirements-dev.txt
 
       - name: Build native PoW solver
-        run: clang -O3 -pthread -o danyapi/deepseek/pow_solver danyapi/deepseek/pow_solver.c
+        run: clang -O3 -pthread -funroll-loops -o danyapi/deepseek/pow_solver danyapi/deepseek/pow_solver.c
 
       - name: Run unit tests with coverage
         run: python -m pytest -q --cov=danyapi
-
-  native-build:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.14"
-          cache: pip
-          cache-dependency-path: requirements-dev.txt
-
-      - name: Install dependencies
-        run: pip install -r requirements-dev.txt
-
-      - name: Build native PoW solver
-        run: clang -O3 -pthread -o danyapi/deepseek/pow_solver danyapi/deepseek/pow_solver.c
-
-      - name: Verify native and node solvers
-        run: python -m pytest -q tests/test_pow.py
 
   docker-build:
     runs-on: ubuntu-latest

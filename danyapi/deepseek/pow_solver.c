@@ -22,36 +22,65 @@ static const uint64_t RC[24] = {
     0x8000000080008081ULL, 0x8000000000008080ULL, 0x0000000080000001ULL, 0x8000000080008008ULL,
 };
 
-static const int ROT[5][5] = {
-    { 0, 36, 3, 41, 18 },
-    { 1, 44, 10, 45, 2 },
-    { 62, 6, 43, 15, 61 },
-    { 28, 55, 25, 21, 56 },
-    { 27, 20, 39, 8, 14 },
-};
-
 static inline uint64_t rotl64(uint64_t x, int n) {
-    if (n == 0) return x;
     return (x << n) | (x >> (64 - n));
 }
 
-static void keccak_f(uint64_t *st) {
-    uint64_t C[5], D[5], B[25];
-    for (int round = 0; round < ROUNDS; round++) {
-        for (int x = 0; x < 5; x++)
-            C[x] = st[x] ^ st[x + 5] ^ st[x + 10] ^ st[x + 15] ^ st[x + 20];
-        for (int x = 0; x < 5; x++)
-            D[x] = C[(x + 4) % 5] ^ rotl64(C[(x + 1) % 5], 1);
-        for (int x = 0; x < 5; x++)
-            for (int y = 0; y < 5; y++)
-                st[x + 5 * y] ^= D[x];
-        for (int x = 0; x < 5; x++)
-            for (int y = 0; y < 5; y++)
-                B[y + 5 * ((2 * x + 3 * y) % 5)] = rotl64(st[x + 5 * y], ROT[x][y]);
-        for (int x = 0; x < 5; x++)
-            for (int y = 0; y < 5; y++)
-                st[x + 5 * y] = B[x + 5 * y] ^ ((~B[(x + 1) % 5 + 5 * y]) & B[(x + 2) % 5 + 5 * y]);
-        st[0] ^= RC[round + 1];
+static void keccak_f(uint64_t *s) {
+    uint64_t bc[5], t, p[25];
+    for (int r = 0; r < ROUNDS; r++) {
+        bc[0] = s[0] ^ s[5] ^ s[10] ^ s[15] ^ s[20];
+        bc[1] = s[1] ^ s[6] ^ s[11] ^ s[16] ^ s[21];
+        bc[2] = s[2] ^ s[7] ^ s[12] ^ s[17] ^ s[22];
+        bc[3] = s[3] ^ s[8] ^ s[13] ^ s[18] ^ s[23];
+        bc[4] = s[4] ^ s[9] ^ s[14] ^ s[19] ^ s[24];
+
+        t = bc[4] ^ rotl64(bc[1], 1);
+        s[0] ^= t; s[5] ^= t; s[10] ^= t; s[15] ^= t; s[20] ^= t;
+        t = bc[0] ^ rotl64(bc[2], 1);
+        s[1] ^= t; s[6] ^= t; s[11] ^= t; s[16] ^= t; s[21] ^= t;
+        t = bc[1] ^ rotl64(bc[3], 1);
+        s[2] ^= t; s[7] ^= t; s[12] ^= t; s[17] ^= t; s[22] ^= t;
+        t = bc[2] ^ rotl64(bc[4], 1);
+        s[3] ^= t; s[8] ^= t; s[13] ^= t; s[18] ^= t; s[23] ^= t;
+        t = bc[3] ^ rotl64(bc[0], 1);
+        s[4] ^= t; s[9] ^= t; s[14] ^= t; s[19] ^= t; s[24] ^= t;
+
+        p[0] = s[0];
+        p[10] = rotl64(s[1], 1);
+        p[20] = rotl64(s[2], 62);
+        p[5] = rotl64(s[3], 28);
+        p[15] = rotl64(s[4], 27);
+        p[16] = rotl64(s[5], 36);
+        p[1] = rotl64(s[6], 44);
+        p[11] = rotl64(s[7], 6);
+        p[21] = rotl64(s[8], 55);
+        p[6] = rotl64(s[9], 20);
+        p[7] = rotl64(s[10], 3);
+        p[17] = rotl64(s[11], 10);
+        p[2] = rotl64(s[12], 43);
+        p[12] = rotl64(s[13], 25);
+        p[22] = rotl64(s[14], 39);
+        p[23] = rotl64(s[15], 41);
+        p[8] = rotl64(s[16], 45);
+        p[18] = rotl64(s[17], 15);
+        p[3] = rotl64(s[18], 21);
+        p[13] = rotl64(s[19], 8);
+        p[14] = rotl64(s[20], 18);
+        p[24] = rotl64(s[21], 2);
+        p[9] = rotl64(s[22], 61);
+        p[19] = rotl64(s[23], 56);
+        p[4] = rotl64(s[24], 14);
+
+        for (int y = 0; y < 25; y += 5) {
+            uint64_t a0 = p[y], a1 = p[y + 1], a2 = p[y + 2], a3 = p[y + 3], a4 = p[y + 4];
+            s[y]     = a0 ^ ((~a1) & a2);
+            s[y + 1] = a1 ^ ((~a2) & a3);
+            s[y + 2] = a2 ^ ((~a3) & a4);
+            s[y + 3] = a3 ^ ((~a4) & a0);
+            s[y + 4] = a4 ^ ((~a0) & a1);
+        }
+        s[0] ^= RC[r + 1];
     }
 }
 
@@ -241,6 +270,10 @@ int main(void) {
 
     char prefix[4120];
     int plen = snprintf(prefix, sizeof(prefix), "%s_%lld_", salt, expire_at);
+    if (plen < 0 || (size_t)plen >= sizeof(prefix)) {
+        puts("{\"error\":\"salt too long\"}");
+        return 1;
+    }
 
     uint64_t base[25];
     absorb_prefix(base, (const uint8_t *)prefix, (size_t)plen);
