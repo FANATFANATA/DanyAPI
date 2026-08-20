@@ -32,6 +32,7 @@ class QwenStreamReconstructor:
         self.content: str = ""
         self.reasoning: str = ""
         self.image_urls: list[str] = []
+        self.image_size: tuple[int, int] | None = None
         self.finished: bool = False
         self.error: dict | None = None
         self.usage: dict = {}
@@ -93,6 +94,13 @@ class QwenStreamReconstructor:
                     self.image_urls.append(image_field)
             extra = delta.get("extra")
             if isinstance(extra, dict):
+                hw = extra.get("output_image_hw")
+                if isinstance(hw, list) and hw:
+                    pair = hw[0]
+                    if isinstance(pair, list) and len(pair) >= 2:
+                        w, h = int(pair[0]), int(pair[1])
+                        if w > 0 and h > 0:
+                            self.image_size = (w, h)
                 for key in ("image_url", "image_urls", "images", "url"):
                     val = extra.get(key)
                     if isinstance(val, str) and val.startswith("http"):

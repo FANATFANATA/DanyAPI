@@ -569,9 +569,22 @@ async def image_generations(req: ImageGenerationRequest) -> dict:
         raise HTTPException(429, "all accounts are busy, try again later") from None
 
     data = []
+    want_b64 = req.response_format == "b64_json"
     for url in result["image_urls"]:
-        entry: dict[str, str] = {"url": url}
-        data.append(entry)
+        if want_b64:
+            try:
+                async with httpx.AsyncClient(follow_redirects=True, timeout=30) as hc:
+                    img_resp = await hc.get(url)
+                    if img_resp.status_code == 200:
+                        import base64 as b64mod
+
+                        data.append({"b64_json": b64mod.b64encode(img_resp.content).decode()})
+                    else:
+                        data.append({"url": url})
+            except Exception:
+                data.append({"url": url})
+        else:
+            data.append({"url": url})
 
     if not data:
         data.append({"url": "", "revised_prompt": result.get("revised_prompt", "")})
