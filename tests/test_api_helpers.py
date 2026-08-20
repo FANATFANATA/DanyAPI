@@ -557,8 +557,9 @@ async def test_success_filters():
     result = await openai_mod._fetch_qwen_models(client)
     ids = [m["id"] for m in result]
     assert "m1" in ids
-    assert "m2" not in ids
+    assert "m2" in ids
     assert "m3" in ids
+    assert len(result) == 3
 
 
 async def test_error_uses_defaults():

@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import re
+
 from ..deepseek.sse import SSEEvent
 
 ANSWER_PHASES = {"answer", "deep_research_answer", "ReportGeneration", "PdfMdGen"}
+IMAGE_PHASES = {"image", "image_generation", "image_gen", "t2i"}
 THINK_PHASES = {"think", "DeepThinking"}
 SUMMARY_PHASE = "thinking_summary"
+
+_IMAGE_URL_RE = re.compile(r"!\[[^\]]*\]\((https?://[^\s)]+)\)|(https?://cdn\.qwenlm\.ai/[^\s)\"]+)")
 
 
 def _delta_text(delta: dict, key: str) -> str:
@@ -12,16 +17,41 @@ def _delta_text(delta: dict, key: str) -> str:
     return value if isinstance(value, str) else ""
 
 
+def _extract_image_urls(text: str) -> list[str]:
+    urls: list[str] = []
+    for match in _IMAGE_URL_RE.finditer(text):
+        url = match.group(1) or match.group(2)
+        if url:
+            urls.append(url)
+    return urls
+
+
 class QwenStreamReconstructor:
     def __init__(self) -> None:
         self.response_id: str | None = None
         self.content: str = ""
         self.reasoning: str = ""
+        self.image_urls: list[str] = []
         self.finished: bool = False
         self.error: dict | None = None
         self.usage: dict = {}
         self._prev_content: str = ""
         self._prev_reasoning: str = ""
+        self._seen_image_urls: set[str] = set()
+
+    def _collect_image_urls(self, text: str) -> None:
+        for url in _extract_image_urls(text):
+            if url not in self._seen_image_urls:
+                self._seen_image_urls.add(url)
+                self.image_urls.append(url)
+
+    def _extract_images_from_content(self, content: str) -> str:
+        if "cdn.qwenlm.ai" not in content and "![" not in content:
+            return content
+        self._collect_image_urls(content)
+        cleaned = _IMAGE_URL_RE.sub("", content)
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+        return cleaned
 
     def handle(self, event: SSEEvent) -> None:
         data = event.data
@@ -51,10 +81,36 @@ class QwenStreamReconstructor:
         if delta.get("status") == "finished":
             self.finished = True
         phase = delta.get("phase") or ""
-        if phase in ANSWER_PHASES:
+        if phase in IMAGE_PHASES:
+            text = _delta_text(delta, "content")
+            if text:
+                self._collect_image_urls(text)
+                self.content += text
+            image_field = delta.get("image_url") or delta.get("image")
+            if isinstance(image_field, str) and image_field.startswith("http"):
+                if image_field not in self._seen_image_urls:
+                    self._seen_image_urls.add(image_field)
+                    self.image_urls.append(image_field)
+            extra = delta.get("extra")
+            if isinstance(extra, dict):
+                for key in ("image_url", "image_urls", "images", "url"):
+                    val = extra.get(key)
+                    if isinstance(val, str) and val.startswith("http"):
+                        if val not in self._seen_image_urls:
+                            self._seen_image_urls.add(val)
+                            self.image_urls.append(val)
+                    elif isinstance(val, list):
+                        for item in val:
+                            item_url = item if isinstance(item, str) else (item.get("url") if isinstance(item, dict) else None)
+                            if isinstance(item_url, str) and item_url.startswith("http"):
+                                if item_url not in self._seen_image_urls:
+                                    self._seen_image_urls.add(item_url)
+                                    self.image_urls.append(item_url)
+        elif phase in ANSWER_PHASES:
             text = _delta_text(delta, "content")
             if text:
                 self.content += text
+                self._collect_image_urls(text)
         elif phase in THINK_PHASES:
             text = _delta_text(delta, "content")
             if text:
@@ -79,7 +135,7 @@ class QwenStreamReconstructor:
 
     @property
     def has_content(self) -> bool:
-        return bool(self.content or self.reasoning)
+        return bool(self.content or self.reasoning or self.image_urls)
 
     @property
     def usage_tokens(self) -> dict:

@@ -114,7 +114,7 @@ async def _prepare_session(account, pool, existing_sid: str | None, model_id: st
     return session, session_key
 
 
-async def _send_completion(client: QwenClient, session, prompt: str, model_id: str, thinking: bool, search: bool):
+async def _send_completion(client: QwenClient, session, prompt: str, model_id: str, thinking: bool, search: bool, chat_type: str = "t2t"):
     try:
         resp = await client.completion(
             chat_session_id=session.id,
@@ -123,6 +123,7 @@ async def _send_completion(client: QwenClient, session, prompt: str, model_id: s
             model=model_id,
             thinking=thinking,
             search=search,
+            chat_type=chat_type,
         )
     except httpx.HTTPStatusError as exc:
         raise HTTPException(exc.response.status_code, exc.response.text[:500]) from exc
@@ -678,6 +679,396 @@ async def stream_openai(
                     "usage": usage,
                 }
             )
+        yield sse(
+            {
+                "id": chunk_id,
+                "session_id": session_key,
+                "object": "chat.completion.chunk",
+                "choices": [],
+            }
+        )
+        yield "data: [DONE]\n\n"
+
+
+async def collect_image(
+    account,
+    pool,
+    existing_sid,
+    lock,
+    prompt,
+    model,
+    model_id,
+    context_seq: tuple[str, ...] | None = None,
+):
+    await _human_delay()
+    async with account_lock(lock, settings.acquire_timeout):
+        session, session_key = await _prepare_session(account, pool, existing_sid, model_id, context_seq)
+        stop_response_id: str | None = None
+        try:
+            rec: QwenStreamReconstructor | None = None
+            attempt = 0
+            while True:
+                if attempt:
+                    await asyncio.sleep(min(RETRY_BACKOFF_SEC * (2 ** (attempt - 1)), RETRY_BACKOFF_MAX_SEC))
+                try:
+                    resp = await _send_completion(account.client, session, prompt, model_id, False, False, chat_type="t2i")
+                except ContextLimitError:
+                    _drop_session(pool, account, session_key)
+                    raise HTTPException(400, "context length exceeded: conversation too long, start a new conversation") from None
+                except HTTPException as exc:
+                    if _is_retryable_http(exc) and attempt < MAX_RETRIES:
+                        attempt += 1
+                        log.warning(
+                            "qwen image provider error (%s), attempt %d/%d",
+                            exc.status_code,
+                            attempt,
+                            MAX_RETRIES,
+                        )
+                        continue
+                    raise
+                rec = QwenStreamReconstructor()
+                incremental = IncrementalSSE()
+                try:
+                    async for chunk in resp.aiter_bytes():
+                        for event in incremental.feed(chunk):
+                            rec.handle(event)
+                    for event in incremental.finish():
+                        rec.handle(event)
+                finally:
+                    if rec.response_id:
+                        stop_response_id = rec.response_id
+                    await resp.aclose()
+                if _is_retryable_error(rec) and attempt < MAX_RETRIES:
+                    attempt += 1
+                    log.warning(
+                        "qwen image retryable error (%s), attempt %d/%d",
+                        error_code(rec.error),
+                        attempt,
+                        MAX_RETRIES,
+                    )
+                    continue
+                break
+        except asyncio.CancelledError:
+            await _try_stop_stream(account.client, session.id, stop_response_id)
+            raise
+
+        assert rec is not None
+        if _is_context_limit(rec) and not rec.has_content:
+            _drop_session(pool, account, session_key)
+            raise HTTPException(400, "context length exceeded: conversation too long, start a new conversation")
+        usage = _accumulate_usage(session, rec)
+        account.sessions.touch_last_message(session_key, rec.response_id)
+
+        if not rec.has_content and rec.error:
+            raise HTTPException(_error_status(error_code(rec.error)), _error_body(rec))
+
+        return {
+            "image_urls": rec.image_urls,
+            "revised_prompt": rec.content or "",
+            "usage": usage,
+            "session_id": session_key,
+        }
+
+
+async def stream_image(
+    account,
+    pool,
+    existing_sid,
+    lock,
+    prompt,
+    model,
+    model_id,
+    context_seq: tuple[str, ...] | None = None,
+):
+    chunk_id = f"chatcmpl-{uuid.uuid4().hex}"
+    created = int(time.time())
+
+    def sse(data: dict) -> str:
+        return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+    await _human_delay()
+    async with account_lock(lock, settings.acquire_timeout):
+        try:
+            session, session_key = await _prepare_session(account, pool, existing_sid, model_id, context_seq)
+        except HTTPException as exc:
+            detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+            yield sse(
+                {
+                    "id": chunk_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model,
+                    "error": {"message": detail},
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "error"}],
+                }
+            )
+            yield sse(
+                {
+                    "id": chunk_id,
+                    "session_id": None,
+                    "object": "chat.completion.chunk",
+                    "choices": [],
+                }
+            )
+            yield "data: [DONE]\n\n"
+            return
+
+        rec: QwenStreamReconstructor | None = None
+        stop_response_id: str | None = None
+        attempt = 0
+        while True:
+            if attempt:
+                await asyncio.sleep(min(RETRY_BACKOFF_SEC * (2 ** (attempt - 1)), RETRY_BACKOFF_MAX_SEC))
+            try:
+                resp = await _send_completion(account.client, session, prompt, model_id, False, False, chat_type="t2i")
+            except ContextLimitError:
+                _drop_session(pool, account, session_key)
+                yield sse(
+                    {
+                        "id": chunk_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": model,
+                        "error": {
+                            "message": "context length exceeded: conversation too long, start a new conversation",
+                            "code": "context_length_exceeded",
+                        },
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {},
+                                "finish_reason": "length",
+                            }
+                        ],
+                    }
+                )
+                yield sse(
+                    {
+                        "id": chunk_id,
+                        "session_id": session_key,
+                        "object": "chat.completion.chunk",
+                        "choices": [],
+                    }
+                )
+                yield "data: [DONE]\n\n"
+                return
+            except HTTPException as exc:
+                if _is_retryable_http(exc) and attempt < MAX_RETRIES:
+                    attempt += 1
+                    log.warning(
+                        "qwen image provider error (%s), attempt %d/%d",
+                        exc.status_code,
+                        attempt,
+                        MAX_RETRIES,
+                    )
+                    continue
+                detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+                yield sse(
+                    {
+                        "id": chunk_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": model,
+                        "error": {"message": detail},
+                        "choices": [{"index": 0, "delta": {}, "finish_reason": "error"}],
+                    }
+                )
+                yield sse(
+                    {
+                        "id": chunk_id,
+                        "session_id": session_key,
+                        "object": "chat.completion.chunk",
+                        "choices": [],
+                    }
+                )
+                yield "data: [DONE]\n\n"
+                return
+            rec = QwenStreamReconstructor()
+            incremental = IncrementalSSE()
+            got_content = False
+            pending: list[str] = []
+            try:
+                async for chunk in resp.aiter_bytes():
+                    for event in incremental.feed(chunk):
+                        rec.handle(event)
+                        c_diff, r_diff = rec.take_diffs()
+                        if c_diff or r_diff:
+                            got_content = True
+                        if not pending:
+                            pending.append(
+                                sse(
+                                    {
+                                        "id": chunk_id,
+                                        "object": "chat.completion.chunk",
+                                        "created": created,
+                                        "model": model,
+                                        "choices": [
+                                            {
+                                                "index": 0,
+                                                "delta": {"role": "assistant"},
+                                                "finish_reason": None,
+                                            }
+                                        ],
+                                    }
+                                )
+                            )
+                        delta: dict = {}
+                        if c_diff:
+                            delta["content"] = c_diff
+                        if r_diff:
+                            delta["reasoning_content"] = r_diff
+                        if delta:
+                            pending.append(
+                                sse(
+                                    {
+                                        "id": chunk_id,
+                                        "object": "chat.completion.chunk",
+                                        "created": created,
+                                        "model": model,
+                                        "choices": [
+                                            {
+                                                "index": 0,
+                                                "delta": delta,
+                                                "finish_reason": None,
+                                            }
+                                        ],
+                                    }
+                                )
+                            )
+                        if got_content:
+                            for line in pending:
+                                yield line
+                            pending.clear()
+            finally:
+                if rec.response_id:
+                    stop_response_id = rec.response_id
+                if sys.exc_info()[0] is not None:
+                    await _try_stop_stream(account.client, session.id, stop_response_id)
+                await resp.aclose()
+            if got_content:
+                break
+            if _is_retryable_error(rec) and attempt < MAX_RETRIES:
+                attempt += 1
+                log.warning(
+                    "qwen image retryable error (%s), attempt %d/%d",
+                    error_code(rec.error),
+                    attempt,
+                    MAX_RETRIES,
+                )
+                continue
+            break
+
+        assert rec is not None
+        if _is_context_limit(rec) and not rec.has_content:
+            _drop_session(pool, account, session_key)
+            yield sse(
+                {
+                    "id": chunk_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model,
+                    "error": {
+                        "message": "context length exceeded: conversation too long, start a new conversation",
+                        "code": "context_length_exceeded",
+                    },
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {},
+                            "finish_reason": "length",
+                        }
+                    ],
+                }
+            )
+            yield sse(
+                {
+                    "id": chunk_id,
+                    "session_id": session_key,
+                    "object": "chat.completion.chunk",
+                    "choices": [],
+                }
+            )
+            yield "data: [DONE]\n\n"
+            return
+        _accumulate_usage(session, rec)
+        account.sessions.touch_last_message(session_key, rec.response_id)
+
+        if not rec.has_content and rec.error:
+            err = rec.error
+            code = error_code(rec.error)
+            yield sse(
+                {
+                    "id": chunk_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model,
+                    "error": {
+                        "message": err.get("details") or err.get("message") or "Qwen server error, try again later",
+                        "code": code,
+                    },
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {},
+                            "finish_reason": code or "error",
+                        }
+                    ],
+                }
+            )
+            yield sse(
+                {
+                    "id": chunk_id,
+                    "session_id": session_key,
+                    "object": "chat.completion.chunk",
+                    "choices": [],
+                }
+            )
+            yield "data: [DONE]\n\n"
+            return
+
+        if rec.image_urls:
+            image_content = "\n".join(rec.image_urls)
+            yield sse(
+                {
+                    "id": chunk_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"content": image_content},
+                            "finish_reason": None,
+                        }
+                    ],
+                }
+            )
+        elif rec.content:
+            yield sse(
+                {
+                    "id": chunk_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"content": rec.content},
+                            "finish_reason": None,
+                        }
+                    ],
+                }
+            )
+
+        yield sse(
+            {
+                "id": chunk_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            }
+        )
         yield sse(
             {
                 "id": chunk_id,

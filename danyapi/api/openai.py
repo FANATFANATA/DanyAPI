@@ -105,6 +105,16 @@ class ChatCompletionRequest(BaseModel):
     stream_options: Any = None
 
 
+class ImageGenerationRequest(BaseModel):
+    model: str = Field(default="qwen-image-gen")
+    prompt: str
+    n: int = Field(default=1, ge=1, le=4)
+    size: str | None = None
+    response_format: str = Field(default="url")
+    session_id: str | None = None
+    user: str | None = None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     accounts: list[DeepSeekAccount] = []
@@ -213,14 +223,24 @@ async def _fetch_qwen_models(client: QwenClient) -> list[dict]:
         info = model.get("info")
         meta = (info or {}).get("meta") if isinstance(info, dict) else None
         chat_types = (meta or {}).get("chat_type") if isinstance(meta, dict) else None
-        if chat_types is not None and "t2t" not in chat_types:
-            continue
+        chat_types = chat_types or []
+        if "t2t" in chat_types:
+            model_type = "chat"
+        elif "t2i" in chat_types:
+            model_type = "image"
+        elif "t2v" in chat_types:
+            model_type = "video"
+        elif chat_types:
+            model_type = "chat"
+        else:
+            model_type = "chat"
         models.append(
             {
                 "id": model["id"],
                 "name": model.get("name") or model["id"],
                 "owned_by": "qwen",
-                "model_type": "chat",
+                "model_type": model_type,
+                "chat_types": chat_types,
             }
         )
     if not models:
@@ -241,7 +261,7 @@ async def _extract_request_model(request: Request) -> str | None:
         return None
     try:
         payload = json.loads(body)
-    except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
+    except json.JSONDecodeError, UnicodeDecodeError, TypeError:
         return None
     if isinstance(payload, dict):
         model = payload.get("model")
@@ -520,6 +540,48 @@ async def chat_completions(req: ChatCompletionRequest) -> Any:
     if provider == "qwen":
         return await _chat_completions_qwen(req)
     return await _chat_completions_deepseek(req)
+
+
+@app.post("/v1/images/generations")
+async def image_generations(req: ImageGenerationRequest) -> dict:
+    pool: AccountPool = app.state.qwen_pool
+    if pool is None:
+        raise HTTPException(503, "qwen provider is not configured (required for image generation)")
+
+    context_seq = None
+    if req.session_id:
+        account, existing_sid = await _acquire_account(pool, req.session_id)
+    else:
+        account, existing_sid = await _acquire_account(pool, None)
+
+    try:
+        result = await qwen_api.collect_image(
+            account=account,
+            pool=pool,
+            existing_sid=existing_sid,
+            lock=account.sem,
+            prompt=req.prompt,
+            model=req.model,
+            model_id=req.model,
+            context_seq=context_seq,
+        )
+    except AccountPoolBusy:
+        raise HTTPException(429, "all accounts are busy, try again later") from None
+
+    data = []
+    for url in result["image_urls"]:
+        entry: dict[str, str] = {"url": url}
+        data.append(entry)
+
+    if not data:
+        data.append({"url": "", "revised_prompt": result.get("revised_prompt", "")})
+
+    return {
+        "created": int(time.time()),
+        "data": data,
+        "usage": result.get("usage"),
+        "session_id": result.get("session_id"),
+    }
 
 
 async def _acquire_account(pool: AccountPool, session_id: str | None):
@@ -1083,7 +1145,7 @@ async def _collect_reduced(
                     rec.handle(event)
             finally:
                 await resp.aclose()
-        except (HTTPException, httpx.HTTPError):
+        except HTTPException, httpx.HTTPError:
             if session_key is not None:
                 _drop_session(pool, account, session_key)
             continue

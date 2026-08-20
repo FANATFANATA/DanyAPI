@@ -134,7 +134,7 @@ class QwenClient:
             if data.get("success") is True:
                 return True
             return bool(data.get("id"))
-        except (httpx.HTTPError, ValueError):
+        except httpx.HTTPError, ValueError:
             return False
 
     async def login(self, email: str, password: str) -> str:
@@ -182,8 +182,9 @@ class QwenClient:
         model: str,
         thinking: bool = False,
         search: bool = False,
+        chat_type: str = "t2t",
     ) -> httpx.Response:
-        log.debug("qwen completion start session=%s model=%s", chat_session_id, model)
+        log.debug("qwen completion start session=%s model=%s chat_type=%s", chat_session_id, model, chat_type)
         ts = int(datetime.datetime.now().timestamp())
         user_fid = new_uuid()
         response_fid = new_uuid()
@@ -208,10 +209,10 @@ class QwenClient:
             "timestamp": ts,
             "models": [model],
             "model": "",
-            "chat_type": "t2t",
+            "chat_type": chat_type,
             "feature_config": feature_config,
-            "extra": {"meta": {"subChatType": "t2t"}},
-            "sub_chat_type": "t2t",
+            "extra": {"meta": {"subChatType": chat_type}},
+            "sub_chat_type": chat_type,
             "parent_id": parent_message_id,
         }
         body = {
