@@ -261,7 +261,7 @@ async def _extract_request_model(request: Request) -> str | None:
         return None
     try:
         payload = json.loads(body)
-    except json.JSONDecodeError, UnicodeDecodeError, TypeError:
+    except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
         return None
     if isinstance(payload, dict):
         model = payload.get("model")
@@ -1158,7 +1158,7 @@ async def _collect_reduced(
                     rec.handle(event)
             finally:
                 await resp.aclose()
-        except HTTPException, httpx.HTTPError:
+        except (HTTPException, httpx.HTTPError):
             if session_key is not None:
                 _drop_session(pool, account, session_key)
             continue

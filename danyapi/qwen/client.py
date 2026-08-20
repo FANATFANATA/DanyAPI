@@ -134,7 +134,7 @@ class QwenClient:
             if data.get("success") is True:
                 return True
             return bool(data.get("id"))
-        except httpx.HTTPError, ValueError:
+        except (httpx.HTTPError, ValueError):
             return False
 
     async def login(self, email: str, password: str) -> str:
