@@ -132,7 +132,7 @@ def rustup_target_reachable():
             text=True,
             timeout=30,
         )
-    except OSError, subprocess.TimeoutExpired:
+    except (OSError, subprocess.TimeoutExpired):
         return True
     lines = {line.strip() for line in proc.stdout.splitlines() if line.strip()}
     return bool(lines) and "aarch64-unknown-linux-android" not in lines
@@ -420,7 +420,7 @@ def collect_provider(name, current, defaults):
         print(f"  {name} password (empty keeps unset):")
     try:
         password = getpass.getpass("    ").strip()
-    except EOFError, OSError:
+    except (EOFError, OSError):
         _EOF_SEEN = True
         password = ""
     if password == "":
