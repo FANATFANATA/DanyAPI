@@ -1931,8 +1931,236 @@ hr {
 .landing .model-list code { background: transparent; padding: 0; color: var(--l-text); font-size: 0.82rem; white-space: nowrap; }
 .landing .model-chip {
     font-size: 0.7rem; color: var(--l-muted); padding: 0.16rem 0.55rem; border-radius: 999px;
-    border: 1px solid var(--l-border); background: rgba(255,255,255,0.03);
 }
+
+@media (max-width: 1024px) {
+    .landing .hero-inner {
+        grid-template-columns: 1fr;
+        gap: 2.5rem;
+    }
+    .landing .features-grid {
+        grid-template-columns: repeat(2, 1fr);
+    }
+    .landing .stats {
+        grid-template-columns: repeat(3, 1fr);
+    }
+}
+
+@media (max-width: 768px) {
+    .landing .nav-inner {
+        padding: 0.7rem 1rem;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+    }
+    .landing .nav-links {
+        display: none;
+    }
+    .landing .nav-links a {
+        padding: 0.35rem 0.65rem;
+        font-size: 0.82rem;
+    }
+    .landing .nav-actions {
+        gap: 0.4rem;
+    }
+    .landing .btn {
+        padding: 0.5rem 0.9rem;
+        font-size: 0.85rem;
+    }
+    .landing .btn-lg {
+        padding: 0.7rem 1.2rem;
+        font-size: 0.92rem;
+    }
+    .landing .hero {
+        padding: 7rem 1rem 2rem;
+    }
+    .landing .hero-title {
+        font-size: clamp(1.8rem, 7vw, 2.5rem);
+    }
+    .landing .hero-sub {
+        font-size: 1rem;
+    }
+    .landing .hero-cta {
+        flex-direction: column;
+        gap: 0.7rem;
+    }
+    .landing .hero-cta .btn {
+        width: 100%;
+        justify-content: center;
+    }
+    .landing .features-grid {
+        grid-template-columns: 1fr;
+        gap: 1rem;
+    }
+    .landing .models-grid {
+        grid-template-columns: 1fr;
+        gap: 1.2rem;
+    }
+    .landing .stats {
+        grid-template-columns: repeat(2, 1fr);
+    }
+    .landing .stat {
+        padding: 1.2rem 0.9rem;
+    }
+    .landing .stat-num {
+        font-size: 1.4rem;
+    }
+    .landing .section {
+        padding: 4rem 1rem;
+    }
+    .landing .section-title {
+        font-size: clamp(1.4rem, 5vw, 2rem);
+    }
+    .landing .terminal-body {
+        padding: 0.9rem 1rem;
+        font-size: 0.72rem;
+        min-height: 250px;
+    }
+    .landing .model-card {
+        padding: 1.5rem 1.3rem 1.4rem;
+    }
+}
+
+@media (max-width: 480px) {
+    .landing .nav-inner {
+        padding: 0.6rem 0.8rem;
+    }
+    .landing .brand-name {
+        font-size: 0.95rem;
+    }
+    .landing .lang-btn {
+        padding: 0.35rem 0.6rem;
+        font-size: 0.7rem;
+    }
+    .landing .btn-icon {
+        padding: 0.5rem 0.6rem;
+    }
+    .landing .hero {
+        padding: 6rem 0.8rem 1.5rem;
+    }
+    .landing .hero-badge {
+        padding: 0.35rem 0.75rem;
+        font-size: 0.7rem;
+        margin-bottom: 1.2rem;
+    }
+    .landing .hero-title {
+        font-size: clamp(1.6rem, 8vw, 2.2rem);
+        margin-bottom: 1rem;
+    }
+    .landing .hero-sub {
+        font-size: 0.95rem;
+        margin-bottom: 1.5rem;
+    }
+    .landing .pill {
+        padding: 0.28rem 0.7rem;
+        font-size: 0.68rem;
+    }
+    .landing .stats {
+        grid-template-columns: 1fr;
+        gap: 1px;
+    }
+    .landing .stat {
+        padding: 1rem 0.8rem;
+    }
+    .landing .stat-num {
+        font-size: 1.3rem;
+    }
+    .landing .stat-label {
+        font-size: 0.75rem;
+    }
+    .landing .section {
+        padding: 3rem 0.8rem;
+    }
+    .landing .section-head {
+        margin-bottom: 2.5rem;
+    }
+    .landing .section-title {
+        font-size: clamp(1.3rem, 6vw, 1.8rem);
+    }
+    .landing .section-sub {
+        font-size: 0.95rem;
+    }
+    .landing .eyebrow {
+        font-size: 0.68rem;
+    }
+    .landing .card {
+        padding: 1.4rem 1.3rem;
+    }
+    .landing .card-icon {
+        width: 38px;
+        height: 38px;
+    }
+    .landing .card h3 {
+        font-size: 1rem;
+    }
+    .landing .card p {
+        font-size: 0.88rem;
+    }
+    .landing .terminal {
+        border-radius: 14px;
+    }
+    .landing .terminal-body {
+        padding: 0.8rem 0.9rem;
+        font-size: 0.68rem;
+        line-height: 1.6;
+        min-height: 220px;
+    }
+    .landing .terminal-bar {
+        padding: 0.6rem 0.9rem;
+    }
+    .landing .terminal-title {
+        font-size: 0.65rem;
+        margin-right: 2rem;
+    }
+    .landing .model-card {
+        padding: 1.3rem 1.1rem 1.2rem;
+        border-radius: 16px;
+    }
+    .landing .model-head {
+        margin-bottom: 1.2rem;
+    }
+    .landing .model-head h3 {
+        font-size: 1.05rem;
+    }
+    .landing .model-logo-tile {
+        width: 48px;
+        height: 48px;
+    }
+    .landing .model-list li {
+        padding: 0.5rem 0.7rem;
+    }
+    .landing .model-list code {
+        font-size: 0.78rem;
+    }
+    .landing .model-chip {
+        font-size: 0.65rem;
+        padding: 0.14rem 0.5rem;
+    }
+    .landing .cta-inner {
+        padding: 2.5rem 1.2rem;
+    }
+    .landing .cta-inner h2 {
+        font-size: clamp(1.3rem, 6vw, 1.8rem);
+    }
+    .landing .cta-inner p {
+        font-size: 0.95rem;
+    }
+    .landing .cta-btns {
+        flex-direction: column;
+        gap: 0.7rem;
+    }
+    .landing .cta-btns .btn {
+        width: 100%;
+        justify-content: center;
+    }
+    .landing .footer-inner {
+        justify-content: center;
+        text-align: center;
+    }
+    .landing .footer-links {
+        justify-content: center;
+    }
+}
+
 .landing .model-note { color: var(--l-faint); font-size: 0.85rem; }
 
 /* -- landing code tabs -- */
@@ -2075,28 +2303,3 @@ hr {
 .landing [data-delay="2"].revealed { transition-delay: 0.16s; }
 .landing [data-delay="3"].revealed { transition-delay: 0.24s; }
 .landing [data-delay="4"].revealed { transition-delay: 0.32s; }
-
-/* -- landing responsive -- */
-@media (max-width: 980px) {
-    .landing .hero-inner { grid-template-columns: 1fr; gap: 2.5rem; }
-    .landing .hero { padding-top: 8rem; }
-    .landing .stats { grid-template-columns: repeat(3, 1fr); }
-    .landing .features-grid { grid-template-columns: repeat(2, 1fr); }
-    .landing .models-grid { grid-template-columns: 1fr; }
-    .landing .nav-links { display: none; }
-}
-@media (max-width: 640px) {
-    .landing .stats { grid-template-columns: repeat(2, 1fr); }
-    .landing .features-grid { grid-template-columns: 1fr; }
-    .landing .how-grid { grid-template-columns: 1fr; }
-    .landing .flow-arrow { transform: rotate(90deg); }
-    .landing .hero-cta { flex-direction: column; align-items: stretch; }
-    .landing .hero-cta .btn { width: 100%; }
-    .landing .section { padding: 4.5rem 1.1rem; }
-    .landing .hero { padding: 7.5rem 1.1rem 2.5rem; }
-    .landing .code-pane { padding: 1.1rem 1rem 1.3rem; }
-    .landing .cta-btns { flex-direction: column; align-items: stretch; }
-    .landing .cta-btns .btn { width: 100%; }
-    .landing .footer-inner { justify-content: center; text-align: center; }
-    .landing .footer-links { justify-content: center; }
-}
