@@ -582,26 +582,24 @@ async def image_generations(req: ImageGenerationRequest) -> dict:
                 img_content = img_resp.content
 
                 if req.size:
+                    from PIL import Image
                     from io import BytesIO
 
+                    img = Image.open(BytesIO(img_content))
                     try:
-                        from PIL import Image
-
-                        img = Image.open(BytesIO(img_content))
                         width, height = map(int, req.size.split("*"))
                         resized_img = img.resize((width, height), Image.LANCZOS)
                         buffer = BytesIO()
                         resized_img.save(buffer, format=img.format)
                         img_content = buffer.getvalue()
                     except Exception:
-                        pass
+                        pass  # Fallback to original if resize fails
 
                 if want_b64:
                     import base64 as b64mod
 
                     data.append({"b64_json": b64mod.b64encode(img_content).decode()})
                 else:
-                    # Re-upload resized image to a temporary host or return as b64
                     import base64 as b64mod
 
                     data.append({"b64_json": b64mod.b64encode(img_content).decode()})
