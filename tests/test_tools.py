@@ -2415,3 +2415,216 @@ def test_parse_json_call_without_parameters():
     assert calls is not None
     assert calls[0].name == "ping"
     assert json.loads(calls[0].arguments) == {}
+
+
+SHELL_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "bash",
+        "description": "Run a shell command",
+        "aliases": ["exec_command", "shell", "run_cmd"],
+        "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]},
+    },
+}
+
+
+def test_normalize_call_name_alias_resolution():
+    schemas = tool_schema_map([SHELL_TOOL, NO_ARGS_TOOL])
+    from danyapi.tools import _normalize_call_name
+
+    for emitted in ("exec_command", "shell", "run_cmd", "Exec-Command", "EXEC_COMMAND"):
+        assert _normalize_call_name(emitted, schemas) == "bash", emitted
+
+
+def test_normalize_call_name_compact_and_fuzzy():
+    schemas = tool_schema_map([WEATHER_TOOL])
+    from danyapi.tools import _normalize_call_name
+
+    assert _normalize_call_name("Get-Weather", schemas) == "get_weather"
+    assert _normalize_call_name("get_weathers", schemas) == "get_weather"
+    assert _normalize_call_name("totally_unrelated", schemas) == "totally_unrelated"
+
+
+def test_normalize_call_name_ambiguous_not_mapped():
+    tools = [
+        {"type": "function", "function": {"name": "search_web"}},
+        {"type": "function", "function": {"name": "search_news"}},
+    ]
+    schemas = tool_schema_map(tools)
+    from danyapi.tools import _normalize_call_name
+
+    assert _normalize_call_name("search_web_results", schemas) == "search_web_results"
+
+
+def test_parse_xml_call_with_alias_name_normalized():
+    text = '<tool_calls><invoke name="exec_command"><parameter name="command">ls</parameter></invoke></tool_calls>'
+    calls, _ = parse_tool_calls(text, tool_schemas=tool_schema_map([SHELL_TOOL]))
+    assert calls is not None
+    assert calls[0].name == "bash"
+    assert json.loads(calls[0].arguments) == {"command": "ls"}
+
+
+def test_tool_schema_map_aliases_attached():
+    mapping = tool_schema_map([SHELL_TOOL])
+    assert mapping["bash"]["command"] == "string"
+    assert mapping["bash"]["_aliases"] == ["exec_command", "shell", "run_cmd"]
+
+
+def test_render_tool_schema_aliases_line():
+    schema = render_tool_schema([SHELL_TOOL])
+    assert schema is not None
+    assert "aliases accepted: exec_command, shell, run_cmd" in schema
+
+
+def test_render_tool_schema_examples_capped():
+    tools = [{"type": "function", "function": {"name": f"tool_{i}", "description": "d"}} for i in range(5)]
+    schema = render_tool_schema(tools)
+    assert schema is not None
+    assert '<invoke name="tool_0">' in schema
+    assert '<invoke name="tool_2">' in schema
+    assert '<invoke name="tool_3">' not in schema
+
+
+def test_render_tool_schema_example_multi_parameter():
+    tool = {
+        "type": "function",
+        "function": {
+            "name": "move",
+            "parameters": {
+                "type": "object",
+                "properties": {"x": {"type": "integer"}, "y": {"type": "integer"}, "z": {"type": "integer"}},
+            },
+        },
+    }
+    schema = render_tool_schema([tool])
+    assert schema is not None
+    assert '<parameter name="x">1</parameter>' in schema
+    assert '<parameter name="y">1</parameter>' in schema
+
+
+def test_render_tool_schema_example_array_object_values():
+    tool = {
+        "type": "function",
+        "function": {
+            "name": "bulk",
+            "parameters": {"type": "object", "properties": {"items": {"type": "array"}, "opts": {"type": "object"}}},
+        },
+    }
+    schema = render_tool_schema([tool])
+    assert schema is not None
+    assert '<parameter name="items">[]</parameter>' in schema
+    assert '<parameter name="opts">{}</parameter>' in schema
+
+
+def test_tail_includes_function_names_reminder():
+    messages = [
+        Message(role="user", content="What is the weather?"),
+        Message(role="assistant", tool_calls=[{"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": '{"city": "Moscow"}'}}]),
+        Message(role="tool", content="22C, sunny", tool_call_id="call_1"),
+    ]
+    prompt, tool_mode = build_prompt(messages, [WEATHER_TOOL], None, has_session=True)
+    assert tool_mode
+    assert "Available functions: get_weather" in prompt
+    assert "You have access to the following functions" not in prompt
+    assert "Continue the conversation" in prompt
+
+
+def test_tail_without_tools_has_no_reminder():
+    messages = [
+        Message(role="user", content="What is the weather?"),
+        Message(role="assistant", tool_calls=[{"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": '{"city": "Moscow"}'}}]),
+        Message(role="tool", content="22C, sunny", tool_call_id="call_1"),
+    ]
+    prompt, _ = build_prompt(messages, None, None, has_session=True)
+    assert "Available functions:" not in prompt
+    assert "Continue the conversation" in prompt
+
+
+def test_history_mode_appends_recency_reminder():
+    messages = [
+        Message(role="user", content="What is the weather?"),
+        Message(role="assistant", content="It is 22C."),
+        Message(role="user", content="And in Rome?"),
+    ]
+    prompt, tool_mode = build_prompt(messages, [WEATHER_TOOL], None, has_session=False)
+    assert tool_mode
+    assert prompt.rstrip().endswith("reply with your final answer.")
+    assert prompt.index("Remember: to call any function") > prompt.index("And in Rome?")
+
+
+def test_history_mode_without_tools_no_reminder():
+    messages = [Message(role="user", content="hi")]
+    prompt, _ = build_prompt(messages, None, None, has_session=False)
+    assert "Remember: to call any function" not in prompt
+
+
+def test_xml_known_parameterless_no_content_fallback():
+    text = "<pong>hello</pong>"
+    result = parse_tool_calls(text, tool_schemas=tool_schema_map([NO_PARAMS_OBJECT_TOOL]))
+    assert result is not None
+    calls, _ = result
+    assert calls[0].name == "pong"
+    assert json.loads(calls[0].arguments) == {}
+
+
+def test_xml_unknown_tool_keeps_content_fallback():
+    text = '<tool_calls><invoke name="mystery">hello</invoke></tool_calls>'
+    result = parse_tool_calls(text)
+    assert result is not None
+    calls, _ = result
+    assert calls[0].name == "mystery"
+    assert json.loads(calls[0].arguments) == {"content": "hello"}
+
+
+def test_parse_xml_selfclose_alias_inside_wrapper():
+    schemas = tool_schema_map([SHELL_TOOL])
+    calls, _ = parse_tool_calls("<tool_calls><Exec_Command/></tool_calls>", schemas)
+    assert calls is not None
+    assert [(c.name, json.loads(c.arguments)) for c in calls] == [("bash", {})]
+
+
+def test_parse_xml_selfclose_casefold_inside_wrapper():
+    schemas = tool_schema_map([SHELL_TOOL])
+    calls, _ = parse_tool_calls("<tool_calls><BASH/></tool_calls>", schemas)
+    assert calls is not None
+    assert [c.name for c in calls] == ["bash"]
+
+
+def test_parse_xml_selfclose_alias_with_sibling_inside_wrapper():
+    schemas = tool_schema_map([SHELL_TOOL])
+    calls, _ = parse_tool_calls('<tool_calls><bash command="ls"/><Exec_Command/></tool_calls>', schemas)
+    assert calls is not None
+    assert [(c.name, json.loads(c.arguments)) for c in calls] == [("bash", {"command": "ls"}), ("bash", {})]
+
+
+def test_parse_html_wrapped_known_tool_no_longer_shadowed():
+    schemas = tool_schema_map([NO_ARGS_TOOL])
+    calls, _ = parse_tool_calls("<div><ping/></div>", schemas)
+    assert calls is not None
+    assert [c.name for c in calls] == ["ping"]
+
+
+def test_parse_plain_html_still_ignored():
+    assert parse_tool_calls("<div><span>hi</span></div>") is None
+    assert parse_tool_calls("Just a normal <b>answer</b>.") is None
+
+
+def test_debug_report_reports_renames():
+    schemas = tool_schema_map([SHELL_TOOL])
+    rep = parse_tool_calls_debug('<invoke name="exec_command"><parameter name="command">ls</parameter></invoke>', schemas)
+    assert rep["parsed"]
+    assert {"from": "exec_command", "to": "bash"} in rep["renamed"]
+    assert rep["calls"][0]["name"] == "bash"
+
+
+def test_debug_report_no_renames_when_exact():
+    schemas = tool_schema_map([SHELL_TOOL])
+    rep = parse_tool_calls_debug('<tool_calls><invoke name="bash"></invoke></tool_calls>', schemas)
+    assert rep["parsed"]
+    assert rep["renamed"] == []
+
+
+def test_debug_report_unparsed_has_empty_renamed():
+    rep = parse_tool_calls_debug("no calls here", tool_schema_map([SHELL_TOOL]))
+    assert not rep["parsed"]
+    assert rep["renamed"] == []

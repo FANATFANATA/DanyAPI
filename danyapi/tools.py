@@ -6,6 +6,7 @@ import re
 import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass
+from difflib import get_close_matches
 from typing import Any
 
 _DSML_PIPE = r"|\u00a6\u01c0\u01c1\u05c0\u2016\u2223\u2502\u2551\u2758\ufe31\uff5c"
@@ -283,13 +284,34 @@ TOOL_CALL_INSTRUCTION = (
     "Example:\n"
     "{example}\n\n"
     "Rules:\n"
-    "- Use the exact function names and argument keys from the definitions above.\n"
+    "- Call ONLY functions from the list above; copy each function name character-for-character.\n"
+    "- Never invent, rename, abbreviate, translate, or guess function names.\n"
+    "- Use the exact argument keys from the definitions above; never invent or rename argument keys.\n"
     "- Put every function call in its own <invoke> element inside the <tool_calls> block.\n"
+    "- Emit several sibling <invoke> elements for several independent calls.\n"
     "- Put every argument in its own <parameter> element; the name attribute must be the exact argument key.\n"
     "- If a function has no parameters, or you need no arguments, emit its <invoke> element with no <parameter> children.\n"
     "- Omit optional arguments you do not need.\n"
+    "- If none of the functions fit the request, reply normally with your answer instead of calling anything.\n"
     "- No markdown fences, no code blocks, no comments, no text before or after the XML block, no other XML tags.\n"
     "{choice}"
+)
+
+TOOL_TAIL_REMINDER = (
+    "If another function call is needed, reply with ONLY an XML block:\n"
+    "<tool_calls>\n"
+    '<invoke name="FUNCTION_NAME">\n'
+    '<parameter name="ARG_NAME">value</parameter>\n'
+    "</invoke>\n"
+    "</tool_calls>\n"
+    "Call functions ONLY by their exact names listed here; never invent function names.\n"
+    "Available functions: {names}\n"
+    "If no further function call is needed, reply with your final answer."
+)
+
+TOOL_HISTORY_REMINDER = (
+    "Remember: to call any function, reply ONLY with the <tool_calls> XML block using the exact function names and argument keys defined above; "
+    "if no function call is needed, reply with your final answer."
 )
 
 CHOICE_INSTRUCTIONS = {
@@ -342,22 +364,48 @@ def _choice_name(tool_choice: Any) -> str | None:
     return None
 
 
+def _tool_names(tools: list[Any] | None) -> list[str]:
+    names: list[str] = []
+    if not tools:
+        return names
+    for tool in tools:
+        fn = _tool_function(tool)
+        if fn is not None and isinstance(fn.get("name"), str) and fn["name"]:
+            names.append(fn["name"])
+    return names
+
+
+_EXAMPLE_MAX_FUNCTIONS = 3
+_EXAMPLE_MAX_PARAMETERS = 3
+
+
+def _example_value(spec: Any) -> str:
+    ptype = spec.get("type") if isinstance(spec, dict) else None
+    if isinstance(ptype, list):
+        ptype = next((t for t in ptype if isinstance(t, str) and t != "null"), None)
+    return {
+        "integer": "1",
+        "number": "1",
+        "boolean": "true",
+        "array": "[]",
+        "object": "{}",
+    }.get(ptype if isinstance(ptype, str) else "", "value")
+
+
 def _example_tool_call(fn: dict) -> str:
     name = fn.get("name") or "tool"
     params = fn.get("parameters")
     properties = params.get("properties") if isinstance(params, dict) else None
     if isinstance(properties, dict) and properties:
-        key = next(iter(properties))
-        spec = properties[key]
-        ptype = spec.get("type") if isinstance(spec, dict) else None
-        value = {
-            "string": "value",
-            "integer": "1",
-            "number": "1",
-            "boolean": "true",
-        }.get(ptype if isinstance(ptype, str) else "", "value")
-        return f'<invoke name="{name}">\n<parameter name="{key}">{value}</parameter>\n</invoke>'
+        lines = [f'<parameter name="{key}">{_example_value(spec)}</parameter>' for key, spec in list(properties.items())[:_EXAMPLE_MAX_PARAMETERS]]
+        joined = "\n".join(lines)
+        return f'<invoke name="{name}">\n{joined}\n</invoke>'
     return f'<invoke name="{name}"></invoke>'
+
+
+def _examples_block(functions: list[dict]) -> str:
+    invokes = "\n".join(_example_tool_call(fn) for fn in functions[:_EXAMPLE_MAX_FUNCTIONS])
+    return f"<tool_calls>\n{invokes}\n</tool_calls>"
 
 
 def render_tool_schema(tools: list[Any] | None, tool_choice: Any = None) -> str | None:
@@ -378,6 +426,11 @@ def render_tool_schema(tools: list[Any] | None, tool_choice: Any = None) -> str 
         lines.append(f"{i}. name: {fn['name']}")
         if fn.get("description"):
             lines.append(f"   description: {fn['description']}")
+        aliases = fn.get("aliases")
+        if isinstance(aliases, (list, tuple)):
+            rendered = ", ".join(a for a in aliases if isinstance(a, str) and a)
+            if rendered:
+                lines.append(f"   aliases accepted: {rendered}")
         if fn.get("strict"):
             lines.append("   strict: true (output arguments must match the schema exactly)")
         params = fn.get("parameters")
@@ -393,10 +446,9 @@ def render_tool_schema(tools: list[Any] | None, tool_choice: Any = None) -> str 
         choice_line = f"You MUST call exactly the function {choice} and no other functions."
     else:
         choice_line = "If you do not need to call any function, reply normally with your answer."
-    example = _example_tool_call(functions[0])
     return TOOL_CALL_INSTRUCTION.format(
         functions="\n".join(lines),
-        example=f"<tool_calls>\n{example}\n</tool_calls>",
+        example=_examples_block(functions),
         choice=choice_line,
     )
 
@@ -508,13 +560,15 @@ def _render_history(messages: list[Any]) -> str:
     return "\n".join(parts)
 
 
-def _render_tool_tail(messages: list[Any]) -> str:
+def _render_tool_tail(messages: list[Any], tool_names: list[str] | None = None) -> str:
     parts = []
     for msg in messages:
         role = getattr(msg, "role", None)
         if role in ("tool", "function"):
             parts.append(render_message(msg))
     parts.append("Continue the conversation and provide the final answer based on the tool results.")
+    if tool_names:
+        parts.append(TOOL_TAIL_REMINDER.format(names=", ".join(tool_names)))
     return "\n".join(parts)
 
 
@@ -633,7 +687,7 @@ def build_prompt(
     if has_session:
         tail = _tail_after_last_user(messages)
         if _is_tool_round_tail(tail):
-            tail_prompt = _render_tool_tail(tail)
+            tail_prompt = _render_tool_tail(tail, _tool_names(tools) if tools_present else None)
             return tail_prompt, True
         base = extract_last_user(messages)
         blocks = []
@@ -649,6 +703,8 @@ def build_prompt(
             prompt = f"{schema}\n\n{prompt}"
         if json_block:
             prompt = f"{json_block}\n\n{prompt}"
+        if schema:
+            prompt = f"{prompt}\n\n{TOOL_HISTORY_REMINDER}"
         if not prompt.strip():
             prompt = schema or extract_last_user(messages)
         return prompt, tools_present or tool_round_active
@@ -1078,16 +1134,56 @@ def _schema_for_name(tool_schemas: dict[str, dict[str, Any]] | None, name: str) 
     for known, spec in tool_schemas.items():
         if known.casefold() == name.casefold():
             return spec
+    resolved = _resolve_alias(name, tool_schemas)
+    if resolved is not None:
+        return tool_schemas[resolved]
+    return None
+
+
+def _name_key(name: str) -> str:
+    return re.sub(r"[^0-9a-z]+", "", name.casefold())
+
+
+def _resolve_alias(name: str, tool_schemas: dict[str, dict[str, Any]] | None) -> str | None:
+    if not tool_schemas:
+        return None
+    folded = name.casefold()
+    key = _name_key(name)
+    if not key:
+        return None
+    for known, spec in tool_schemas.items():
+        aliases = (spec or {}).get("_aliases") or []
+        for alias in aliases:
+            if isinstance(alias, str) and (_name_key(alias) == key or alias.casefold() == folded):
+                return known
+    return None
+
+
+def _fuzzy_known_name(name: str, tool_schemas: dict[str, dict[str, Any]]) -> str | None:
+    key = _name_key(name)
+    if len(key) < 4:
+        return None
+    matches = get_close_matches(key, [_name_key(known) for known in tool_schemas], n=2, cutoff=0.8)
+    if len(matches) != 1:
+        return None
+    for known in tool_schemas:
+        if _name_key(known) == matches[0]:
+            return known
     return None
 
 
 def _normalize_call_name(name: str, tool_schemas: dict[str, dict[str, Any]] | None) -> str:
     if not tool_schemas or name in tool_schemas:
         return name
-    for known in tool_schemas:
-        if known.casefold() == name.casefold():
-            return known
-    return name
+    folded = {known.casefold(): known for known in tool_schemas}
+    hit = folded.get(name.casefold())
+    if hit is not None:
+        return hit
+    compact = {_name_key(known): known for known in tool_schemas}
+    hit = compact.get(_name_key(name))
+    if hit is not None:
+        return hit
+    return _resolve_alias(name, tool_schemas) or _fuzzy_known_name(name, tool_schemas) or name
 
 
 def tool_schema_map(tools: list[Any] | None) -> dict[str, dict[str, Any]]:
@@ -1107,25 +1203,25 @@ def tool_schema_map(tools: list[Any] | None) -> dict[str, dict[str, Any]]:
                 params = json.loads(params)
             except ValueError:
                 params = None
-        if not isinstance(params, dict):
-            result[name] = {}
-            continue
-        properties = params.get("properties")
-        if not isinstance(properties, dict):
-            result[name] = {}
-            continue
         prop_types: dict[str, Any] = {}
-        for prop, spec in properties.items():
-            if not isinstance(spec, dict):
-                continue
-            typ = spec.get("type")
-            if isinstance(typ, list):
-                for candidate in ("integer", "number", "boolean", "null", "string"):
-                    if candidate in typ:
-                        typ = candidate
-                        break
-            if typ:
-                prop_types[prop] = typ
+        properties = params.get("properties") if isinstance(params, dict) else None
+        if isinstance(properties, dict):
+            for prop, spec in properties.items():
+                if not isinstance(spec, dict):
+                    continue
+                typ = spec.get("type")
+                if isinstance(typ, list):
+                    for candidate in ("integer", "number", "boolean", "null", "string"):
+                        if candidate in typ:
+                            typ = candidate
+                            break
+                if typ:
+                    prop_types[prop] = typ
+        aliases = fn.get("aliases")
+        if isinstance(aliases, (list, tuple)):
+            cleaned = [a for a in aliases if isinstance(a, str) and a]
+            if cleaned:
+                prop_types["_aliases"] = cleaned
         result[name] = prop_types
     return result
 
@@ -1180,6 +1276,8 @@ def _xml_invoke_arguments(body: str, param_types: dict[str, Any] | None = None, 
                     return params[key]
         return params
     if not allow_content:
+        return None
+    if param_types is not None and all(key == "_aliases" for key in param_types):
         return None
     inner = _unescape_xml(stripped)
     if inner:
@@ -1340,7 +1438,7 @@ def _parse_xml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | N
             if any(s <= element_start and element_end <= e for s, e in consumed):
                 continue
             tool_name = element.group(1).strip()
-            param_types = (tool_schemas or {}).get(tool_name)
+            param_types = _schema_for_name(tool_schemas, tool_name)
             arguments = _xml_tag_attrs(element.group(2), param_types)
             if not arguments and param_types is None:
                 continue
@@ -1374,17 +1472,19 @@ def _parse_xml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | N
             calls.append(ToolCall.create(tool_name, arguments))
             consumed.append((start, end))
             blank(start, end)
+
+    def _bare_eligible(match: re.Match) -> bool:
+        name = match.group(1).strip().lower()
+        return name not in _XML_SKIP_ELEMENTS and name not in _XML_HTML_TAGS
+
     bare_candidates: list[tuple[int, int, bool, re.Match]] = []
-    bare_candidates.extend((m.start(), m.end(), False, m) for m in _XML_ELEMENT.finditer(text))
-    bare_candidates.extend((m.start(), m.end(), True, m) for m in _XML_SELFCLOSE.finditer(text))
+    bare_candidates.extend((m.start(), m.end(), False, m) for m in _XML_ELEMENT.finditer(text) if _bare_eligible(m))
+    bare_candidates.extend((m.start(), m.end(), True, m) for m in _XML_SELFCLOSE.finditer(text) if _bare_eligible(m))
     bare_candidates.sort(key=lambda item: (item[0], -item[1]))
     for start, end, self_closed, match in bare_candidates:
         if any(s <= start and end <= e for s, e, _, _ in bare_candidates if (s, e) != (start, end)):
             continue
         if any(s <= start and end <= e for s, e in consumed):
-            continue
-        element_name = match.group(1).strip().lower()
-        if element_name in _XML_SKIP_ELEMENTS or element_name in _XML_HTML_TAGS:
             continue
         raw_name = match.group(1).strip()
         param_types = _schema_for_name(tool_schemas, raw_name)
@@ -1839,13 +1939,17 @@ def parse_tool_calls_debug(text: str, tool_schemas: dict[str, dict[str, Any]] | 
         "parsed": False,
         "strategies": [],
         "calls": [],
+        "renamed": [],
         "wrapper": "",
         "unrecognized": _strip_fences(_strip_dsml(text)),
     }
     result = _parse_tool_calls_impl(text, tool_schemas, report)
     if result is not None:
         calls, wrapper = result
+        renamed = [{"from": call.name, "to": _normalize_call_name(call.name, tool_schemas)} for call in calls]
+        renamed = [item for item in renamed if item["from"] != item["to"]]
         report["parsed"] = True
+        report["renamed"] = renamed
         report["calls"] = [
             {
                 "id": call.id,
