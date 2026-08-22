@@ -139,27 +139,6 @@ async def test_check_auth_exception():
     assert not await client.check_auth()
 
 
-async def test_login_sets_token():
-    client = make_client()
-    client.http.headers = {}
-    resp = make_resp({"code": 0, "data": {"biz_data": {"user": {"token": "fresh"}}}})
-    client.http.post = AsyncMock(return_value=resp)
-
-    token = await client.login(email="a@b.c", password="pw")
-    assert token == "fresh"
-    assert client.token == "fresh"
-    assert client.http.headers["Authorization"] == "Bearer fresh"
-
-
-async def test_login_no_token_raises():
-    client = make_client()
-    resp = make_resp({"code": 0, "data": {"biz_data": {"user": {}}}})
-    client.http.post = AsyncMock(return_value=resp)
-
-    with pytest.raises(DeepSeekError):
-        await client.login(email="a@b.c", password="pw")
-
-
 async def test_get_user():
     client = make_client()
     resp = make_resp({"code": 0, "data": {"biz_data": {"user": {"id": 7}}}})

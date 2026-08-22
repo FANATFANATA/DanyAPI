@@ -5,6 +5,7 @@ import base64
 import json
 import logging
 import random
+import re
 import sys
 import time
 import uuid
@@ -115,6 +116,44 @@ class ImageGenerationRequest(BaseModel):
     user: str | None = None
 
 
+IMAGE_SIZE_RE = re.compile(r"^(\d{2,5})\s*[*x\u00d7,]\s*(\d{2,5})$", re.IGNORECASE)
+MIN_IMAGE_DIM = 16
+MAX_IMAGE_DIM = 8192
+
+
+def _parse_image_size(size: str | None) -> tuple[int, int] | None:
+    if size is None or not size.strip():
+        return None
+    match = IMAGE_SIZE_RE.fullmatch(size.strip())
+    if match is None:
+        raise HTTPException(400, f"invalid size {size!r}: expected WIDTHxHEIGHT (e.g. 1152x2048 or 1152*2048)")
+    width, height = int(match.group(1)), int(match.group(2))
+    if not (MIN_IMAGE_DIM <= width <= MAX_IMAGE_DIM and MIN_IMAGE_DIM <= height <= MAX_IMAGE_DIM):
+        raise HTTPException(400, f"size out of range: both dimensions must be within {MIN_IMAGE_DIM}..{MAX_IMAGE_DIM}")
+    return width, height
+
+
+def _resize_image_bytes(content: bytes, dims: tuple[int, int] | None) -> bytes:
+    if dims is None:
+        return content
+    try:
+        from io import BytesIO
+
+        from PIL import Image
+
+        with Image.open(BytesIO(content)) as img:
+            fmt = img.format or "PNG"
+            resized = img.resize(dims, Image.Resampling.LANCZOS)
+            if fmt.upper() == "JPEG" and resized.mode not in ("RGB", "L"):
+                resized = resized.convert("RGB")
+            buffer = BytesIO()
+            resized.save(buffer, format=fmt)
+            return buffer.getvalue()
+    except Exception as exc:
+        log.warning("image resize to %s failed, returning original: %s", dims, exc)
+        return content
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     accounts: list[DeepSeekAccount] = []
@@ -144,14 +183,6 @@ async def lifespan(app: FastAPI):
                     )
                 )
             log.info("deepseek accounts ready: %d", len(accounts))
-        elif settings.deepseek_email:
-            client = DeepSeekClient(timeout=settings.timeout)
-            await client.login(
-                email=settings.deepseek_email,
-                password=settings.deepseek_password,
-            )
-            accounts.append(DeepSeekAccount(0, client))
-            log.info("deepseek login success, device_id=%s", client.device_id)
         if settings.qwen_tokens:
             for i, token in enumerate(settings.qwen_tokens):
                 client = QwenClient(token=token, timeout=settings.timeout)
@@ -169,14 +200,6 @@ async def lifespan(app: FastAPI):
                     )
                 )
             log.info("qwen accounts ready: %d", len(qwen_accounts))
-        elif settings.qwen_email:
-            client = QwenClient(timeout=settings.timeout)
-            await client.login(
-                email=settings.qwen_email,
-                password=settings.qwen_password,
-            )
-            qwen_accounts.append(QwenAccount(0, client))
-            log.info("qwen login success")
         if accounts:
             app.state.pool = AccountPool(
                 accounts,
@@ -201,7 +224,7 @@ async def lifespan(app: FastAPI):
             app.state.qwen_pool = None
             app.state.qwen_models = []
         if not accounts and not qwen_accounts:
-            raise RuntimeError("no valid credentials: set DEEPSEEK_TOKENS/DEEPSEEK_EMAIL or QWEN_TOKENS/QWEN_EMAIL")
+            raise RuntimeError("no valid credentials: set DEEPSEEK_TOKENS or QWEN_TOKENS")
         yield
     finally:
         for acct in accounts:
@@ -261,7 +284,7 @@ async def _extract_request_model(request: Request) -> str | None:
         return None
     try:
         payload = json.loads(body)
-    except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
+    except json.JSONDecodeError, UnicodeDecodeError, TypeError:
         return None
     if isinstance(payload, dict):
         model = payload.get("model")
@@ -548,6 +571,8 @@ async def image_generations(req: ImageGenerationRequest) -> dict:
     if pool is None:
         raise HTTPException(503, "qwen provider is not configured (required for image generation)")
 
+    dims = _parse_image_size(req.size)
+
     context_seq = None
     if req.session_id:
         account, existing_sid = await _acquire_account(pool, req.session_id)
@@ -569,41 +594,23 @@ async def image_generations(req: ImageGenerationRequest) -> dict:
     except AccountPoolBusy:
         raise HTTPException(429, "all accounts are busy, try again later") from None
 
-    data = []
     want_b64 = req.response_format == "b64_json"
+    data: list[dict] = []
     for url in result["image_urls"]:
+        if not (want_b64 or dims):
+            data.append({"url": url})
+            continue
         try:
             async with httpx.AsyncClient(follow_redirects=True, timeout=30) as hc:
                 img_resp = await hc.get(url)
-                if img_resp.status_code != 200:
-                    data.append({"url": url})
-                    continue
-
-                img_content = img_resp.content
-
-                if req.size:
-                    from PIL import Image
-                    from io import BytesIO
-
-                    img = Image.open(BytesIO(img_content))
-                    try:
-                        width, height = map(int, req.size.split("*"))
-                        resized_img = img.resize((width, height), Image.LANCZOS)
-                        buffer = BytesIO()
-                        resized_img.save(buffer, format=img.format)
-                        img_content = buffer.getvalue()
-                    except Exception:
-                        pass  # Fallback to original if resize fails
-
-                if want_b64:
-                    import base64 as b64mod
-
-                    data.append({"b64_json": b64mod.b64encode(img_content).decode()})
-                else:
-                    import base64 as b64mod
-
-                    data.append({"b64_json": b64mod.b64encode(img_content).decode()})
-        except Exception:
+            if img_resp.status_code != 200:
+                log.warning("image download failed (%s) for %s, returning url", img_resp.status_code, url)
+                data.append({"url": url})
+                continue
+            payload_bytes = _resize_image_bytes(img_resp.content, dims)
+            data.append({"b64_json": base64.b64encode(payload_bytes).decode()})
+        except Exception as exc:
+            log.warning("image fetch failed for %s, returning url: %s", url, exc)
             data.append({"url": url})
 
     if not data:
@@ -1178,7 +1185,7 @@ async def _collect_reduced(
                     rec.handle(event)
             finally:
                 await resp.aclose()
-        except (HTTPException, httpx.HTTPError):
+        except HTTPException, httpx.HTTPError:
             if session_key is not None:
                 _drop_session(pool, account, session_key)
             continue

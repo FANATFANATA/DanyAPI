@@ -107,27 +107,19 @@
                 <h2 id="account-setup" data-i18n="pl_accounts">Account setup</h2>
 
                 <h3 id="deepseek" data-i18n="st_ds_h">DeepSeek</h3>
-                <p data-i18n-html="st_ds_p1">Set a pool of tokens (from different accounts), comma-separated, or a single token via <span class="env-var">DEEPSEEK_TOKEN</span>:</p>
+                <p data-i18n-html="st_ds_p1">Set a pool of tokens (from different accounts), comma-separated:</p>
                 <div class="code-header">bash</div>
-                <pre><code>export DEEPSEEK_TOKENS="token1,token2,token3"
-                    # or
-                    export DEEPSEEK_TOKEN="token1"</code></pre>
+                <pre><code>export DEEPSEEK_TOKENS="token1,token2,token3"</code></pre>
                 <p data-i18n-html="st_ds_p2">
                     Each account can generate <strong>one</strong> message at a time, so a pool of N tokens
                     gives up to N parallel generations. Grab a token in the browser:
                     DevTools → Application → Local Storage → <a href="https://chat.deepseek.com" target="_blank">https://chat.deepseek.com</a> → <code>userToken</code>.
                 </p>
-                <p data-i18n="st_ds_p3">Or a single email + password account (login happens at startup):</p>
-                <div class="code-header">bash</div>
-                <pre><code>export DEEPSEEK_EMAIL="you@example.com"
-                    export DEEPSEEK_PASSWORD="secret"</code></pre>
 
                 <h3 id="qwen" data-i18n="st_qw_h">Qwen</h3>
-                <p data-i18n-html="st_qw_p1">Same model, different token location (single token via <span class="env-var">QWEN_TOKEN</span>):</p>
+                <p data-i18n-html="st_qw_p1">Qwen tokens are set the same way:</p>
                 <div class="code-header">bash</div>
-                <pre><code>export QWEN_TOKENS="token1,token2,token3"
-                    # or
-                    export QWEN_TOKEN="token1"</code></pre>
+                <pre><code>export QWEN_TOKENS="token1,token2,token3"</code></pre>
                 <p data-i18n-html="st_qw_p2">
                     Grab a token in the browser:
                     DevTools → Application → Local Storage → <a href="https://chat.qwen.ai" target="_blank">https://chat.qwen.ai</a> → <code>token</code>.
@@ -143,10 +135,6 @@
                         (<code>tools</code> / <code>tool_choice</code>) and plain chat work as intended.
                     </p>
                 </blockquote>
-                <p data-i18n="st_qw_p3">Or a single email + password account (login happens at startup):</p>
-                <div class="code-header">bash</div>
-                <pre><code>export QWEN_EMAIL="you@example.com"
-                    export QWEN_PASSWORD="secret"</code></pre>
                 <p data-i18n-html="st_both">
                     Both providers are optional. Run at least one of them (or both) - requests
                     are routed to the right provider by the model name (<code>deepseek-*</code> / <code>qwen*</code>).

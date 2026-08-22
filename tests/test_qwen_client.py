@@ -1,4 +1,3 @@
-import hashlib
 import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -10,7 +9,6 @@ from danyapi.qwen.client import (
     QwenError,
     QwenSession,
     new_uuid,
-    sha256_hex,
     timezone_header,
 )
 
@@ -18,10 +16,6 @@ from danyapi.qwen.client import (
 def test_new_uuid():
     value = new_uuid()
     assert str(uuid.UUID(value)) == value
-
-
-def test_sha256_hex():
-    assert sha256_hex("hello") == hashlib.sha256(b"hello").hexdigest()
 
 
 def test_timezone_header():
@@ -165,25 +159,6 @@ async def test_check_auth_exception():
     client = QwenClient()
     client.http.get = AsyncMock(side_effect=httpx.ConnectError("boom"))
     assert not await client.check_auth()
-
-
-async def test_login():
-    client = QwenClient()
-    resp = SimpleNamespace(status_code=200, headers={"content-type": "application/json"})
-    resp.json = MagicMock(return_value={"success": True, "data": {"token": "fresh"}})
-    client.http.post = AsyncMock(return_value=resp)
-    token = await client.login("a@b.c", "pw")
-    assert token == "fresh"
-    assert client.http.headers["Authorization"] == "Bearer fresh"
-
-
-async def test_login_no_token_raises():
-    client = QwenClient()
-    resp = SimpleNamespace(status_code=200, headers={"content-type": "application/json"})
-    resp.json = MagicMock(return_value={"success": True, "data": {}})
-    client.http.post = AsyncMock(return_value=resp)
-    with pytest.raises(QwenError):
-        await client.login("a@b.c", "pw")
 
 
 async def test_fetch_models():

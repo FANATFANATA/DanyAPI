@@ -21,10 +21,6 @@ def test_defaults(settings_for):
     assert s.port == 8000
     assert s.deepseek_tokens == []
     assert s.qwen_tokens == []
-    assert s.deepseek_email == ""
-    assert s.deepseek_password == ""
-    assert s.qwen_email == ""
-    assert s.qwen_password == ""
     assert s.timeout == 60.0
     assert s.acquire_timeout is None
     assert s.session_cache_size == 128
@@ -83,21 +79,8 @@ def test_deepseek_tokens_comma(settings_for):
     assert s.deepseek_tokens == ["a", "b", "c"]
 
 
-def test_deepseek_single_token_fallback(settings_for):
-    assert settings_for({"DEEPSEEK_TOKEN": "solo"}).deepseek_tokens == ["solo"]
-
-
-def test_deepseek_tokens_win_over_single(settings_for):
-    s = settings_for({"DEEPSEEK_TOKENS": "a,b", "DEEPSEEK_TOKEN": "solo"})
-    assert s.deepseek_tokens == ["a", "b"]
-
-
 def test_qwen_tokens_comma(settings_for):
     assert settings_for({"QWEN_TOKENS": "x , y"}).qwen_tokens == ["x", "y"]
-
-
-def test_qwen_single_token_fallback(settings_for):
-    assert settings_for({"QWEN_TOKEN": "only"}).qwen_tokens == ["only"]
 
 
 def test_empty_tokens(settings_for):

@@ -101,32 +101,8 @@ class DeepSeekClient:
                 params={"did": self.device_id, "scope": "main"},
             )
             return resp.json().get("code") == 0
-        except (httpx.HTTPError, ValueError):
+        except httpx.HTTPError, ValueError:
             return False
-
-    async def login(
-        self,
-        email: str | None = None,
-        mobile: str | None = None,
-        password: str | None = None,
-        area_code: str = "",
-    ) -> str:
-        body = {
-            "email": email,
-            "mobile": mobile,
-            "password": password,
-            "area_code": area_code,
-            "device_id": self.device_id,
-            "os": "web",
-        }
-        resp = await self._post("/api/v0/users/login", body)
-        biz = self._biz(resp)
-        user = (biz or {}).get("user")
-        if not user or not user.get("token"):
-            raise DeepSeekError((resp.get("data") or {}).get("biz_code", -1), "login failed: no token")
-        self.token = user["token"]
-        self.http.headers["Authorization"] = f"Bearer {self.token}"
-        return self.token
 
     async def get_user(self) -> dict:
         resp = await self._post("/api/v0/users", None)

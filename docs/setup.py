@@ -1,6 +1,4 @@
 import datetime
-import getpass
-import hashlib
 import json
 import os
 import re
@@ -79,15 +77,18 @@ GROUPS = [
 ]
 
 
-_EOF_SEEN = False
+class _InputState:
+    eof_seen = False
+
+
+_input_state = _InputState()
 
 
 def _read_input(prompt):
-    global _EOF_SEEN
     try:
         return input(prompt)
     except EOFError:
-        _EOF_SEEN = True
+        _input_state.eof_seen = True
         return None
 
 
@@ -131,8 +132,9 @@ def rustup_target_reachable():
             capture_output=True,
             text=True,
             timeout=30,
+            check=False,
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except OSError, subprocess.TimeoutExpired:
         return True
     lines = {line.strip() for line in proc.stdout.splitlines() if line.strip()}
     return bool(lines) and "aarch64-unknown-linux-android" not in lines
@@ -312,61 +314,19 @@ def check_deepseek_token(token):
         return False, f"unexpected response: {body[:200]}"
 
 
-def check_deepseek_login(email, password):
-    payload = {
-        "email": email,
-        "mobile": None,
-        "password": password,
-        "area_code": "",
-        "device_id": str(uuid.uuid4()),
-        "os": "web",
-    }
-    status, body = _request("https://chat.deepseek.com/api/v0/users/login", _ds_headers(), payload)
-    if status is None:
-        return False, f"network error: {body}"
-    try:
-        resp = json.loads(body)
-        if resp.get("code"):
-            return False, f"code {resp.get('code')}: {resp.get('msg') or resp.get('message') or ''}"
-        data = resp.get("data") or {}
-        if data.get("biz_code"):
-            return False, f"biz {data.get('biz_code')}: {data.get('biz_msg', '')}"
-        user = (data.get("biz_data") or {}).get("user") or {}
-        return bool(user.get("token")), "login failed: no token in response"
-    except ValueError:
-        return False, f"unexpected response: {body[:200]}"
-
-
 def check_qwen_token(token):
     status, body = _request("https://chat.qwen.ai/api/v1/auths/", _qwen_headers(token))
+    if status is None:
+        return False, f"network error: {body}"
     if status != 200:
         return False, f"http {status}: {body[:200]}"
     try:
         payload = json.loads(body)
-        if payload.get("success") is True:
-            return True, ""
-        return False, "server rejected the token"
     except ValueError:
         return False, f"unexpected response: {body[:200]}"
-
-
-def check_qwen_login(email, password):
-    payload = {"email": email, "password": hashlib.sha256(password.encode("utf-8")).hexdigest()}
-    status, body = _request("https://chat.qwen.ai/api/v2/auths/signin", _qwen_headers(), payload)
-    if status is None:
-        return False, f"network error: {body}"
-    try:
-        resp = json.loads(body)
-        if resp.get("success") is not True:
-            data = resp.get("data")
-            if isinstance(data, dict) and data.get("code"):
-                return False, f"code {data.get('code')}: {data.get('details') or data.get('message') or ''}"
-            return False, "login failed"
-        biz = resp.get("data") or {}
-        token = biz.get("token") or (biz.get("user") or {}).get("token")
-        return bool(token), "login failed: no token in response"
-    except ValueError:
-        return False, f"unexpected response: {body[:200]}"
+    if payload.get("success") is True or payload.get("id"):
+        return True, ""
+    return False, "server rejected the token"
 
 
 def split_tokens(raw):
@@ -388,12 +348,8 @@ def read_value(message, current, default=""):
 
 
 def collect_provider(name, current, defaults):
-    global _EOF_SEEN
     upper = name.upper()
     tokens_key = upper + "_TOKENS"
-    single_key = upper + "_TOKEN"
-    email_key = upper + "_EMAIL"
-    password_key = upper + "_PASSWORD"
     host = "chat.deepseek.com" if name == "DeepSeek" else "chat.qwen.ai"
     storage = "userToken" if name == "DeepSeek" else "token"
     print()
@@ -404,62 +360,19 @@ def collect_provider(name, current, defaults):
         current.get(tokens_key, ""),
         defaults.get(tokens_key, ""),
     )
-    single = read_value(
-        f"  {name} single token, fallback [{current.get(single_key, '') or '(empty)'}]: ",
-        current.get(single_key, ""),
-        defaults.get(single_key, ""),
-    )
-    email = read_value(
-        f"  {name} email, login fallback [{current.get(email_key, '') or '(empty)'}]: ",
-        current.get(email_key, ""),
-        defaults.get(email_key, ""),
-    )
-    if current.get(password_key, ""):
-        print(f"  {name} password (current set, Enter keeps, !clear erases):")
-    else:
-        print(f"  {name} password (empty keeps unset):")
-    try:
-        password = getpass.getpass("    ").strip()
-    except (EOFError, OSError):
-        _EOF_SEEN = True
-        password = ""
-    if password == "":
-        password = current.get(password_key, "")
-    elif password == "!clear":
-        password = ""
-    return {
-        tokens_key: tokens,
-        single_key: single,
-        email_key: email,
-        password_key: password,
-    }
+    return {tokens_key: tokens}
 
 
 def check_provider(name, creds):
     upper = name.upper()
     tokens = split_tokens(creds.get(upper + "_TOKENS", ""))
     if not tokens:
-        single = creds.get(upper + "_TOKEN", "").strip()
-        if single:
-            tokens = [single]
-    if tokens:
-        if name == "DeepSeek":
-            for token in tokens:
-                ok, detail = check_deepseek_token(token)
-                if not ok:
-                    return False, f"token invalid: {detail}"
-            return True, ""
-        for token in tokens:
-            ok, detail = check_qwen_token(token)
-            if not ok:
-                return False, f"token invalid: {detail}"
         return True, ""
-    email = creds.get(upper + "_EMAIL", "").strip()
-    password = creds.get(upper + "_PASSWORD", "")
-    if email and password:
-        if name == "DeepSeek":
-            return check_deepseek_login(email, password)
-        return check_qwen_login(email, password)
+    checker = check_deepseek_token if name == "DeepSeek" else check_qwen_token
+    for token in tokens:
+        ok, detail = checker(token)
+        if not ok:
+            return False, f"token invalid: {detail}"
     return True, ""
 
 
@@ -470,7 +383,7 @@ def validate_provider(name, creds, defaults):
             print(f"  {name} credentials OK.")
             return creds
         print(f"  {name} credentials INVALID: {detail}")
-        if _EOF_SEEN or not ask(f"  Re-enter {name} credentials?", True):
+        if _input_state.eof_seen or not ask(f"  Re-enter {name} credentials?", True):
             print(f"  Keeping {name} credentials as entered; the server may fail at startup.")
             return creds
         creds = collect_provider(name, creds, defaults)

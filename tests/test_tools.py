@@ -1169,7 +1169,7 @@ def test_tool_schema_map():
         {"function": {"name": "b"}},
     ]
     result = tool_schema_map(tools)
-    assert result == {"a": {"x": "integer", "y": "string"}}
+    assert result == {"a": {"x": "integer", "y": "string"}, "b": {}}
 
 
 def test_xml_invoke_inline_json():
@@ -1303,10 +1303,14 @@ def test_parse_two_objects_second_is_tool_call():
     assert calls[0].name == "f"
 
 
-def test_xml_invoke_empty_args_skipped():
+def test_xml_invoke_empty_args_accepted():
     text = '<tool_calls><invoke name="bash">   </invoke></tool_calls>'
     parsed = _parse_xml_tool_calls(text, {"bash": {"cmd": "string"}})
-    assert parsed == (None, "")
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert calls[0].name == "bash"
+    assert json.loads(calls[0].arguments) == {}
 
 
 def test_xml_open_pattern_overlap_skipped():
@@ -1318,10 +1322,14 @@ def test_xml_open_pattern_overlap_skipped():
     assert [c.name for c in calls] == ["other"]
 
 
-def test_xml_open_pattern_empty_merged_skipped():
+def test_xml_open_pattern_empty_merged_accepted():
     text = "<bash></bash>"
     parsed = _parse_xml_tool_calls(text, {"bash": {"cmd": "string"}})
-    assert parsed == (None, "")
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert calls[0].name == "bash"
+    assert json.loads(calls[0].arguments) == {}
 
 
 def test_xml_open_pattern_with_schema():
@@ -1347,11 +1355,17 @@ def test_tool_schema_map_skips_bad_tools():
     tools = [
         {"function": {}},
         {"function": {"name": ""}},
-        {"function": {"name": "a", "parameters": "not dict"}},
+    ]
+    assert tool_schema_map(tools) == {}
+
+
+def test_tool_schema_map_normalizes_bad_params():
+    tools = [
+        {"function": {"name": "a", "parameters": "not json"}},
         {"function": {"name": "b", "parameters": {"properties": "not dict"}}},
         {"function": {"name": "c", "parameters": {"properties": {"x": "not dict"}}}},
     ]
-    assert tool_schema_map(tools) == {}
+    assert tool_schema_map(tools) == {"a": {}, "b": {}, "c": {}}
 
 
 def test_xml_invoke_broken_json():
@@ -1361,14 +1375,28 @@ def test_xml_invoke_broken_json():
     assert args == {"content": "{broken"}
 
 
-def test_parse_xml_empty_merged_skipped():
+def test_parse_xml_empty_merged_accepted():
     text = "<bash />"
     parsed = _parse_xml_tool_calls(text, {"bash": {"cmd": "string"}})
-    assert parsed == (None, "")
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert calls[0].name == "bash"
+    assert json.loads(calls[0].arguments) == {}
 
 
 def test_parse_xml_selfclose_no_args():
     text = "<bash />"
+    parsed = _parse_xml_tool_calls(text, {"bash": {}})
+    assert parsed is not None
+    calls, _ = parsed
+    assert calls is not None
+    assert calls[0].name == "bash"
+    assert json.loads(calls[0].arguments) == {}
+
+
+def test_parse_xml_unknown_tag_empty_args_still_skipped():
+    text = "<unknown />"
     parsed = _parse_xml_tool_calls(text, {"bash": {}})
     assert parsed == (None, "")
 
@@ -2055,7 +2083,10 @@ def test_parse_yaml_unknown_line():
 
 
 def test_parse_xml_selfclose_empty_attrs():
-    assert parse_tool_calls('<function name="x"/>') is None
+    calls, _ = parse_tool_calls('<function name="x"/>')
+    assert calls is not None
+    assert calls[0].name == "x"
+    assert json.loads(calls[0].arguments) == {}
 
 
 def test_parse_yaml_empty_name():
@@ -2112,7 +2143,8 @@ def test_choice_name_unknown_dict():
 def test_render_schema_tool_without_parameters():
     schema = render_tool_schema([{"function": {"name": "a", "description": "d"}}])
     assert schema is not None
-    assert "parameters" not in schema
+    assert "   parameters (JSON Schema)" not in schema
+    assert '<invoke name="a"></invoke>' in schema
 
 
 def test_render_message_tool_calls_non_dict():
@@ -2273,8 +2305,9 @@ def test_parse_dsml_invoke_empty():
     )
     calls, _ = parse_tool_calls(text)
     assert calls is not None
-    assert calls[0].name == "g"
-    assert json.loads(calls[0].arguments) == {"x": "1"}
+    assert [call.name for call in calls] == ["f", "g"]
+    assert json.loads(calls[0].arguments) == {}
+    assert json.loads(calls[1].arguments) == {"x": "1"}
 
 
 def test_tool_call_deltas_empty_arguments():
@@ -2283,3 +2316,102 @@ def test_tool_call_deltas_empty_arguments():
     assert len(deltas) == 2
     assert deltas[0] == {"role": "assistant", "content": "text"}
     assert deltas[1]["tool_calls"][0]["function"]["arguments"] == ""
+
+
+NO_ARGS_TOOL = {
+    "type": "function",
+    "function": {"name": "ping", "description": "Ping the server"},
+}
+
+NO_PARAMS_OBJECT_TOOL = {
+    "type": "function",
+    "function": {"name": "pong", "description": "Pong the server", "parameters": {"type": "object", "properties": {}}},
+}
+
+
+def test_tool_schema_map_parameterless_tools_registered():
+    mapping = tool_schema_map([NO_ARGS_TOOL, NO_PARAMS_OBJECT_TOOL, WEATHER_TOOL])
+    assert mapping["ping"] == {}
+    assert mapping["pong"] == {}
+    assert mapping["get_weather"] == {"city": "string"}
+
+
+def test_tool_schema_map_string_parameters_json():
+    tool = {
+        "type": "function",
+        "function": {
+            "name": "calc",
+            "parameters": json.dumps({"type": "object", "properties": {"x": {"type": "number"}}}),
+        },
+    }
+    assert tool_schema_map([tool])["calc"] == {"x": "number"}
+
+
+def test_render_tool_schema_parameterless_example():
+    schema = render_tool_schema([NO_ARGS_TOOL])
+    assert schema is not None
+    assert '<invoke name="ping"></invoke>' in schema
+    assert "no <parameter> children" in schema
+
+
+def test_parse_xml_tool_calls_invoke_without_parameters():
+    text = '<tool_calls>\n<invoke name="ping"></invoke>\n</tool_calls>'
+    calls, _ = parse_tool_calls(text)
+    assert calls is not None
+    assert len(calls) == 1
+    assert calls[0].name == "ping"
+    assert json.loads(calls[0].arguments) == {}
+
+
+def test_parse_xml_tool_calls_invoke_empty_body_with_schema():
+    text = '<tool_calls><invoke name="pong"></invoke></tool_calls>'
+    calls, _ = parse_tool_calls(text, tool_schemas=tool_schema_map([NO_PARAMS_OBJECT_TOOL]))
+    assert calls is not None
+    assert calls[0].name == "pong"
+    assert json.loads(calls[0].arguments) == {}
+
+
+def test_parse_xml_tool_calls_invoke_selfclose_without_parameters():
+    text = '<tool_calls><invoke name="ping"/></tool_calls>'
+    calls, _ = parse_tool_calls(text, tool_schemas=tool_schema_map([NO_ARGS_TOOL]))
+    assert calls is not None
+    assert calls[0].name == "ping"
+    assert json.loads(calls[0].arguments) == {}
+
+
+def test_parse_xml_tool_calls_bare_known_tag_without_parameters():
+    text = "<tool_calls>\n<ping/>\n</tool_calls>"
+    calls, _ = parse_tool_calls(text, tool_schemas=tool_schema_map([NO_ARGS_TOOL]))
+    assert calls is not None
+    assert calls[0].name == "ping"
+    assert json.loads(calls[0].arguments) == {}
+
+
+def test_parse_xml_tool_calls_bare_unknown_tag_still_skipped():
+    text = "<hello>world</hello>"
+    assert parse_tool_calls(text, tool_schemas=tool_schema_map([NO_ARGS_TOOL])) is None
+
+
+def test_parse_xml_tool_calls_generic_wrapper_without_parameters_via_name_child():
+    text = "<tool_calls><call><name>ping</name></call></tool_calls>"
+    calls, _ = parse_tool_calls(text)
+    assert calls is not None
+    assert calls[0].name == "ping"
+    assert json.loads(calls[0].arguments) == {}
+
+
+def test_parse_python_style_call_without_parameters():
+    text = "ping()"
+    calls, wrapper = parse_tool_calls(text, tool_schemas=tool_schema_map([NO_ARGS_TOOL]))
+    assert calls is not None
+    assert calls[0].name == "ping"
+    assert json.loads(calls[0].arguments) == {}
+    assert wrapper == ""
+
+
+def test_parse_json_call_without_parameters():
+    text = '{"name": "ping", "arguments": {}}'
+    calls, _ = parse_tool_calls(text)
+    assert calls is not None
+    assert calls[0].name == "ping"
+    assert json.loads(calls[0].arguments) == {}

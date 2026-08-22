@@ -94,7 +94,7 @@
                 <h2 id="qwen" data-i18n="pl_in_qw">Qwen</h2>
                 <p data-i18n-html="in_qw_p">Protocol reverse-engineered from the chat.qwen.ai frontend bundle:</p>
                 <ul>
-                    <li data-i18n-html="in_qw_b1">Auth: <code>POST /api/v2/auths/signin</code> with <code>{email, password}</code> where the password is SHA-256 hex of the plain text → <code>data.token</code> (JWT). Requests send it as <code>Authorization: Bearer &lt;token&gt;</code> and the <code>token</code> cookie.</li>
+                    <li data-i18n-html="in_qw_b1">Auth: requests send the web client token as <code>Authorization: Bearer &lt;token&gt;</code> and in the <code>token</code> cookie. The token comes from the Local Storage of chat.qwen.ai (DanyAPI does not use email/password login).</li>
                     <li data-i18n-html="in_qw_b2">Headers: <code>source: web</code>, <code>version</code>, <code>X-Request-Id</code>, <code>Timezone</code>, browser <code>sec-ch-ua</code>/<code>User-Agent</code>/<code>Origin</code>/<code>Referer</code>.</li>
                     <li data-i18n-html="in_qw_b3">Session: <code>POST /api/v2/chats/new</code> (<code>{chatId, models, chat_type: "t2t", chat_mode: "normal", timestamp}</code>) → <code>data.id</code> (the chat id).</li>
                     <li data-i18n-html="in_qw_b4">

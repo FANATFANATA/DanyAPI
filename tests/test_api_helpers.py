@@ -741,7 +741,7 @@ def test_chat_deepseek_attachment_via_endpoint():
     acct.client.upload_file.assert_awaited_once()
 
 
-def _patch_creds(ds_tokens=None, ds_email="", qwen_tokens=None, qwen_email="", cache=True):
+def _patch_creds(ds_tokens=None, qwen_tokens=None, cache=True):
     from contextlib import ExitStack
 
     from danyapi.deepseek.client import DeepSeekClient as DSC
@@ -751,10 +751,6 @@ def _patch_creds(ds_tokens=None, ds_email="", qwen_tokens=None, qwen_email="", c
     for patch_cm in (
         patch.object(settings, "deepseek_tokens", ds_tokens or []),
         patch.object(settings, "qwen_tokens", qwen_tokens or []),
-        patch.object(settings, "deepseek_email", ds_email),
-        patch.object(settings, "qwen_email", qwen_email),
-        patch.object(settings, "deepseek_password", "pw"),
-        patch.object(settings, "qwen_password", "pw"),
         patch.object(settings, "cache_enabled", cache),
         patch.object(DSC, "check_auth", new=AsyncMock(return_value=True)),
         patch.object(QC, "check_auth", new=AsyncMock(return_value=True)),
@@ -783,30 +779,11 @@ def test_deepseek_invalid_skipped():
     with (
         patch.object(settings, "deepseek_tokens", ["bad"]),
         patch.object(settings, "qwen_tokens", []),
-        patch.object(settings, "deepseek_email", ""),
-        patch.object(settings, "qwen_email", ""),
         patch.object(DSC, "check_auth", new=AsyncMock(return_value=False)),
     ):
         with pytest.raises(RuntimeError):
             with TestClient(app):
                 pass
-
-
-@pytest.mark.usefixtures("reset_app_state")
-def test_deepseek_email_login():
-    from danyapi.deepseek.client import DeepSeekClient as DSC
-
-    with (
-        patch.object(settings, "deepseek_tokens", []),
-        patch.object(settings, "qwen_tokens", []),
-        patch.object(settings, "deepseek_email", "a@b.c"),
-        patch.object(settings, "deepseek_password", "pw"),
-        patch.object(settings, "qwen_email", ""),
-        patch.object(DSC, "login", new=AsyncMock()),
-    ):
-        with TestClient(app):
-            assert app.state.pool is not None
-            assert len(app.state.pool.accounts) == 1
 
 
 @pytest.mark.usefixtures("reset_app_state")
@@ -819,21 +796,14 @@ def test_qwen_tokens_ok():
 
 
 @pytest.mark.usefixtures("reset_app_state")
-def test_qwen_email_login():
-    from danyapi.qwen.client import QwenClient as QC
-
+def test_no_credentials_raises():
     with (
         patch.object(settings, "deepseek_tokens", []),
         patch.object(settings, "qwen_tokens", []),
-        patch.object(settings, "deepseek_email", ""),
-        patch.object(settings, "qwen_email", "a@b.c"),
-        patch.object(settings, "qwen_password", "pw"),
-        patch.object(QC, "login", new=AsyncMock()),
-        patch.object(QC, "fetch_models", new=AsyncMock(return_value=[])),
     ):
-        with TestClient(app):
-            assert app.state.qwen_pool is not None
-            assert app.state.qwen_models == openai_mod.QWEN_DEFAULT_MODELS
+        with pytest.raises(RuntimeError, match="DEEPSEEK_TOKENS or QWEN_TOKENS"):
+            with TestClient(app):
+                pass
 
 
 @pytest.mark.usefixtures("reset_app_state")
@@ -1516,8 +1486,6 @@ def test_lifespan_qwen_invalid_token():
     for patch_cm in (
         patch.object(settings, "deepseek_tokens", []),
         patch.object(settings, "qwen_tokens", ["bad"]),
-        patch.object(settings, "deepseek_email", ""),
-        patch.object(settings, "qwen_email", ""),
         patch.object(QC, "check_auth", new=AsyncMock(return_value=False)),
     ):
         stack.enter_context(patch_cm)

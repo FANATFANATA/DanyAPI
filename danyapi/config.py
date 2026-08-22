@@ -24,19 +24,9 @@ class Settings:
         except ValueError:
             self.port = 8000
         tokens = [t.strip() for t in os.environ.get("DEEPSEEK_TOKENS", "").split(",") if t.strip()]
-        single = os.environ.get("DEEPSEEK_TOKEN", "").strip()
-        if not tokens and single:
-            tokens = [single]
         self.deepseek_tokens = tokens
-        self.deepseek_email = os.environ.get("DEEPSEEK_EMAIL", "")
-        self.deepseek_password = os.environ.get("DEEPSEEK_PASSWORD", "")
         qwen_tokens = [t.strip() for t in os.environ.get("QWEN_TOKENS", "").split(",") if t.strip()]
-        qwen_single = os.environ.get("QWEN_TOKEN", "").strip()
-        if not qwen_tokens and qwen_single:
-            qwen_tokens = [qwen_single]
         self.qwen_tokens = qwen_tokens
-        self.qwen_email = os.environ.get("QWEN_EMAIL", "")
-        self.qwen_password = os.environ.get("QWEN_PASSWORD", "")
         try:
             self.timeout = float(os.environ.get("DANYAPI_TIMEOUT", "60"))
         except ValueError:

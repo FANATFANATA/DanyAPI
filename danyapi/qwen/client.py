@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import datetime
-import hashlib
 import logging
 import time
 import uuid
@@ -32,10 +31,6 @@ COMMON_HEADERS = {
 
 def new_uuid() -> str:
     return str(uuid.uuid4())
-
-
-def sha256_hex(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def timezone_header() -> str:
@@ -134,23 +129,8 @@ class QwenClient:
             if data.get("success") is True:
                 return True
             return bool(data.get("id"))
-        except (httpx.HTTPError, ValueError):
+        except httpx.HTTPError, ValueError:
             return False
-
-    async def login(self, email: str, password: str) -> str:
-        resp = await self.http.post(
-            "/api/v2/auths/signin",
-            json={"email": email, "password": sha256_hex(password)},
-            headers=self._request_headers(),
-        )
-        biz = self._parse_json(resp, "/api/v2/auths/signin")
-        token = biz.get("token") or (biz.get("user") or {}).get("token")
-        if not token:
-            raise QwenError(-1, "login failed: no token in response")
-        self.token = token
-        self.http.headers["Authorization"] = f"Bearer {token}"
-        self.http.cookies.set("token", token, domain="chat.qwen.ai", path="/")
-        return token
 
     async def fetch_models(self) -> list[dict]:
         biz = await self._get("/api/v2/models/")
