@@ -261,7 +261,7 @@ async def _extract_request_model(request: Request) -> str | None:
         return None
     try:
         payload = json.loads(body)
-    except json.JSONDecodeError, UnicodeDecodeError, TypeError:
+    except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
         return None
     if isinstance(payload, dict):
         model = payload.get("model")
