@@ -261,7 +261,7 @@ async def _extract_request_model(request: Request) -> str | None:
         return None
     try:
         payload = json.loads(body)
-    except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
+    except json.JSONDecodeError, UnicodeDecodeError, TypeError:
         return None
     if isinstance(payload, dict):
         model = payload.get("model")
@@ -564,6 +564,7 @@ async def image_generations(req: ImageGenerationRequest) -> dict:
             model=req.model,
             model_id=req.model,
             context_seq=context_seq,
+            size=req.size,
         )
     except AccountPoolBusy:
         raise HTTPException(429, "all accounts are busy, try again later") from None
@@ -571,19 +572,40 @@ async def image_generations(req: ImageGenerationRequest) -> dict:
     data = []
     want_b64 = req.response_format == "b64_json"
     for url in result["image_urls"]:
-        if want_b64:
-            try:
-                async with httpx.AsyncClient(follow_redirects=True, timeout=30) as hc:
-                    img_resp = await hc.get(url)
-                    if img_resp.status_code == 200:
-                        import base64 as b64mod
+        try:
+            async with httpx.AsyncClient(follow_redirects=True, timeout=30) as hc:
+                img_resp = await hc.get(url)
+                if img_resp.status_code != 200:
+                    data.append({"url": url})
+                    continue
 
-                        data.append({"b64_json": b64mod.b64encode(img_resp.content).decode()})
-                    else:
-                        data.append({"url": url})
-            except Exception:
-                data.append({"url": url})
-        else:
+                img_content = img_resp.content
+
+                if req.size:
+                    from io import BytesIO
+
+                    try:
+                        from PIL import Image
+
+                        img = Image.open(BytesIO(img_content))
+                        width, height = map(int, req.size.split("*"))
+                        resized_img = img.resize((width, height), Image.LANCZOS)
+                        buffer = BytesIO()
+                        resized_img.save(buffer, format=img.format)
+                        img_content = buffer.getvalue()
+                    except Exception:
+                        pass
+
+                if want_b64:
+                    import base64 as b64mod
+
+                    data.append({"b64_json": b64mod.b64encode(img_content).decode()})
+                else:
+                    # Re-upload resized image to a temporary host or return as b64
+                    import base64 as b64mod
+
+                    data.append({"b64_json": b64mod.b64encode(img_content).decode()})
+        except Exception:
             data.append({"url": url})
 
     if not data:
@@ -1158,7 +1180,7 @@ async def _collect_reduced(
                     rec.handle(event)
             finally:
                 await resp.aclose()
-        except (HTTPException, httpx.HTTPError):
+        except HTTPException, httpx.HTTPError:
             if session_key is not None:
                 _drop_session(pool, account, session_key)
             continue
