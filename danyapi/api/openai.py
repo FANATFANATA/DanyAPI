@@ -1178,7 +1178,7 @@ async def _collect_reduced(
                     rec.handle(event)
             finally:
                 await resp.aclose()
-        except HTTPException, httpx.HTTPError:
+        except (HTTPException, httpx.HTTPError):
             if session_key is not None:
                 _drop_session(pool, account, session_key)
             continue
