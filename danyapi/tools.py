@@ -866,7 +866,7 @@ def _loads_lenient(text: str) -> Any:
     for candidate in _json_candidates(text):
         try:
             return json.loads(candidate)
-        except json.JSONDecodeError, TypeError, ValueError:
+        except (json.JSONDecodeError, TypeError, ValueError):
             continue
     raise ValueError("invalid json")
 

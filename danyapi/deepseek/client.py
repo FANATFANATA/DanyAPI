@@ -101,7 +101,7 @@ class DeepSeekClient:
                 params={"did": self.device_id, "scope": "main"},
             )
             return resp.json().get("code") == 0
-        except httpx.HTTPError, ValueError:
+        except (httpx.HTTPError, ValueError):
             return False
 
     async def get_user(self) -> dict:

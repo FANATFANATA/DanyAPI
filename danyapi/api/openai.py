@@ -284,7 +284,7 @@ async def _extract_request_model(request: Request) -> str | None:
         return None
     try:
         payload = json.loads(body)
-    except json.JSONDecodeError, UnicodeDecodeError, TypeError:
+    except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
         return None
     if isinstance(payload, dict):
         model = payload.get("model")
@@ -573,11 +573,7 @@ async def image_generations(req: ImageGenerationRequest) -> dict:
 
     dims = _parse_image_size(req.size)
 
-    context_seq = None
-    if req.session_id:
-        account, existing_sid = await _acquire_account(pool, req.session_id)
-    else:
-        account, existing_sid = await _acquire_account(pool, None)
+    account, existing_sid = await _acquire_account(pool, req.session_id)
 
     try:
         result = await qwen_api.collect_image(
@@ -588,7 +584,6 @@ async def image_generations(req: ImageGenerationRequest) -> dict:
             prompt=req.prompt,
             model=req.model,
             model_id=req.model,
-            context_seq=context_seq,
             size=req.size,
         )
     except AccountPoolBusy:
@@ -1185,7 +1180,7 @@ async def _collect_reduced(
                     rec.handle(event)
             finally:
                 await resp.aclose()
-        except HTTPException, httpx.HTTPError:
+        except (HTTPException, httpx.HTTPError):
             if session_key is not None:
                 _drop_session(pool, account, session_key)
             continue

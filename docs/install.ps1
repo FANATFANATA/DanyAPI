@@ -32,7 +32,7 @@ function Install-FromZip {
 $python = Find-Python
 if (-not $python) {
     Write-Host ""
-    Write-Host "Python was not found. Install Python 3.13+ from https://www.python.org/downloads/ and run the command again."
+    Write-Host "Python was not found. Install Python 3.10+ from https://www.python.org/downloads/ and run the command again."
     exit 1
 }
 

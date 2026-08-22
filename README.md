@@ -10,6 +10,8 @@ OpenAI-compatible HTTP API built on Python + FastAPI. Instead of the paid APIs i
 
 ## Install & Upgrade
 
+Requires Python 3.10+ (CI tests 3.10–3.14).
+
 Windows (PowerShell):
 
 ```powershell

@@ -30,11 +30,18 @@ FILE_HANDLER_NAME = "danyapi-file"
 DEFAULT_LOG_LEVEL = "INFO"
 DEFAULT_MAX_BYTES = 10 * 1024 * 1024
 DEFAULT_BACKUP_COUNT = 3
+_FALLBACK_LEVEL_NAMES = {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG", "NOTSET"}
+
+
+def _level_names() -> set[str]:
+    if hasattr(logging, "getLevelNamesMapping"):
+        return set(logging.getLevelNamesMapping())
+    return set(_FALLBACK_LEVEL_NAMES)
 
 
 def _resolve_level(level: str | None) -> str:
     normalized = str(level or "").strip().upper()
-    if normalized in logging.getLevelNamesMapping():
+    if normalized in _level_names():
         return normalized
     return DEFAULT_LOG_LEVEL
 

@@ -129,7 +129,7 @@ class QwenClient:
             if data.get("success") is True:
                 return True
             return bool(data.get("id"))
-        except httpx.HTTPError, ValueError:
+        except (httpx.HTTPError, ValueError):
             return False
 
     async def fetch_models(self) -> list[dict]:

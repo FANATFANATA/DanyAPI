@@ -134,7 +134,7 @@ def rustup_target_reachable():
             timeout=30,
             check=False,
         )
-    except OSError, subprocess.TimeoutExpired:
+    except (OSError, subprocess.TimeoutExpired):
         return True
     lines = {line.strip() for line in proc.stdout.splitlines() if line.strip()}
     return bool(lines) and "aarch64-unknown-linux-android" not in lines
