@@ -690,18 +690,6 @@ def build_prompt(
     tools_present = schema is not None
     json_block = render_json_mode(response_format)
 
-    if has_session:
-        tail = _tail_after_last_user(messages)
-        if _is_tool_round_tail(tail):
-            tail_prompt = _render_tool_tail(tail, _tool_names(tools) if tools_present else None)
-            return tail_prompt, True
-        base = extract_last_user(messages)
-        blocks = []
-        if json_block:
-            blocks.append(json_block)
-        blocks.append(base)
-        return "\n\n".join(blocks), tools_present
-
     tool_round_active = is_tool_round(messages)
     if tool_round_active or _has_history(messages):
         prompt = _render_history(messages)

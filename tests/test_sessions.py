@@ -338,7 +338,7 @@ def test_account_pool_stats_reports_cache_state():
     assert pool.stats()["context_hits"] == 1
 
 
-def test_plain_continuation_sends_only_last_user():
+def test_plain_continuation_preserves_full_history():
     messages = [
         Message("user", "What is the weather?"),
         Message("assistant", "It is 22C."),
@@ -346,7 +346,9 @@ def test_plain_continuation_sends_only_last_user():
     ]
     prompt, tool_mode = build_prompt(messages, has_session=True)
     assert not tool_mode
-    assert prompt == "And in Rome?"
+    assert "What is the weather?" in prompt
+    assert "It is 22C." in prompt
+    assert "And in Rome?" in prompt
 
 
 def test_continuation_after_tool_round_with_new_user():
@@ -358,12 +360,12 @@ def test_continuation_after_tool_round_with_new_user():
         Message("user", "And in Rome?"),
     ]
     prompt, tool_mode = build_prompt(messages, has_session=True)
-    assert not tool_mode
-    assert prompt == "And in Rome?"
-    assert "22C, sunny" not in prompt
+    assert tool_mode
+    assert "22C, sunny" in prompt
+    assert "And in Rome?" in prompt
 
 
-def test_immediate_tool_round_uses_tail():
+def test_immediate_tool_round_renders_full_history():
     messages = [
         Message("user", "What is the weather?"),
         Message("assistant", tool_calls=[{"id": "c1", "type": "function", "function": {"name": "get_weather", "arguments": '{"city": "Moscow"}'}}]),
@@ -371,9 +373,8 @@ def test_immediate_tool_round_uses_tail():
     ]
     prompt, tool_mode = build_prompt(messages, has_session=True)
     assert tool_mode
+    assert "What is the weather?" in prompt
     assert "22C, sunny" in prompt
-    assert "Continue the conversation" in prompt
-    assert "What is the weather?" not in prompt
 
 
 def test_session_continuation_with_tools():
@@ -385,13 +386,14 @@ def test_session_continuation_with_tools():
     prompt, tool_mode = build_prompt(messages, [WEATHER_TOOL], has_session=True)
     assert tool_mode
     assert "And in Rome?" in prompt
-    assert "get_weather" not in prompt
+    assert "get_weather" in prompt
 
 
-def test_session_skips_system():
+def test_session_includes_system():
     messages = [Message("system", "Be concise."), Message("user", "hi")]
     prompt, _ = build_prompt(messages, has_session=True)
-    assert prompt == "hi"
+    assert "Be concise." in prompt
+    assert "hi" in prompt
 
 
 def test_deepseek_stateless_request_resolves_cached_session():
