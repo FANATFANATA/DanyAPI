@@ -8,6 +8,7 @@ mypy
 pyright
 pylint
 flake8
+pyflakes
 isort
 bandit
 vulture

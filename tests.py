@@ -39,8 +39,8 @@ def run_cmd(name: str, cmd: list[str]) -> bool:
     try:
         proc = subprocess.run(cmd, cwd=ROOT, check=False)
     except FileNotFoundError:
-        print(f"[{name}] SKIPPED: tool not found")
-        return True
+        print(f"[{name}] FAIL: tool not found: {cmd[0]}")
+        return False
     elapsed = time.monotonic() - started
     status = "OK" if proc.returncode == 0 else f"FAIL (exit {proc.returncode})"
     print(f"=== [{name}] {status} ({elapsed:.1f}s)")
