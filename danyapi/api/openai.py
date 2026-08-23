@@ -37,7 +37,7 @@ MODEL_TYPE_BY_NAME = {
     "deepseek-v4-vision": "vision",
 }
 
-REASONING_SUFFIXES = ("-reasoning", "-thinking")
+REASONING_SUFFIXES = ("-thinking",)
 
 QWEN_DEFAULT_MODELS = [
     {
