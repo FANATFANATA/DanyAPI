@@ -25,6 +25,11 @@ RETRY_BACKOFF_SEC = 1.0
 RETRY_BACKOFF_MAX_SEC = 8.0
 
 RETRYABLE_HTTP_STATUSES = {408, 425, 429, 500, 502, 503, 504}
+STALE_SESSION_STATUSES = {400, 404}
+
+
+def _retry_delay(attempt: int) -> float:
+    return min(RETRY_BACKOFF_SEC * (2 ** (attempt - 1)), RETRY_BACKOFF_MAX_SEC)
 
 
 def _is_retryable_http(exc: HTTPException) -> bool:
@@ -238,26 +243,41 @@ async def collect_non_stream(
                 pass
             tool_schemas = toolemu.tool_schema_map(tools)
         stop_response_id: str | None = None
+        had_cached_session = bool(existing_sid) and account.sessions.get(existing_sid) is not None
+        stale_rebuilt = False
         try:
             rec: QwenStreamReconstructor | None = None
             attempt = 0
             while True:
-                if attempt:
-                    await asyncio.sleep(min(RETRY_BACKOFF_SEC * (2 ** (attempt - 1)), RETRY_BACKOFF_MAX_SEC))
                 try:
                     resp = await _send_completion(account.client, session, prompt, model_id, thinking, search)
                 except ContextLimitError:
                     _drop_session(pool, account, session_key)
                     raise HTTPException(400, "context length exceeded: conversation too long, start a new conversation") from None
                 except HTTPException as exc:
+                    if exc.status_code in STALE_SESSION_STATUSES and had_cached_session and not stale_rebuilt and messages is not None:
+                        stale_rebuilt = True
+                        _drop_session(pool, account, session_key)
+                        try:
+                            prompt, tool_mode = toolemu.build_prompt(messages, tools, tool_choice, False, response_format)
+                            tool_schemas = toolemu.tool_schema_map(tools)
+                        except ValueError as build_exc:
+                            raise exc from build_exc
+                        log.warning("qwen chat %s is stale (%s), rebuilt full history into a fresh chat", session_key, exc.status_code)
+                        session, session_key = await _prepare_session(account, pool, None, model_id, context_seq)
+                        stop_response_id = None
+                        continue
                     if _is_retryable_http(exc) and attempt < MAX_RETRIES:
                         attempt += 1
+                        delay = _retry_delay(attempt)
                         log.warning(
-                            "qwen provider error (%s), attempt %d/%d",
+                            "qwen provider error (%s), retry %d/%d in %.1fs",
                             exc.status_code,
                             attempt,
                             MAX_RETRIES,
+                            delay,
                         )
+                        await asyncio.sleep(delay)
                         continue
                     raise
                 rec = QwenStreamReconstructor()
@@ -274,12 +294,15 @@ async def collect_non_stream(
                     await resp.aclose()
                 if _is_retryable_error(rec) and attempt < MAX_RETRIES:
                     attempt += 1
+                    delay = _retry_delay(attempt)
                     log.warning(
-                        "qwen retryable error (%s), attempt %d/%d",
+                        "qwen retryable error (%s), retry %d/%d in %.1fs",
                         error_code(rec.error),
                         attempt,
                         MAX_RETRIES,
+                        delay,
                     )
+                    await asyncio.sleep(delay)
                     continue
                 break
         except asyncio.CancelledError:
@@ -391,10 +414,10 @@ async def stream_openai(
         rec: QwenStreamReconstructor | None = None
         content_buf = ""
         stop_response_id: str | None = None
+        had_cached_session = bool(existing_sid) and account.sessions.get(existing_sid) is not None
+        stale_rebuilt = False
         attempt = 0
         while True:
-            if attempt:
-                await asyncio.sleep(min(RETRY_BACKOFF_SEC * (2 ** (attempt - 1)), RETRY_BACKOFF_MAX_SEC))
             try:
                 resp = await _send_completion(account.client, session, prompt, model_id, thinking, search)
             except ContextLimitError:
@@ -429,14 +452,49 @@ async def stream_openai(
                 yield "data: [DONE]\n\n"
                 return
             except HTTPException as exc:
+                if exc.status_code in STALE_SESSION_STATUSES and had_cached_session and not stale_rebuilt and messages is not None:
+                    stale_rebuilt = True
+                    _drop_session(pool, account, session_key)
+                    try:
+                        prompt, tool_mode = toolemu.build_prompt(messages, tools, tool_choice, False, response_format)
+                        tool_schemas = toolemu.tool_schema_map(tools)
+                    except ValueError:
+                        detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+                        yield sse(
+                            {
+                                "id": chunk_id,
+                                "object": "chat.completion.chunk",
+                                "created": created,
+                                "model": model,
+                                "error": {"message": detail},
+                                "choices": [{"index": 0, "delta": {}, "finish_reason": "error"}],
+                            }
+                        )
+                        yield sse(
+                            {
+                                "id": chunk_id,
+                                "session_id": session_key,
+                                "object": "chat.completion.chunk",
+                                "choices": [],
+                            }
+                        )
+                        yield "data: [DONE]\n\n"
+                        return
+                    log.warning("qwen chat %s is stale (%s), rebuilt full history into a fresh chat", session_key, exc.status_code)
+                    session, session_key = await _prepare_session(account, pool, None, model_id, context_seq)
+                    stop_response_id = None
+                    continue
                 if _is_retryable_http(exc) and attempt < MAX_RETRIES:
                     attempt += 1
+                    delay = _retry_delay(attempt)
                     log.warning(
-                        "qwen provider error (%s), attempt %d/%d",
+                        "qwen provider error (%s), retry %d/%d in %.1fs",
                         exc.status_code,
                         attempt,
                         MAX_RETRIES,
+                        delay,
                     )
+                    await asyncio.sleep(delay)
                     continue
                 detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
                 yield sse(
@@ -528,12 +586,15 @@ async def stream_openai(
                 break
             if _is_retryable_error(rec) and attempt < MAX_RETRIES:
                 attempt += 1
+                delay = _retry_delay(attempt)
                 log.warning(
-                    "qwen retryable error (%s), attempt %d/%d",
+                    "qwen retryable error (%s), retry %d/%d in %.1fs",
                     error_code(rec.error),
                     attempt,
                     MAX_RETRIES,
+                    delay,
                 )
+                await asyncio.sleep(delay)
                 continue
             break
 
@@ -709,8 +770,6 @@ async def collect_image(
             rec: QwenStreamReconstructor | None = None
             attempt = 0
             while True:
-                if attempt:
-                    await asyncio.sleep(min(RETRY_BACKOFF_SEC * (2 ** (attempt - 1)), RETRY_BACKOFF_MAX_SEC))
                 try:
                     resp = await _send_completion(account.client, session, prompt, model_id, False, False, chat_type="t2i")
                 except ContextLimitError:
@@ -719,12 +778,15 @@ async def collect_image(
                 except HTTPException as exc:
                     if _is_retryable_http(exc) and attempt < MAX_RETRIES:
                         attempt += 1
+                        delay = _retry_delay(attempt)
                         log.warning(
-                            "qwen image provider error (%s), attempt %d/%d",
+                            "qwen image provider error (%s), retry %d/%d in %.1fs",
                             exc.status_code,
                             attempt,
                             MAX_RETRIES,
+                            delay,
                         )
+                        await asyncio.sleep(delay)
                         continue
                     raise
                 rec = QwenStreamReconstructor()
@@ -741,12 +803,15 @@ async def collect_image(
                     await resp.aclose()
                 if _is_retryable_error(rec) and attempt < MAX_RETRIES:
                     attempt += 1
+                    delay = _retry_delay(attempt)
                     log.warning(
-                        "qwen image retryable error (%s), attempt %d/%d",
+                        "qwen image retryable error (%s), retry %d/%d in %.1fs",
                         error_code(rec.error),
                         attempt,
                         MAX_RETRIES,
+                        delay,
                     )
+                    await asyncio.sleep(delay)
                     continue
                 break
         except asyncio.CancelledError:
@@ -818,8 +883,6 @@ async def stream_image(
         stop_response_id: str | None = None
         attempt = 0
         while True:
-            if attempt:
-                await asyncio.sleep(min(RETRY_BACKOFF_SEC * (2 ** (attempt - 1)), RETRY_BACKOFF_MAX_SEC))
             try:
                 resp = await _send_completion(account.client, session, prompt, model_id, False, False, chat_type="t2i")
             except ContextLimitError:
@@ -856,12 +919,15 @@ async def stream_image(
             except HTTPException as exc:
                 if _is_retryable_http(exc) and attempt < MAX_RETRIES:
                     attempt += 1
+                    delay = _retry_delay(attempt)
                     log.warning(
-                        "qwen image provider error (%s), attempt %d/%d",
+                        "qwen image provider error (%s), retry %d/%d in %.1fs",
                         exc.status_code,
                         attempt,
                         MAX_RETRIES,
+                        delay,
                     )
+                    await asyncio.sleep(delay)
                     continue
                 detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
                 yield sse(
@@ -950,12 +1016,15 @@ async def stream_image(
                 break
             if _is_retryable_error(rec) and attempt < MAX_RETRIES:
                 attempt += 1
+                delay = _retry_delay(attempt)
                 log.warning(
-                    "qwen image retryable error (%s), attempt %d/%d",
+                    "qwen image retryable error (%s), retry %d/%d in %.1fs",
                     error_code(rec.error),
                     attempt,
                     MAX_RETRIES,
+                    delay,
                 )
+                await asyncio.sleep(delay)
                 continue
             break
 

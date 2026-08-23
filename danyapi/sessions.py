@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import threading
 import time
 from collections import OrderedDict
@@ -24,6 +25,7 @@ class SessionRegistry:
         self._ttl = max(0.0, ttl)
         self._store = store
         self._key_prefix = key_prefix
+        self._creation_lock = asyncio.Lock()
         self._restore()
 
     def _now(self) -> float:
@@ -109,23 +111,24 @@ class SessionRegistry:
             return session
 
     async def obtain(self, session_id: str | None, **kwargs) -> tuple[Any, str]:
-        if session_id:
-            existing = self.get(session_id)
-            if existing is not None and self._reuse(existing, session_id, **kwargs):
-                return existing, session_id
-        session = await self._create(**kwargs)
-        new_id = session.id
-        now = self._now()
-        with self._lock:
-            self._sessions[new_id] = (session, now)
-            self._sessions.move_to_end(new_id)
-            while len(self._sessions) > self._maxsize:
-                evicted, _ = self._sessions.popitem(last=False)
+        async with self._creation_lock:
+            if session_id:
+                existing = self.get(session_id)
+                if existing is not None and self._reuse(existing, session_id, **kwargs):
+                    return existing, session_id
+            session = await self._create(**kwargs)
+            new_id = session.id
+            now = self._now()
+            with self._lock:
+                self._sessions[new_id] = (session, now)
+                self._sessions.move_to_end(new_id)
+                while len(self._sessions) > self._maxsize:
+                    evicted, _ = self._sessions.popitem(last=False)
+                    if self._store is not None:
+                        self._store.discard(self._session_key(evicted))
                 if self._store is not None:
-                    self._store.discard(self._session_key(evicted))
-            if self._store is not None:
-                self._store.set(self._session_key(new_id), self._serialize(session))
-        return session, new_id
+                    self._store.set(self._session_key(new_id), self._serialize(session))
+            return session, new_id
 
     def touch_last_message(self, session_id: str, message_id: str | None) -> None:
         session = self.get(session_id)

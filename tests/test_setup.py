@@ -1,3 +1,4 @@
+import email.message
 import importlib.util
 import io
 import json
@@ -7,6 +8,8 @@ from unittest.mock import patch
 
 DOCS = Path(__file__).resolve().parents[1] / "docs"
 _SPEC = importlib.util.spec_from_file_location("danyapi_setup", DOCS / "setup.py")
+assert _SPEC is not None
+assert _SPEC.loader is not None
 setup = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(setup)
 
@@ -52,7 +55,7 @@ def test_check_qwen_token_rejects_unknown_payload():
 
 
 def test_check_qwen_token_http_401():
-    error = urllib.error.HTTPError("https://chat.qwen.ai/api/v1/auths/", 401, "Unauthorized", None, io.BytesIO(b"denied"))
+    error = urllib.error.HTTPError("https://chat.qwen.ai/api/v1/auths/", 401, "Unauthorized", email.message.Message(), io.BytesIO(b"denied"))
     with patch.object(setup.urllib.request, "urlopen", side_effect=error):
         ok, detail = setup.check_qwen_token("bad")
     assert ok is False

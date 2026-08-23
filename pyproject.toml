@@ -9,3 +9,27 @@ select = ["B", "C4", "E", "F", "FURB", "I", "PLW", "RUF", "UP"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 filterwarnings = ["ignore:Using `httpx` with `starlette.testclient` is deprecated.*"]
+
+[tool.mypy]
+python_version = "3.10"
+
+[tool.pyright]
+include = ["danyapi", "docs", "tests"]
+typeCheckingMode = "basic"
+
+[[tool.pyright.executionEnvironments]]
+root = "tests"
+extraPaths = ["."]
+reportGeneralTypeIssues = false
+reportArgumentType = false
+reportAttributeAccessIssue = false
+reportOptionalMemberAccess = false
+
+[tool.vulture]
+min_confidence = 90
+paths = ["danyapi", "docs"]
+
+[tool.isort]
+profile = "black"
+line_length = 160
+known_first_party = ["danyapi"]

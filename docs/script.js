@@ -1,34 +1,11 @@
 (function () {
     "use strict";
-
-    /* ---------------- nav scrolled state ---------------- */
     var nav = document.getElementById("nav");
     function onScroll() {
         nav.classList.toggle("scrolled", window.scrollY > 20);
     }
     window.addEventListener("scroll", onScroll, { passive: true });
     onScroll();
-
-    /* ---------------- docs dropdown ---------------- */
-    var docsNav = document.querySelector(".docs-nav");
-    if (docsNav) {
-        var docsBtn = docsNav.querySelector(".docs-btn");
-        function closeDocs() {
-            docsNav.classList.remove("open");
-            docsBtn.setAttribute("aria-expanded", "false");
-        }
-        docsBtn.addEventListener("click", function (e) {
-            e.stopPropagation();
-            var open = docsNav.classList.toggle("open");
-            docsBtn.setAttribute("aria-expanded", open ? "true" : "false");
-        });
-        document.addEventListener("click", closeDocs);
-        document.addEventListener("keydown", function (e) {
-            if (e.key === "Escape") closeDocs();
-        });
-    }
-
-    /* ---------------- reveal on scroll ---------------- */
     var revealEls = document.querySelectorAll(".reveal");
     if ("IntersectionObserver" in window) {
         var io = new IntersectionObserver(function (entries) {
@@ -43,8 +20,6 @@
     } else {
         revealEls.forEach(function (el) { el.classList.add("revealed"); });
     }
-
-    /* ---------------- code tabs ---------------- */
     var tabs = document.querySelectorAll(".tab");
     tabs.forEach(function (tab) {
         tab.addEventListener("click", function () {
@@ -55,8 +30,6 @@
             });
         });
     });
-
-    /* ---------------- copy buttons ---------------- */
     var COPY_LABELS = {
         en: "Copy", ru: "Копировать",
         okEn: "Copied!", okRu: "Скопировано!"
@@ -91,103 +64,6 @@
             });
         });
     });
-
-    /* ---------------- hero terminal animation ---------------- */
-    var termBody = document.getElementById("termBody");
-    var TERM_LINES = {
-        en: [
-            { cls: "term-prompt", text: "$ python -m danyapi" },
-            { cls: "term-info", text: "Loading .env - deepseek + qwen" },
-            { cls: "term-ok", text: "✓ DeepSeek: 3 tokens valid" },
-            { cls: "term-ok", text: "✓ Qwen: 1 token valid" },
-            { cls: "term-info", text: "Uvicorn running on http://0.0.0.0:8000" },
-            { cls: "term-prompt", text: "→ POST /v1/chat/completions · deepseek-v4-flash" },
-            { cls: "term-data", text: 'data: {"choices":[{"delta":{"role":"assistant"}}]}' },
-            { cls: "term-data", text: 'data: {"choices":[{"delta":{"content":"Hi"}}]}' },
-            { cls: "term-data", text: 'data: {"choices":[{"delta":{"content":" there! How can I help?"}}]}' },
-            { cls: "term-data", text: 'data: [DONE]' },
-            { cls: "term-ok", text: "✓ session_id: 8f3a...c21e · tokens: 42" }
-        ],
-        ru: [
-            { cls: "term-prompt", text: "$ python -m danyapi" },
-            { cls: "term-info", text: "Загружаю .env - deepseek + qwen" },
-            { cls: "term-ok", text: "✓ DeepSeek: 3 токена валидны" },
-            { cls: "term-ok", text: "✓ Qwen: 1 токен валиден" },
-            { cls: "term-info", text: "Uvicorn запущен на http://0.0.0.0:8000" },
-            { cls: "term-prompt", text: "→ POST /v1/chat/completions · deepseek-v4-flash" },
-            { cls: "term-data", text: 'data: {"choices":[{"delta":{"role":"assistant"}}]}' },
-            { cls: "term-data", text: 'data: {"choices":[{"delta":{"content":"Привет"}}]}' },
-            { cls: "term-data", text: 'data: {"choices":[{"delta":{"content":"! Чем могу помочь?"}}]}' },
-            { cls: "term-data", text: 'data: [DONE]' },
-            { cls: "term-ok", text: "✓ session_id: 8f3a...c21e · tokens: 42" }
-        ]
-    };
-    var termIdx = 0;
-    var termStarted = false;
-
-    function typeLine(line, resolve) {
-        var row = document.createElement("div");
-        row.className = "term-line " + line.cls;
-        termBody.appendChild(row);
-        var i = 0;
-        var t = line.text;
-        (function step() {
-            if (i <= t.length) {
-                row.textContent = t.slice(0, i);
-                i++;
-                setTimeout(step, 14);
-            } else {
-                resolve();
-            }
-        })();
-    }
-
-    function playTerminal() {
-        if (!termBody) return;
-        var lines = TERM_LINES[document.documentElement.lang] || TERM_LINES.en;
-        if (termIdx >= lines.length) {
-            setTimeout(playTerminal, 9000);
-            return;
-        }
-        var line = lines[termIdx];
-        termIdx++;
-        var delay = line.cls === "term-prompt" ? 650 : 200;
-        setTimeout(function () {
-            typeLine(line, function () {
-                termBody.scrollTop = termBody.scrollHeight;
-                setTimeout(playTerminal, delay);
-            });
-        }, delay);
-    }
-
-    function startTerminal() {
-        if (termStarted || !termBody) return;
-        termStarted = true;
-        playTerminal();
-    }
-
-    function restartTerminal() {
-        if (!termStarted || !termBody) return;
-        termBody.innerHTML = "";
-        termIdx = 0;
-        playTerminal();
-    }
-
-    if ("IntersectionObserver" in window) {
-        var termObserver = new IntersectionObserver(function (entries) {
-            entries.forEach(function (e) {
-                if (e.isIntersecting) {
-                    startTerminal();
-                    termObserver.disconnect();
-                }
-            });
-        }, { threshold: 0.4 });
-        termObserver.observe(termBody);
-    } else {
-        startTerminal();
-    }
-
-    /* ---------------- i18n (EN / RU) ---------------- */
     var LANGS = ["en", "ru"];
     var STORE_KEY = "danyapi-lang";
 
@@ -198,20 +74,11 @@
             nav_quickstart: "Быстрый старт",
             nav_how: "Как работает",
             nav_faq: "FAQ",
-            nav_docs: "Доки",
-            nav_overview: "Обзор",
-            nav_install: "Установка и аккаунты",
-            nav_config: "Конфигурация",
-            nav_usage: "Использование",
-            nav_internals: "Как это работает",
             hero_badge: "Бесплатно · Open Source · OpenAI-совместимо",
-            hero_h1_a: "API больших моделей.",
-            hero_h1_b: "Ноль ключей.",
-            hero_h1_c: "Ноль затрат.",
-            hero_sub: "DanyAPI - это OpenAI-совместимый HTTP API на Python + FastAPI. Вместо платных API он работает с внутренними API бесплатных веб-клиентов chat.deepseek.com и chat.qwen.ai через серверные аккаунты. Вашим пользователям не нужен ни один API-ключ.",
+            hero_h1_b: "Ноль затрат.",
+            hero_sub: "DanyAPI - это OpenAI-совместимый HTTP API на Python + FastAPI. Вместо платных API он работает с внутренними API бесплатных веб-клиентов chat.deepseek.com и chat.qwen.ai через серверные аккаунты, созданные из ваших бесплатных токенов провайдеров.",
             hero_cta_start: "Быстрый старт",
             hero_cta_gh: "на GitHub",
-            hero_term_note: "Одна команда устанавливает, настраивает и запускает сервер. Запросы обслуживаются бесплатными серверными аккаунтами.",
             stat_zero: "за токен, навсегда",
             stat_providers: "бесплатных провайдера",
             stat_cmd: "команда для установки",
@@ -282,8 +149,8 @@
             flow_api: "FastAPI · /v1",
             flow_pool: "Пул аккаунтов",
             flow_pool_detail: "round-robin · ретраи · PoW",
-            how1_t: "Ключей нет",
-            how1_d: "Все запросы делают серверные аккаунты. Потребители API просто указывают ваш инстанс - <code>api_key</code> не проверяется.",
+            how1_t: "Работает на бесплатных токенах провайдеров",
+            how1_d: "Добавь свои бесплатные токены DeepSeek/Qwen в <code>.env</code> - все запросы к апстриму делают эти серверные аккаунты. Потребителям API достаточно указать ваш инстанс - ключи им не нужны.",
             how2_t: "Параллельность",
             how2_d: "Один аккаунт = одно сообщение за раз. DanyAPI держит пул токенов и распределяет параллельные запросы, ставя в очередь, когда все заняты.",
             how3_t: "Сессии, что живут",
@@ -294,7 +161,7 @@
             faq_title: "Вопросы?",
             faq_title_hi: "Есть ответы.",
             q1: "Это правда бесплатно?",
-            a1: "Да. DanyAPI работает с внутренними API бесплатных веб-клиентов chat.deepseek.com и chat.qwen.ai через серверные аккаунты. Никаких тарифов, лимитов и ключей.",
+            a1: "Да. DanyAPI работает с внутренними API бесплатных веб-клиентов chat.deepseek.com и chat.qwen.ai через серверные аккаунты, созданные из ваших бесплатных токенов провайдеров. Никаких тарифов и лимитов.",
             q2: "Нужен ли пользователям API-ключ?",
             a2: "Нет. SDK OpenAI требует поле <code>api_key</code>, но DanyAPI его не проверяет - передайте любое значение. Все запросы к апстриму делают настроенные вами серверные аккаунты.",
             q3: "Какие провайдеры и модели?",
@@ -311,9 +178,8 @@
             cta_tg: "Телеграм-канал",
             footer_creator: "Создатель",
             footer_channel: "Телеграм-канал",
-            footer_docs: "Документация",
             footer_note: "Сделано на FastAPI и Python · реверс-инжиниринг, не аффилировано с DeepSeek или Alibaba",
-            meta_title: "DanyAPI - бесплатный OpenAI-совместимый API без ключей",
+            meta_title: "DanyAPI",
             lang_en: "Английский",
             lang_ru: "Русский"
         }
@@ -359,8 +225,6 @@
             void main.offsetWidth;
             main.classList.add("i18n-swap");
         }
-
-        restartTerminal();
     }
 
     function formatStarCount(n) {

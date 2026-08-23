@@ -62,7 +62,7 @@ class QwenSessionRegistry(SessionRegistry):
 
 
 class QwenAccount:
-    __slots__ = ("broken", "client", "index", "sem", "sessions")
+    __slots__ = ("broken", "client", "index", "sem", "sessions", "stable_id")
 
     def __init__(
         self,
@@ -71,11 +71,13 @@ class QwenAccount:
         session_cache_size: int = 128,
         ttl: float = 0.0,
         store: JsonStore | None = None,
+        stable_id: str | None = None,
     ) -> None:
         self.index = index
         self.client = client
         self.sem = asyncio.Semaphore(1)
         self.sessions = QwenSessionRegistry(client, session_cache_size, ttl, store=store, key_prefix=f"{index}:")
+        self.stable_id = stable_id
         self.broken = False
 
     def mark_broken(self) -> None:

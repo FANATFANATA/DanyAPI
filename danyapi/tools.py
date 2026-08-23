@@ -228,8 +228,9 @@ _XML_NESTED_RE = re.compile(r"<[a-zA-Z_]")
 _PYTHON_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*")
 _PYTHON_CALL_RE = re.compile(r"\s*([A-Za-z_][A-Za-z0-9_-]*)\s*\(")
 _XML_WRAPPER_CLOSE_RE = re.compile(r"</(?:tool_calls|tool_call|function_calls|function_call|tools)\s*>", re.IGNORECASE)
+_XML_TOOL_NAMES = r"invoke|toolinvoke|tool_invoke|use_tool|tool_use|call|function|tool"
 _XML_TOOL_ELEMENT_RE = re.compile(
-    r"<(?:invoke|toolinvoke|tool_invoke|use_tool|tool_use|call|function|tool)\b([^>]*)>(.*?)</(?:invoke|toolinvoke|tool_invoke|use_tool|tool_use|call|function|tool)\s*>",
+    rf"<(?:{_XML_TOOL_NAMES})\b([^>]*)>(.*?)</(?:{_XML_TOOL_NAMES})\s*>",
     re.DOTALL | re.IGNORECASE,
 )
 _XML_TOOL_SELFCLOSE_RE = re.compile(

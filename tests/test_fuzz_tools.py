@@ -51,9 +51,20 @@ _tool_call_json = st.one_of(
     ).map(json.dumps),
 )
 
+
+def _prefix_join(prefix: str) -> st.SearchStrategy[str]:
+    return _tool_call_json.map(lambda j: f"{prefix}\n\n{j}")
+
+
+def _halved(j: str) -> st.SearchStrategy[str]:
+    if len(j) > 4:
+        return st.just(j[: len(j) // 2 + 1])
+    return st.just(j)
+
+
 _malformed_json = st.one_of(
-    st.text(max_size=100).flatmap(lambda prefix, _=_tool_call_json: _tool_call_json.map(lambda j, p=prefix: f"{p}\n\n{j}")),
-    _tool_call_json.flatmap(lambda j: st.just(j[: len(j) // 2 + 1]) if len(j) > 4 else st.just(j)),
+    st.text(max_size=100).flatmap(_prefix_join),
+    _tool_call_json.flatmap(_halved),
     _tool_call_json.map(lambda s: re.sub(r"\}(?=\])", "", s, count=1)),
     st.text(min_size=1, max_size=20).map(lambda name: f'<invoke name="{name}"><parameter name="city">Moscow</parameter></invoke>'),
 )

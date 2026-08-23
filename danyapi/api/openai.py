@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import random
@@ -154,6 +155,10 @@ def _resize_image_bytes(content: bytes, dims: tuple[int, int] | None) -> bytes:
         return content
 
 
+def _token_stable_id(token: str) -> str:
+    return hashlib.sha1(token.encode("utf-8"), usedforsecurity=False).hexdigest()[:16]
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     accounts: list[DeepSeekAccount] = []
@@ -168,35 +173,37 @@ async def lifespan(app: FastAPI):
     try:
         if settings.deepseek_tokens:
             for i, token in enumerate(settings.deepseek_tokens):
-                client = DeepSeekClient(token=token, timeout=settings.timeout)
-                if not await client.check_auth():
+                ds_client = DeepSeekClient(token=token, timeout=settings.timeout)
+                if not await ds_client.check_auth():
                     log.warning("deepseek token #%d invalid/expired, skipping", i)
-                    await client.aclose()
+                    await ds_client.aclose()
                     continue
                 accounts.append(
                     DeepSeekAccount(
                         len(accounts),
-                        client,
+                        ds_client,
                         session_cache_size=settings.session_cache_size,
                         ttl=settings.session_ttl,
                         store=deepseek_session_store,
+                        stable_id=_token_stable_id(token),
                     )
                 )
             log.info("deepseek accounts ready: %d", len(accounts))
         if settings.qwen_tokens:
             for i, token in enumerate(settings.qwen_tokens):
-                client = QwenClient(token=token, timeout=settings.timeout)
-                if not await client.check_auth():
+                qw_client = QwenClient(token=token, timeout=settings.timeout)
+                if not await qw_client.check_auth():
                     log.warning("qwen token #%d invalid/expired, skipping", i)
-                    await client.aclose()
+                    await qw_client.aclose()
                     continue
                 qwen_accounts.append(
                     QwenAccount(
                         len(qwen_accounts),
-                        client,
+                        qw_client,
                         session_cache_size=settings.session_cache_size,
                         ttl=settings.session_ttl,
                         store=qwen_session_store,
+                        stable_id=_token_stable_id(token),
                     )
                 )
             log.info("qwen accounts ready: %d", len(qwen_accounts))
@@ -227,10 +234,10 @@ async def lifespan(app: FastAPI):
             raise RuntimeError("no valid credentials: set DEEPSEEK_TOKENS or QWEN_TOKENS")
         yield
     finally:
-        for acct in accounts:
-            await acct.client.aclose()
-        for acct in qwen_accounts:
-            await acct.client.aclose()
+        for ds_acct in accounts:
+            await ds_acct.client.aclose()
+        for qw_acct in qwen_accounts:
+            await qw_acct.client.aclose()
 
 
 async def _fetch_qwen_models(client: QwenClient) -> list[dict]:
@@ -909,6 +916,11 @@ def _is_retryable_hint(rec: MessageReconstructor) -> bool:
 
 
 RETRYABLE_HTTP_STATUSES = {408, 425, 429, 500, 502, 503, 504}
+STALE_SESSION_STATUSES = {400, 404}
+
+
+def _retry_delay(attempt: int) -> float:
+    return min(RETRY_BACKOFF_SEC * (2 ** (attempt - 1)), RETRY_BACKOFF_MAX_SEC)
 
 
 def _is_retryable_http(exc: HTTPException) -> bool:
@@ -1064,8 +1076,6 @@ async def _collect_continuation(
 ) -> MessageReconstructor | None:
     attempt = 0
     while True:
-        if attempt:
-            await asyncio.sleep(min(RETRY_BACKOFF_SEC * (2 ** (attempt - 1)), RETRY_BACKOFF_MAX_SEC))
         try:
             pow_headers = await _fresh_pow_headers(account)
             resp = await _send_with_auth(
@@ -1083,12 +1093,15 @@ async def _collect_continuation(
         except HTTPException as exc:
             if _is_retryable_http(exc) and attempt < MAX_RETRIES:
                 attempt += 1
+                delay = _retry_delay(attempt)
                 log.warning(
-                    "deepseek continuation error (%s), attempt %d/%d",
+                    "deepseek continuation error (%s), retry %d/%d in %.1fs",
                     exc.status_code,
                     attempt,
                     MAX_RETRIES,
+                    delay,
                 )
+                await asyncio.sleep(delay)
                 continue
             return None
         rec = MessageReconstructor()
@@ -1103,6 +1116,15 @@ async def _collect_continuation(
             await resp.aclose()
         if not (rec.content or rec.reasoning) and _is_retryable_hint(rec) and attempt < MAX_RETRIES:
             attempt += 1
+            delay = _retry_delay(attempt)
+            log.warning(
+                "deepseek continuation retryable hint (%s), retry %d/%d in %.1fs",
+                (rec.hint_error or {}).get("finish_reason"),
+                attempt,
+                MAX_RETRIES,
+                delay,
+            )
+            await asyncio.sleep(delay)
             continue
         return rec
 
@@ -1223,13 +1245,13 @@ async def _collect_non_stream(
             tool_schemas = toolemu.tool_schema_map(tools)
         stop_message_id: str | None = None
         started = time.monotonic()
+        had_cached_session = bool(existing_sid) and account.sessions.get(existing_sid) is not None
+        stale_rebuilt = False
+        rec: MessageReconstructor | None = None
+        response_message_id = None
+        attempt = 0
         try:
-            rec: MessageReconstructor | None = None
-            response_message_id = None
-            attempt = 0
             while True:
-                if attempt:
-                    await asyncio.sleep(min(RETRY_BACKOFF_SEC * (2 ** (attempt - 1)), RETRY_BACKOFF_MAX_SEC))
                 try:
                     pow_headers = await _fresh_pow_headers(account)
                     resp = await _send_with_auth(
@@ -1250,14 +1272,30 @@ async def _collect_non_stream(
                         rec = MessageReconstructor()
                         rec.hint_error = input_hint
                         break
+                    if exc.status_code in STALE_SESSION_STATUSES and had_cached_session and not stale_rebuilt and messages is not None:
+                        stale_rebuilt = True
+                        _drop_session(pool, account, session_key)
+                        try:
+                            prompt, tool_mode = toolemu.build_prompt(messages, tools, tool_choice, False, response_format)
+                            tool_schemas = toolemu.tool_schema_map(tools)
+                        except ValueError as build_exc:
+                            raise exc from build_exc
+                        log.warning("deepseek session %s is stale (%s), rebuilt full history into a fresh chat", session_key, exc.status_code)
+                        session, session_key, parent_message_id = await _prepare_session(account, pool, None, context_seq)
+                        stop_message_id = None
+                        response_message_id = None
+                        continue
                     if _is_retryable_http(exc) and attempt < MAX_RETRIES:
                         attempt += 1
+                        delay = _retry_delay(attempt)
                         log.warning(
-                            "deepseek provider error (%s), attempt %d/%d",
+                            "deepseek provider error (%s), retry %d/%d in %.1fs",
                             exc.status_code,
                             attempt,
                             MAX_RETRIES,
+                            delay,
                         )
+                        await asyncio.sleep(delay)
                         continue
                     raise
                 rec = MessageReconstructor()
@@ -1279,12 +1317,15 @@ async def _collect_non_stream(
                     stop_message_id = rec.id
                 if not (rec.content or rec.reasoning) and _is_retryable_hint(rec) and attempt < MAX_RETRIES:
                     attempt += 1
+                    delay = _retry_delay(attempt)
                     log.warning(
-                        "retryable hint (%s), attempt %d/%d",
+                        "deepseek retryable hint (%s), retry %d/%d in %.1fs",
                         (rec.hint_error or {}).get("finish_reason"),
                         attempt,
                         MAX_RETRIES,
+                        delay,
                     )
+                    await asyncio.sleep(delay)
                     continue
                 break
         except asyncio.CancelledError:
@@ -1374,10 +1415,10 @@ async def _stream_openai(
         stop_message_id: str | None = None
         content_buf = ""
         started = time.monotonic()
+        had_cached_session = bool(existing_sid) and account.sessions.get(existing_sid) is not None
+        stale_rebuilt = False
         attempt = 0
         while True:
-            if attempt:
-                await asyncio.sleep(min(RETRY_BACKOFF_SEC * (2 ** (attempt - 1)), RETRY_BACKOFF_MAX_SEC))
             try:
                 pow_headers = await _fresh_pow_headers(account)
                 resp = await _send_with_auth(
@@ -1398,14 +1439,33 @@ async def _stream_openai(
                     rec = MessageReconstructor()
                     rec.hint_error = input_hint
                     break
+                if exc.status_code in STALE_SESSION_STATUSES and had_cached_session and not stale_rebuilt and messages is not None:
+                    stale_rebuilt = True
+                    _drop_session(pool, account, session_key)
+                    try:
+                        prompt, tool_mode = toolemu.build_prompt(messages, tools, tool_choice, False, response_format)
+                        tool_schemas = toolemu.tool_schema_map(tools)
+                    except ValueError:
+                        detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+                        for line in _stream_error_sse(chunk_id, created, model, detail, session_key):
+                            yield line
+                        return
+                    log.warning("deepseek session %s is stale (%s), rebuilt full history into a fresh chat", session_key, exc.status_code)
+                    session, session_key, parent_message_id = await _prepare_session(account, pool, None, context_seq)
+                    stop_message_id = None
+                    response_message_id = None
+                    continue
                 if _is_retryable_http(exc) and attempt < MAX_RETRIES:
                     attempt += 1
+                    delay = _retry_delay(attempt)
                     log.warning(
-                        "deepseek provider error (%s), attempt %d/%d",
+                        "deepseek provider error (%s), retry %d/%d in %.1fs",
                         exc.status_code,
                         attempt,
                         MAX_RETRIES,
+                        delay,
                     )
+                    await asyncio.sleep(delay)
                     continue
                 detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
                 for line in _stream_error_sse(chunk_id, created, model, detail, session_key):
@@ -1485,12 +1545,15 @@ async def _stream_openai(
                 break
             if _is_retryable_hint(rec) and attempt < MAX_RETRIES:
                 attempt += 1
+                delay = _retry_delay(attempt)
                 log.warning(
-                    "retryable hint (%s), attempt %d/%d",
+                    "deepseek retryable hint (%s), retry %d/%d in %.1fs",
                     (rec.hint_error or {}).get("finish_reason"),
                     attempt,
                     MAX_RETRIES,
+                    delay,
                 )
+                await asyncio.sleep(delay)
                 continue
             break
 

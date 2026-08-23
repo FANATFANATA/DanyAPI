@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>DanyAPI - Free OpenAI-compatible API, no keys</title>
-<meta name="description" content="OpenAI-compatible HTTP API on top of the free web clients chat.deepseek.com and chat.qwen.ai. No keys. Free. FastAPI + Python." />
+<title>DanyAPI</title>
+<meta name="description" content="OpenAI-compatible HTTP API on top of the free web clients chat.deepseek.com and chat.qwen.ai. Runs on your own free provider tokens. Free. FastAPI + Python." />
 <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2040%2040'%3E%3Cdefs%3E%3ClinearGradient%20id='g'%20x1='0'%20y1='0'%20x2='1'%20y2='1'%3E%3Cstop%20offset='0'%20stop-color='%236c7bff'/%3E%3Cstop%20offset='1'%20stop-color='%2322d3ee'/%3E%3C/linearGradient%3E%3C/defs%3E%3Cpath%20d='M20%202.5L35%2011V29L20%2037.5L5%2029V11Z'%20fill='none'%20stroke='url(%23g)'%20stroke-width='2.6'%20stroke-linejoin='round'/%3E%3Cpath%20d='M20%2013.5L12.5%2026.5H27.5Z'%20fill='none'%20stroke='url(%23g)'%20stroke-width='1.8'%20stroke-linejoin='round'/%3E%3Ccircle%20cx='20'%20cy='13.5'%20r='3'%20fill='url(%23g)'/%3E%3Ccircle%20cx='12.5'%20cy='26.5'%20r='3'%20fill='url(%23g)'/%3E%3Ccircle%20cx='27.5'%20cy='26.5'%20r='3'%20fill='url(%23g)'/%3E%3C/svg%3E" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -41,16 +41,6 @@
             <a href="#quickstart" data-i18n="nav_quickstart">Quick start</a>
             <a href="#how" data-i18n="nav_how">How it works</a>
             <a href="#faq" data-i18n="nav_faq">FAQ</a>
-            <div class="docs-nav">
-                <button type="button" class="docs-btn" aria-expanded="false" data-i18n="nav_docs">Docs</button>
-                <div class="docs-dropdown">
-                    <a href="overview.html" data-i18n="nav_overview">Overview</a>
-                    <a href="setup.html" data-i18n="nav_install">Install &amp; accounts</a>
-                    <a href="configuration.html" data-i18n="nav_config">Configuration</a>
-                    <a href="usage.html" data-i18n="nav_usage">Usage</a>
-                    <a href="internals.html" data-i18n="nav_internals">How it works</a>
-                </div>
-            </div>
         </nav>
         <div class="nav-actions">
             <div class="lang-switch" role="group" aria-label="Language">
@@ -70,7 +60,6 @@
 
 <main id="top">
 
-    <!-- HERO -->
     <section class="hero">
         <div class="hero-inner">
             <div class="hero-copy">
@@ -79,14 +68,12 @@
                     <span data-i18n="hero_badge">Free · Open source · OpenAI-compatible</span>
                 </span>
                 <h1 class="hero-title reveal" data-delay="1">
-                    <span data-i18n="hero_h1_a">Big-model API.</span>
-                    <span class="grad-text" data-i18n="hero_h1_b">Zero keys.</span>
-                    <span data-i18n="hero_h1_c">Zero cost.</span>
+                    <span class="grad-text" data-i18n="hero_h1_b">Zero cost.</span>
                 </h1>
                 <p class="hero-sub reveal" data-delay="2" data-i18n="hero_sub">
                     DanyAPI is an OpenAI-compatible HTTP API built on Python + FastAPI. Instead of the paid
                     APIs it talks to the internal APIs of the free web clients chat.deepseek.com and
-                    chat.qwen.ai using server-side accounts. Your users never need an API key.
+                    chat.qwen.ai using server-side accounts created from your own free provider tokens.
                 </p>
                 <div class="hero-cta reveal" data-delay="3">
                     <a class="btn btn-primary btn-lg" href="#quickstart" data-i18n="hero_cta_start">Quick start</a>
@@ -103,19 +90,6 @@
                     <span class="pill"><code>Docker · GHCR</code></span>
                 </div>
             </div>
-
-            <div class="hero-terminal reveal" data-delay="2">
-                <div class="terminal">
-                    <div class="terminal-bar">
-                        <span class="t-dot t-red"></span>
-                        <span class="t-dot t-yellow"></span>
-                        <span class="t-dot t-green"></span>
-                        <span class="terminal-title">danyapi - live demo</span>
-                    </div>
-                    <div class="terminal-body" id="termBody" aria-live="polite"></div>
-                </div>
-                <div class="hero-terminal-note" data-i18n="hero_term_note">One command installs, configures and launches the server. Requests are served by server-side free accounts.</div>
-            </div>
         </div>
 
         <div class="stats reveal" data-delay="3">
@@ -127,7 +101,6 @@
         </div>
     </section>
 
-    <!-- FEATURES -->
     <section class="section" id="features">
         <div class="section-head reveal">
             <span class="eyebrow" data-i18n="features_eyebrow">Features</span>
@@ -199,7 +172,6 @@
         </div>
     </section>
 
-    <!-- MODELS -->
     <section class="section" id="models">
         <div class="section-head reveal">
             <span class="eyebrow" data-i18n="models_eyebrow">Models</span>
@@ -242,7 +214,6 @@
         </div>
     </section>
 
-    <!-- QUICKSTART -->
     <section class="section" id="quickstart">
         <div class="section-head reveal">
             <span class="eyebrow" data-i18n="qs_eyebrow">Quick start</span>
@@ -331,7 +302,6 @@ r = client.chat.completions.create(
         </div>
     </section>
 
-    <!-- HOW -->
     <section class="section" id="how">
         <div class="section-head reveal">
             <span class="eyebrow" data-i18n="how_eyebrow">How it works</span>
@@ -372,8 +342,8 @@ r = client.chat.completions.create(
 
         <div class="how-grid">
             <div class="how-card reveal">
-                <h3 data-i18n="how1_t">No keys for your users</h3>
-                <p data-i18n="how1_d">All requests are made by server-side accounts. Your API consumers just point their client at your instance - <code>api_key</code> is never checked.</p>
+                <h3 data-i18n="how1_t">Runs on free provider tokens</h3>
+                <p data-i18n="how1_d">You add your free DeepSeek/Qwen tokens to <code>.env</code> and all upstream requests are made by those server-side accounts. Your API consumers just point their client at your instance - no keys on their side.</p>
             </div>
             <div class="how-card reveal">
                 <h3 data-i18n="how2_t">Parallel by design</h3>
@@ -390,7 +360,6 @@ r = client.chat.completions.create(
         </div>
     </section>
 
-    <!-- FAQ -->
     <section class="section" id="faq">
         <div class="section-head reveal">
             <span class="eyebrow" data-i18n="faq_eyebrow">FAQ</span>
@@ -399,7 +368,7 @@ r = client.chat.completions.create(
         <div class="faq-list reveal">
             <details class="faq">
                 <summary data-i18n="q1">Is it really free?</summary>
-                <p data-i18n="a1">Yes. DanyAPI talks to the internal APIs of the free web clients chat.deepseek.com and chat.qwen.ai using server-side accounts. There is no billing, no quotas, no keys.</p>
+                <p data-i18n="a1">Yes. DanyAPI talks to the internal APIs of the free web clients chat.deepseek.com and chat.qwen.ai using server-side accounts created from your own free provider tokens. There is no billing and no quotas.</p>
             </details>
             <details class="faq">
                 <summary data-i18n="q2">Do my users need an API key?</summary>
@@ -424,7 +393,6 @@ r = client.chat.completions.create(
         </div>
     </section>
 
-    <!-- CTA -->
     <section class="cta reveal">
         <div class="cta-inner">
             <h2 data-i18n="cta_title">Free models.<br />Your API.</h2>
@@ -459,7 +427,6 @@ r = client.chat.completions.create(
             <a href="https://github.com/FANATFANATA/DanyAPI" target="_blank" rel="noopener">GitHub</a>
             <a href="https://t.me/DanyaVoredom" target="_blank" rel="noopener" data-i18n="footer_creator">Creator</a>
             <a href="https://t.me/DanyAPIFree" target="_blank" rel="noopener" data-i18n="footer_channel">Telegram channel</a>
-            <a href="https://fanatfanata.github.io/DanyAPI/" target="_blank" rel="noopener" data-i18n="footer_docs">Docs</a>
         </div>
         <div class="footer-note" data-i18n="footer_note">Built with FastAPI &amp; Python · reverse-engineered, not affiliated with DeepSeek or Alibaba</div>
     </div>

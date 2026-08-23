@@ -1,6 +1,6 @@
 # DanyAPI
 
-OpenAI-compatible HTTP API built on Python + FastAPI. Instead of the paid APIs it talks to the internal APIs of the free web clients [chat.deepseek.com](https://chat.deepseek.com) and [chat.qwen.ai](https://chat.qwen.ai) using server-side accounts. API users need no keys - all requests are made by the server accounts.
+OpenAI-compatible HTTP API built on Python + FastAPI. Instead of the paid APIs it talks to the internal APIs of the free web clients [chat.deepseek.com](https://chat.deepseek.com) and [chat.qwen.ai](https://chat.qwen.ai) using server-side accounts created from your own free provider tokens (`DEEPSEEK_TOKENS` / `QWEN_TOKENS`). API consumers need no keys - all upstream requests are made by the configured server tokens.
 
 [![CI](https://img.shields.io/github/actions/workflow/status/FANATFANATA/DanyAPI/ci.yml?branch=main)](https://github.com/FANATFANATA/DanyAPI/actions)
 [![GitHub Release](https://img.shields.io/github/v/release/FANATFANATA/DanyAPI?sort=semver)](https://github.com/FANATFANATA/DanyAPI/releases)
@@ -10,7 +10,7 @@ OpenAI-compatible HTTP API built on Python + FastAPI. Instead of the paid APIs i
 
 ## Install & Upgrade
 
-Requires Python 3.10+ (CI tests 3.10–3.14).
+Requires Python 3.10+ (CI tests 3.10-3.14).
 
 Windows (PowerShell):
 

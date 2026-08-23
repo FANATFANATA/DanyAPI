@@ -160,7 +160,7 @@ class ContextIndex:
 
 
 class DeepSeekAccount:
-    __slots__ = ("broken", "client", "index", "pow", "pow_upload", "sem", "sessions")
+    __slots__ = ("broken", "client", "index", "pow", "pow_upload", "sem", "sessions", "stable_id")
 
     def __init__(
         self,
@@ -169,6 +169,7 @@ class DeepSeekAccount:
         session_cache_size: int = 128,
         ttl: float = 0.0,
         store: JsonStore | None = None,
+        stable_id: str | None = None,
     ) -> None:
         self.index = index
         self.client = client
@@ -176,6 +177,7 @@ class DeepSeekAccount:
         self.pow_upload = PowManager()
         self.sem = asyncio.Semaphore(1)
         self.sessions = SessionRegistry(client, session_cache_size, ttl, store=store, key_prefix=f"{index}:")
+        self.stable_id = stable_id
         self.broken = False
 
     def mark_broken(self) -> None:
@@ -201,11 +203,34 @@ class AccountPool:
         self.accounts = accounts
         self.label = label
         self._by_session: dict[str, tuple[int, float]] = {}
+        self._stable_to_idx: dict[str, int] = {}
+        for i, acct in enumerate(accounts):
+            sid = getattr(acct, "stable_id", None)
+            if isinstance(sid, str) and sid:
+                self._stable_to_idx[sid] = i
         self._rr = 0
         self._ttl = max(0.0, ttl)
         self._affinity_store = affinity_store
         self._contexts = ContextIndex(session_cache_size, ttl, store=context_store)
         self._restore_affinities()
+
+    def _affinity_record(self, account_index: int) -> int | str:
+        sid = getattr(self.accounts[account_index], "stable_id", None)
+        if isinstance(sid, str) and sid:
+            return sid
+        return account_index
+
+    def _resolve_affinity(self, record) -> int | None:
+        idx = record
+        if isinstance(record, list) and record:
+            idx = record[0]
+        if isinstance(idx, bool):
+            return None
+        if isinstance(idx, int):
+            return idx if 0 <= idx < len(self.accounts) else None
+        if isinstance(idx, str):
+            return self._stable_to_idx.get(idx)
+        return None
 
     def _restore_affinities(self) -> None:
         if self._affinity_store is None:
@@ -214,13 +239,10 @@ class AccountPool:
         for session_id, record in self._affinity_store.items():
             if not isinstance(session_id, str) or not session_id:
                 continue
-            idx = record
-            if isinstance(record, list) and record:
-                idx = record[0]
-            if isinstance(idx, bool) or not isinstance(idx, int):
+            idx = self._resolve_affinity(record)
+            if idx is None:
                 continue
-            if 0 <= idx < len(self.accounts):
-                self._by_session[session_id] = (idx, now)
+            self._by_session[session_id] = (idx, now)
 
     @property
     def healthy(self) -> list[DeepSeekAccount]:
@@ -230,7 +252,7 @@ class AccountPool:
         now = time.monotonic()
         self._by_session[session_id] = (account_index, now)
         if self._affinity_store is not None:
-            self._affinity_store.set(session_id, account_index)
+            self._affinity_store.set(session_id, self._affinity_record(account_index))
         if self._ttl > 0 and len(self._by_session) > max(4096, len(self.accounts) * 1024):
             stale = [sid for sid, (_, ts) in self._by_session.items() if now - ts > self._ttl]
             for sid in stale:
@@ -257,7 +279,8 @@ class AccountPool:
         if entry is None:
             return None
         idx, ts = entry
-        if self._ttl > 0 and time.monotonic() - ts > self._ttl:
+        now = time.monotonic()
+        if self._ttl > 0 and now - ts > self._ttl:
             self._by_session.pop(session_id, None)
             self._contexts.forget(session_id)
             if self._affinity_store is not None:
@@ -270,6 +293,8 @@ class AccountPool:
             if self._affinity_store is not None:
                 self._affinity_store.discard(session_id)
             return None
+        if self._ttl > 0 and now != ts:
+            self._by_session[session_id] = (idx, now)
         return acct
 
     def stats(self) -> dict:
