@@ -83,6 +83,7 @@ class ChatMessage(BaseModel):
     name: str | None = None
 
     @validator("role")
+    @classmethod
     def validate_role(cls, v: str) -> str:
         allowed_roles = {"user", "assistant", "system", "tool", "function"}
         if v not in allowed_roles:
@@ -90,6 +91,7 @@ class ChatMessage(BaseModel):
         return v
 
     @validator("tool_calls", pre=True, always=True)
+    @classmethod
     def validate_tool_calls(cls, v: list[Any] | None) -> list[dict[str, Any]] | None:
         if v is None:
             return None

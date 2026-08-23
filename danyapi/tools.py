@@ -333,6 +333,11 @@ class ToolCall:
     @classmethod
     def create(cls, name: str, arguments: Any) -> ToolCall:
         call_id = f"call_{uuid.uuid4().hex[:12]}"
+        if name == "edit" and isinstance(arguments, dict):
+            if "oldString" in arguments and not isinstance(arguments["oldString"], str):
+                arguments["oldString"] = json.dumps(arguments["oldString"], ensure_ascii=False)
+            if "newString" in arguments and not isinstance(arguments["newString"], str):
+                arguments["newString"] = json.dumps(arguments["newString"], ensure_ascii=False)
         if isinstance(arguments, dict):
             args_text = json.dumps(arguments, ensure_ascii=False)
         elif isinstance(arguments, str):
@@ -1101,6 +1106,11 @@ def _extract_calls(obj: dict) -> list[ToolCall] | None:
         return calls
     name, arguments = _call_item_fields(obj)
     if isinstance(name, str) and name and _is_jsonish_arguments(arguments):
+        if name == "edit" and isinstance(arguments, dict):
+            if "oldString" in arguments and not isinstance(arguments["oldString"], str):
+                arguments["oldString"] = json.dumps(arguments["oldString"], ensure_ascii=False)
+            if "newString" in arguments and not isinstance(arguments["newString"], str):
+                arguments["newString"] = json.dumps(arguments["newString"], ensure_ascii=False)
         return [ToolCall.create(name, arguments)]
     return None
 
@@ -1255,7 +1265,10 @@ def _xml_value(raw: str, json_type: Any) -> Any:
         nested = _xml_invoke_arguments(stripped, None, False)
         if nested is not None:
             return nested
-    return _coerce_scalar(_unescape_xml(stripped), json_type)
+    value = _coerce_scalar(_unescape_xml(stripped), json_type)
+    if json_type == "string" and not isinstance(value, str):
+        value = json.dumps(value, ensure_ascii=False)
+    return value
 
 
 def _xml_invoke_arguments(body: str, param_types: dict[str, Any] | None = None, allow_content: bool = True) -> dict[str, Any] | None:

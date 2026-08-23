@@ -253,7 +253,6 @@ r = client.chat.completions.create(
 )
 print(r.choices[0].message.content)' data-i18n="copy">Copy</button>
                 </div>
-                <pre><code><span class="c-cmt"># works with any OpenAI-compatible client</span>
 <span class="c-kw">from</span> openai <span class="c-kw">import</span> OpenAI
 
 client = OpenAI(base_url=<span class="c-str">"http://127.0.0.1:8000/v1"</span>, api_key=<span class="c-str">"dummy"</span>)
