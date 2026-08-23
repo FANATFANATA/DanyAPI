@@ -760,7 +760,6 @@ async def collect_image(
     model,
     model_id,
     context_seq: tuple[str, ...] | None = None,
-    size: str | None = None,
 ):
     await _human_delay()
     async with account_lock(lock, settings.acquire_timeout):

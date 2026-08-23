@@ -89,6 +89,12 @@ class SessionRegistry:
     def _reuse(self, session: Any, session_id: str, **kwargs) -> bool:
         return True
 
+    def can_reuse(self, session_id: str | None, **kwargs) -> bool:
+        if not session_id:
+            return False
+        session = self.get(session_id)
+        return session is not None and self._reuse(session, session_id, **kwargs)
+
     def _update_last(self, session: Any, message_id: str) -> None:
         session.last_message_id = message_id
 

@@ -1,6 +1,6 @@
 from danyapi.deepseek.sse import SSEEvent
 from danyapi.deepseek.stream import IncrementalSSE
-from danyapi.qwen.stream import QwenStreamReconstructor
+from danyapi.qwen.stream import QwenStreamReconstructor, error_code
 
 
 def test_incremental_parse_real_stream():
@@ -189,3 +189,96 @@ def test_summary_content_empty():
     rec = QwenStreamReconstructor()
     rec.handle(SSEEvent(None, {"choices": [{"delta": {"phase": "thinking_summary", "extra": {"summary_thought": {"content": []}}}}]}))
     assert rec.reasoning == ""
+
+
+def test_image_phase_collects_markdown_url():
+    rec = QwenStreamReconstructor()
+    rec.handle(SSEEvent(None, {"choices": [{"delta": {"content": "![cat](https://cdn.qwenlm.ai/cat.png)", "phase": "image"}}]}))
+    assert rec.image_urls == ["https://cdn.qwenlm.ai/cat.png"]
+    assert rec.content == "![cat](https://cdn.qwenlm.ai/cat.png)"
+    assert rec.has_content
+
+
+def test_image_phase_deduplicates_urls():
+    rec = QwenStreamReconstructor()
+    delta = {"content": "![x](https://cdn.qwenlm.ai/x.png)", "phase": "image"}
+    rec.handle(SSEEvent(None, {"choices": [{"delta": dict(delta)}]}))
+    rec.handle(SSEEvent(None, {"choices": [{"delta": dict(delta)}]}))
+    assert rec.image_urls == ["https://cdn.qwenlm.ai/x.png"]
+
+
+def test_image_phase_image_url_field():
+    rec = QwenStreamReconstructor()
+    rec.handle(SSEEvent(None, {"choices": [{"delta": {"phase": "image", "image_url": "https://cdn.qwenlm.ai/direct.png"}}]}))
+    assert rec.image_urls == ["https://cdn.qwenlm.ai/direct.png"]
+
+
+def test_image_phase_extra_image_hw():
+    rec = QwenStreamReconstructor()
+    rec.handle(
+        SSEEvent(
+            None,
+            {"choices": [{"delta": {"phase": "image", "extra": {"output_image_hw": [[1152, 2048]]}}}]},
+        )
+    )
+    assert rec.image_size == (1152, 2048)
+
+
+def test_image_phase_extra_invalid_hw_ignored():
+    rec = QwenStreamReconstructor()
+    for hw in ([], [[0, 100]], [["a", "b"]], "bad"):
+        rec.handle(SSEEvent(None, {"choices": [{"delta": {"phase": "image", "extra": {"output_image_hw": hw}}}]}))
+    assert rec.image_size is None
+
+
+def test_image_phase_extra_url_variants():
+    rec = QwenStreamReconstructor()
+    rec.handle(
+        SSEEvent(
+            None,
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "phase": "image",
+                            "extra": {
+                                "image_urls": ["https://cdn.qwenlm.ai/1.png", {"url": "https://cdn.qwenlm.ai/2.png"}, "nope"],
+                                "images": [{"url": "https://cdn.qwenlm.ai/3.png"}],
+                            },
+                        }
+                    }
+                ]
+            },
+        )
+    )
+    assert rec.image_urls == [
+        "https://cdn.qwenlm.ai/1.png",
+        "https://cdn.qwenlm.ai/2.png",
+        "https://cdn.qwenlm.ai/3.png",
+    ]
+
+
+def test_answer_phase_collects_cdn_urls():
+    rec = QwenStreamReconstructor()
+    rec.handle(SSEEvent(None, {"choices": [{"delta": {"content": "see https://cdn.qwenlm.ai/pic.webp here", "phase": "answer"}}]}))
+    assert rec.image_urls == ["https://cdn.qwenlm.ai/pic.webp"]
+    assert rec.content == "see https://cdn.qwenlm.ai/pic.webp here"
+
+
+def test_error_code_variants():
+    assert error_code({"code": "Busy"}) == "Busy"
+    assert error_code({"code": 123}) is None
+    assert error_code({}) is None
+    assert error_code(None) is None
+
+
+def test_usage_tokens_defaults():
+    rec = QwenStreamReconstructor()
+    assert rec.usage_tokens == {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+
+def test_has_content_false_initially():
+    rec = QwenStreamReconstructor()
+    assert not rec.has_content
+    rec.handle(SSEEvent(None, {"choices": [{"delta": {"content": "step", "phase": "think"}}]}))
+    assert rec.has_content

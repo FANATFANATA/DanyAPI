@@ -46,14 +46,6 @@ class QwenStreamReconstructor:
                 self._seen_image_urls.add(url)
                 self.image_urls.append(url)
 
-    def _extract_images_from_content(self, content: str) -> str:
-        if "cdn.qwenlm.ai" not in content and "![" not in content:
-            return content
-        self._collect_image_urls(content)
-        cleaned = _IMAGE_URL_RE.sub("", content)
-        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
-        return cleaned
-
     def handle(self, event: SSEEvent) -> None:
         data = event.data
         if not isinstance(data, dict):
@@ -98,7 +90,10 @@ class QwenStreamReconstructor:
                 if isinstance(hw, list) and hw:
                     pair = hw[0]
                     if isinstance(pair, list) and len(pair) >= 2:
-                        w, h = int(pair[0]), int(pair[1])
+                        try:
+                            w, h = int(pair[0]), int(pair[1])
+                        except (TypeError, ValueError):
+                            w = h = 0
                         if w > 0 and h > 0:
                             self.image_size = (w, h)
                 for key in ("image_url", "image_urls", "images", "url"):

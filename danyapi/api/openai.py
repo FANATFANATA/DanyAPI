@@ -17,7 +17,7 @@ from typing import Any
 import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
 
 from .. import tools as toolemu
 from ..accounts import AccountPool, AccountPoolBusy, DeepSeekAccount, account_lock
@@ -85,7 +85,7 @@ class ChatMessage(BaseModel):
     tool_call_id: str | None = None
     name: str | None = None
 
-    @validator("role")
+    @field_validator("role")
     @classmethod
     def validate_role(cls, v: str) -> str:
         allowed_roles = {"user", "assistant", "system", "tool", "function"}
@@ -93,7 +93,7 @@ class ChatMessage(BaseModel):
             raise ValueError(f"Invalid role: {v}. Allowed roles: {allowed_roles}")
         return v
 
-    @validator("tool_calls", pre=True, always=True)
+    @field_validator("tool_calls", mode="before")
     @classmethod
     def validate_tool_calls(cls, v: list[Any] | None) -> list[dict[str, Any]] | None:
         if v is None:
@@ -345,7 +345,8 @@ def _log_request_failure(request: Request, model: str | None, duration: float, s
 
 def _log_request_success(request: Request, duration: float) -> None:
     log.info(
-        "%s success (%.0fms)",
+        "%s %s success (%.0fms)",
+        request.method,
         request.url.path,
         duration,
     )
@@ -618,7 +619,6 @@ async def image_generations(req: ImageGenerationRequest) -> dict:
             prompt=req.prompt,
             model=req.model,
             model_id=req.model,
-            size=req.size,
         )
     except AccountPoolBusy:
         raise HTTPException(429, "all accounts are busy, try again later") from None
@@ -663,10 +663,7 @@ async def _acquire_account(pool: AccountPool, session_id: str | None):
 
 
 def _can_reuse_session(account: Any, session_id: str | None, **kwargs: Any) -> bool:
-    if not session_id:
-        return False
-    session = account.sessions.get(session_id)
-    return session is not None and account.sessions._reuse(session, session_id, **kwargs)
+    return bool(account.sessions.can_reuse(session_id, **kwargs))
 
 
 def _include_usage(req: ChatCompletionRequest) -> bool:

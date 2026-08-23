@@ -120,6 +120,16 @@ def test_session_reuses_explicit():
     assert k2 == k1
 
 
+def test_can_reuse():
+    reg = SessionRegistry(FakeSessionClient())
+    assert not reg.can_reuse(None)
+    assert not reg.can_reuse("missing")
+    _session, key = asyncio.run(reg.obtain(None))
+    assert reg.can_reuse(key)
+    reg.forget(key)
+    assert not reg.can_reuse(key)
+
+
 def test_session_evicts_oldest():
     reg = SessionRegistry(FakeSessionClient(), maxsize=2)
     asyncio.run(reg.obtain(None))
@@ -548,7 +558,7 @@ def test_qwen_cached_wrong_model_renders_full_history():
     try:
         account = MagicMock()
         account.sessions.get.return_value = SimpleNamespace(id="sess-q", model="qwen-old")
-        account.sessions._reuse.return_value = False
+        account.sessions.can_reuse.return_value = False
         pool = MagicMock()
         pool.acquire = AsyncMock(return_value=(account, "sess-q"))
         pool.resolve_context = MagicMock(return_value="sess-q")
@@ -570,7 +580,7 @@ def test_qwen_cached_wrong_model_renders_full_history():
             ],
         )
         asyncio.run(openai_mod._chat_completions_qwen(req))
-        account.sessions._reuse.assert_called_once()
+        account.sessions.can_reuse.assert_called_once()
         assert "remember beta" in captured["prompt"]
         assert "beta noted" in captured["prompt"]
         assert "what did I ask you to remember?" in captured["prompt"]
