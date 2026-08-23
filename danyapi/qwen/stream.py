@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from typing import Any
 
 from ..deepseek.sse import SSEEvent
 
@@ -142,10 +143,13 @@ class QwenStreamReconstructor:
 
     @property
     def usage_tokens(self) -> dict:
+        def _int(value: Any) -> int:
+            return int(value) if isinstance(value, (int, float)) else 0
+
         return {
-            "prompt_tokens": self.usage.get("input_tokens", 0),
-            "completion_tokens": self.usage.get("output_tokens", 0),
-            "total_tokens": self.usage.get("total_tokens", 0),
+            "prompt_tokens": _int(self.usage.get("input_tokens")),
+            "completion_tokens": _int(self.usage.get("output_tokens")),
+            "total_tokens": _int(self.usage.get("total_tokens")),
         }
 
 

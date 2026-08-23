@@ -277,6 +277,14 @@ def test_usage_tokens_defaults():
     assert rec.usage_tokens == {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
 
+def test_usage_tokens_ignores_invalid_values():
+    rec = QwenStreamReconstructor()
+    rec.usage = {"input_tokens": None, "output_tokens": "5", "total_tokens": [15]}
+    assert rec.usage_tokens == {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    rec.usage = {"input_tokens": 10.0, "output_tokens": 5.0, "total_tokens": 15.0}
+    assert rec.usage_tokens == {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+
+
 def test_has_content_false_initially():
     rec = QwenStreamReconstructor()
     assert not rec.has_content
