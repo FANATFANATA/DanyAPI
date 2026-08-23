@@ -15,7 +15,7 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -29,10 +29,10 @@ jobs:
           cache: pip
           cache-dependency-path: requirements-dev.txt
 
-      - name: Install system tools (clang, clang-format, clang-tidy)
+      - name: Install system tools (clang, clang-format, clang-tidy, node)
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends clang clang-format clang-tidy
+          sudo apt-get install -y --no-install-recommends clang clang-format clang-tidy nodejs
 
       - name: Install dependencies
         run: pip install -r requirements-dev.txt
@@ -41,11 +41,12 @@ jobs:
         run: clang -O3 -pthread -funroll-loops -flto -march=native -mtune=native -o danyapi/deepseek/pow_solver danyapi/deepseek/pow_solver.c
 
       - name: Run tests.py
-        run: python tests.py
+        run: python tests.py -j 2
 
   docker-build:
+    needs: test
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     permissions:
       contents: read
       packages: write
@@ -62,24 +63,22 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Compute image tags
-        id: tags
-        run: |
-          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"
-          TAGS="$IMAGE:sha-${GITHUB_SHA::8}"
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            TAGS="$TAGS,$IMAGE:${GITHUB_REF#refs/tags/v}"
-          fi
-          if [[ "$GITHUB_REF" == refs/heads/main ]]; then
-            TAGS="$TAGS,$IMAGE:latest"
-          fi
-          echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=sha,prefix=sha-,format=short
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v7
         with:
           context: .
           push: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) }}
-          tags: ${{ steps.tags.outputs.tags }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
