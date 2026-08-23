@@ -73,6 +73,9 @@ CONTEXT_LENGTH_STATUS = "CONTEXT_LENGTH_EXCEEDED"
 INPUT_EXCEEDS_LIMIT = "input_exceeds_limit"
 CONTINUE_PROMPT = "Continue"
 MAX_CONTINUE_ROUNDS = 5
+RESPONSE_INCOMPLETE = "response_incomplete"
+RESPONSE_INCOMPLETE_MESSAGE = "Response is incomplete: provider errors interrupted the continuation, please retry"
+REDUCED_CONTEXT_MESSAGE = "Response was generated from reduced context because the original input exceeded the model limit and may be incomplete"
 
 
 class ChatMessage(BaseModel):
@@ -965,6 +968,16 @@ def _is_input_exceeds_limit(rec: MessageReconstructor) -> bool:
     return bool(hint and hint.get("finish_reason") == INPUT_EXCEEDS_LIMIT)
 
 
+def _incomplete_message(rec: MessageReconstructor) -> str:
+    hint = rec.hint_error or {}
+    message = hint.get("message")
+    return message if isinstance(message, str) and message else RESPONSE_INCOMPLETE_MESSAGE
+
+
+def _incomplete_error_body(message: str) -> str:
+    return json.dumps({"error": {"message": message, "finish_reason": RESPONSE_INCOMPLETE}}, ensure_ascii=False)
+
+
 def _input_exceeds_hint_from_http(exc: HTTPException) -> dict | None:
     detail = exc.detail
     if isinstance(detail, str):
@@ -1360,7 +1373,10 @@ async def _collect_non_stream(
         if _is_context_limit(rec) and not (rec.content or rec.reasoning):
             _drop_session(pool, account, session_key)
             raise HTTPException(400, "context length exceeded: conversation too long, start a new conversation")
+        incomplete_message: str | None = None
+        reduced_notice: str | None = None
         if _is_input_exceeds_limit(rec):
+            incomplete_message = _incomplete_message(rec)
             cont_parent = rec.id or response_message_id or parent_message_id
             for _ in range(MAX_CONTINUE_ROUNDS):
                 cont_rec = await _collect_continuation(account, session, cont_parent, model_type, thinking, search, ref_file_ids)
@@ -1369,16 +1385,22 @@ async def _collect_non_stream(
                 rec.extend_with(cont_rec)
                 cont_parent = cont_rec.id or cont_parent
                 if not _is_input_exceeds_limit(cont_rec):
+                    incomplete_message = None
                     break
+                incomplete_message = _incomplete_message(cont_rec)
                 if not cont_rec.content:
                     break
-        if _is_input_exceeds_limit(rec) and not (rec.content or rec.reasoning) and reduced_prompts:
-            _drop_session(pool, account, session_key)
-            reduced = await _collect_reduced(account, pool, reduced_prompts, model_type, thinking, search, ref_file_ids)
-            if reduced is not None:
-                rec, session, session_key = reduced
-                response_message_id = rec.id or response_message_id
-                stop_message_id = response_message_id
+            if incomplete_message is not None and not (rec.content or rec.reasoning) and reduced_prompts:
+                _drop_session(pool, account, session_key)
+                reduced = await _collect_reduced(account, pool, reduced_prompts, model_type, thinking, search, ref_file_ids)
+                if reduced is not None:
+                    rec, session, session_key = reduced
+                    response_message_id = rec.id or response_message_id
+                    stop_message_id = response_message_id
+                    reduced_notice = REDUCED_CONTEXT_MESSAGE
+        if incomplete_message is not None and reduced_notice is None:
+            log.warning("deepseek response incomplete: %s", incomplete_message)
+            raise HTTPException(502, _incomplete_error_body(incomplete_message))
         session.accumulated_tokens = max(getattr(session, "accumulated_tokens", 0) or 0, rec.accumulated_tokens)
         account.sessions.touch_last_message(session_key, rec.id or response_message_id)
         log.info("deepseek completion success (%.0fms)", (time.monotonic() - started) * 1000)
@@ -1390,7 +1412,12 @@ async def _collect_non_stream(
         message, finish = _build_assistant_message(content, reasoning, tool_mode, tool_schemas)
         if finish == "stop":
             finish = _finish_reason(rec.status)
-        return _build_completion_response(model, message, finish, session, session_key)
+        response = _build_completion_response(model, message, finish, session, session_key)
+        if reduced_notice is not None:
+            log.warning("deepseek response delivered from reduced context (%s)", model)
+            response["error"] = {"message": reduced_notice, "finish_reason": RESPONSE_INCOMPLETE}
+            response["choices"][0]["finish_reason"] = RESPONSE_INCOMPLETE
+        return response
 
 
 async def _stream_openai(
@@ -1595,7 +1622,10 @@ async def _stream_openai(
             ):
                 yield line
             return
+        incomplete_message: str | None = None
+        reduced_notice: str | None = None
         if _is_input_exceeds_limit(rec):
+            incomplete_message = _incomplete_message(rec)
             cont_parent = rec.id or response_message_id or parent_message_id
             for _ in range(MAX_CONTINUE_ROUNDS):
                 cont_rec = await _collect_continuation(account, session, cont_parent, model_type, thinking, search, ref_file_ids)
@@ -1627,36 +1657,44 @@ async def _stream_openai(
                         }
                     )
                 if not _is_input_exceeds_limit(cont_rec):
+                    incomplete_message = None
                     break
+                incomplete_message = _incomplete_message(cont_rec)
                 if not cont_rec.content:
                     break
-        if _is_input_exceeds_limit(rec) and not (rec.content or rec.reasoning) and reduced_prompts:
-            _drop_session(pool, account, session_key)
-            reduced = await _collect_reduced(account, pool, reduced_prompts, model_type, thinking, search, ref_file_ids)
-            if reduced is not None:
-                rec, session, session_key = reduced
-                response_message_id = rec.id or response_message_id
-                stop_message_id = response_message_id
-                if rec.content:
-                    yield _sse(
-                        {
-                            "id": chunk_id,
-                            "object": "chat.completion.chunk",
-                            "created": created,
-                            "model": model,
-                            "choices": [{"index": 0, "delta": {"content": rec.content}, "finish_reason": None}],
-                        }
-                    )
-                if rec.reasoning:
-                    yield _sse(
-                        {
-                            "id": chunk_id,
-                            "object": "chat.completion.chunk",
-                            "created": created,
-                            "model": model,
-                            "choices": [{"index": 0, "delta": {"reasoning_content": rec.reasoning}, "finish_reason": None}],
-                        }
-                    )
+            if incomplete_message is not None and not (rec.content or rec.reasoning) and reduced_prompts:
+                _drop_session(pool, account, session_key)
+                reduced = await _collect_reduced(account, pool, reduced_prompts, model_type, thinking, search, ref_file_ids)
+                if reduced is not None:
+                    rec, session, session_key = reduced
+                    response_message_id = rec.id or response_message_id
+                    stop_message_id = response_message_id
+                    reduced_notice = REDUCED_CONTEXT_MESSAGE
+                    if rec.content:
+                        yield _sse(
+                            {
+                                "id": chunk_id,
+                                "object": "chat.completion.chunk",
+                                "created": created,
+                                "model": model,
+                                "choices": [{"index": 0, "delta": {"content": rec.content}, "finish_reason": None}],
+                            }
+                        )
+                    if rec.reasoning:
+                        yield _sse(
+                            {
+                                "id": chunk_id,
+                                "object": "chat.completion.chunk",
+                                "created": created,
+                                "model": model,
+                                "choices": [{"index": 0, "delta": {"reasoning_content": rec.reasoning}, "finish_reason": None}],
+                            }
+                        )
+        if incomplete_message is not None and reduced_notice is None:
+            log.warning("deepseek response incomplete: %s", incomplete_message)
+            for line in _stream_error_sse(chunk_id, created, model, incomplete_message, session_key, RESPONSE_INCOMPLETE, RESPONSE_INCOMPLETE):
+                yield line
+            return
         if not (rec.content or rec.reasoning) and rec.hint_error:
             hint = rec.hint_error
             for line in _stream_error_sse(
@@ -1729,15 +1767,27 @@ async def _stream_openai(
         else:
             finish = _finish_reason(rec.status)
 
-        yield _sse(
-            {
-                "id": chunk_id,
-                "object": "chat.completion.chunk",
-                "created": created,
-                "model": model,
-                "choices": [{"index": 0, "delta": {}, "finish_reason": finish}],
-            }
-        )
+        if reduced_notice is not None:
+            yield _sse(
+                {
+                    "id": chunk_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model,
+                    "error": {"message": reduced_notice, "finish_reason": RESPONSE_INCOMPLETE},
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": RESPONSE_INCOMPLETE}],
+                }
+            )
+        else:
+            yield _sse(
+                {
+                    "id": chunk_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model,
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": finish}],
+                }
+            )
         if include_usage:
             yield _sse(
                 {

@@ -1001,8 +1001,9 @@ async def test_non_stream_input_exceeds_http_continuation_none():
             thinking=False,
             search=False,
         )
-    assert excinfo.value.status_code == 429
+    assert excinfo.value.status_code == 502
     assert "Content is too long" in excinfo.value.detail
+    assert "response_incomplete" in excinfo.value.detail
 
 
 async def test_stream_input_exceeds_http_continuation_none():
@@ -1026,7 +1027,11 @@ async def test_stream_input_exceeds_http_continuation_none():
         search=False,
     )
     lines = await _collect_agen(gen)
-    assert "".join(lines).rstrip().endswith("data: [DONE]")
+    joined = "".join(lines)
+    assert '"error"' in joined
+    assert "Content is too long" in joined
+    assert '"response_incomplete"' in joined
+    assert joined.rstrip().endswith("data: [DONE]")
 
 
 REDUCED_TOOL = {
@@ -1093,6 +1098,8 @@ async def test_non_stream_input_exceeds_reduced_retry():
         reduced_prompts=[("short prompt", False, {})],
     )
     assert result["choices"][0]["message"]["content"] == "Hi"
+    assert result["choices"][0]["finish_reason"] == "response_incomplete"
+    assert result["error"]["finish_reason"] == "response_incomplete"
     assert acct.client.completion.await_count == 3
     acct.sessions.forget.assert_called_once_with("s1")
 
@@ -1121,6 +1128,8 @@ async def test_stream_input_exceeds_reduced_retry():
     )
     joined = "".join(await _collect_agen(gen))
     assert '"content": "Hi"' in joined
+    assert '"error"' in joined
+    assert '"response_incomplete"' in joined
     assert joined.rstrip().endswith("data: [DONE]")
     acct.sessions.forget.assert_called_once_with("s1")
 
@@ -1150,6 +1159,7 @@ async def test_stream_input_exceeds_reduced_retry_reasoning():
     joined = "".join(await _collect_agen(gen))
     assert '"reasoning_content": "why"' in joined
     assert '"content": "Answer"' in joined
+    assert '"response_incomplete"' in joined
     assert joined.rstrip().endswith("data: [DONE]")
 
 
@@ -1215,8 +1225,9 @@ async def test_non_stream_input_exceeds_reduced_retry_fails():
             search=False,
             reduced_prompts=[("short prompt", False, {})],
         )
-    assert excinfo.value.status_code == 429
+    assert excinfo.value.status_code == 502
     assert "Content is too long" in excinfo.value.detail
+    assert "response_incomplete" in excinfo.value.detail
 
 
 async def test_stream_input_exceeds_reduced_retry_fails():
@@ -1244,6 +1255,7 @@ async def test_stream_input_exceeds_reduced_retry_fails():
     joined = "".join(await _collect_agen(gen))
     assert '"error"' in joined
     assert "Content is too long" in joined
+    assert '"response_incomplete"' in joined
     assert joined.rstrip().endswith("data: [DONE]")
 
 
@@ -1272,7 +1284,8 @@ async def test_stream_input_exceeds_reduced_retry_tool_mode():
     )
     joined = "".join(await _collect_agen(gen))
     assert '"content": "Hi"' in joined
-    assert '"finish_reason": "stop"' in joined
+    assert '"finish_reason": "response_incomplete"' in joined
+    assert '"error"' in joined
     assert joined.rstrip().endswith("data: [DONE]")
 
 
@@ -1639,18 +1652,20 @@ async def test_non_stream_input_exceeds_continuation_none():
         ]
     )
     acct.sessions.obtain = AsyncMock(return_value=(FakeSession(), "s1"))
-    result = await openai_mod._collect_non_stream(
-        account=acct,
-        pool=MagicMock(),
-        existing_sid="s1",
-        lock=acct.sem,
-        prompt="x",
-        model="deepseek-v4-flash",
-        model_type="default",
-        thinking=False,
-        search=False,
-    )
-    assert result["choices"][0]["message"]["content"] == ""
+    with pytest.raises(openai_mod.HTTPException) as excinfo:
+        await openai_mod._collect_non_stream(
+            account=acct,
+            pool=MagicMock(),
+            existing_sid="s1",
+            lock=acct.sem,
+            prompt="x",
+            model="deepseek-v4-flash",
+            model_type="default",
+            thinking=False,
+            search=False,
+        )
+    assert excinfo.value.status_code == 502
+    assert "response_incomplete" in excinfo.value.detail
 
 
 async def test_stream_input_exceeds_tool_mode_continuation():
@@ -1694,7 +1709,10 @@ async def test_stream_input_exceeds_continuation_none():
         search=False,
     )
     lines = await _collect_agen(gen)
-    assert "".join(lines).rstrip().endswith("data: [DONE]")
+    joined = "".join(lines)
+    assert '"error"' in joined
+    assert '"response_incomplete"' in joined
+    assert joined.rstrip().endswith("data: [DONE]")
 
 
 def test_reduced_prompt_variants_original_matches():
@@ -1784,18 +1802,20 @@ INPUT_CONT_SSE = (
 async def test_non_stream_continuation_rounds_exhausted():
     acct = FakeAccount([INPUT_SSE] + [INPUT_CONT_SSE] * openai_mod.MAX_CONTINUE_ROUNDS)
     acct.sessions.obtain = AsyncMock(return_value=(FakeSession(), "s1"))
-    result = await openai_mod._collect_non_stream(
-        account=acct,
-        pool=MagicMock(),
-        existing_sid="s1",
-        lock=acct.sem,
-        prompt="x",
-        model="deepseek-v4-flash",
-        model_type="default",
-        thinking=False,
-        search=False,
-    )
-    assert "part" in result["choices"][0]["message"]["content"]
+    with pytest.raises(openai_mod.HTTPException) as excinfo:
+        await openai_mod._collect_non_stream(
+            account=acct,
+            pool=MagicMock(),
+            existing_sid="s1",
+            lock=acct.sem,
+            prompt="x",
+            model="deepseek-v4-flash",
+            model_type="default",
+            thinking=False,
+            search=False,
+        )
+    assert excinfo.value.status_code == 502
+    assert "response_incomplete" in excinfo.value.detail
     assert acct.client.completion.await_count == 1 + openai_mod.MAX_CONTINUE_ROUNDS
 
 
@@ -1815,6 +1835,9 @@ async def test_stream_continuation_rounds_exhausted():
     )
     joined = "".join(await _collect_agen(gen))
     assert '"content": "part"' in joined
+    assert '"error"' in joined
+    assert '"response_incomplete"' in joined
+    assert joined.rstrip().endswith("data: [DONE]")
 
 
 THINK_ONLY_SSE = (
@@ -1851,6 +1874,7 @@ async def test_stream_input_exceeds_reduced_reasoning_only():
     joined = "".join(await _collect_agen(gen))
     assert '"reasoning_content": "why"' in joined
     assert '"content": "Answer"' not in joined
+    assert '"response_incomplete"' in joined
 
 
 TOOL_JSON_SSE = (
@@ -1888,5 +1912,6 @@ async def test_stream_tool_mode_reduced_emits_tool_calls():
     )
     joined = "".join(await _collect_agen(gen))
     assert '"tool_calls"' in joined
-    assert '"finish_reason": "tool_calls"' in joined
+    assert '"finish_reason": "response_incomplete"' in joined
+    assert '"error"' in joined
     assert joined.rstrip().endswith("data: [DONE]")
