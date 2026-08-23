@@ -98,6 +98,11 @@ class _ColorFormatter(logging.Formatter):
         self._use_color = sys.stdout.isatty()
 
     def format(self, record: logging.LogRecord) -> str:
+        message = record.getMessage()
+        if isinstance(message, str):
+            message = message.replace("{", "{{").replace("}", "}}")
+        record.msg = message
+        record.args = ()
         text = super().format(record)
         if not self._use_color:
             return text

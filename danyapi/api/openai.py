@@ -17,7 +17,7 @@ from typing import Any
 import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, validator
 
 from .. import tools as toolemu
 from ..accounts import AccountPool, AccountPoolBusy, DeepSeekAccount, account_lock
@@ -78,9 +78,31 @@ MAX_CONTINUE_ROUNDS = 5
 class ChatMessage(BaseModel):
     role: str = "user"
     content: Any = ""
-    tool_calls: list[Any] | None = None
+    tool_calls: list[dict[str, Any]] | None = None
     tool_call_id: str | None = None
     name: str | None = None
+
+    @validator("role")
+    def validate_role(cls, v: str) -> str:
+        allowed_roles = {"user", "assistant", "system", "tool", "function"}
+        if v not in allowed_roles:
+            raise ValueError(f"Invalid role: {v}. Allowed roles: {allowed_roles}")
+        return v
+
+    @validator("tool_calls", pre=True, always=True)
+    def validate_tool_calls(cls, v: list[Any] | None) -> list[dict[str, Any]] | None:
+        if v is None:
+            return None
+        if not isinstance(v, list):
+            raise ValueError("tool_calls must be a list")
+        validated_tool_calls = []
+        for tool_call in v:
+            if not isinstance(tool_call, dict):
+                raise ValueError("Each tool_call must be a dictionary")
+            if "function" not in tool_call and "name" not in tool_call:
+                raise ValueError("Each tool_call must contain 'function' or 'name'")
+            validated_tool_calls.append(tool_call)
+        return validated_tool_calls
 
 
 class FileSpec(BaseModel):
@@ -305,13 +327,13 @@ def _log_request_failure(request: Request, model: str | None, duration: float, s
     if status is not None:
         reason = f"status={status}"
     else:
-        reason = f"error={exc!r}"
+        reason = f"error={str(exc) if exc else 'unknown'}"
     log.warning(
         "%s %s failed: %s %s (%.0fms)",
         request.method,
         request.url.path,
         model_part,
-        reason,
+        reason.replace("{", "{{").replace("}", "}}"),
         duration,
     )
 

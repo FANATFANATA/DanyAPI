@@ -1016,6 +1016,8 @@ def _balanced_json(text: str) -> tuple[int, int] | None:
 
 
 def _extract_json_object(text: str) -> tuple[dict, int, int] | None:
+    if not isinstance(text, str):
+        return None
     stripped = _strip_fences(text)
     bounds = _balanced_json(stripped)
     if bounds is None:
@@ -1023,6 +1025,8 @@ def _extract_json_object(text: str) -> tuple[dict, int, int] | None:
     start, end = bounds
     try:
         obj = _loads_lenient(stripped[start : end + 1])
+        if not isinstance(obj, dict):
+            return None
     except ValueError:
         return None
     return obj, start, end
@@ -1090,6 +1094,8 @@ def _extract_wrapped_calls(obj: dict) -> list[ToolCall] | None:
 
 
 def _extract_calls(obj: dict) -> list[ToolCall] | None:
+    if not isinstance(obj, dict):
+        return None
     calls = _extract_wrapped_calls(obj)
     if calls is not None:
         return calls
