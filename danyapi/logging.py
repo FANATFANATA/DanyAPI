@@ -34,8 +34,9 @@ _FALLBACK_LEVEL_NAMES = {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG", "NOTSE
 
 
 def _level_names() -> set[str]:
-    if hasattr(logging, "getLevelNamesMapping"):
-        return set(logging.getLevelNamesMapping())
+    get_mapping = getattr(logging, "getLevelNamesMapping", None)
+    if get_mapping is not None:
+        return set(get_mapping())
     return set(_FALLBACK_LEVEL_NAMES)
 
 

@@ -14,3 +14,4 @@ vulture
 xenon
 pip-audit
 PyYAML
+setuptools>=83.0.0
