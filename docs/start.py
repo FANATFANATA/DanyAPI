@@ -103,16 +103,19 @@ def zip_update(tag):
         os.chdir(str(parent))
     except OSError:
         pass
+    tmp_dir_str = str(tmp_dir)
+    root_str = str(ROOT)
+    old_dir_str = str(old_dir)
     try:
-        shutil.move(str(ROOT), str(old_dir))
+        shutil.move(root_str, old_dir_str)
     except Exception as exc:
         print(f"DanyAPI: could not replace installation: {exc}")
         return False
     try:
-        shutil.move(str(tmp_dir), str(ROOT))
+        shutil.move(tmp_dir_str, root_str)
     except Exception as exc:
-        shutil.move(str(old_dir), str(ROOT))
-        shutil.rmtree(str(tmp_dir), ignore_errors=True)
+        shutil.move(old_dir_str, root_str)
+        shutil.rmtree(tmp_dir_str, ignore_errors=True)
         print(f"DanyAPI: could not replace installation: {exc}")
         return False
     for name in USER_FILES:
