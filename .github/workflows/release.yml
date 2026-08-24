@@ -2,15 +2,15 @@ name: Release
 
 on:
   push:
-    tags:
-      - "v*"
+    branches:
+      - main
 
 permissions:
   contents: write
 
 concurrency:
   group: release-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   release:
@@ -21,10 +21,40 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Check skip
+        id: skip
+        run: |
+          MSG=$(git log -1 --pretty=%B)
+          if echo "$MSG" | grep -qi '\[skip release\]'; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Determine next tag
+        id: version
+        if: steps.skip.outputs.skip == 'false'
+        run: |
+          LAST_TAG=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+' | head -n1)
+          if [ -z "$LAST_TAG" ]; then
+            NEXT_TAG="v0.0.1"
+          else
+            VERSION="${LAST_TAG#v}"
+            MAJOR=$(echo "$VERSION" | cut -d. -f1)
+            MINOR=$(echo "$VERSION" | cut -d. -f2)
+            PATCH=$(echo "$VERSION" | cut -d. -f3)
+            if [ -z "$PATCH" ]; then
+              PATCH=0
+            fi
+            NEXT_TAG="v${MAJOR}.${MINOR}.$((PATCH + 1))"
+          fi
+          echo "next_tag=$NEXT_TAG" >> "$GITHUB_OUTPUT"
+
       - name: Generate changelog
         id: changelog
+        if: steps.skip.outputs.skip == 'false'
         run: |
-          PREV_TAG=$(git tag --sort=-creatordate | sed -n '2p')
+          PREV_TAG=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+' | sed -n '2p')
           if [ -z "$PREV_TAG" ]; then
             LOG=$(git log --pretty=format:"- %s (%h)" --no-merges)
           else
@@ -32,13 +62,17 @@ jobs:
           fi
           {
             echo "body<<CHANGELOG_EOF"
+            echo "## What's Changed"
+            echo ""
             echo "$LOG"
             echo "CHANGELOG_EOF"
           } >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
+        if: steps.skip.outputs.skip == 'false'
         uses: softprops/action-gh-release@v3
         with:
+          tag_name: ${{ steps.version.outputs.next_tag }}
           generate_release_notes: false
           body: ${{ steps.changelog.outputs.body }}
           draft: false

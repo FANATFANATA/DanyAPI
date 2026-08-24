@@ -70,7 +70,7 @@ jobs:
           images: ghcr.io/${{ github.repository }}
           tags: |
             type=sha,prefix=sha-,format=short
-            type=match,pattern=v(\d+\.\d+),group=1
+            type=match,pattern=v(\d+\.\d+(\.\d+)?),group=1
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
 
       - name: Build and push Docker image
