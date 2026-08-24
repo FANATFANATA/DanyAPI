@@ -7,7 +7,6 @@ import json
 import logging
 import random
 import re
-import sys
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -1355,9 +1354,6 @@ async def _collect_non_stream(
                 except (httpx.HTTPError, RuntimeError) as exc:
                     await _try_stop_stream(account.client, session.id, stop_message_id)
                     raise HTTPException(502, f"Stream processing failed: {exc}") from exc
-                except asyncio.CancelledError:
-                    await _try_stop_stream(account.client, session.id, stop_message_id)
-                    raise
                 finally:
                     try:
                         await resp.aclose()
@@ -1380,7 +1376,7 @@ async def _collect_non_stream(
                     await asyncio.sleep(delay)
                     continue
                 break
-        except asyncio.CancelledError:
+        except BaseException:
             await _try_stop_stream(account.client, session.id, stop_message_id)
             raise
 
@@ -1541,6 +1537,7 @@ async def _stream_openai(
             response_message_id = None
             got_content = False
             role_sent = False
+            stopped = False
             try:
                 async for chunk in resp.aiter_bytes():
                     for event in incremental.feed(chunk):
@@ -1594,13 +1591,20 @@ async def _stream_openai(
                                     ],
                                 }
                             )
+            except BaseException:
+                stopped = True
+                if rec.id:
+                    stop_message_id = rec.id
+                await _try_stop_stream(account.client, session.id, stop_message_id)
+                raise
             finally:
                 if rec.id:
                     stop_message_id = rec.id
                 try:
                     await resp.aclose()
                 except Exception:
-                    await _try_stop_stream(account.client, session.id, stop_message_id)
+                    if not stopped:
+                        await _try_stop_stream(account.client, session.id, stop_message_id)
                     raise
             if got_content:
                 break
@@ -1668,9 +1672,6 @@ async def _stream_openai(
                     )
                 if not _is_input_exceeds_limit(cont_rec):
                     incomplete_message = None
-                    break
-                incomplete_message = _incomplete_message(cont_rec)
-                if not (cont_rec.content or cont_rec.reasoning):
                     break
                 incomplete_message = _incomplete_message(cont_rec)
                 if not (cont_rec.content or cont_rec.reasoning):

@@ -1252,7 +1252,7 @@ def tool_schema_map(tools: list[Any] | None) -> dict[str, dict[str, Any]]:
                         if candidate in typ:
                             typ = candidate
                             break
-                if isinstance(typ, str) and typ in _JSON_TYPE_ATTRS:
+                if typ:
                     prop_types[prop] = typ
         aliases = fn.get("aliases")
         if isinstance(aliases, (list, tuple)):
@@ -1526,9 +1526,9 @@ def _parse_xml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | N
             bare_candidates.append((m.start(), m.end(), True, m))
     bare_candidates.sort(key=lambda item: (item[0], -item[1]))
     for start, end, self_closed, match in bare_candidates:
-        if any(s <= start and end <= e for s, e in consumed):
+        if any(s <= start and end <= e for s, e, _, _ in bare_candidates if (s, e) != (start, end)):
             continue
-        if any(s < start and end < e for s, _, _, _ in bare_candidates if s != start):
+        if any(s <= start and end <= e for s, e in consumed):
             continue
         raw_name = match.group(1).strip()
         param_types = _schema_for_name(tool_schemas, raw_name)
@@ -1735,6 +1735,8 @@ def _python_call_match(text: str) -> tuple[str, str] | None:
         elif ch == ")":
             depth -= 1
             if depth == 0:
+                if text[i + 1 :].strip():
+                    return None
                 return match.group(1), text[match.end() : i]
     return None
 
