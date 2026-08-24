@@ -668,7 +668,9 @@ def _can_reuse_session(account: Any, session_id: str | None, **kwargs: Any) -> b
 
 def _include_usage(req: ChatCompletionRequest) -> bool:
     opts = getattr(req, "stream_options", None)
-    return bool((opts or {}).get("include_usage"))
+    if not isinstance(opts, dict):
+        return False
+    return bool(opts.get("include_usage"))
 
 
 def _deepseek_usage(total: int) -> dict:
@@ -1178,14 +1180,14 @@ def _reduced_prompt_variants(
         except ValueError:
             pass
     system_msgs = [msg for msg in messages if getattr(msg, "role", None) == "system"]
-    last_user = None
+    last_input = None
     for msg in reversed(messages):
-        if getattr(msg, "role", None) == "user":
-            last_user = msg
+        if getattr(msg, "role", None) in ("user", "system"):
+            last_input = msg
             break
     reduced_msgs = list(system_msgs)
-    if last_user is not None:
-        reduced_msgs.append(last_user)
+    if last_input is not None and getattr(last_input, "role", None) == "user":
+        reduced_msgs.append(last_input)
     if reduced_msgs:
         try:
             prompt, tool_mode = toolemu.build_prompt(reduced_msgs, None, None, False, response_format)
@@ -1401,14 +1403,13 @@ async def _collect_non_stream(
         if incomplete_message is not None and reduced_notice is None:
             log.warning("deepseek response incomplete: %s", incomplete_message)
             raise HTTPException(502, _incomplete_error_body(incomplete_message))
+        content = rec.content
+        reasoning = rec.reasoning
+        if not (content or reasoning) and rec.hint_error:
+            raise HTTPException(429, _busy_error_body(rec))
         session.accumulated_tokens = max(getattr(session, "accumulated_tokens", 0) or 0, rec.accumulated_tokens)
         account.sessions.touch_last_message(session_key, rec.id or response_message_id)
         log.info("deepseek completion success (%.0fms)", (time.monotonic() - started) * 1000)
-
-        content = rec.content
-        reasoning = rec.reasoning
-        if not (rec.content or rec.reasoning) and rec.hint_error:
-            raise HTTPException(429, _busy_error_body(rec))
         message, finish = _build_assistant_message(content, reasoning, tool_mode, tool_schemas)
         if finish == "stop":
             finish = _finish_reason(rec.status)
@@ -1526,7 +1527,7 @@ async def _stream_openai(
             incremental = IncrementalSSE()
             response_message_id = None
             got_content = False
-            pending: list[str] = []
+            role_sent = False
             try:
                 async for chunk in resp.aiter_bytes():
                     for event in incremental.feed(chunk):
@@ -1536,25 +1537,25 @@ async def _stream_openai(
                                 stop_message_id = response_message_id
                         rec.handle(event)
                         c_diff, r_diff = rec.take_diffs()
-                        if c_diff or r_diff:
-                            got_content = True
-                        if not pending:
-                            pending.append(
-                                _sse(
-                                    {
-                                        "id": chunk_id,
-                                        "object": "chat.completion.chunk",
-                                        "created": created,
-                                        "model": model,
-                                        "choices": [
-                                            {
-                                                "index": 0,
-                                                "delta": {"role": "assistant"},
-                                                "finish_reason": None,
-                                            }
-                                        ],
-                                    }
-                                )
+                        if not (c_diff or r_diff):
+                            continue
+                        got_content = True
+                        if not role_sent:
+                            role_sent = True
+                            yield _sse(
+                                {
+                                    "id": chunk_id,
+                                    "object": "chat.completion.chunk",
+                                    "created": created,
+                                    "model": model,
+                                    "choices": [
+                                        {
+                                            "index": 0,
+                                            "delta": {"role": "assistant"},
+                                            "finish_reason": None,
+                                        }
+                                    ],
+                                }
                             )
                         delta: dict = {}
                         if c_diff:
@@ -1565,27 +1566,21 @@ async def _stream_openai(
                         if r_diff:
                             delta["reasoning_content"] = r_diff
                         if delta:
-                            pending.append(
-                                _sse(
-                                    {
-                                        "id": chunk_id,
-                                        "object": "chat.completion.chunk",
-                                        "created": created,
-                                        "model": model,
-                                        "choices": [
-                                            {
-                                                "index": 0,
-                                                "delta": delta,
-                                                "finish_reason": None,
-                                            }
-                                        ],
-                                    }
-                                )
+                            yield _sse(
+                                {
+                                    "id": chunk_id,
+                                    "object": "chat.completion.chunk",
+                                    "created": created,
+                                    "model": model,
+                                    "choices": [
+                                        {
+                                            "index": 0,
+                                            "delta": delta,
+                                            "finish_reason": None,
+                                        }
+                                    ],
+                                }
                             )
-                        if got_content:
-                            for line in pending:
-                                yield line
-                            pending.clear()
             finally:
                 if rec.id:
                     stop_message_id = rec.id

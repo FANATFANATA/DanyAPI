@@ -364,9 +364,14 @@ def _choice_name(tool_choice: Any) -> str | None:
     if isinstance(tool_choice, str):
         return tool_choice
     if isinstance(tool_choice, dict):
+        choice_type = tool_choice.get("type")
+        if choice_type in ("none", "required"):
+            return choice_type
         fn = tool_choice.get("function")
         if isinstance(fn, dict) and isinstance(fn.get("name"), str):
             return fn["name"]
+        if isinstance(choice_type, str) and choice_type not in ("auto", "function"):
+            return choice_type
     return None
 
 
@@ -885,7 +890,8 @@ def _normalize_bare_json(text: str) -> str | None:
         j = i
         while j < n and text[j].isspace():
             j += 1
-        if prev in ("{", "[", ",") and j < n and text[j] == ":":
+        nxt = text[j] if j < n else ""
+        if prev in ("{", "[", ",") and nxt == ":":
             out.append('"')
             out.append(token)
             out.append('"')
@@ -894,6 +900,13 @@ def _normalize_bare_json(text: str) -> str | None:
             changed = True
             continue
         if prev == ":" and not _is_bare_literal(token):
+            out.append('"')
+            out.append(token)
+            out.append('"')
+            prev = '"'
+            changed = True
+            continue
+        if prev in ("[", ",") and nxt in (",", "]") and not _is_bare_literal(token):
             out.append('"')
             out.append(token)
             out.append('"')
@@ -1559,6 +1572,8 @@ def _iter_json_objects(text: str) -> Iterator[tuple[dict, int, int]]:
         in_string = False
         escaped = False
         end = start
+        parsed = False
+        closed = False
         while end < length:
             ch = text[end]
             if in_string:
@@ -1575,15 +1590,17 @@ def _iter_json_objects(text: str) -> Iterator[tuple[dict, int, int]]:
             elif ch == "}":
                 depth -= 1
                 if depth == 0:
+                    closed = True
                     candidate = text[start : end + 1]
                     try:
                         obj = _loads_lenient(candidate)
                         yield obj, start, end
+                        parsed = True
                     except ValueError:
                         pass
                     break
             end += 1
-        i = end + 1
+        i = (end + 1) if (parsed or not closed) else (start + 1)
 
 
 def _split_top_level(text: str, delimiter: str = ",") -> list[str]:
@@ -1679,20 +1696,31 @@ def _python_call_match(text: str) -> tuple[str, str] | None:
     if match is None:
         return None
     depth = 1
-    in_string = False
+    in_double = False
+    in_single = False
     escaped = False
     for i in range(match.end(), len(text)):
         ch = text[i]
-        if in_string:
+        if in_double:
             if escaped:
                 escaped = False
             elif ch == "\\":
                 escaped = True
             elif ch == '"':
-                in_string = False
+                in_double = False
+            continue
+        if in_single:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == "'":
+                in_single = False
             continue
         if ch == '"':
-            in_string = True
+            in_double = True
+        elif ch == "'":
+            in_single = True
         elif ch == "(":
             depth += 1
         elif ch == ")":
