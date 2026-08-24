@@ -406,7 +406,15 @@ def test_accumulate_usage():
     usage = qwen_api._accumulate_usage(session, rec)
     assert usage == {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
     usage2 = qwen_api._accumulate_usage(session, rec)
-    assert usage2 == {"prompt_tokens": 20, "completion_tokens": 10, "total_tokens": 30}
+    assert usage2 == {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+    assert session.accumulated_input_tokens == 20
+    assert session.accumulated_output_tokens == 10
+    rec2 = QwenStreamReconstructor()
+    rec2.usage = {"input_tokens": 3, "output_tokens": 4}
+    usage3 = qwen_api._accumulate_usage(session, rec2)
+    assert usage3 == {"prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7}
+    assert session.accumulated_input_tokens == 23
+    assert session.accumulated_output_tokens == 14
 
 
 def test_drop_session():

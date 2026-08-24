@@ -5,6 +5,7 @@ import logging
 import threading
 import time
 from contextlib import asynccontextmanager
+from typing import Any, Generic, Protocol, TypeVar
 
 from .deepseek.client import DeepSeekClient
 from .pow import PowManager
@@ -190,10 +191,18 @@ class DeepSeekAccount:
         return f"acct#{self.index}"
 
 
-class AccountPool:
+class _PoolAccount(Protocol):
+    broken: bool
+    sem: asyncio.Semaphore
+
+
+AccountT = TypeVar("AccountT", bound=_PoolAccount)
+
+
+class AccountPool(Generic[AccountT]):
     def __init__(
         self,
-        accounts: list,
+        accounts: list[AccountT],
         label: str = "deepseek",
         session_cache_size: int = 128,
         ttl: float = 0.0,
@@ -220,8 +229,8 @@ class AccountPool:
             return sid
         return account_index
 
-    def _resolve_affinity(self, record) -> int | None:
-        idx = record
+    def _resolve_affinity(self, record: Any) -> int | None:
+        idx: Any = record
         if isinstance(record, list) and record:
             idx = record[0]
         if isinstance(idx, bool):
@@ -245,7 +254,7 @@ class AccountPool:
             self._by_session[session_id] = (idx, now)
 
     @property
-    def healthy(self) -> list[DeepSeekAccount]:
+    def healthy(self) -> list[AccountT]:
         return [a for a in self.accounts if not a.broken]
 
     def register(self, account_index: int, session_id: str) -> None:
@@ -274,7 +283,7 @@ class AccountPool:
     def forget_context(self, session_id: str) -> None:
         self._contexts.forget(session_id)
 
-    def account_for_session(self, session_id: str) -> DeepSeekAccount | None:
+    def account_for_session(self, session_id: str) -> AccountT | None:
         entry = self._by_session.get(session_id)
         if entry is None:
             return None
@@ -297,7 +306,7 @@ class AccountPool:
             self._by_session[session_id] = (idx, now)
         return acct
 
-    def stats(self) -> dict:
+    def stats(self) -> dict[str, Any]:
         return {
             "label": self.label,
             "accounts": len(self.accounts),
@@ -311,7 +320,7 @@ class AccountPool:
             "ttl_seconds": self._ttl,
         }
 
-    async def acquire(self, session_id: str | None, max_wait: float | None = None) -> tuple[DeepSeekAccount, str | None]:
+    async def acquire(self, session_id: str | None, max_wait: float | None = None) -> tuple[AccountT, str | None]:
         healthy = self.healthy
         if not healthy:
             raise RuntimeError(f"all {self.label} accounts are unavailable")
@@ -336,21 +345,23 @@ class AccountPool:
 
     async def _wait_free(
         self,
-        preferred: DeepSeekAccount | None,
+        preferred: AccountT | None,
         max_wait: float,
         session_id: str | None,
-    ) -> tuple[DeepSeekAccount, str | None]:
+    ) -> tuple[AccountT, str | None]:
         deadline = time.monotonic() + max_wait
         while True:
-            if preferred is not None:
+            if preferred is not None and not preferred.broken:
                 candidates = [preferred]
             else:
                 candidates = self.healthy
-            for acct in candidates:
+            if not candidates:
+                raise AccountPoolBusy()
+            for i, acct in enumerate(candidates):
                 if not acct.sem.locked():
                     if session_id is not None:
                         return acct, session_id
-                    self._rr = (candidates.index(acct) + 1) % len(candidates)
+                    self._rr = (i + 1) % len(candidates)
                     return acct, None
             if time.monotonic() >= deadline:
                 raise AccountPoolBusy()

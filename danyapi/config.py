@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Any
 
 
-def _noop_load_dotenv(*args, **kwargs) -> bool:
+def _noop_load_dotenv(*args: Any, **kwargs: Any) -> bool:
     return False
 
 
@@ -26,7 +27,7 @@ def _env_int(key: str, default: int) -> int:
 def _env_float(key: str, default: float) -> float:
     try:
         return float(os.environ.get(key, default))
-    except (TypeError, ValueError):
+    except ValueError:
         return default
 
 

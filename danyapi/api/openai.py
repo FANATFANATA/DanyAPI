@@ -677,6 +677,13 @@ def _deepseek_usage(total: int) -> dict:
     return {"prompt_tokens": 0, "completion_tokens": value, "total_tokens": value}
 
 
+def _advance_session_usage(session, accumulated_total: int) -> int:
+    prev = max(0, int(getattr(session, "accumulated_tokens", 0) or 0))
+    current = max(0, int(accumulated_total or 0))
+    session.accumulated_tokens = max(prev, current)
+    return max(0, current - prev)
+
+
 def _sse(data: dict) -> str:
     return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
@@ -1083,7 +1090,7 @@ def _build_completion_response(
     model: str,
     message: dict,
     finish: str,
-    session,
+    usage: dict,
     session_key: str | None,
 ) -> dict:
     return {
@@ -1098,7 +1105,7 @@ def _build_completion_response(
                 "finish_reason": finish,
             }
         ],
-        "usage": _deepseek_usage(getattr(session, "accumulated_tokens", 0)),
+        "usage": usage,
         "session_id": session_key,
     }
 
@@ -1416,13 +1423,13 @@ async def _collect_non_stream(
         reasoning = rec.reasoning
         if not (content or reasoning) and rec.hint_error:
             raise HTTPException(429, _busy_error_body(rec))
-        session.accumulated_tokens = max(getattr(session, "accumulated_tokens", 0) or 0, rec.accumulated_tokens)
+        request_tokens = _advance_session_usage(session, rec.accumulated_tokens)
         account.sessions.touch_last_message(session_key, rec.id or response_message_id)
         log.info("deepseek completion success (%.0fms)", (time.monotonic() - started) * 1000)
         message, finish = _build_assistant_message(content, reasoning, tool_mode, tool_schemas)
         if finish == "stop":
             finish = _finish_reason(rec.status)
-        response = _build_completion_response(model, message, finish, session, session_key)
+        response = _build_completion_response(model, message, finish, _deepseek_usage(request_tokens), session_key)
         if reduced_notice is not None:
             log.warning("deepseek response delivered from reduced context (%s)", model)
             response["error"] = {"message": reduced_notice, "finish_reason": RESPONSE_INCOMPLETE}
@@ -1722,7 +1729,7 @@ async def _stream_openai(
                 yield line
             return
 
-        session.accumulated_tokens = max(getattr(session, "accumulated_tokens", 0) or 0, rec.accumulated_tokens)
+        request_tokens = _advance_session_usage(session, rec.accumulated_tokens)
         account.sessions.touch_last_message(session_key, rec.id or response_message_id)
         log.info("deepseek completion success (%.0fms)", (time.monotonic() - started) * 1000)
 
@@ -1810,7 +1817,7 @@ async def _stream_openai(
                     "created": created,
                     "model": model,
                     "choices": [],
-                    "usage": _deepseek_usage(getattr(session, "accumulated_tokens", 0)),
+                    "usage": _deepseek_usage(request_tokens),
                 }
             )
         yield _sse(

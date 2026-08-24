@@ -99,7 +99,7 @@ class JsonStore:
             self._data.clear()
             self._write()
 
-    def items(self):
+    def items(self) -> list[tuple[str, Any]]:
         with self._lock:
             return list(self._data.items())
 

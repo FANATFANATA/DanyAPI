@@ -37,7 +37,7 @@ class SessionRegistry:
     def _session_key(self, session_id: str) -> str:
         return f"{self._key_prefix}{session_id}"
 
-    def _serialize(self, session: Any) -> dict:
+    def _serialize(self, session: Any) -> dict[str, Any]:
         return {
             "id": session.id,
             "title": getattr(session, "title", ""),
@@ -89,13 +89,13 @@ class SessionRegistry:
             oldest, _ = self._sessions.popitem(last=False)
             self._store.discard(self._session_key(oldest))
 
-    async def _create(self, **kwargs) -> Any:
+    async def _create(self, **kwargs: Any) -> Any:
         return await self._client.create_session(**kwargs)
 
-    def _reuse(self, session: Any, session_id: str, **kwargs) -> bool:
+    def _reuse(self, session: Any, session_id: str, **kwargs: Any) -> bool:
         return True
 
-    def can_reuse(self, session_id: str | None, **kwargs) -> bool:
+    def can_reuse(self, session_id: str | None, **kwargs: Any) -> bool:
         if not session_id:
             return False
         session = self.get(session_id)
@@ -122,7 +122,7 @@ class SessionRegistry:
             self._sessions[session_id] = (session, now)
             return session
 
-    async def obtain(self, session_id: str | None, **kwargs) -> tuple[Any, str]:
+    async def obtain(self, session_id: str | None, **kwargs: Any) -> tuple[Any, str]:
         async with self._creation_lock:
             if session_id:
                 existing = self.get(session_id)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -15,7 +16,7 @@ LEVEL_COLORS = {
     "CRITICAL": "\033[31m",
 }
 SUCCESS_COLOR = "\033[32m"
-SUCCESS_MARKERS = (" ok", "ready", "success")
+SUCCESS_PATTERN = re.compile(r"\b(ok|ready|success)\b", re.IGNORECASE)
 LIFECYCLE_MESSAGES = {
     "Waiting for application startup.",
     "Application startup complete.",
@@ -88,21 +89,16 @@ class _LifecycleFilter(logging.Filter):
 
 
 def _is_success(message: str) -> bool:
-    lowered = message.lower()
-    return any(marker in lowered for marker in SUCCESS_MARKERS)
+    return SUCCESS_PATTERN.search(message) is not None
 
 
 class _ColorFormatter(logging.Formatter):
     def __init__(self) -> None:
         super().__init__(DEFAULT_FORMAT, DEFAULT_DATEFMT)
-        self._use_color = bool(sys.stdout and sys.stdout.isatty())
+        stream = sys.stderr if sys.stderr is not None else sys.stdout
+        self._use_color = bool(stream and stream.isatty())
 
     def format(self, record: logging.LogRecord) -> str:
-        message = record.getMessage()
-        if isinstance(message, str):
-            message = message.replace("{", "{{").replace("}", "}}")
-        record.msg = message
-        record.args = ()
         text = super().format(record)
         if not self._use_color:
             return text
@@ -123,17 +119,26 @@ def _enable_windows_vt() -> None:
         return
     try:
         import ctypes
+        from ctypes import wintypes
 
         kernel32 = ctypes.windll.kernel32
+        kernel32.GetStdHandle.argtypes = [wintypes.DWORD]
+        kernel32.GetStdHandle.restype = wintypes.HANDLE
+        kernel32.GetConsoleMode.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        kernel32.GetConsoleMode.restype = wintypes.BOOL
+        kernel32.SetConsoleMode.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        kernel32.SetConsoleMode.restype = wintypes.BOOL
+        enable_virtual_terminal_processing = 0x0004
+        invalid_handle = wintypes.HANDLE(-1).value
         for std_handle in (-11, -12):
             handle = kernel32.GetStdHandle(std_handle)
-            if not handle or handle == -1:
+            if not handle or handle == invalid_handle:
                 continue
-            mode = ctypes.c_uint32()
+            mode = wintypes.DWORD()
             if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
                 continue
-            if not mode.value & 0x0004:
-                kernel32.SetConsoleMode(handle, mode.value | 0x0004)
+            if not mode.value & enable_virtual_terminal_processing:
+                kernel32.SetConsoleMode(handle, mode.value | enable_virtual_terminal_processing)
     except Exception:
         logging.getLogger(__name__).debug("failed to enable windows VT mode", exc_info=True)
 
@@ -161,7 +166,7 @@ def configure() -> None:
     if settings.log_file and not _has_handler(root, FILE_HANDLER_NAME):
         path = Path(settings.log_file)
         if path.is_dir():
-            logging.getLogger("danyapi.logging").warning(
+            logging.getLogger(__name__).warning(
                 "log file %s is a directory, using console only",
                 path,
             )

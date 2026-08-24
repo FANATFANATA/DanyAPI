@@ -135,6 +135,18 @@ def test_deepseek_usage():
     assert openai_mod._deepseek_usage(None) == {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
 
+def test_advance_session_usage():
+    session = FakeSession()
+    assert openai_mod._advance_session_usage(session, 100) == 100
+    assert session.accumulated_tokens == 100
+    assert openai_mod._advance_session_usage(session, 250) == 150
+    assert session.accumulated_tokens == 250
+    assert openai_mod._advance_session_usage(session, 200) == 0
+    assert session.accumulated_tokens == 250
+    assert openai_mod._advance_session_usage(session, None) == 0
+    assert session.accumulated_tokens == 250
+
+
 def test_finish_reason():
     assert openai_mod._finish_reason("FINISHED") == "stop"
     assert openai_mod._finish_reason("CONTEXT_LENGTH_EXCEEDED") == "length"

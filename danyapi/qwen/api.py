@@ -200,16 +200,17 @@ async def _human_delay() -> None:
 
 def _accumulate_usage(session, rec: QwenStreamReconstructor) -> dict:
     current = rec.usage_tokens
+    prompt_tokens = current["prompt_tokens"]
+    completion_tokens = current["completion_tokens"]
+    total_tokens = current["total_tokens"] or prompt_tokens + completion_tokens
     prev_input = int(getattr(session, "accumulated_input_tokens", 0) or 0)
     prev_output = int(getattr(session, "accumulated_output_tokens", 0) or 0)
-    input_tokens = prev_input + current["prompt_tokens"]
-    output_tokens = prev_output + current["completion_tokens"]
-    session.accumulated_input_tokens = input_tokens
-    session.accumulated_output_tokens = output_tokens
+    session.accumulated_input_tokens = prev_input + prompt_tokens
+    session.accumulated_output_tokens = prev_output + completion_tokens
     return {
-        "prompt_tokens": input_tokens,
-        "completion_tokens": output_tokens,
-        "total_tokens": input_tokens + output_tokens,
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": total_tokens,
     }
 
 
