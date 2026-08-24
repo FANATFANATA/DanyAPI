@@ -95,7 +95,7 @@ def _is_success(message: str) -> bool:
 class _ColorFormatter(logging.Formatter):
     def __init__(self) -> None:
         super().__init__(DEFAULT_FORMAT, DEFAULT_DATEFMT)
-        self._use_color = sys.stdout.isatty()
+        self._use_color = bool(sys.stdout and sys.stdout.isatty())
 
     def format(self, record: logging.LogRecord) -> str:
         message = record.getMessage()
@@ -118,8 +118,30 @@ def _has_handler(root: logging.Logger, name: str) -> bool:
     return any(getattr(handler, "name", None) == name for handler in root.handlers)
 
 
+def _enable_windows_vt() -> None:
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        for std_handle in (-11, -12):
+            handle = kernel32.GetStdHandle(std_handle)
+            if not handle or handle == -1:
+                continue
+            mode = ctypes.c_uint32()
+            if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+                continue
+            if not mode.value & 0x0004:
+                kernel32.SetConsoleMode(handle, mode.value | 0x0004)
+    except Exception:
+        pass
+
+
 def configure() -> None:
     from danyapi.config import settings
+
+    _enable_windows_vt()
 
     for noisy in ("httpx", "httpcore"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
