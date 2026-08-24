@@ -29,7 +29,7 @@ jobs:
           cache: pip
           cache-dependency-path: requirements-dev.txt
 
-      - name: Install system tools (clang, clang-format, clang-tidy, node)
+      - name: Install system tools
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends clang clang-format clang-tidy nodejs
@@ -40,7 +40,7 @@ jobs:
       - name: Build native PoW solver
         run: clang -O3 -pthread -funroll-loops -flto -march=native -mtune=native -o danyapi/deepseek/pow_solver danyapi/deepseek/pow_solver.c
 
-      - name: Run tests.py
+      - name: Run tests
         run: python tests.py -j 2
 
   docker-build:
@@ -70,7 +70,7 @@ jobs:
           images: ghcr.io/${{ github.repository }}
           tags: |
             type=sha,prefix=sha-,format=short
-            type=semver,pattern={{version}}
+            type=match,pattern=v(\d+\.\d+),group=1
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
 
       - name: Build and push Docker image
