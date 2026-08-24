@@ -741,6 +741,8 @@ async def _chat_completions_deepseek(req: ChatCompletionRequest) -> Any:
     context_seq = toolemu.context_sequence(req.messages, user=getattr(req, "user", None))
     if req.session_id:
         account, existing_sid = await _acquire_account(pool, req.session_id)
+        if existing_sid is None:
+            existing_sid = req.session_id
     else:
         cached_sid = pool.resolve_context(context_seq) if context_seq else None
         account, existing_sid = await _acquire_account(pool, cached_sid)
@@ -809,6 +811,8 @@ async def _chat_completions_qwen(req: ChatCompletionRequest) -> Any:
     context_seq = toolemu.context_sequence(req.messages, user=getattr(req, "user", None))
     if req.session_id:
         account, existing_sid = await _acquire_account(pool, req.session_id)
+        if existing_sid is None:
+            existing_sid = req.session_id
     else:
         cached_sid = pool.resolve_context(context_seq) if context_seq else None
         account, existing_sid = await _acquire_account(pool, cached_sid)
@@ -867,12 +871,11 @@ async def _prepare_session(
     except DeepSeekError as exc:
         _handle_account_error(account, exc)
         raise HTTPException(_deepseek_status(exc), _deepseek_error_detail(exc)) from exc
-    if session_key != existing_sid:
-        pool.register(account.index, session_key)
-        if existing_sid:
-            pool.forget(existing_sid)
-            pool.forget_context(existing_sid)
-            account.sessions.forget(existing_sid)
+    pool.register(account.index, session_key)
+    if existing_sid and session_key != existing_sid:
+        pool.forget(existing_sid)
+        pool.forget_context(existing_sid)
+        account.sessions.forget(existing_sid)
     if context_seq:
         pool.index_context(session_key, context_seq)
     return session, session_key, session.last_message_id
@@ -1315,7 +1318,7 @@ async def _collect_non_stream(
                         except ValueError as build_exc:
                             raise exc from build_exc
                         log.warning("deepseek session %s is stale (%s), rebuilt full history into a fresh chat", session_key, exc.status_code)
-                        session, session_key, parent_message_id = await _prepare_session(account, pool, None, context_seq)
+                        session, session_key, parent_message_id = await _prepare_session(account, pool, existing_sid, context_seq)
                         stop_message_id = None
                         response_message_id = None
                         continue
@@ -1499,7 +1502,7 @@ async def _stream_openai(
                             yield line
                         return
                     log.warning("deepseek session %s is stale (%s), rebuilt full history into a fresh chat", session_key, exc.status_code)
-                    session, session_key, parent_message_id = await _prepare_session(account, pool, None, context_seq)
+                    session, session_key, parent_message_id = await _prepare_session(account, pool, existing_sid, context_seq)
                     stop_message_id = None
                     response_message_id = None
                     continue

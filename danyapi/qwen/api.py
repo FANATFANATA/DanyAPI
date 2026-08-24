@@ -108,12 +108,11 @@ async def _prepare_session(account, pool, existing_sid: str | None, model_id: st
     except QwenError as exc:
         _handle_account_error(account, exc)
         raise HTTPException(_error_status(exc.code), f"Qwen error: {exc}") from exc
-    if session_key != existing_sid:
-        pool.register(account.index, session_key)
-        if existing_sid:
-            pool.forget(existing_sid)
-            pool.forget_context(existing_sid)
-            account.sessions.forget(existing_sid)
+    pool.register(account.index, session_key)
+    if existing_sid and session_key != existing_sid:
+        pool.forget(existing_sid)
+        pool.forget_context(existing_sid)
+        account.sessions.forget(existing_sid)
     if context_seq:
         pool.index_context(session_key, context_seq)
     return session, session_key
@@ -264,7 +263,7 @@ async def collect_non_stream(
                         except ValueError as build_exc:
                             raise exc from build_exc
                         log.warning("qwen chat %s is stale (%s), rebuilt full history into a fresh chat", session_key, exc.status_code)
-                        session, session_key = await _prepare_session(account, pool, None, model_id, context_seq)
+                        session, session_key = await _prepare_session(account, pool, existing_sid, model_id, context_seq)
                         stop_response_id = None
                         continue
                     if _is_retryable_http(exc) and attempt < MAX_RETRIES:
@@ -481,7 +480,7 @@ async def stream_openai(
                         yield "data: [DONE]\n\n"
                         return
                     log.warning("qwen chat %s is stale (%s), rebuilt full history into a fresh chat", session_key, exc.status_code)
-                    session, session_key = await _prepare_session(account, pool, None, model_id, context_seq)
+                    session, session_key = await _prepare_session(account, pool, existing_sid, model_id, context_seq)
                     stop_response_id = None
                     continue
                 if _is_retryable_http(exc) and attempt < MAX_RETRIES:

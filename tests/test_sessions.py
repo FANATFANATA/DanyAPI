@@ -10,7 +10,7 @@ import danyapi.api.openai as openai_mod
 import danyapi.qwen.api as qwen_api
 from danyapi.accounts import AccountPool, DeepSeekAccount
 from danyapi.deepseek.client import DeepSeekClient
-from danyapi.qwen.accounts import QwenSessionRegistry
+from danyapi.qwen.accounts import QwenAccount, QwenSessionRegistry
 from danyapi.sessions import SessionRegistry
 from danyapi.store import JsonStore
 from danyapi.tools import build_prompt, context_sequence
@@ -163,8 +163,9 @@ def test_session_forget_removes():
     assert reg.get(k) is not None
     reg.forget(k)
     assert reg.get(k) is None
-    _, k2 = asyncio.run(reg.obtain(k))
-    assert k2 != k
+    s2, k2 = asyncio.run(reg.obtain(k))
+    assert s2.id != k
+    assert reg.get(k2) is s2
 
 
 def test_session_ttl_expires():
@@ -194,14 +195,70 @@ def test_qwen_session_touch_last_message():
     assert s.last_response_id == "r1"
 
 
-def test_qwen_model_switch_creates_new_chat():
+def test_qwen_model_switch_rebinds_key_to_new_chat():
     reg = QwenSessionRegistry(FakeSessionClient())
     _, k1 = asyncio.run(reg.obtain(None, "qwen3.8-max"))
-    _, k2 = asyncio.run(reg.obtain(k1, "qwen3.7-plus"))
-    assert k2 != k1
-    s, k3 = asyncio.run(reg.obtain(k1, "qwen3.8-max"))
+    s2, k2 = asyncio.run(reg.obtain(k1, "qwen3.7-plus"))
+    assert s2.id != k1
+    assert k2 == k1
+    assert reg.get(k1) is s2
+    assert s2.model == "qwen3.7-plus"
+    s3, k3 = asyncio.run(reg.obtain(k1, "qwen3.7-plus"))
+    assert s3 is s2
     assert k3 == k1
-    assert s.model == "qwen3.8-max"
+
+
+def test_obtain_binds_requested_alias():
+    client = FakeSessionClient()
+    reg = SessionRegistry(client)
+    s1, k1 = asyncio.run(reg.obtain("alias-1"))
+    assert k1 == "alias-1"
+    assert s1.id == "s1"
+    assert client.counter == 1
+    assert reg.get("alias-1") is s1
+    assert reg.can_reuse("alias-1")
+    s2, k2 = asyncio.run(reg.obtain("alias-1"))
+    assert s2 is s1
+    assert k2 == "alias-1"
+    assert client.counter == 1
+
+
+def test_obtain_alias_rebinds_on_qwen_model_switch():
+    client = FakeSessionClient()
+    reg = QwenSessionRegistry(client)
+    _, k1 = asyncio.run(reg.obtain("alias-q", "qwen3.8-max"))
+    assert k1 == "alias-q"
+    s2, k2 = asyncio.run(reg.obtain("alias-q", "qwen3.7-plus"))
+    assert k2 == "alias-q"
+    assert s2.id == "c2"
+    assert client.counter == 2
+    assert reg.get("alias-q") is s2
+    s3, _ = asyncio.run(reg.obtain("alias-q", "qwen3.7-plus"))
+    assert s3 is s2
+    assert client.counter == 2
+
+
+def test_alias_binding_persists_and_unifies(sessions_store):
+    reg = SessionRegistry(FakeSessionClient(), store=sessions_store)
+    session, key = asyncio.run(reg.obtain("alias-p"))
+    assert key == "alias-p"
+    assert session.id in sessions_store
+    assert "alias-p" in sessions_store
+    reg.touch_last_message("alias-p", "m1")
+    reg2 = SessionRegistry(FakeSessionClient(), store=JsonStore("sessions", "default"))
+    via_alias = reg2.get("alias-p")
+    via_real = reg2.get(session.id)
+    assert via_alias is not None
+    assert via_alias is via_real
+    assert via_alias.last_message_id == "m1"
+
+
+def test_forget_alias_keeps_canonical_entry():
+    reg = SessionRegistry(FakeSessionClient())
+    session, _ = asyncio.run(reg.obtain("alias-f"))
+    reg.forget("alias-f")
+    assert reg.get("alias-f") is None
+    assert reg.get(session.id) is session
 
 
 @pytest.fixture
@@ -348,7 +405,7 @@ def test_account_pool_stats_reports_cache_state():
     assert pool.stats()["context_hits"] == 1
 
 
-def test_plain_continuation_preserves_full_history():
+def test_plain_continuation_sends_only_last_user():
     messages = [
         Message("user", "What is the weather?"),
         Message("assistant", "It is 22C."),
@@ -356,9 +413,7 @@ def test_plain_continuation_preserves_full_history():
     ]
     prompt, tool_mode = build_prompt(messages, has_session=True)
     assert not tool_mode
-    assert "What is the weather?" in prompt
-    assert "It is 22C." in prompt
-    assert "And in Rome?" in prompt
+    assert prompt == "And in Rome?"
 
 
 def test_continuation_after_tool_round_with_new_user():
@@ -370,12 +425,12 @@ def test_continuation_after_tool_round_with_new_user():
         Message("user", "And in Rome?"),
     ]
     prompt, tool_mode = build_prompt(messages, has_session=True)
-    assert tool_mode
-    assert "22C, sunny" in prompt
-    assert "And in Rome?" in prompt
+    assert not tool_mode
+    assert prompt == "And in Rome?"
+    assert "22C, sunny" not in prompt
 
 
-def test_immediate_tool_round_renders_full_history():
+def test_immediate_tool_round_uses_tail():
     messages = [
         Message("user", "What is the weather?"),
         Message("assistant", tool_calls=[{"id": "c1", "type": "function", "function": {"name": "get_weather", "arguments": '{"city": "Moscow"}'}}]),
@@ -383,8 +438,9 @@ def test_immediate_tool_round_renders_full_history():
     ]
     prompt, tool_mode = build_prompt(messages, has_session=True)
     assert tool_mode
-    assert "What is the weather?" in prompt
     assert "22C, sunny" in prompt
+    assert "Continue the conversation" in prompt
+    assert "What is the weather?" not in prompt
 
 
 def test_session_continuation_with_tools():
@@ -396,14 +452,13 @@ def test_session_continuation_with_tools():
     prompt, tool_mode = build_prompt(messages, [WEATHER_TOOL], has_session=True)
     assert tool_mode
     assert "And in Rome?" in prompt
-    assert "get_weather" in prompt
+    assert "get_weather" not in prompt
 
 
-def test_session_includes_system():
+def test_session_skips_system():
     messages = [Message("system", "Be concise."), Message("user", "hi")]
     prompt, _ = build_prompt(messages, has_session=True)
-    assert "Be concise." in prompt
-    assert "hi" in prompt
+    assert prompt == "hi"
 
 
 def test_deepseek_stateless_request_resolves_cached_session():
@@ -451,6 +506,7 @@ def test_deepseek_cached_missing_session_renders_full_history():
     try:
         account = MagicMock()
         account.sessions.get.return_value = None
+        account.sessions.can_reuse.return_value = False
         pool = MagicMock()
         pool.acquire = AsyncMock(return_value=(account, "sess-a"))
         pool.resolve_context = MagicMock(return_value="sess-a")
@@ -590,6 +646,146 @@ def test_qwen_cached_wrong_model_renders_full_history():
 
 def test_deepseek_non_stream_accepts_include_usage():
     assert "include_usage" in openai_mod._collect_non_stream.__code__.co_varnames
+
+
+class FakeDeepSeekCreateClient:
+    def __init__(self):
+        self.counter = 0
+
+    async def create_session(self):
+        self.counter += 1
+        return SimpleNamespace(id=f"srv-{self.counter}", last_message_id=None)
+
+
+def test_prepare_session_binds_client_alias_and_reuses():
+    client = FakeDeepSeekCreateClient()
+    account = DeepSeekAccount(0, client)
+    pool = AccountPool([account])
+    session, key, _parent = asyncio.run(openai_mod._prepare_session(account, pool, "conv-abc"))
+    assert key == "conv-abc"
+    assert session.id == "srv-1"
+    assert pool.account_for_session("conv-abc") is account
+    session2, key2, _ = asyncio.run(openai_mod._prepare_session(account, pool, "conv-abc"))
+    assert key2 == "conv-abc"
+    assert session2 is session
+    assert client.counter == 1
+
+
+def test_deepseek_sequential_single_message_session_accumulates():
+    captured = []
+    orig = openai_mod._collect_non_stream
+
+    async def fake_collect(**kwargs):
+        captured.append(dict(kwargs))
+        return {"ok": True}
+
+    openai_mod._collect_non_stream = fake_collect
+    try:
+        client = FakeDeepSeekCreateClient()
+        account = DeepSeekAccount(0, client)
+        pool = MagicMock()
+        pool.acquire = AsyncMock(side_effect=[(account, None), (account, "seq-1")])
+        openai_mod.app.state.pool = pool
+        base = {
+            "model": "deepseek-v4-flash",
+            "stream": False,
+            "thinking": False,
+            "search": False,
+            "files": None,
+            "tools": None,
+            "tool_choice": None,
+            "response_format": None,
+        }
+        req1 = SimpleNamespace(**base, session_id="seq-1", messages=[openai_mod.ChatMessage(role="user", content="My name is Alice")])
+        asyncio.run(openai_mod._chat_completions_deepseek(req1))
+        assert captured[0]["existing_sid"] == "seq-1"
+        assert captured[0]["prompt"] == "My name is Alice"
+        asyncio.run(account.sessions.obtain("seq-1"))
+        req2 = SimpleNamespace(**base, session_id="seq-1", messages=[openai_mod.ChatMessage(role="user", content="What is my name?")])
+        asyncio.run(openai_mod._chat_completions_deepseek(req2))
+        assert captured[1]["existing_sid"] == "seq-1"
+        assert captured[1]["prompt"] == "What is my name?"
+        assert client.counter == 1
+    finally:
+        openai_mod._collect_non_stream = orig
+
+
+def test_deepseek_cached_session_hit_sends_only_delta():
+    captured = []
+    orig = openai_mod._collect_non_stream
+
+    async def fake_collect(**kwargs):
+        captured.append(dict(kwargs))
+        return {"ok": True}
+
+    openai_mod._collect_non_stream = fake_collect
+    try:
+        client = FakeDeepSeekCreateClient()
+        account = DeepSeekAccount(0, client)
+        asyncio.run(account.sessions.obtain("cached-1"))
+        pool = MagicMock()
+        pool.acquire = AsyncMock(return_value=(account, "cached-1"))
+        pool.resolve_context = MagicMock(return_value="cached-1")
+        openai_mod.app.state.pool = pool
+        req = SimpleNamespace(
+            model="deepseek-v4-flash",
+            stream=False,
+            thinking=False,
+            search=False,
+            session_id=None,
+            files=None,
+            tools=None,
+            tool_choice=None,
+            response_format=None,
+            messages=[
+                openai_mod.ChatMessage(role="user", content="remember alpha"),
+                openai_mod.ChatMessage(role="assistant", content="alpha noted"),
+                openai_mod.ChatMessage(role="user", content="what did I ask you to remember?"),
+            ],
+        )
+        asyncio.run(openai_mod._chat_completions_deepseek(req))
+        assert captured[0]["prompt"] == "what did I ask you to remember?"
+        assert client.counter == 1
+    finally:
+        openai_mod._collect_non_stream = orig
+
+
+def test_qwen_sequential_single_message_session_accumulates():
+    captured = []
+    orig = qwen_api.collect_non_stream
+
+    async def fake_collect(**kwargs):
+        captured.append(dict(kwargs))
+        return {"ok": True}
+
+    qwen_api.collect_non_stream = fake_collect
+    try:
+        client = FakeSessionClient()
+        account = QwenAccount(0, client)
+        pool = MagicMock()
+        pool.acquire = AsyncMock(side_effect=[(account, None), (account, "qseq-1")])
+        openai_mod.app.state.qwen_pool = pool
+        base = {
+            "model": "qwen3.8-max",
+            "stream": False,
+            "thinking": False,
+            "search": False,
+            "files": None,
+            "tools": None,
+            "tool_choice": None,
+            "response_format": None,
+        }
+        req1 = SimpleNamespace(**base, session_id="qseq-1", messages=[openai_mod.ChatMessage(role="user", content="My name is Alice")])
+        asyncio.run(openai_mod._chat_completions_qwen(req1))
+        assert captured[0]["existing_sid"] == "qseq-1"
+        assert captured[0]["prompt"] == "My name is Alice"
+        asyncio.run(account.sessions.obtain("qseq-1", "qwen3.8-max"))
+        req2 = SimpleNamespace(**base, session_id="qseq-1", messages=[openai_mod.ChatMessage(role="user", content="What is my name?")])
+        asyncio.run(openai_mod._chat_completions_qwen(req2))
+        assert captured[1]["prompt"] == "What is my name?"
+        assert client.counter == 1
+    finally:
+        qwen_api.collect_non_stream = orig
 
 
 def test_qwen_non_stream_accepts_include_usage():

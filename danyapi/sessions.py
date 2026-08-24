@@ -63,6 +63,7 @@ class SessionRegistry:
         if self._store is None:
             return
         prefix = self._key_prefix
+        by_canonical: dict[str, Any] = {}
         for key, record in self._store.items():
             if prefix:
                 if not key.startswith(prefix):
@@ -78,6 +79,11 @@ class SessionRegistry:
                 session = self._deserialize(record)
             except Exception:
                 continue
+            canonical = by_canonical.get(session.id)
+            if canonical is not None:
+                session = canonical
+            else:
+                by_canonical[session.id] = session
             self._sessions[session_id] = (session, self._now())
         while len(self._sessions) > self._maxsize:
             oldest, _ = self._sessions.popitem(last=False)
@@ -124,17 +130,22 @@ class SessionRegistry:
                     return existing, session_id
             session = await self._create(**kwargs)
             new_id = session.id
+            bind_key = session_id or new_id
             now = self._now()
             with self._lock:
                 self._sessions[new_id] = (session, now)
-                self._sessions.move_to_end(new_id)
+                if bind_key != new_id:
+                    self._sessions[bind_key] = (session, now)
+                self._sessions.move_to_end(bind_key)
                 while len(self._sessions) > self._maxsize:
                     evicted, _ = self._sessions.popitem(last=False)
                     if self._store is not None:
                         self._store.discard(self._session_key(evicted))
                 if self._store is not None:
                     self._store.set(self._session_key(new_id), self._serialize(session))
-            return session, new_id
+                    if bind_key != new_id:
+                        self._store.set(self._session_key(bind_key), self._serialize(session))
+            return session, bind_key
 
     def touch_last_message(self, session_id: str, message_id: str | None) -> None:
         session = self.get(session_id)
@@ -142,6 +153,8 @@ class SessionRegistry:
             self._update_last(session, message_id)
             if self._store is not None:
                 self._store.set(self._session_key(session_id), self._serialize(session))
+                if session_id != session.id:
+                    self._store.set(self._session_key(session.id), self._serialize(session))
 
     def forget(self, session_id: str) -> None:
         with self._lock:

@@ -485,7 +485,7 @@ async def test_existing_session_reused():
     pool = MagicMock()
     _session, key = await qwen_api._prepare_session(acct, pool, "s1", "m")
     assert key == "s1"
-    pool.register.assert_not_called()
+    pool.register.assert_called_once_with(0, "s1")
 
 
 async def test_json_error_dict():

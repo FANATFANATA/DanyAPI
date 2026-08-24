@@ -306,7 +306,7 @@ async def test_existing_session_reused():
     pool = MagicMock()
     _, key, _ = await openai_mod._prepare_session(acct, pool, "s1")
     assert key == "s1"
-    pool.register.assert_not_called()
+    pool.register.assert_called_once_with(0, "s1")
 
 
 async def test_swapped_session_forgets_old():

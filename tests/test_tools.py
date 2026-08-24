@@ -618,7 +618,8 @@ def test_build_prompt_continuation_with_session():
     prompt, tool_mode = build_prompt(messages, None, None, has_session=True)
     assert tool_mode
     assert "22C, sunny" in prompt
-    assert "What is the weather?" in prompt
+    assert "Continue the conversation" in prompt
+    assert "What is the weather?" not in prompt
 
 
 def test_build_prompt_continuation_no_session():
@@ -634,7 +635,7 @@ def test_build_prompt_continuation_no_session():
     assert "get_weather" in prompt
 
 
-def test_build_prompt_continuation_with_session_keeps_schema():
+def test_build_prompt_continuation_with_session_skips_schema():
     messages = [
         Message(role="user", content="What is the weather?"),
         Message(role="assistant", content="It is 22C."),
@@ -643,10 +644,10 @@ def test_build_prompt_continuation_with_session_keeps_schema():
     prompt, tool_mode = build_prompt(messages, [WEATHER_TOOL], None, has_session=True)
     assert tool_mode
     assert "And in Rome?" in prompt
-    assert "get_weather" in prompt
+    assert "get_weather" not in prompt
 
 
-def test_build_prompt_tool_round_with_session_renders_full_history():
+def test_build_prompt_tool_round_with_session_skips_schema():
     messages = [
         Message(role="user", content="What is the weather?"),
         Message(role="assistant", tool_calls=[{"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": '{"city": "Moscow"}'}}]),
@@ -655,7 +656,7 @@ def test_build_prompt_tool_round_with_session_renders_full_history():
     prompt, tool_mode = build_prompt(messages, [WEATHER_TOOL], None, has_session=True)
     assert tool_mode
     assert "22C, sunny" in prompt
-    assert "You have access to the following functions" in prompt
+    assert "You have access to the following functions" not in prompt
 
 
 def test_build_prompt_new_chat_with_history_renders_full_context():
@@ -2515,7 +2516,7 @@ def test_render_tool_schema_example_array_object_values():
     assert '<parameter name="opts">{}</parameter>' in schema
 
 
-def test_history_with_session_includes_function_reminder():
+def test_tail_includes_function_names_reminder():
     messages = [
         Message(role="user", content="What is the weather?"),
         Message(role="assistant", tool_calls=[{"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": '{"city": "Moscow"}'}}]),
@@ -2523,21 +2524,20 @@ def test_history_with_session_includes_function_reminder():
     ]
     prompt, tool_mode = build_prompt(messages, [WEATHER_TOOL], None, has_session=True)
     assert tool_mode
-    assert "Remember: to call any function" in prompt
-    assert "Available functions:" not in prompt
-    assert "Continue the conversation" not in prompt
+    assert "Available functions: get_weather" in prompt
+    assert "You have access to the following functions" not in prompt
+    assert "Continue the conversation" in prompt
 
 
-def test_tool_round_with_session_without_tools_no_reminder():
+def test_tail_without_tools_has_no_reminder():
     messages = [
         Message(role="user", content="What is the weather?"),
         Message(role="assistant", tool_calls=[{"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": '{"city": "Moscow"}'}}]),
         Message(role="tool", content="22C, sunny", tool_call_id="call_1"),
     ]
     prompt, _ = build_prompt(messages, None, None, has_session=True)
-    assert "Remember: to call any function" not in prompt
-    assert "22C, sunny" in prompt
-    assert "What is the weather?" in prompt
+    assert "Available functions:" not in prompt
+    assert "Continue the conversation" in prompt
 
 
 def test_history_mode_appends_recency_reminder():
