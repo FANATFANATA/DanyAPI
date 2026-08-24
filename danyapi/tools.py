@@ -1157,16 +1157,20 @@ def _coerce_scalar(value: str, json_type: Any) -> Any:
 
 
 def _schema_for_name(tool_schemas: dict[str, dict[str, Any]] | None, name: str) -> dict[str, Any] | None:
-    if not tool_schemas:
+    if not tool_schemas or not name:
+        return None
+    if not isinstance(tool_schemas, dict):
         return None
     if name in tool_schemas:
-        return tool_schemas[name]
+        spec = tool_schemas[name]
+        return spec if isinstance(spec, dict) else None
     for known, spec in tool_schemas.items():
-        if known.casefold() == name.casefold():
-            return spec
+        if isinstance(known, str) and known.casefold() == name.casefold():
+            return spec if isinstance(spec, dict) else None
     resolved = _resolve_alias(name, tool_schemas)
-    if resolved is not None:
-        return tool_schemas[resolved]
+    if resolved is not None and resolved in tool_schemas:
+        spec = tool_schemas[resolved]
+        return spec if isinstance(spec, dict) else None
     return None
 
 
@@ -1218,26 +1222,29 @@ def _normalize_call_name(name: str, tool_schemas: dict[str, dict[str, Any]] | No
 
 def tool_schema_map(tools: list[Any] | None) -> dict[str, dict[str, Any]]:
     result: dict[str, dict[str, Any]] = {}
-    if not tools:
+    if not tools or not isinstance(tools, list):
         return result
     for tool in tools:
+        if not isinstance(tool, dict):
+            continue
         fn = _tool_function(tool)
-        if not fn:
+        if not fn or not isinstance(fn, dict):
             continue
         name = fn.get("name")
-        if not isinstance(name, str) or not name:
+        if not isinstance(name, str) or not name.strip():
             continue
+        name = name.strip()
         params = fn.get("parameters")
         if isinstance(params, str):
             try:
                 params = json.loads(params)
-            except ValueError:
+            except (ValueError, TypeError, AttributeError):
                 params = None
         prop_types: dict[str, Any] = {}
         properties = params.get("properties") if isinstance(params, dict) else None
         if isinstance(properties, dict):
             for prop, spec in properties.items():
-                if not isinstance(spec, dict):
+                if not isinstance(prop, str) or not isinstance(spec, dict):
                     continue
                 typ = spec.get("type")
                 if isinstance(typ, list):
@@ -1245,11 +1252,11 @@ def tool_schema_map(tools: list[Any] | None) -> dict[str, dict[str, Any]]:
                         if candidate in typ:
                             typ = candidate
                             break
-                if typ:
+                if isinstance(typ, str) and typ in _JSON_TYPE_ATTRS:
                     prop_types[prop] = typ
         aliases = fn.get("aliases")
         if isinstance(aliases, (list, tuple)):
-            cleaned = [a for a in aliases if isinstance(a, str) and a]
+            cleaned = [a for a in aliases if isinstance(a, str) and a.strip()]
             if cleaned:
                 prop_types["_aliases"] = cleaned
         result[name] = prop_types
@@ -1511,25 +1518,27 @@ def _parse_xml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | N
         return name not in _XML_SKIP_ELEMENTS and name not in _XML_HTML_TAGS
 
     bare_candidates: list[tuple[int, int, bool, re.Match]] = []
-    bare_candidates.extend((m.start(), m.end(), False, m) for m in _XML_ELEMENT.finditer(text) if _bare_eligible(m))
-    bare_candidates.extend((m.start(), m.end(), True, m) for m in _XML_SELFCLOSE.finditer(text) if _bare_eligible(m))
+    for m in _XML_ELEMENT.finditer(text):
+        if _bare_eligible(m) and not any(s <= m.start() and m.end() <= e for s, e in consumed):
+            bare_candidates.append((m.start(), m.end(), False, m))
+    for m in _XML_SELFCLOSE.finditer(text):
+        if _bare_eligible(m) and not any(s <= m.start() and m.end() <= e for s, e in consumed):
+            bare_candidates.append((m.start(), m.end(), True, m))
     bare_candidates.sort(key=lambda item: (item[0], -item[1]))
     for start, end, self_closed, match in bare_candidates:
-        if any(s <= start and end <= e for s, e, _, _ in bare_candidates if (s, e) != (start, end)):
-            continue
         if any(s <= start and end <= e for s, e in consumed):
+            continue
+        if any(s < start and end < e for s, _, _, _ in bare_candidates if s != start):
             continue
         raw_name = match.group(1).strip()
         param_types = _schema_for_name(tool_schemas, raw_name)
-        if self_closed:
-            arguments = _xml_tag_attrs(match.group(2), param_types)
-        else:
-            arguments = _xml_tag_attrs(match.group(2), param_types)
+        arguments = _xml_tag_attrs(match.group(2), param_types)
+        if not self_closed:
             arguments.update(_xml_invoke_arguments(match.group(3), param_types, False) or {})
         if param_types is None and isinstance(arguments.get("name"), str) and arguments["name"].strip():
             raw_name = arguments.pop("name")
             param_types = _schema_for_name(tool_schemas, raw_name)
-        elif param_types is None and raw_name.casefold() in _XML_GENERIC_TOOL_TAGS:
+        elif param_types is None and raw_name.casefold() in _XML_GENERIC_TOOL_TAGS and not arguments:
             continue
         if not arguments and param_types is None:
             continue
@@ -1644,20 +1653,20 @@ def _python_value(text: str) -> Any:
     if stripped.startswith(("{", "[")):
         try:
             return _loads_lenient(stripped)
-        except ValueError:
+        except (ValueError, TypeError, AttributeError):
             return stripped
     if stripped[0] in ("'", '"'):
-        if stripped[-1] != stripped[0]:
+        if len(stripped) < 2 or stripped[-1] != stripped[0]:
             return stripped
         if stripped[0] == '"':
             try:
                 return json.loads(stripped)
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, TypeError):
                 return stripped[1:-1]
         normalized = _normalize_single_quotes(stripped)
         try:
             return json.loads(normalized)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, TypeError):
             return stripped[1:-1].replace("\\'", "'")
     low = stripped.lower()
     if low in ("true", "false"):
@@ -1666,11 +1675,11 @@ def _python_value(text: str) -> Any:
         return None
     try:
         return int(stripped)
-    except ValueError:
+    except (ValueError, TypeError):
         pass
     try:
         return float(stripped)
-    except ValueError:
+    except (ValueError, TypeError):
         pass
     return stripped
 
@@ -1726,8 +1735,6 @@ def _python_call_match(text: str) -> tuple[str, str] | None:
         elif ch == ")":
             depth -= 1
             if depth == 0:
-                if text[i + 1 :].strip():
-                    return None
                 return match.group(1), text[match.end() : i]
     return None
 
@@ -1792,15 +1799,15 @@ def _yaml_value(raw: str) -> Any:
     if value.startswith(("{", "[")):
         try:
             return _loads_lenient(value)
-        except ValueError:
+        except (ValueError, TypeError, AttributeError):
             return value
     if value[0] in ("'", '"'):
-        if value[-1] != value[0]:
+        if len(value) < 2 or value[-1] != value[0]:
             return value
         if value[0] == '"':
             try:
                 return json.loads(value)
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, TypeError):
                 return value[1:-1]
         return value[1:-1]
     low = value.lower()
@@ -1812,11 +1819,11 @@ def _yaml_value(raw: str) -> Any:
         return None
     try:
         return int(value)
-    except ValueError:
+    except (ValueError, TypeError):
         pass
     try:
         return float(value)
-    except ValueError:
+    except (ValueError, TypeError):
         pass
     return value
 
@@ -1858,6 +1865,9 @@ def _parse_yaml_calls(text: str) -> list[ToolCall] | None:
                 current_name = _yaml_name(item_text)
             continue
         if current_name is None:
+            key, value = _yaml_key_value(line)
+            if key == "name":
+                current_name = _yaml_name(value)
             continue
         key, value = _yaml_key_value(line)
         if key is None:

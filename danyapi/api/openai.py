@@ -1289,6 +1289,7 @@ async def _collect_non_stream(
         rec: MessageReconstructor | None = None
         response_message_id = None
         attempt = 0
+
         try:
             while True:
                 try:
@@ -1317,7 +1318,7 @@ async def _collect_non_stream(
                         try:
                             prompt, tool_mode = toolemu.build_prompt(messages, tools, tool_choice, False, response_format)
                             tool_schemas = toolemu.tool_schema_map(tools)
-                        except ValueError as build_exc:
+                        except (ValueError, TypeError, AttributeError) as build_exc:
                             raise exc from build_exc
                         log.warning("deepseek session %s is stale (%s), rebuilt full history into a fresh chat", session_key, exc.status_code)
                         session, session_key, parent_message_id = await _prepare_session(account, pool, existing_sid, context_seq)
@@ -1337,6 +1338,7 @@ async def _collect_non_stream(
                         await asyncio.sleep(delay)
                         continue
                     raise
+
                 rec = MessageReconstructor()
                 incremental = IncrementalSSE()
                 response_message_id = None
@@ -1350,8 +1352,19 @@ async def _collect_non_stream(
                             rec.handle(event)
                     for event in incremental.finish():
                         rec.handle(event)
+                except (httpx.HTTPError, RuntimeError) as exc:
+                    await _try_stop_stream(account.client, session.id, stop_message_id)
+                    raise HTTPException(502, f"Stream processing failed: {exc}") from exc
+                except asyncio.CancelledError:
+                    await _try_stop_stream(account.client, session.id, stop_message_id)
+                    raise
                 finally:
-                    await resp.aclose()
+                    try:
+                        await resp.aclose()
+                    except Exception:
+                        await _try_stop_stream(account.client, session.id, stop_message_id)
+                        raise
+
                 if rec.id:
                     stop_message_id = rec.id
                 if not (rec.content or rec.reasoning) and _is_retryable_hint(rec) and attempt < MAX_RETRIES:
@@ -1584,9 +1597,11 @@ async def _stream_openai(
             finally:
                 if rec.id:
                     stop_message_id = rec.id
-                if sys.exc_info()[0] is not None:
+                try:
+                    await resp.aclose()
+                except Exception:
                     await _try_stop_stream(account.client, session.id, stop_message_id)
-                await resp.aclose()
+                    raise
             if got_content:
                 break
             if _is_retryable_hint(rec) and attempt < MAX_RETRIES:
@@ -1655,7 +1670,10 @@ async def _stream_openai(
                     incomplete_message = None
                     break
                 incomplete_message = _incomplete_message(cont_rec)
-                if not cont_rec.content:
+                if not (cont_rec.content or cont_rec.reasoning):
+                    break
+                incomplete_message = _incomplete_message(cont_rec)
+                if not (cont_rec.content or cont_rec.reasoning):
                     break
             if incomplete_message is not None and not (rec.content or rec.reasoning) and reduced_prompts:
                 _drop_session(pool, account, session_key)
