@@ -135,7 +135,7 @@ def _enable_windows_vt() -> None:
             if not mode.value & 0x0004:
                 kernel32.SetConsoleMode(handle, mode.value | 0x0004)
     except Exception:
-        pass
+        logging.getLogger(__name__).debug("failed to enable windows VT mode", exc_info=True)
 
 
 def configure() -> None:
