@@ -366,3 +366,10 @@ class AccountPool(Generic[AccountT]):
             if time.monotonic() >= deadline:
                 raise AccountPoolBusy()
             await asyncio.sleep(0.05)
+
+    def add_account(self, account: AccountT) -> None:
+        idx = len(self.accounts)
+        self.accounts.append(account)
+        sid = getattr(account, "stable_id", None)
+        if isinstance(sid, str) and sid:
+            self._stable_to_idx[sid] = idx

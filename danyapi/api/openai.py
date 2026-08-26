@@ -11,11 +11,14 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
 from .. import tools as toolemu
@@ -306,6 +309,186 @@ async def _fetch_qwen_models(client: QwenClient) -> list[dict]:
 
 
 app = FastAPI(title="DanyAPI", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+docs_path = Path(__file__).resolve().parents[2] / "docs"
+if docs_path.is_dir():
+    app.mount("/docs", StaticFiles(directory=str(docs_path), html=True), name="docs")
+
+
+@app.get("/", response_class=HTMLResponse)
+async def root():
+    web_path = Path(__file__).resolve().parents[2] / "web" / "index.html"
+    if web_path.exists():
+        return web_path.read_text()
+    return HTMLResponse("<h1>DanyAPI</h1><p>Web interface not found</p>", status_code=404)
+
+
+@app.get("/favicon.ico")
+async def favicon():
+    return HTMLResponse(status_code=204)
+
+
+def _env_path() -> Path:
+    return Path(__file__).resolve().parents[2] / ".env"
+
+
+def _read_env_tokens() -> tuple[list[str], list[str]]:
+    env_file = _env_path()
+    if not env_file.exists():
+        return [], []
+    ds_tokens = ""
+    qw_tokens = ""
+    for line in env_file.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("DEEPSEEK_TOKENS="):
+            ds_tokens = stripped.split("=", 1)[1].strip()
+        elif stripped.startswith("QWEN_TOKENS="):
+            qw_tokens = stripped.split("=", 1)[1].strip()
+    ds_list = [t.strip() for t in ds_tokens.split(",") if t.strip()] if ds_tokens else []
+    qw_list = [t.strip() for t in qw_tokens.split(",") if t.strip()] if qw_tokens else []
+    return ds_list, qw_list
+
+
+def _write_env_tokens(ds_tokens: list[str], qw_tokens: list[str]) -> None:
+    env_file = _env_path()
+    ds_line = f"DEEPSEEK_TOKENS={','.join(ds_tokens)}"
+    qw_line = f"QWEN_TOKENS={','.join(qw_tokens)}"
+    new_lines: list[str] = []
+    ds_set = False
+    qw_set = False
+    if env_file.exists():
+        for line in env_file.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if stripped.startswith("DEEPSEEK_TOKENS="):
+                new_lines.append(ds_line)
+                ds_set = True
+            elif stripped.startswith("QWEN_TOKENS="):
+                new_lines.append(qw_line)
+                qw_set = True
+            else:
+                new_lines.append(line)
+    if not ds_set:
+        new_lines.append(ds_line)
+    if not qw_set:
+        new_lines.append(qw_line)
+    env_file.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+
+
+@app.post("/v1/tokens")
+async def add_tokens(tokens: dict) -> dict:
+    new_ds = [t.strip() for t in tokens.get("deepseek_tokens", []) if t.strip()]
+    new_qw = [t.strip() for t in tokens.get("qwen_tokens", []) if t.strip()]
+    if not new_ds and not new_qw:
+        raise HTTPException(400, "no tokens provided")
+
+    existing_ds, existing_qw = _read_env_tokens()
+    ds_to_add = [t for t in new_ds if t not in existing_ds]
+    qw_to_add = [t for t in new_qw if t not in existing_qw]
+
+    if not ds_to_add and not qw_to_add:
+        raise HTTPException(400, "all provided tokens already exist")
+
+    added_ds = 0
+    added_qw = 0
+    skipped_ds = 0
+    skipped_qw = 0
+
+    cache_enabled = settings.cache_enabled
+    ds_store = JsonStore("deepseek-sessions", "default" if cache_enabled else None)
+    qw_store = JsonStore("qwen-sessions", "default" if cache_enabled else None)
+
+    pool: AccountPool | None = getattr(app.state, "pool", None)
+    qwen_pool: AccountPool | None = getattr(app.state, "qwen_pool", None)
+
+    for token in ds_to_add:
+        client = DeepSeekClient(token=token, timeout=settings.timeout)
+        if not await client.check_auth():
+            log.warning("new deepseek token invalid/expired, skipping")
+            await client.aclose()
+            skipped_ds += 1
+            continue
+        acct = DeepSeekAccount(
+            len(pool.accounts) if pool else 0,
+            client,
+            session_cache_size=settings.session_cache_size,
+            ttl=settings.session_ttl,
+            store=ds_store,
+            stable_id=_token_stable_id(token),
+        )
+        if pool is None:
+            pool = AccountPool(
+                [acct],
+                session_cache_size=settings.session_cache_size,
+                ttl=settings.session_ttl,
+            )
+            app.state.pool = pool
+        else:
+            pool.add_account(acct)
+        added_ds += 1
+        log.info("hot-added deepseek token (total accounts: %d)", len(pool.accounts))
+
+    for token in qw_to_add:
+        client = QwenClient(token=token, timeout=settings.timeout)
+        if not await client.check_auth():
+            log.warning("new qwen token invalid/expired, skipping")
+            await client.aclose()
+            skipped_qw += 1
+            continue
+        acct = QwenAccount(
+            len(qwen_pool.accounts) if qwen_pool else 0,
+            client,
+            session_cache_size=settings.session_cache_size,
+            ttl=settings.session_ttl,
+            store=qw_store,
+            stable_id=_token_stable_id(token),
+        )
+        if qwen_pool is None:
+            qwen_pool = AccountPool(
+                [acct],
+                label="qwen",
+                session_cache_size=settings.session_cache_size,
+                ttl=settings.session_ttl,
+            )
+            app.state.qwen_pool = qwen_pool
+            try:
+                app.state.qwen_models = await _fetch_qwen_models(client)
+            except Exception:
+                pass
+        else:
+            qwen_pool.add_account(acct)
+        added_qw += 1
+        log.info("hot-added qwen token (total accounts: %d)", len(qwen_pool.accounts))
+
+    merged_ds = existing_ds + ds_to_add
+    merged_qw = existing_qw + qw_to_add
+    _write_env_tokens(merged_ds, merged_qw)
+    settings.deepseek_tokens = merged_ds
+    settings.qwen_tokens = merged_qw
+
+    parts = []
+    if added_ds:
+        parts.append(f"deepseek: +{added_ds}")
+    if added_qw:
+        parts.append(f"qwen: +{added_qw}")
+    if skipped_ds:
+        parts.append(f"deepseek skipped: {skipped_ds}")
+    if skipped_qw:
+        parts.append(f"qwen skipped: {skipped_qw}")
+
+    return {
+        "success": True,
+        "message": "Tokens added and activated." if (added_ds or added_qw) else "No valid tokens to add.",
+        "added": {"deepseek": added_ds, "qwen": added_qw},
+        "skipped": {"deepseek": skipped_ds, "qwen": skipped_qw},
+    }
 
 
 async def _extract_request_model(request: Request) -> str | None:

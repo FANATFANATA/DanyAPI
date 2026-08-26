@@ -1,6 +1,4 @@
 .env
-.env.tmp
-run.*
 __pycache__/
 *.py[cod]
 *.egg-info/
@@ -19,7 +17,6 @@ htmlcov/
 *.exe
 pow_solver
 .playwright-mcp/
-.opencode/
 .idea/
 .vscode/
 *.log

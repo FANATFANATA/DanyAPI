@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="black">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>DanyAPI</title>
+<meta name="description" content="DanyAPI free OpenAI-compatible API. Add your DeepSeek and Qwen tokens." />
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%2040%2040'%3E%3Cdefs%3E%3ClinearGradient%20id='g'%20x1='0'%20y1='0'%20x2='1'%20y2='1'%3E%3Cstop%20offset='0'%20stop-color='%236c7bff'/%3E%3Cstop%20offset='1'%20stop-color='%2322d3ee'/%3E%3C/linearGradient%3E%3C/defs%3E%3Cpath%20d='M20%202.5L35%2011V29L20%2037.5L5%2029V11Z'%20fill='none'%20stroke='url(%23g)'%20stroke-width='2.6'%20stroke-linejoin='round'/%3E%3Cpath%20d='M20%2013.5L12.5%2026.5H27.5Z'%20fill='none'%20stroke='url(%23g)'%20stroke-width='1.8'%20stroke-linejoin='round'/%3E%3Ccircle%20cx='20'%20cy='13.5'%20r='3'%20fill='url(%23g)'/%3E%3Ccircle%20cx='12.5'%20cy='26.5'%20r='3'%20fill='url(%23g)'/%3E%3Ccircle%20cx='27.5'%20cy='26.5'%20r='3'%20fill='url(%23g)'/%3E%3C/svg%3E" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Unbounded:wght@500;700;900&family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<style>
+*,
+*::before,
+*::after {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+:root {
+    --font-disp: "Unbounded", sans-serif;
+    --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --font-mono: "SF Mono", "Fira Code", "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+    --accent: #6366f1;
+    --accent-strong: #818cf8;
+    --accent-soft: rgba(99, 102, 241, 0.14);
+    --bg-body: #0b0d12;
+    --bg-container: #11151d;
+    --bg-elevated: #161b26;
+    --shadow: rgba(0, 0, 0, 0.55);
+    --text: #e7e9ee;
+    --text-soft: #a7adbb;
+    --text-muted: #7d8494;
+    --text-faint: #5b6270;
+    --heading: #f4f6fa;
+    --link: #a5aaf5;
+    --link-hover: #c7cbfb;
+    --border: #1e2430;
+    --border-strong: #2a3141;
+    --l-bg: #06070c;
+    --l-surface: #0d1119;
+    --l-surface-2: #121726;
+    --l-border: rgba(255, 255, 255, 0.08);
+    --l-border-strong: rgba(255, 255, 255, 0.16);
+    --l-text: #e9edf5;
+    --l-muted: #9aa3b5;
+    --l-faint: #5d6577;
+    --l-accent: #6c7bff;
+    --l-accent-2: #22d3ee;
+    --l-grad: linear-gradient(120deg, #6c7bff 0%, #22d3ee 100%);
+    --l-green: #34d399;
+    --l-red: #ff5f56;
+    --l-amber: #f5b04c;
+}
+
+html {
+    scroll-behavior: smooth;
+    font-size: 15px;
+}
+
+body {
+    font-family: var(--font-body);
+    background: var(--bg-body);
+    color: var(--text);
+    line-height: 1.7;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 2rem 1rem;
+}
+
+body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    background:
+        radial-gradient(900px 520px at 85% -10%, var(--accent-soft), transparent 60%),
+        radial-gradient(760px 480px at -10% 105%, var(--accent-soft), transparent 60%);
+}
+
+.bg-grid {
+    position: fixed;
+    inset: 0;
+    z-index: -3;
+    pointer-events: none;
+    background-image:
+        linear-gradient(var(--l-border) 1px, transparent 1px),
+        linear-gradient(90deg, var(--l-border) 1px, transparent 1px);
+    background-size: 56px 56px;
+    opacity: 0.5;
+    -webkit-mask-image: radial-gradient(ellipse 100% 62% at 50% 0%, #000 0%, transparent 78%);
+    mask-image: radial-gradient(ellipse 100% 62% at 50% 0%, #000 0%, transparent 78%);
+}
+
+.bg-glow {
+    position: fixed;
+    z-index: -2;
+    pointer-events: none;
+    border-radius: 50%;
+    filter: blur(110px);
+    opacity: 0.5;
+}
+
+.bg-glow-a {
+    width: 640px;
+    height: 640px;
+    top: -220px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: radial-gradient(circle, rgba(108, 123, 255, 0.55), transparent 65%);
+}
+
+.bg-glow-b {
+    width: 520px;
+    height: 520px;
+    bottom: -180px;
+    right: -140px;
+    background: radial-gradient(circle, rgba(34, 211, 238, 0.35), transparent 65%);
+}
+
+.noise {
+    position: fixed;
+    inset: 0;
+    z-index: 60;
+    pointer-events: none;
+    opacity: 0.035;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+.container {
+    position: relative;
+    z-index: 1;
+    background: var(--l-surface);
+    border: 1px solid var(--l-border-strong);
+    border-radius: 20px;
+    padding: 3rem 2.5rem;
+    max-width: 520px;
+    width: 100%;
+    box-shadow: 0 30px 80px -30px rgba(0, 0, 0, 0.7);
+}
+
+.brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.6rem;
+    text-decoration: none;
+    border-bottom: none;
+    transition: transform 0.2s ease;
+}
+
+.brand:hover {
+    transform: translateY(-1px);
+}
+
+.brand-logo {
+    width: 36px;
+    height: 36px;
+    display: block;
+    filter: drop-shadow(0 2px 10px rgba(108, 123, 255, 0.5));
+    transition: transform 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.brand:hover .brand-logo {
+    animation: logo-spin 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+@keyframes logo-spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
+.brand-name {
+    font-family: var(--font-disp);
+    font-weight: 700;
+    font-size: 1.15rem;
+    letter-spacing: -0.02em;
+    color: var(--l-text);
+}
+
+.brand-accent {
+    background: var(--l-grad);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    color: transparent;
+}
+
+.header {
+    text-align: center;
+    margin-bottom: 2.2rem;
+}
+
+.header h1 {
+    font-family: var(--font-disp);
+    font-weight: 700;
+    font-size: clamp(1.4rem, 3vw, 1.8rem);
+    line-height: 1.25;
+    letter-spacing: -0.02em;
+    margin-bottom: 0.6rem;
+    color: var(--l-text);
+}
+
+.header .grad-text {
+    background: var(--l-grad);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    color: transparent;
+}
+
+.header p {
+    color: var(--l-muted);
+    font-size: 0.95rem;
+}
+
+.form-group {
+    margin-bottom: 1.3rem;
+}
+
+.form-group label {
+    display: block;
+    margin-bottom: 0.5rem;
+    color: var(--l-muted);
+    font-size: 0.85rem;
+    font-weight: 600;
+    font-family: var(--font-mono);
+    letter-spacing: 0.04em;
+}
+
+.form-group input {
+    width: 100%;
+    padding: 0.75rem 1rem;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid var(--l-border-strong);
+    border-radius: 11px;
+    color: var(--l-text);
+    font-size: 0.92rem;
+    font-family: var(--font-mono);
+    transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
+}
+
+.form-group input:focus {
+    outline: none;
+    border-color: var(--l-accent);
+    box-shadow: 0 0 0 3px rgba(108, 123, 255, 0.2);
+    background: rgba(255, 255, 255, 0.06);
+}
+
+.form-group input::placeholder {
+    color: var(--l-faint);
+}
+
+.info-box {
+    background: rgba(108, 123, 255, 0.06);
+    border-left: 3px solid var(--l-accent);
+    padding: 1rem 1.2rem;
+    margin: 1.4rem 0;
+    border-radius: 0 11px 11px 0;
+    font-size: 0.85rem;
+    color: var(--l-muted);
+    line-height: 1.6;
+}
+
+.info-box strong {
+    color: var(--l-text);
+}
+
+.status {
+    margin-top: 1.2rem;
+    padding: 0.75rem 1rem;
+    border-radius: 11px;
+    font-size: 0.88rem;
+    font-weight: 600;
+    display: none;
+    animation: slideIn 0.3s ease;
+}
+
+@keyframes slideIn {
+    from { opacity: 0; transform: translateY(-8px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.status.success {
+    background: rgba(52, 211, 153, 0.1);
+    border: 1px solid rgba(52, 211, 153, 0.3);
+    color: var(--l-green);
+    display: block;
+}
+
+.status.error {
+    background: rgba(255, 95, 86, 0.1);
+    border: 1px solid rgba(255, 95, 86, 0.3);
+    color: var(--l-red);
+    display: block;
+}
+
+.status.loading {
+    background: rgba(108, 123, 255, 0.1);
+    border: 1px solid rgba(108, 123, 255, 0.3);
+    color: var(--l-accent-2);
+    display: block;
+}
+
+.btn {
+    flex: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    padding: 0.85rem 1.5rem;
+    border-radius: 11px;
+    font-family: var(--font-body);
+    font-weight: 700;
+    font-size: 0.95rem;
+    border: 1px solid transparent;
+    cursor: pointer;
+    color: var(--l-text);
+    text-decoration: none;
+    transition: transform 0.18s ease, box-shadow 0.25s ease, background 0.25s, color 0.25s, border-color 0.25s;
+    white-space: nowrap;
+    position: relative;
+    overflow: hidden;
+    width: 100%;
+    margin-top: 1.6rem;
+}
+
+.btn:hover {
+    transform: translateY(-2px);
+}
+
+.btn:active {
+    transform: translateY(0);
+}
+
+.btn-primary {
+    background: var(--l-grad);
+    color: #fff;
+    box-shadow: 0 10px 30px -12px rgba(108, 123, 255, 0.7);
+}
+
+.btn-primary:hover {
+    box-shadow: 0 16px 40px -12px rgba(108, 123, 255, 0.85);
+}
+
+.footer-link {
+    display: block;
+    text-align: center;
+    margin-top: 1.4rem;
+    font-size: 0.82rem;
+    color: var(--l-faint);
+}
+
+.footer-link a {
+    color: var(--l-muted);
+    text-decoration: none;
+    border-bottom: 1px solid transparent;
+    transition: color 0.2s, border-color 0.2s;
+}
+
+.footer-link a:hover {
+    color: var(--l-accent-2);
+    border-bottom-color: var(--l-accent-2);
+}
+
+@media (max-width: 480px) {
+    body {
+        padding: 1rem 0.6rem;
+        align-items: flex-start;
+        padding-top: 2rem;
+    }
+
+    .container {
+        padding: 2rem 1.3rem;
+        border-radius: 16px;
+    }
+
+    .header h1 {
+        font-size: 1.3rem;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .brand-logo {
+        animation: none !important;
+    }
+
+    * {
+        transition-duration: 0.01ms !important;
+        animation-duration: 0.01ms !important;
+    }
+}
+
+:focus-visible {
+    outline: 2px solid var(--l-accent);
+    outline-offset: 2px;
+}
+
+::selection {
+    background: var(--accent-soft);
+    color: var(--heading);
+}
+</style>
+</head>
+<body>
+<div class="bg-grid" aria-hidden="true"></div>
+<div class="bg-glow bg-glow-a" aria-hidden="true"></div>
+<div class="bg-glow bg-glow-b" aria-hidden="true"></div>
+<div class="noise" aria-hidden="true"></div>
+
+<div class="container">
+    <div class="header">
+        <a class="brand" href="/" style="margin-bottom:1.4rem;display:inline-flex">
+            <svg class="brand-logo" viewBox="0 0 40 40" aria-hidden="true">
+                <defs>
+                    <linearGradient id="brand-grad" x1="0" y1="0" x2="1" y2="1">
+                        <stop offset="0" stop-color="#6c7bff"></stop>
+                        <stop offset="1" stop-color="#22d3ee"></stop>
+                    </linearGradient>
+                </defs>
+                <path d="M20 2.5 L35 11 V29 L20 37.5 L5 29 V11 Z" fill="none" stroke="url(#brand-grad)" stroke-width="2.6" stroke-linejoin="round"></path>
+                <path d="M20 13.5 L12.5 26.5 H27.5 Z" fill="none" stroke="url(#brand-grad)" stroke-width="1.8" stroke-linejoin="round"></path>
+                <circle cx="20" cy="13.5" r="3" fill="url(#brand-grad)"></circle>
+                <circle cx="12.5" cy="26.5" r="3" fill="url(#brand-grad)"></circle>
+                <circle cx="27.5" cy="26.5" r="3" fill="url(#brand-grad)"></circle>
+            </svg>
+            <span class="brand-name">Dany<span class="brand-accent">API</span></span>
+        </a>
+        <h1><span class="grad-text">Token Manager</span></h1>
+        <p>Support the project add your free provider tokens</p>
+    </div>
+
+    <div class="form-group">
+        <label for="deepseek-tokens">DeepSeek Tokens</label>
+        <input type="text" id="deepseek-tokens"
+               placeholder="token1, token2, token3..." value="" autocomplete="off" spellcheck="false" />
+    </div>
+
+    <div class="form-group">
+        <label for="qwen-tokens">Qwen Tokens</label>
+        <input type="text" id="qwen-tokens"
+               placeholder="token1, token2, token3..." value="" autocomplete="off" spellcheck="false" />
+    </div>
+
+    <div class="info-box">
+        <strong>No limits.</strong> Tokens are used server-side. Your consumers just point their OpenAI client at this instance no keys needed on their side. Each token adds parallel generation capacity.
+    </div>
+
+    <div id="status" class="status"></div>
+
+    <button class="btn btn-primary" type="button" id="btn-save">Add Tokens</button>
+
+    <div class="footer-link">
+        <a href="/health" target="_blank">Health</a> &middot;
+        <a href="/v1/models" target="_blank">Models</a> &middot;
+        <a href="/docs/" target="_blank">Docs</a> &middot;
+        <a href="https://github.com/FANATFANATA/DanyAPI" target="_blank" rel="noopener">GitHub</a>
+    </div>
+</div>
+
+<script>
+(function () {
+    "use strict";
+
+    var BASE = window.location.origin;
+    var statusEl = document.getElementById("status");
+    var dsInput = document.getElementById("deepseek-tokens");
+    var qwInput = document.getElementById("qwen-tokens");
+
+    function showStatus(msg, type) {
+        statusEl.textContent = msg;
+        statusEl.className = "status " + type;
+    }
+
+    document.getElementById("btn-save").addEventListener("click", function () {
+        var dsRaw = dsInput.value.trim();
+        var qwRaw = qwInput.value.trim();
+
+        if (!dsRaw && !qwRaw) {
+            showStatus("Enter at least one token", "error");
+            return;
+        }
+
+        var payload = {
+            deepseek_tokens: dsRaw ? dsRaw.split(",").map(function (s) { return s.trim(); }).filter(Boolean) : [],
+            qwen_tokens: qwRaw ? qwRaw.split(",").map(function (s) { return s.trim(); }).filter(Boolean) : []
+        };
+
+        showStatus("Adding\u2026", "loading");
+
+        fetch(BASE + "/v1/tokens", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+        })
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+                if (data.success) {
+                    var added = data.added || {};
+                    var skipped = data.skipped || {};
+                    var parts = [];
+                    if (added.deepseek) parts.push("DeepSeek: +" + added.deepseek);
+                    if (added.qwen) parts.push("Qwen: +" + added.qwen);
+                    if (skipped.deepseek) parts.push("DeepSeek invalid: " + skipped.deepseek);
+                    if (skipped.qwen) parts.push("Qwen invalid: " + skipped.qwen);
+                    var detail = parts.length ? " (" + parts.join(", ") + ")" : "";
+                    showStatus("Tokens added and activated." + detail, "success");
+                    dsInput.value = "";
+                    qwInput.value = "";
+                } else {
+                    showStatus(data.error || "Failed to save", "error");
+                }
+            })
+            .catch(function (e) {
+                showStatus("Connection error: " + e.message, "error");
+            });
+    });
+})();
+</script>
+</body>
+</html>

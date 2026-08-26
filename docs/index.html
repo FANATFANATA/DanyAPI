@@ -39,7 +39,6 @@
             <a href="#features" data-i18n="nav_features">Features</a>
             <a href="#models" data-i18n="nav_models">Models</a>
             <a href="#quickstart" data-i18n="nav_quickstart">Quick start</a>
-            <a href="#how" data-i18n="nav_how">How it works</a>
             <a href="#faq" data-i18n="nav_faq">FAQ</a>
         </nav>
         <div class="nav-actions">
@@ -71,9 +70,8 @@
                     <span class="grad-text" data-i18n="hero_h1_b">Zero cost.</span>
                 </h1>
                 <p class="hero-sub reveal" data-delay="2" data-i18n="hero_sub">
-                    DanyAPI is an OpenAI-compatible HTTP API built on Python + FastAPI. Instead of the paid
-                    APIs it talks to the internal APIs of the free web clients chat.deepseek.com and
-                    chat.qwen.ai using server-side accounts created from your own free provider tokens.
+                    A free, OpenAI-compatible API that runs the DeepSeek and Qwen web clients
+                    server-side from your own free provider tokens. No paid keys, no quotas.
                 </p>
                 <div class="hero-cta reveal" data-delay="3">
                     <a class="btn btn-primary btn-lg" href="#quickstart" data-i18n="hero_cta_start">Quick start</a>
@@ -85,19 +83,9 @@
                 </div>
                 <div class="hero-meta reveal" data-delay="4">
                     <span class="pill"><code>Python 3.10+</code></span>
-                    <span class="pill"><code>FastAPI</code></span>
-                    <span class="pill"><code>SSE streaming</code></span>
                     <span class="pill"><code>Docker · GHCR</code></span>
                 </div>
             </div>
-        </div>
-
-        <div class="stats reveal" data-delay="3">
-            <div class="stat"><div class="stat-num">$0</div><div class="stat-label" data-i18n="stat_zero">per token, forever</div></div>
-            <div class="stat"><div class="stat-num">2</div><div class="stat-label" data-i18n="stat_providers">free providers</div></div>
-            <div class="stat"><div class="stat-num">1</div><div class="stat-label" data-i18n="stat_cmd">command to install</div></div>
-            <div class="stat"><div class="stat-num">5</div><div class="stat-label" data-i18n="stat_retries">auto retries w/ backoff</div></div>
-            <div class="stat"><div class="stat-num">128</div><div class="stat-label" data-i18n="stat_cache">server-side chats cached</div></div>
         </div>
     </section>
 
@@ -105,39 +93,34 @@
         <div class="section-head reveal">
             <span class="eyebrow" data-i18n="features_eyebrow">Features</span>
             <h2 class="section-title" data-i18n="features_title">Everything the paid APIs have.<br /><span class="grad-text" data-i18n="features_title_hi">None of the bills.</span></h2>
-            <p class="section-sub" data-i18n="features_sub">A drop-in replacement for the official OpenAI API - your existing client code just works.</p>
+            <p class="section-sub" data-i18n="features_sub">A drop-in replacement for the official OpenAI API - swap <code>base_url</code> and your existing client code just works.</p>
         </div>
 
         <div class="features-grid">
             <article class="card reveal">
                 <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg></div>
                 <h3 data-i18n="f1_t">OpenAI-compatible</h3>
-                <p data-i18n="f1_d"><code>GET /v1/models</code> and <code>POST /v1/chat/completions</code> with the official request format. Swap <code>base_url</code>, keep your client.</p>
+                <p data-i18n="f1_d"><code>GET /v1/models</code> and <code>POST /v1/chat/completions</code> in the official format. Change <code>base_url</code>, keep your client.</p>
             </article>
             <article class="card reveal">
                 <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><path d="M5.64 18.36A9 9 0 1 1 18.36 5.64"/><path d="M5.64 18.36L8.1 15.9"/><path d="M5.64 18.36L3 21"/><path d="M18.36 5.64L15.9 8.1"/><path d="M18.36 5.64L21 3"/></svg></div>
-                <h3 data-i18n="f2_t">SSE streaming</h3>
-                <p data-i18n="f2_d">Real-time streaming via <code>data:</code> chunks and <code>data: [DONE]</code>, with live thinking traces as <code>reasoning_content</code>.</p>
+                <h3 data-i18n="f2_t">Streaming</h3>
+                <p data-i18n="f2_d">Live streaming with <code>data:</code> chunks and <code>data: [DONE]</code>, plus thinking traces as <code>reasoning_content</code>.</p>
             </article>
             <article class="card reveal">
                 <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><path d="M12 2a7 7 0 0 0-4.6 12.3c.8.7 1.3 1.6 1.3 2.2V18a1 1 0 0 0 1 1h3.6a1 1 0 0 0 1-1v-1.5c0-.6.5-1.5 1.3-2.2A7 7 0 0 0 12 2z"/><path d="M9 21h6"/></svg></div>
                 <h3 data-i18n="f3_t">Thinking traces</h3>
-                <p data-i18n="f3_d">DeepSeek and Qwen reasoning exposed to your app - streamed live, both providers, exactly like the official API.</p>
+                <p data-i18n="f3_d">DeepSeek and Qwen reasoning exposed to your app - streamed live, on both providers.</p>
             </article>
             <article class="card reveal">
                 <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg></div>
                 <h3 data-i18n="f4_t">Tool calling</h3>
-                <p data-i18n="f4_d">Emulated <code>tools</code>, <code>tool_choice</code> and <code>parallel_tool_calls</code> with proper <code>finish_reason: "tool_calls"</code> responses.</p>
+                <p data-i18n="f4_d">Emulated <code>tools</code>, <code>tool_choice</code> and <code>parallel_tool_calls</code> with <code>finish_reason: "tool_calls"</code> responses.</p>
             </article>
             <article class="card reveal">
                 <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><path d="M8 13h3"/><path d="M16 13h-2"/><path d="M8 17h8"/></svg></div>
                 <h3 data-i18n="f5_t">JSON mode</h3>
                 <p data-i18n="f5_d"><code>response_format</code> with <code>json_object</code> and <code>json_schema</code> - structured output for your agents.</p>
-            </article>
-            <article class="card reveal">
-                <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></div>
-                <h3 data-i18n="f6_t">Server-side sessions</h3>
-                <p data-i18n="f6_d">Multi-turn chats live on the server. Stateless clients keep context automatically via message fingerprinting.</p>
             </article>
             <article class="card reveal">
                 <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg></div>
@@ -147,27 +130,7 @@
             <article class="card reveal">
                 <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></div>
                 <h3 data-i18n="f8_t">File attachments</h3>
-                <p data-i18n="f8_d">Images and text files as base64 or data URIs. Vision, OCR and file analysis per model - up to 50 files, 100 MB each.</p>
-            </article>
-            <article class="card reveal">
-                <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg></div>
-                <h3 data-i18n="f9_t">Real token usage</h3>
-                <p data-i18n="f9_d">OpenAI-style <code>usage</code> accumulated per conversation, including streaming via <code>stream_options.include_usage</code>.</p>
-            </article>
-            <article class="card reveal">
-                <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg></div>
-                <h3 data-i18n="f10_t">Survives restarts</h3>
-                <p data-i18n="f10_d">Sessions, affinities and usage counters are persisted to disk. Conversations survive server restarts.</p>
-            </article>
-            <article class="card reveal">
-                <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg></div>
-                <h3 data-i18n="f11_t">Account pool</h3>
-                <p data-i18n="f11_d">N tokens = N parallel generations. Requests are distributed round-robin, retried with exponential backoff.</p>
-            </article>
-            <article class="card reveal">
-                <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7z"/></svg></div>
-                <h3 data-i18n="f12_t">Health ready</h3>
-                <p data-i18n="f12_d"><code>GET /health</code> reports provider status and cache stats - perfect for readiness probes and load balancers.</p>
+                <p data-i18n="f8_d">Images and text files as base64 or data URIs. Vision, OCR and file analysis per model.</p>
             </article>
         </div>
     </section>
@@ -185,7 +148,6 @@
                     <span class="model-logo model-logo-ds"><img src="deepseek-logo.svg" alt="DeepSeek" /></span>
                     <div>
                         <h3>DeepSeek</h3>
-                        <span class="model-tag" data-i18n="models_ds_tag">chat.deepseek.com</span>
                     </div>
                 </div>
                 <ul class="model-list">
@@ -201,7 +163,6 @@
                     <span class="model-logo-tile model-logo-tile-qw"><img src="qwen-logo.svg" alt="Qwen" /></span>
                     <div>
                         <h3>Qwen</h3>
-                        <span class="model-tag" data-i18n="models_qw_tag">chat.qwen.ai</span>
                     </div>
                 </div>
                 <ul class="model-list">
@@ -221,11 +182,10 @@
             <p class="section-sub" data-i18n="qs_sub">One-command install on Windows, Linux and macOS. No Python setup gymnastics required.</p>
         </div>
 
+        <p class="section-note reveal" data-i18n="qs_need">All you need is a free DeepSeek or Qwen token - the script does the rest.</p>
         <div class="code-tabs reveal">
             <div class="tab-bar">
                 <button class="tab active" data-tab="install" data-i18n="qs_tab_install">Install</button>
-                <button class="tab" data-tab="python" data-i18n="qs_tab_python">OpenAI SDK</button>
-                <button class="tab" data-tab="curl" data-i18n="qs_tab_curl">curl streaming</button>
                 <button class="tab" data-tab="docker" data-i18n="qs_tab_docker">Docker</button>
             </div>
             <div class="code-pane active" data-pane="install">
@@ -241,49 +201,7 @@
                 <pre><code>curl -fsSL https://raw.githubusercontent.com/FANATFANATA/DanyAPI/main/docs/install.sh | bash</code></pre>
                 <p class="pane-note" data-i18n="qs_install_note">The script clones the repo, installs dependencies, creates <code>.env</code>, live-checks your provider tokens and launches the server. It even auto-updates itself on each start.</p>
             </div>
-            <div class="code-pane" data-pane="python">
-                <div class="pane-head">
-                    <span>Python</span>
-                    <button class="copy-btn" data-copy='from openai import OpenAI
 
-client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="dummy")
-r = client.chat.completions.create(
-    model="deepseek-v4-flash",
-    messages=[{"role": "user", "content": "Hello!"}],
-)
-print(r.choices[0].message.content)' data-i18n="copy">Copy</button>
-                </div>
-<pre><code><span class="c-kw">from</span> openai <span class="c-kw">import</span> OpenAI
-
-client = OpenAI(base_url=<span class="c-str">"http://127.0.0.1:8000/v1"</span>, api_key=<span class="c-str">"dummy"</span>)
-r = client.chat.completions.create(
-    model=<span class="c-str">"deepseek-v4-flash"</span>,
-    messages=[{<span class="c-str">"role"</span>: <span class="c-str">"user"</span>, <span class="c-str">"content"</span>: <span class="c-str">"Hello!"</span>}],
-)
-<span class="c-fn">print</span>(r.choices[<span class="c-num">0</span>].message.content)</code></pre>
-                <p class="pane-note" data-i18n="qs_python_note"><code>api_key</code> is required by the SDK but never checked - all requests are made by the server-side accounts.</p>
-            </div>
-            <div class="code-pane" data-pane="curl">
-                <div class="pane-head">
-                    <span>curl</span>
-                    <button class="copy-btn" data-copy='curl http://127.0.0.1:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '"'"'{"model": "deepseek-v4-flash", "messages": [{"role": "user", "content": "Hello!"}]}'"'"'' data-i18n="copy">Copy</button>
-                </div>
-                <pre><code>curl http://127.0.0.1:8000/v1/chat/completions \
-  -H <span class="c-str">"Content-Type: application/json"</span> \
-  -d <span class="c-str">'{"model": "deepseek-v4-flash", "messages": [{"role": "user", "content": "Hello!"}]}'</span></code></pre>
-                <div class="pane-head">
-                    <span>curl + thinking + stream</span>
-                    <button class="copy-btn" data-copy='curl http://127.0.0.1:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '"'"'{"model": "deepseek-v4-pro", "messages": [{"role": "user", "content": "2+2?"}], "thinking": true, "stream": true}'"'"'' data-i18n="copy">Copy</button>
-                </div>
-                <pre><code>curl http://127.0.0.1:8000/v1/chat/completions \
-  -H <span class="c-str">"Content-Type: application/json"</span> \
-  -d <span class="c-str">'{"model": "deepseek-v4-pro", "messages": [{"role": "user", "content": "2+2?"}], "thinking": true, "stream": true}'</span></code></pre>
-                <p class="pane-note" data-i18n="qs_curl_note">Thinking traces stream live as <code>reasoning_content</code>. Add <code>"stream_options": {"include_usage": true}</code> for usage in the final chunk.</p>
-            </div>
             <div class="code-pane" data-pane="docker">
                 <div class="pane-head">
                     <span>Docker · GHCR</span>
@@ -301,64 +219,6 @@ r = client.chat.completions.create(
         </div>
     </section>
 
-    <section class="section" id="how">
-        <div class="section-head reveal">
-            <span class="eyebrow" data-i18n="how_eyebrow">How it works</span>
-            <h2 class="section-title" data-i18n="how_title">A smart proxy to<br /><span class="grad-text" data-i18n="how_title_hi">free models.</span></h2>
-            <p class="section-sub" data-i18n="how_sub">Reverse-engineered provider protocols, an account pool, PoW solving and session caching - all hidden behind a clean OpenAI API.</p>
-        </div>
-
-        <div class="flow reveal">
-            <div class="flow-node flow-in">
-                <span class="flow-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg></span>
-                <strong data-i18n="flow_in">Your app</strong>
-                <span class="flow-detail">OpenAI SDK / curl</span>
-            </div>
-            <div class="flow-arrow" aria-hidden="true">→</div>
-            <div class="flow-node flow-api">
-                <span class="flow-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg></span>
-                <strong>DanyAPI</strong>
-                <span class="flow-detail" data-i18n="flow_api">FastAPI · /v1</span>
-            </div>
-            <div class="flow-arrow" aria-hidden="true">→</div>
-            <div class="flow-node flow-pool">
-                <span class="flow-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><circle cx="6" cy="6" r="1"/><circle cx="6" cy="18" r="1"/></svg></span>
-                <strong data-i18n="flow_pool">Account pool</strong>
-                <span class="flow-detail" data-i18n="flow_pool_detail">round-robin · retries · PoW</span>
-            </div>
-            <div class="flow-arrow" aria-hidden="true">→</div>
-            <div class="flow-node flow-prov">
-                <span class="flow-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg></span>
-                <strong>DeepSeek</strong>
-                <span class="flow-detail">chat.deepseek.com</span>
-            </div>
-            <div class="flow-node flow-prov">
-                <span class="flow-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg></span>
-                <strong>Qwen</strong>
-                <span class="flow-detail">chat.qwen.ai</span>
-            </div>
-        </div>
-
-        <div class="how-grid">
-            <div class="how-card reveal">
-                <h3 data-i18n="how1_t">Runs on free provider tokens</h3>
-                <p data-i18n="how1_d">You add your free DeepSeek/Qwen tokens to <code>.env</code> and all upstream requests are made by those server-side accounts. Your API consumers just point their client at your instance - no keys on their side.</p>
-            </div>
-            <div class="how-card reveal">
-                <h3 data-i18n="how2_t">Parallel by design</h3>
-                <p data-i18n="how2_d">One account = one message at a time. DanyAPI keeps a pool of tokens and distributes concurrent requests across accounts, queuing when all are busy.</p>
-            </div>
-            <div class="how-card reveal">
-                <h3 data-i18n="how3_t">Sessions that survive</h3>
-                <p data-i18n="how3_d">Chats live server-side like the web clients. <code>session_id</code> pins a conversation; stateless clients are matched by message fingerprint automatically.</p>
-            </div>
-            <div class="how-card reveal">
-                <h3 data-i18n="how4_t">Emulated, normalized</h3>
-                <p data-i18n="how4_d">Tool calling and JSON mode are emulated at the proxy layer with prompt injection, then normalized to perfect OpenAI-shaped responses.</p>
-            </div>
-        </div>
-    </section>
-
     <section class="section" id="faq">
         <div class="section-head reveal">
             <span class="eyebrow" data-i18n="faq_eyebrow">FAQ</span>
@@ -367,7 +227,7 @@ r = client.chat.completions.create(
         <div class="faq-list reveal">
             <details class="faq">
                 <summary data-i18n="q1">Is it really free?</summary>
-                <p data-i18n="a1">Yes. DanyAPI talks to the internal APIs of the free web clients chat.deepseek.com and chat.qwen.ai using server-side accounts created from your own free provider tokens. There is no billing and no quotas.</p>
+                <p data-i18n="a1">Yes. DanyAPI uses the internal APIs of the free web clients chat.deepseek.com and chat.qwen.ai through accounts made from your own free provider tokens. No billing, no quotas.</p>
             </details>
             <details class="faq">
                 <summary data-i18n="q2">Do my users need an API key?</summary>
@@ -378,16 +238,8 @@ r = client.chat.completions.create(
                 <p data-i18n="a3">DeepSeek (<code>deepseek-v4-flash</code>, <code>deepseek-v4-pro</code>, <code>deepseek-v4-vision</code>) and Qwen (<code>qwen3.8-max</code>, <code>qwen3.7-plus</code>, … - fetched live from the account). Route by model name; both can run at once.</p>
             </details>
             <details class="faq">
-                <summary data-i18n="q4">Can I use it with agents and tool calling?</summary>
-                <p data-i18n="a4">Yes - emulated <code>tools</code>, <code>tool_choice</code> and <code>parallel_tool_calls</code> with <code>finish_reason: "tool_calls"</code>. Clients that ship many tools (like opencode) work out of the box.</p>
-            </details>
-            <details class="faq">
-                <summary data-i18n="q5">What are the account limits?</summary>
-                <p data-i18n="a5">One account generates one message at a time, so a pool of N tokens gives N parallel generations. DeepSeek and Qwen pools are independent. Busy errors are retried automatically up to 5 times with backoff.</p>
-            </details>
-            <details class="faq">
-                <summary data-i18n="q6">Do conversations survive restarts?</summary>
-                <p data-i18n="a6">Yes. Session ids, context fingerprints, account affinity and token usage are persisted to disk (JSON files) with atomic writes. In Docker, mount <code>DANYAPI_CACHE_DIR</code> as a volume.</p>
+                <summary data-i18n="q7">Are there rate limits or will my token get banned?</summary>
+                <p data-i18n="a7">Requests go through the free web clients at a human-like pace. Add more tokens to the pool for extra parallelism - the project stays within normal usage, but treat free tokens as best-effort.</p>
             </details>
         </div>
     </section>

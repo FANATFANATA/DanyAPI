@@ -11,5 +11,3 @@ venv
 .pytest_cache
 *.exe
 pow_solver
-run.bat
-run.sh

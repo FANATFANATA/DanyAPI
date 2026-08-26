@@ -24,6 +24,15 @@ Linux/macOS:
 curl -fsSL https://raw.githubusercontent.com/FANATFANATA/DanyAPI/main/docs/install.sh | bash
 ```
 
+Docker:
+
+```bash
+docker run -d -p 8000:8000 \
+  -e DEEPSEEK_TOKENS="token1,token2" \
+  -e QWEN_TOKENS="token3" \
+  ghcr.io/fanatfanata/danyapi:latest
+```
+
 ## Contacts
 
 [Creator](https://t.me/DanyaVoredom) · [Telegram channel](https://t.me/DanyAPIFree) · [Website](https://fanatfanata.github.io/DanyAPI/)
