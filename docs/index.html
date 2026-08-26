@@ -37,6 +37,7 @@
         </a>
         <nav class="nav-links" id="navLinks">
             <a href="#features" data-i18n="nav_features">Features</a>
+            <a href="#hosted" data-i18n="nav_hosted">Public</a>
             <a href="#models" data-i18n="nav_models">Models</a>
             <a href="#quickstart" data-i18n="nav_quickstart">Quick start</a>
             <a href="#faq" data-i18n="nav_faq">FAQ</a>
@@ -85,6 +86,29 @@
                     <span class="pill"><code>Python 3.10+</code></span>
                     <span class="pill"><code>Docker · GHCR</code></span>
                 </div>
+            </div>
+        </div>
+    </section>
+
+    <section class="section" id="hosted">
+        <div class="section-head reveal">
+            <span class="eyebrow" data-i18n="hosted_eyebrow">Public instance</span>
+            <h2 class="section-title" data-i18n="hosted_title">No server?<br /><span class="grad-text" data-i18n="hosted_title_hi">Use the free one.</span></h2>
+            <p class="section-sub" data-i18n="hosted_sub">A public, fully free DanyAPI instance is already live in production. No signup, no keys, no setup - just point your client at it.</p>
+        </div>
+        <div class="code-tabs reveal">
+            <div class="code-pane active" data-pane="hosted">
+                <div class="pane-head">
+                    <span data-i18n="hosted_pane_api">API base URL</span>
+                    <button class="copy-btn" data-copy="https://danyapi.cloudpub.ru/v1/" data-i18n="copy">Copy</button>
+                </div>
+                <pre><code>https://danyapi.cloudpub.ru/v1/</code></pre>
+                <div class="pane-head">
+                    <span data-i18n="hosted_pane_site">Landing page</span>
+                    <button class="copy-btn" data-copy="https://danyapi.cloudpub.ru/" data-i18n="copy">Copy</button>
+                </div>
+                <pre><code>https://danyapi.cloudpub.ru/</code></pre>
+                <p class="pane-note" data-i18n="hosted_note">Use any OpenAI-compatible client with a dummy <code>api_key</code>. The instance runs on the same free provider tokens - best-effort, but zero cost for you.</p>
             </div>
         </div>
     </section>

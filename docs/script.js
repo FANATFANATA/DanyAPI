@@ -70,6 +70,7 @@
     var I18N = {
         ru: {
             nav_features: "Возможности",
+            nav_hosted: "Публичный",
             nav_models: "Модели",
             nav_quickstart: "Быстрый старт",
             nav_faq: "FAQ",
@@ -138,12 +139,27 @@
             footer_creator: "Создатель",
             footer_channel: "Телеграм-канал",
             footer_note: "Сделано на FastAPI и Python · реверс-инжиниринг, не аффилировано с DeepSeek или Alibaba",
+            hosted_eyebrow: "Публичный инстанс",
+            hosted_title: "Нет сервера?",
+            hosted_title_hi: "Берите бесплатный.",
+            hosted_sub: "Публичный, полностью бесплатный инстанс DanyAPI уже работает в продакшене. Без регистрации, ключей и настройки - просто направьте на него свой клиент.",
+            hosted_pane_api: "Базовый URL API",
+            hosted_pane_site: "Лендинг",
+            hosted_note: "Используйте любой OpenAI-совместимый клиент с фейковым <code>api_key</code>. Инстанс работает на тех же бесплатных токенах провайдеров - best-effort, но ноль затрат для вас.",
             meta_title: "DanyAPI Документация",
             lang_en: "Английский",
             lang_ru: "Русский"
         },
         en: {
-            meta_title: "DanyAPI Documentation"
+            meta_title: "DanyAPI Documentation",
+            nav_hosted: "Public",
+            hosted_eyebrow: "Public instance",
+            hosted_title: "No server?",
+            hosted_title_hi: "Use the free one.",
+            hosted_sub: "A public, fully free DanyAPI instance is already live in production. No signup, no keys, no setup - just point your client at it.",
+            hosted_pane_api: "API base URL",
+            hosted_pane_site: "Landing page",
+            hosted_note: "Use any OpenAI-compatible client with a dummy <code>api_key</code>. The instance runs on the same free provider tokens - best-effort, but zero cost for you."
         }
     };
 
