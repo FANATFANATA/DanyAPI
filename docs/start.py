@@ -12,7 +12,7 @@ REPO = "FANATFANATA/DanyAPI"
 API = f"https://api.github.com/repos/{REPO}/releases/latest"
 TAG_FILE = ROOT / ".installed-release"
 ENV_FILE = ROOT / ".env"
-USER_FILES = (".env", "run.bat", "run.sh")
+USER_FILES = (".env",)
 
 
 def env_flag(name, default):

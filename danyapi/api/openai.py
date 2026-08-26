@@ -17,7 +17,7 @@ from typing import Any
 import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
@@ -436,15 +436,15 @@ async def add_tokens(tokens: dict) -> dict:
         log.info("hot-added deepseek token (total accounts: %d)", len(pool.accounts))
 
     for token in qw_to_add:
-        client = QwenClient(token=token, timeout=settings.timeout)
-        if not await client.check_auth():
+        qw_client = QwenClient(token=token, timeout=settings.timeout)
+        if not await qw_client.check_auth():
             log.warning("new qwen token invalid/expired, skipping")
-            await client.aclose()
+            await qw_client.aclose()
             skipped_qw += 1
             continue
-        acct = QwenAccount(
+        qw_acct = QwenAccount(
             len(qwen_pool.accounts) if qwen_pool else 0,
-            client,
+            qw_client,
             session_cache_size=settings.session_cache_size,
             ttl=settings.session_ttl,
             store=qw_store,
@@ -452,18 +452,18 @@ async def add_tokens(tokens: dict) -> dict:
         )
         if qwen_pool is None:
             qwen_pool = AccountPool(
-                [acct],
+                [qw_acct],
                 label="qwen",
                 session_cache_size=settings.session_cache_size,
                 ttl=settings.session_ttl,
             )
             app.state.qwen_pool = qwen_pool
             try:
-                app.state.qwen_models = await _fetch_qwen_models(client)
-            except Exception:
-                pass
+                app.state.qwen_models = await _fetch_qwen_models(qw_client)
+            except Exception as exc:
+                log.warning("failed to prefetch qwen models: %s", exc)
         else:
-            qwen_pool.add_account(acct)
+            qwen_pool.add_account(qw_acct)
         added_qw += 1
         log.info("hot-added qwen token (total accounts: %d)", len(qwen_pool.accounts))
 

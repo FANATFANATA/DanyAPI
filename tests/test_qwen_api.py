@@ -73,6 +73,8 @@ class FakeSession:
     def __init__(self, sid: str = "c1", last_response_id: str | None = None) -> None:
         self.id = sid
         self.last_response_id = last_response_id
+        self.accumulated_input_tokens = 0
+        self.accumulated_output_tokens = 0
 
 
 class FakeResp:

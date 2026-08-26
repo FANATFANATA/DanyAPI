@@ -4,9 +4,12 @@ import asyncio
 import email.header
 import email.message
 import imaplib
+import logging
 import re
 import time
 from collections.abc import Callable
+
+log = logging.getLogger("danyapi.reg.email")
 
 
 class EmailCodeError(Exception):
@@ -141,5 +144,5 @@ class ImapCodeSource(CodeSource):
         finally:
             try:
                 client.logout()
-            except Exception:
-                pass
+            except Exception as exc:
+                log.debug("logout failed: %s", exc)

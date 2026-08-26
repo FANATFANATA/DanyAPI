@@ -527,9 +527,9 @@ def main():
     print(f"DanyAPI runs from: {ROOT}")
     print("The server auto-updates to the latest GitHub release at every launch (DANYAPI_AUTO_UPDATE=0 disables).")
     print("Start it anytime with the desktop shortcut or:")
-    print("  run.bat   (Windows)")
-    print("  ./run.sh  (Linux/macOS)")
+    print("  python app.py        (from the DanyAPI folder)")
     print("  python -m danyapi")
+    print("  python docs/start.py (auto-updates, then runs)")
 
 
 if __name__ == "__main__":

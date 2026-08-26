@@ -152,7 +152,6 @@ class DeepSeekRegistrar:
         pow_headers = await self._guest_pow(CREATE_EMAIL_CODE_PATH)
         body = {
             "email": email,
-            "turnstile_token": None,
             "locale": LOCALE,
             "hcaptcha_token": hcaptcha_token,
             "device_id": self.device_id,

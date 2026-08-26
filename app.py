@@ -39,10 +39,10 @@ def main() -> None:
 
     load_dotenv(ROOT / ".env", override=False)
 
+    import uvicorn
+
     from danyapi.config import settings
     from danyapi.logging import uvicorn_log_config
-
-    import uvicorn
 
     print(f"DanyAPI starting on {settings.host}:{settings.port}")
     uvicorn.run(
