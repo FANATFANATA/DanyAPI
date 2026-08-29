@@ -332,6 +332,66 @@ async def test_swapped_session_forgets_old():
     acct.sessions.forget.assert_called_once_with("old1")
 
 
+async def test_acquire_and_build_with_session():
+    acct = FakeAccount()
+    pool = MagicMock()
+    pool.acquire = AsyncMock(return_value=(acct, "s1"))
+    req = SimpleNamespace(
+        model="deepseek-v4-flash",
+        messages=[openai_mod.ChatMessage(role="user", content="hello")],
+        session_id="s1",
+        tools=None,
+        tool_choice=None,
+        response_format=None,
+        user=None,
+    )
+    account, existing_sid, context_seq, prompt, tool_mode = await openai_mod._acquire_and_build(pool, req)
+    assert account is acct
+    assert existing_sid == "s1"
+    assert context_seq
+    assert "hello" in prompt
+    assert tool_mode is False
+
+
+async def test_acquire_and_build_without_session_uses_context():
+    acct = FakeAccount()
+    pool = MagicMock()
+    pool.acquire = AsyncMock(return_value=(acct, None))
+    pool.resolve_context = MagicMock(return_value="cached")
+    req = SimpleNamespace(
+        model="deepseek-v4-flash",
+        messages=[openai_mod.ChatMessage(role="user", content="hello")],
+        session_id=None,
+        tools=None,
+        tool_choice=None,
+        response_format=None,
+        user=None,
+    )
+    account, existing_sid, context_seq, _prompt, _tool_mode = await openai_mod._acquire_and_build(pool, req)
+    assert account is acct
+    assert existing_sid is None
+    pool.resolve_context.assert_called_once_with(context_seq)
+    pool.acquire.assert_awaited_once_with("cached", settings.acquire_timeout)
+
+
+async def test_acquire_and_build_raises_400_on_bad_messages():
+    acct = FakeAccount()
+    pool = MagicMock()
+    pool.acquire = AsyncMock(return_value=(acct, None))
+    req = SimpleNamespace(
+        model="deepseek-v4-flash",
+        messages=[],
+        session_id=None,
+        tools=None,
+        tool_choice=None,
+        response_format=None,
+        user=None,
+    )
+    with pytest.raises(Exception) as excinfo:
+        await openai_mod._acquire_and_build(pool, req)
+    assert excinfo.value.status_code == 400
+
+
 async def test_auth_error_401():
     acct = FakeAccount()
     acct.sessions.obtain = AsyncMock(side_effect=DeepSeekError(40001, "bad"))

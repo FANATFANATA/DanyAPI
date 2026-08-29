@@ -54,7 +54,7 @@ class QwenStreamReconstructor:
         created = data.get("response.created")
         if isinstance(created, dict) and created.get("response_id"):
             self.response_id = created["response_id"]
-        if data.get("response.stopped") is not None:
+        if data.get("response.stopped"):
             self.finished = True
         if data.get("done"):
             self.finished = True

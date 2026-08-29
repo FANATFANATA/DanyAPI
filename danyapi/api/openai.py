@@ -82,6 +82,10 @@ RESPONSE_INCOMPLETE_MESSAGE = "Response is incomplete: provider errors interrupt
 REDUCED_CONTEXT_MESSAGE = "Response was generated from reduced context because the original input exceeded the model limit and may be incomplete"
 
 
+class DeepSeekStreamError(Exception):
+    pass
+
+
 class ChatMessage(BaseModel):
     role: str = "user"
     content: Any = ""
@@ -410,6 +414,10 @@ async def add_tokens(tokens: dict) -> dict:
     cache_enabled = settings.cache_enabled
     ds_store = JsonStore("deepseek-sessions", "default" if cache_enabled else None)
     qw_store = JsonStore("qwen-sessions", "default" if cache_enabled else None)
+    ds_context_store = JsonStore("deepseek-contexts", "default" if cache_enabled else None)
+    qw_context_store = JsonStore("qwen-contexts", "default" if cache_enabled else None)
+    ds_affinity_store = JsonStore("deepseek-affinities", "default" if cache_enabled else None)
+    qw_affinity_store = JsonStore("qwen-affinities", "default" if cache_enabled else None)
 
     pool: AccountPool | None = getattr(app.state, "pool", None)
     qwen_pool: AccountPool | None = getattr(app.state, "qwen_pool", None)
@@ -434,6 +442,8 @@ async def add_tokens(tokens: dict) -> dict:
                 [acct],
                 session_cache_size=settings.session_cache_size,
                 ttl=settings.session_ttl,
+                context_store=ds_context_store,
+                affinity_store=ds_affinity_store,
             )
             app.state.pool = pool
         else:
@@ -462,6 +472,8 @@ async def add_tokens(tokens: dict) -> dict:
                 label="qwen",
                 session_cache_size=settings.session_cache_size,
                 ttl=settings.session_ttl,
+                context_store=qw_context_store,
+                affinity_store=qw_affinity_store,
             )
             app.state.qwen_pool = qwen_pool
             try:
@@ -874,6 +886,33 @@ def _can_reuse_session(account: Any, session_id: str | None, **kwargs: Any) -> b
     return bool(account.sessions.can_reuse(session_id, **kwargs))
 
 
+async def _acquire_and_build(
+    pool: AccountPool,
+    req: ChatCompletionRequest,
+    reuse_kwargs: dict[str, Any] | None = None,
+) -> tuple[Any, str | None, tuple[str, ...], str, bool]:
+    context_seq = toolemu.context_sequence(req.messages, user=getattr(req, "user", None))
+    if req.session_id:
+        account, existing_sid = await _acquire_account(pool, req.session_id)
+        if existing_sid is None:
+            existing_sid = req.session_id
+    else:
+        cached_sid = pool.resolve_context(context_seq) if context_seq else None
+        account, existing_sid = await _acquire_account(pool, cached_sid)
+    has_session = _can_reuse_session(account, existing_sid, **(reuse_kwargs or {}))
+    try:
+        prompt, tool_mode = toolemu.build_prompt(
+            req.messages,
+            getattr(req, "tools", None),
+            getattr(req, "tool_choice", None),
+            has_session,
+            getattr(req, "response_format", None),
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return account, existing_sid, context_seq, prompt, tool_mode
+
+
 def _include_usage(req: ChatCompletionRequest) -> bool:
     opts = getattr(req, "stream_options", None)
     if not isinstance(opts, dict):
@@ -956,26 +995,7 @@ async def _chat_completions_deepseek(req: ChatCompletionRequest) -> Any:
     thinking = req.thinking if req.thinking is not None else _is_reasoning_model(req.model)
     search = bool(req.search) and model_type == "default"
 
-    context_seq = toolemu.context_sequence(req.messages, user=getattr(req, "user", None))
-    if req.session_id:
-        account, existing_sid = await _acquire_account(pool, req.session_id)
-        if existing_sid is None:
-            existing_sid = req.session_id
-    else:
-        cached_sid = pool.resolve_context(context_seq) if context_seq else None
-        account, existing_sid = await _acquire_account(pool, cached_sid)
-    has_session = _can_reuse_session(account, existing_sid)
-
-    try:
-        prompt, tool_mode = toolemu.build_prompt(
-            req.messages,
-            getattr(req, "tools", None),
-            getattr(req, "tool_choice", None),
-            has_session,
-            getattr(req, "response_format", None),
-        )
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
+    account, existing_sid, context_seq, prompt, tool_mode = await _acquire_and_build(pool, req)
 
     attachments = _collect_attachments(req)
     _validate_attachments(attachments, model_type)
@@ -1027,26 +1047,7 @@ async def _chat_completions_qwen(req: ChatCompletionRequest) -> Any:
     thinking = req.thinking if req.thinking is not None else True
     search = bool(req.search)
 
-    context_seq = toolemu.context_sequence(req.messages, user=getattr(req, "user", None))
-    if req.session_id:
-        account, existing_sid = await _acquire_account(pool, req.session_id)
-        if existing_sid is None:
-            existing_sid = req.session_id
-    else:
-        cached_sid = pool.resolve_context(context_seq) if context_seq else None
-        account, existing_sid = await _acquire_account(pool, cached_sid)
-    has_session = _can_reuse_session(account, existing_sid, model=req.model)
-
-    try:
-        prompt, tool_mode = toolemu.build_prompt(
-            req.messages,
-            getattr(req, "tools", None),
-            getattr(req, "tool_choice", None),
-            has_session,
-            getattr(req, "response_format", None),
-        )
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
+    account, existing_sid, context_seq, prompt, tool_mode = await _acquire_and_build(pool, req, {"model": req.model})
 
     common = {
         "account": account,
@@ -1322,6 +1323,64 @@ def _build_completion_response(
     }
 
 
+async def _send_deepseek_stream(
+    account,
+    session,
+    parent_message_id,
+    prompt,
+    model_type,
+    thinking,
+    search,
+    ref_file_ids=None,
+) -> tuple[MessageReconstructor, str | None, str | None]:
+    pow_headers = await _fresh_pow_headers(account)
+    resp = await _send_with_auth(
+        account,
+        account.client,
+        pow_headers,
+        session.id,
+        parent_message_id,
+        prompt,
+        model_type,
+        thinking,
+        search,
+        ref_file_ids,
+    )
+    rec = MessageReconstructor()
+    incremental = IncrementalSSE()
+    response_message_id: str | None = None
+    stop_message_id: str | None = None
+    try:
+        async for chunk in resp.aiter_bytes():
+            for event in incremental.feed(chunk):
+                if event.event == "ready" and isinstance(event.data, dict):
+                    response_message_id = event.data.get("response_message_id")
+                    if response_message_id:
+                        stop_message_id = response_message_id
+                rec.handle(event)
+        for event in incremental.finish():
+            rec.handle(event)
+    except (httpx.HTTPError, RuntimeError) as exc:
+        if rec.id:
+            stop_message_id = rec.id
+        await _try_stop_stream(account.client, session.id, stop_message_id)
+        raise DeepSeekStreamError(f"Stream processing failed: {exc}") from exc
+    except BaseException:
+        if rec.id:
+            stop_message_id = rec.id
+        await _try_stop_stream(account.client, session.id, stop_message_id)
+        raise
+    finally:
+        if rec.id:
+            stop_message_id = rec.id
+        try:
+            await resp.aclose()
+        except Exception as exc:
+            log.debug("response close failed: %s", exc)
+            await _try_stop_stream(account.client, session.id, stop_message_id)
+    return rec, response_message_id, stop_message_id
+
+
 async def _collect_continuation(
     account,
     session,
@@ -1334,12 +1393,9 @@ async def _collect_continuation(
     attempt = 0
     while True:
         try:
-            pow_headers = await _fresh_pow_headers(account)
-            resp = await _send_with_auth(
+            rec, _response_message_id, _stop_message_id = await _send_deepseek_stream(
                 account,
-                account.client,
-                pow_headers,
-                session.id,
+                session,
                 parent_message_id,
                 CONTINUE_PROMPT,
                 model_type,
@@ -1347,6 +1403,8 @@ async def _collect_continuation(
                 search,
                 ref_file_ids,
             )
+        except DeepSeekStreamError as exc:
+            raise HTTPException(502, str(exc)) from exc
         except HTTPException as exc:
             if _is_retryable_http(exc) and attempt < MAX_RETRIES:
                 attempt += 1
@@ -1361,32 +1419,6 @@ async def _collect_continuation(
                 await asyncio.sleep(delay)
                 continue
             return None
-        rec = MessageReconstructor()
-        incremental = IncrementalSSE()
-        stop_message_id: str | None = None
-        try:
-            async for chunk in resp.aiter_bytes():
-                for event in incremental.feed(chunk):
-                    if event.event == "ready" and isinstance(event.data, dict):
-                        response_message_id = event.data.get("response_message_id")
-                        if response_message_id:
-                            stop_message_id = response_message_id
-                    rec.handle(event)
-            for event in incremental.finish():
-                rec.handle(event)
-        except (httpx.HTTPError, RuntimeError) as exc:
-            if rec.id:
-                stop_message_id = rec.id
-            await _try_stop_stream(account.client, session.id, stop_message_id)
-            raise HTTPException(502, f"Stream processing failed: {exc}") from exc
-        finally:
-            if rec.id:
-                stop_message_id = rec.id
-            try:
-                await resp.aclose()
-            except Exception as exc:
-                log.debug("response close failed: %s", exc)
-                await _try_stop_stream(account.client, session.id, stop_message_id)
         if not (rec.content or rec.reasoning) and _is_retryable_hint(rec) and attempt < MAX_RETRIES:
             attempt += 1
             delay = _retry_delay(attempt)
@@ -1452,12 +1484,9 @@ async def _collect_reduced(
         session_key = None
         try:
             session, session_key, parent_message_id = await _prepare_session(account, pool, None, None)
-            pow_headers = await _fresh_pow_headers(account)
-            resp = await _send_with_auth(
+            rec, _response_message_id, _stop_message_id = await _send_deepseek_stream(
                 account,
-                account.client,
-                pow_headers,
-                session.id,
+                session,
                 parent_message_id,
                 prompt,
                 model_type,
@@ -1465,17 +1494,7 @@ async def _collect_reduced(
                 search,
                 ref_file_ids,
             )
-            rec = MessageReconstructor()
-            incremental = IncrementalSSE()
-            try:
-                async for chunk in resp.aiter_bytes():
-                    for event in incremental.feed(chunk):
-                        rec.handle(event)
-                for event in incremental.finish():
-                    rec.handle(event)
-            finally:
-                await resp.aclose()
-        except (HTTPException, httpx.HTTPError):
+        except (HTTPException, httpx.HTTPError, DeepSeekStreamError):
             if session_key is not None:
                 _drop_session(pool, account, session_key)
             continue
@@ -1528,12 +1547,9 @@ async def _collect_non_stream(
         try:
             while True:
                 try:
-                    pow_headers = await _fresh_pow_headers(account)
-                    resp = await _send_with_auth(
+                    rec, response_message_id, stop_message_id = await _send_deepseek_stream(
                         account,
-                        account.client,
-                        pow_headers,
-                        session.id,
+                        session,
                         parent_message_id,
                         prompt,
                         model_type,
@@ -1541,6 +1557,8 @@ async def _collect_non_stream(
                         search,
                         ref_file_ids,
                     )
+                except DeepSeekStreamError as exc:
+                    raise HTTPException(502, str(exc)) from exc
                 except HTTPException as exc:
                     input_hint = _input_exceeds_hint_from_http(exc)
                     if input_hint is not None:
@@ -1573,36 +1591,6 @@ async def _collect_non_stream(
                         await asyncio.sleep(delay)
                         continue
                     raise
-
-                rec = MessageReconstructor()
-                incremental = IncrementalSSE()
-                response_message_id = None
-                try:
-                    async for chunk in resp.aiter_bytes():
-                        for event in incremental.feed(chunk):
-                            if event.event == "ready" and isinstance(event.data, dict):
-                                response_message_id = event.data.get("response_message_id")
-                                if response_message_id:
-                                    stop_message_id = response_message_id
-                            rec.handle(event)
-                    for event in incremental.finish():
-                        rec.handle(event)
-                except (httpx.HTTPError, RuntimeError) as exc:
-                    if rec.id:
-                        stop_message_id = rec.id
-                    await _try_stop_stream(account.client, session.id, stop_message_id)
-                    raise HTTPException(502, f"Stream processing failed: {exc}") from exc
-                finally:
-                    if rec.id:
-                        stop_message_id = rec.id
-                    try:
-                        await resp.aclose()
-                    except Exception as exc:
-                        log.debug("response close failed: %s", exc)
-                        await _try_stop_stream(account.client, session.id, stop_message_id)
-
-                if rec.id:
-                    stop_message_id = rec.id
                 if not (rec.content or rec.reasoning) and _is_retryable_hint(rec) and attempt < MAX_RETRIES:
                     attempt += 1
                     delay = _retry_delay(attempt)

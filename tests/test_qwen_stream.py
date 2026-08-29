@@ -117,6 +117,12 @@ def test_done_and_stopped():
     assert rec2.finished
 
 
+def test_response_stopped_false_does_not_finish():
+    rec = QwenStreamReconstructor()
+    rec.handle(SSEEvent(None, {"response.stopped": False}))
+    assert not rec.finished
+
+
 def test_usage():
     rec = QwenStreamReconstructor()
     rec.handle(
