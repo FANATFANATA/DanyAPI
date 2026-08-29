@@ -1334,14 +1334,30 @@ async def _collect_continuation(
             return None
         rec = MessageReconstructor()
         incremental = IncrementalSSE()
+        stop_message_id: str | None = None
         try:
             async for chunk in resp.aiter_bytes():
                 for event in incremental.feed(chunk):
+                    if event.event == "ready" and isinstance(event.data, dict):
+                        response_message_id = event.data.get("response_message_id")
+                        if response_message_id:
+                            stop_message_id = response_message_id
                     rec.handle(event)
             for event in incremental.finish():
                 rec.handle(event)
+        except (httpx.HTTPError, RuntimeError) as exc:
+            if rec.id:
+                stop_message_id = rec.id
+            await _try_stop_stream(account.client, session.id, stop_message_id)
+            raise HTTPException(502, f"Stream processing failed: {exc}") from exc
         finally:
-            await resp.aclose()
+            if rec.id:
+                stop_message_id = rec.id
+            try:
+                await resp.aclose()
+            except Exception as exc:
+                log.debug("response close failed: %s", exc)
+                await _try_stop_stream(account.client, session.id, stop_message_id)
         if not (rec.content or rec.reasoning) and _is_retryable_hint(rec) and attempt < MAX_RETRIES:
             attempt += 1
             delay = _retry_delay(attempt)
@@ -1542,14 +1558,18 @@ async def _collect_non_stream(
                     for event in incremental.finish():
                         rec.handle(event)
                 except (httpx.HTTPError, RuntimeError) as exc:
+                    if rec.id:
+                        stop_message_id = rec.id
                     await _try_stop_stream(account.client, session.id, stop_message_id)
                     raise HTTPException(502, f"Stream processing failed: {exc}") from exc
                 finally:
+                    if rec.id:
+                        stop_message_id = rec.id
                     try:
                         await resp.aclose()
-                    except Exception:
+                    except Exception as exc:
+                        log.debug("response close failed: %s", exc)
                         await _try_stop_stream(account.client, session.id, stop_message_id)
-                        raise
 
                 if rec.id:
                     stop_message_id = rec.id
@@ -1792,10 +1812,10 @@ async def _stream_openai(
                     stop_message_id = rec.id
                 try:
                     await resp.aclose()
-                except Exception:
+                except Exception as exc:
+                    log.debug("response close failed: %s", exc)
                     if not stopped:
                         await _try_stop_stream(account.client, session.id, stop_message_id)
-                    raise
             if got_content:
                 break
             if _is_retryable_hint(rec) and attempt < MAX_RETRIES:

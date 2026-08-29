@@ -455,6 +455,26 @@ async def test_continuation_http_error_returns_none():
     assert rec is None
 
 
+async def test_continuation_stream_error_stops_upstream():
+    acct = FakeAccount()
+
+    class ErrorResp(FakeResp):
+        async def aiter_bytes(self):
+            yield b'event: ready\ndata: {"request_message_id":1,"response_message_id":2,"model_type":"default"}\n\n'
+            raise httpx.ReadError("connection reset")
+
+    acct.client.completion = AsyncMock(return_value=ErrorResp(OK_SSE))
+    acct.client.stop_stream = AsyncMock()
+    with pytest.raises(Exception) as excinfo:
+        await openai_mod._collect_continuation(acct, FakeSession(), None, "default", False, False)
+    assert isinstance(excinfo.value, openai_mod.HTTPException)
+    assert excinfo.value.status_code == 502
+    acct.client.stop_stream.assert_awaited()
+    args, _ = acct.client.stop_stream.call_args
+    assert args[0] == "c1"
+    assert args[1] == 2
+
+
 async def test_guard_relays():
     async def gen():
         yield "a"

@@ -126,14 +126,11 @@ class QwenClient:
             if resp.status_code != 200:
                 return False
             payload = resp.json()
-            # Successful auth indicated by explicit success flag
             if payload.get("success") is True:
                 return True
-            # Some responses may embed the account id under a nested `data` key
             nested = payload.get("data")
             if isinstance(nested, dict) and nested.get("id"):
                 return True
-            # Fallback to top‑level id field
             return bool(payload.get("id"))
         except (httpx.HTTPError, ValueError):
             return False

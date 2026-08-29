@@ -4,7 +4,6 @@ import asyncio
 import json
 import logging
 import random
-import sys
 import time
 import uuid
 
@@ -288,10 +287,19 @@ async def collect_non_stream(
                             rec.handle(event)
                     for event in incremental.finish():
                         rec.handle(event)
+                except (httpx.HTTPError, RuntimeError) as exc:
+                    if rec.response_id:
+                        stop_response_id = rec.response_id
+                    await _try_stop_stream(account.client, session.id, stop_response_id)
+                    raise HTTPException(502, f"Stream processing failed: {exc}") from exc
                 finally:
                     if rec.response_id:
                         stop_response_id = rec.response_id
-                    await resp.aclose()
+                    try:
+                        await resp.aclose()
+                    except Exception as exc:
+                        log.debug("response close failed: %s", exc)
+                        await _try_stop_stream(account.client, session.id, stop_response_id)
                 if _is_retryable_error(rec) and attempt < MAX_RETRIES:
                     attempt += 1
                     delay = _retry_delay(attempt)
@@ -305,7 +313,9 @@ async def collect_non_stream(
                     await asyncio.sleep(delay)
                     continue
                 break
-        except asyncio.CancelledError:
+        except BaseException:
+            if rec is not None and rec.response_id:
+                stop_response_id = rec.response_id
             await _try_stop_stream(account.client, session.id, stop_response_id)
             raise
 
@@ -521,6 +531,7 @@ async def stream_openai(
             incremental = IncrementalSSE()
             got_content = False
             pending: list[str] = []
+            stopped = False
             try:
                 async for chunk in resp.aiter_bytes():
                     for event in incremental.feed(chunk):
@@ -576,12 +587,21 @@ async def stream_openai(
                             for line in pending:
                                 yield line
                             pending.clear()
+            except BaseException:
+                stopped = True
+                if rec.response_id:
+                    stop_response_id = rec.response_id
+                await _try_stop_stream(account.client, session.id, stop_response_id)
+                raise
             finally:
                 if rec.response_id:
                     stop_response_id = rec.response_id
-                if sys.exc_info()[0] is not None:
-                    await _try_stop_stream(account.client, session.id, stop_response_id)
-                await resp.aclose()
+                try:
+                    await resp.aclose()
+                except Exception as exc:
+                    log.debug("response close failed: %s", exc)
+                    if not stopped:
+                        await _try_stop_stream(account.client, session.id, stop_response_id)
             if got_content:
                 break
             if _is_retryable_error(rec) and attempt < MAX_RETRIES:
@@ -796,10 +816,19 @@ async def collect_image(
                             rec.handle(event)
                     for event in incremental.finish():
                         rec.handle(event)
+                except (httpx.HTTPError, RuntimeError) as exc:
+                    if rec.response_id:
+                        stop_response_id = rec.response_id
+                    await _try_stop_stream(account.client, session.id, stop_response_id)
+                    raise HTTPException(502, f"Stream processing failed: {exc}") from exc
                 finally:
                     if rec.response_id:
                         stop_response_id = rec.response_id
-                    await resp.aclose()
+                    try:
+                        await resp.aclose()
+                    except Exception as exc:
+                        log.debug("response close failed: %s", exc)
+                        await _try_stop_stream(account.client, session.id, stop_response_id)
                 if _is_retryable_error(rec) and attempt < MAX_RETRIES:
                     attempt += 1
                     delay = _retry_delay(attempt)
@@ -813,7 +842,9 @@ async def collect_image(
                     await asyncio.sleep(delay)
                     continue
                 break
-        except asyncio.CancelledError:
+        except BaseException:
+            if rec is not None and rec.response_id:
+                stop_response_id = rec.response_id
             await _try_stop_stream(account.client, session.id, stop_response_id)
             raise
 
@@ -953,6 +984,7 @@ async def stream_image(
             incremental = IncrementalSSE()
             got_content = False
             pending: list[str] = []
+            stopped = False
             try:
                 async for chunk in resp.aiter_bytes():
                     for event in incremental.feed(chunk):
@@ -1005,12 +1037,21 @@ async def stream_image(
                             for line in pending:
                                 yield line
                             pending.clear()
+            except BaseException:
+                stopped = True
+                if rec.response_id:
+                    stop_response_id = rec.response_id
+                await _try_stop_stream(account.client, session.id, stop_response_id)
+                raise
             finally:
                 if rec.response_id:
                     stop_response_id = rec.response_id
-                if sys.exc_info()[0] is not None:
-                    await _try_stop_stream(account.client, session.id, stop_response_id)
-                await resp.aclose()
+                try:
+                    await resp.aclose()
+                except Exception as exc:
+                    log.debug("response close failed: %s", exc)
+                    if not stopped:
+                        await _try_stop_stream(account.client, session.id, stop_response_id)
             if got_content:
                 break
             if _is_retryable_error(rec) and attempt < MAX_RETRIES:

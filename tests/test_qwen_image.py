@@ -2,6 +2,7 @@ import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 
 import danyapi.qwen.api as qwen_api
@@ -171,3 +172,23 @@ async def test_stream_image_prepare_session_error():
     assert "bad" in joined
     assert '"session_id": null' in joined
     assert joined.rstrip().endswith("data: [DONE]")
+
+
+async def test_collect_image_stream_error_stops_upstream():
+    acct = FakeAccount([])
+
+    class ErrorResp(FakeResp):
+        async def aiter_bytes(self):
+            yield b'data: {"response.created":{"chat_id":"c1","parent_id":"p0","response_id":"r1"}} \n\n'
+            raise httpx.ReadError("connection reset")
+
+    acct.client.completion = AsyncMock(return_value=ErrorResp(IMG_SSE))
+    acct.client.stop_stream = AsyncMock()
+    with pytest.raises(Exception) as excinfo:
+        await qwen_api.collect_image(**_args(acct))
+    assert isinstance(excinfo.value, qwen_api.HTTPException)
+    assert excinfo.value.status_code == 502
+    acct.client.stop_stream.assert_awaited()
+    args, _ = acct.client.stop_stream.call_args
+    assert args[0] == "c1"
+    assert args[1] == "r1"

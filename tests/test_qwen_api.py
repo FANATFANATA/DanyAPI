@@ -354,6 +354,45 @@ async def test_stream_full_consumption_does_not_stop_upstream():
     acct.client.stop_stream.assert_not_awaited()
 
 
+async def test_non_stream_stream_error_stops_upstream():
+    acct = FakeAccount([])
+
+    class ErrorResp(FakeResp):
+        async def aiter_bytes(self):
+            yield b'data: {"response.created":{"chat_id":"c1","parent_id":"p0","response_id":"r1"}} \n\n'
+            raise httpx.ReadError("connection reset")
+
+    acct.client.completion = AsyncMock(return_value=ErrorResp(OK_SSE))
+    acct.client.stop_stream = AsyncMock()
+    with pytest.raises(Exception) as excinfo:
+        await qwen_api.collect_non_stream(**_args(acct))
+    assert isinstance(excinfo.value, qwen_api.HTTPException)
+    assert excinfo.value.status_code == 502
+    acct.client.stop_stream.assert_awaited()
+    args, _ = acct.client.stop_stream.call_args
+    assert args[0] == "c1"
+    assert args[1] == "r1"
+
+
+async def test_stream_stream_error_stops_upstream():
+    acct = FakeAccount([])
+
+    class ErrorResp(FakeResp):
+        async def aiter_bytes(self):
+            yield b'data: {"response.created":{"chat_id":"c1","parent_id":"p0","response_id":"r1"}} \n\n'
+            raise httpx.ReadError("connection reset")
+
+    acct.client.completion = AsyncMock(return_value=ErrorResp(OK_SSE))
+    acct.client.stop_stream = AsyncMock()
+    gen = qwen_api.stream_openai(**_args(acct))
+    with pytest.raises(httpx.ReadError):
+        await _collect(gen)
+    acct.client.stop_stream.assert_awaited_once()
+    args, _ = acct.client.stop_stream.call_args
+    assert args[0] == "c1"
+    assert args[1] == "r1"
+
+
 def test_error_status():
     assert qwen_api._error_status("Too_Many_Requests") == 429
     assert qwen_api._error_status("RateLimited") == 429
