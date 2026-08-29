@@ -131,6 +131,7 @@ def _rec(status=None, hint=None):
 
 def test_deepseek_usage():
     assert openai_mod._deepseek_usage(10) == {"prompt_tokens": 0, "completion_tokens": 10, "total_tokens": 10}
+    assert openai_mod._deepseek_usage(10, "Hello world") == {"prompt_tokens": 2, "completion_tokens": 10, "total_tokens": 12}
     assert openai_mod._deepseek_usage(-5) == {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
     assert openai_mod._deepseek_usage(None) == {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
@@ -648,6 +649,41 @@ def test_health_with_pools():
     assert data["deepseek"]
     assert data["qwen"]
     assert data["deepseek_stats"] == {"accounts": 2}
+
+
+def test_usage_endpoint_disabled():
+    app.state.usage = None
+    client = TestClient(app)
+    resp = client.get("/v1/usage")
+    client.close()
+    assert resp.status_code == 404
+
+
+def test_usage_endpoint_snapshot():
+    from danyapi.usage import UsageTracker
+
+    tracker = UsageTracker()
+    tracker.record("deepseek", "deepseek-v4-flash", 10, 20, 30, user="alice")
+    app.state.usage = tracker
+    client = TestClient(app)
+    data = client.get("/v1/usage").json()
+    client.close()
+    assert data["totals"] == {"requests": 1, "prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}
+    assert data["by_model"]["deepseek-v4-flash"]["requests"] == 1
+    assert data["by_user"]["alice"]["requests"] == 1
+    assert len(data["recent"]) == 1
+
+
+def test_health_includes_usage():
+    from danyapi.usage import UsageTracker
+
+    tracker = UsageTracker()
+    tracker.record("qwen", "qwen3.8-max", 5, 7, 12)
+    app.state.usage = tracker
+    client = TestClient(app)
+    data = client.get("/health").json()
+    client.close()
+    assert data["usage"] == {"requests": 1, "prompt_tokens": 5, "completion_tokens": 7, "total_tokens": 12}
 
 
 def test_list_models():

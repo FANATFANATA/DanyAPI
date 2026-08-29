@@ -70,6 +70,7 @@
     var I18N = {
         ru: {
             nav_features: "Возможности",
+            nav_hosted: "Публичный",
             nav_models: "Модели",
             nav_quickstart: "Быстрый старт",
             nav_faq: "FAQ",
@@ -131,6 +132,8 @@
             a3: "DeepSeek (<code>deepseek-v4-flash</code>, <code>deepseek-v4-pro</code>, <code>deepseek-v4-vision</code>) и Qwen (<code>qwen3.8-max</code>, <code>qwen3.7-plus</code>, … - подтягиваются из аккаунта). Маршрутизация по имени модели; оба работают одновременно.",
             q7: "Есть ли лимиты или забанят токен?",
             a7: "Запросы идут через бесплатные веб-клиенты в человекоподобном темпе. Добавьте больше токенов в пул для параллелизма - проект держится в рамках нормального использования, но бесплатные токены - best-effort.",
+            q8: "Есть ли учёт использования?",
+            a8: "<code>GET /v1/usage</code> возвращает итоги по токенам, разбивку по моделям и пользователям. Отключается через <code>DANYAPI_USAGE_ENABLED=0</code>.",
             cta_title: "Бесплатные модели.",
             cta_sub: "Ваш API.",
             cta_gh: "GitHub",
@@ -138,12 +141,27 @@
             footer_creator: "Создатель",
             footer_channel: "Телеграм-канал",
             footer_note: "Сделано на FastAPI и Python · реверс-инжиниринг, не аффилировано с DeepSeek или Alibaba",
+            hosted_eyebrow: "Публичный инстанс",
+            hosted_title: "Нет сервера?",
+            hosted_title_hi: "Берите бесплатный.",
+            hosted_sub: "Публичный, полностью бесплатный инстанс DanyAPI уже работает в продакшене. Без регистрации, ключей и настройки - просто направьте на него свой клиент.",
+            hosted_pane_api: "Базовый URL API",
+            hosted_pane_site: "Лендинг",
+            hosted_note: "Используйте любой OpenAI-совместимый клиент с фейковым <code>api_key</code>. Инстанс работает на тех же бесплатных токенах провайдеров - best-effort, но ноль затрат для вас.",
             meta_title: "DanyAPI Документация",
             lang_en: "Английский",
             lang_ru: "Русский"
         },
         en: {
-            meta_title: "DanyAPI Documentation"
+            meta_title: "DanyAPI Documentation",
+            nav_hosted: "Public",
+            hosted_eyebrow: "Public instance",
+            hosted_title: "No server?",
+            hosted_title_hi: "Use the free one.",
+            hosted_sub: "A public, fully free DanyAPI instance is already live in production. No signup, no keys, no setup - just point your client at it.",
+            hosted_pane_api: "API base URL",
+            hosted_pane_site: "Landing page",
+            hosted_note: "Use any OpenAI-compatible client with a dummy <code>api_key</code>. The instance runs on the same free provider tokens - best-effort, but zero cost for you."
         }
     };
 

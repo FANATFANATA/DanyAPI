@@ -63,6 +63,8 @@ class Settings:
         self.cache_enabled = os.environ.get("DANYAPI_CACHE_DISABLED", "").strip().lower() not in ("1", "true", "yes", "on")
         self.human_delay_min = _env_float("DANYAPI_HUMAN_DELAY_MIN", 0.5)
         self.human_delay_max = _env_float("DANYAPI_HUMAN_DELAY_MAX", 3.0)
+        self.usage_enabled = os.environ.get("DANYAPI_USAGE_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off")
+        self.usage_max_records = _env_int("DANYAPI_USAGE_MAX_RECORDS", 1000)
 
 
 settings = Settings()

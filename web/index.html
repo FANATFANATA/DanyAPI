@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>DanyAPI</title>
 <meta name="description" content="DanyAPI free OpenAI-compatible API. Add your DeepSeek and Qwen tokens." />
-<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%2040%2040'%3E%3Cdefs%3E%3ClinearGradient%20id='g'%20x1='0'%20y1='0'%20x2='1'%20y2='1'%3E%3Cstop%20offset='0'%20stop-color='%236c7bff'/%3E%3Cstop%20offset='1'%20stop-color='%2322d3ee'/%3E%3C/linearGradient%3E%3C/defs%3E%3Cpath%20d='M20%202.5L35%2011V29L20%2037.5L5%2029V11Z'%20fill='none'%20stroke='url(%23g)'%20stroke-width='2.6'%20stroke-linejoin='round'/%3E%3Cpath%20d='M20%2013.5L12.5%2026.5H27.5Z'%20fill='none'%20stroke='url(%23g)'%20stroke-width='1.8'%20stroke-linejoin='round'/%3E%3Ccircle%20cx='20'%20cy='13.5'%20r='3'%20fill='url(%23g)'/%3E%3Ccircle%20cx='12.5'%20cy='26.5'%20r='3'%20fill='url(%23g)'/%3E%3Ccircle%20cx='27.5'%20cy='26.5'%20r='3'%20fill='url(%23g)'/%3E%3C/svg%3E" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2040%2040'%3E%3Cdefs%3E%3ClinearGradient%20id='g'%20x1='0'%20y1='0'%20x2='1'%20y2='1'%3E%3Cstop%20offset='0'%20stop-color='%236c7bff'/%3E%3Cstop%20offset='1'%20stop-color='%2322d3ee'/%3E%3C/linearGradient%3E%3C/defs%3E%3Cpath%20d='M20%202.5L35%2011V29L20%2037.5L5%2029V11Z'%20fill='none'%20stroke='url(%23g)'%20stroke-width='2.6'%20stroke-linejoin='round'/%3E%3Cpath%20d='M20%2013.5L12.5%2026.5H27.5Z'%20fill='none'%20stroke='url(%23g)'%20stroke-width='1.8'%20stroke-linejoin='round'/%3E%3Ccircle%20cx='20'%20cy='13.5'%20r='3'%20fill='url(%23g)'/%3E%3Ccircle%20cx='12.5'%20cy='26.5'%20r='3'%20fill='url(%23g)'/%3E%3Ccircle%20cx='27.5'%20cy='26.5'%20r='3'%20fill='url(%23g)'/%3E%3C/svg%3E" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=Unbounded:wght@500;700;900&family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
@@ -356,6 +356,105 @@ body::before {
     color: var(--l-faint);
 }
 
+.usage-section {
+    margin-top: 2.2rem;
+    padding-top: 1.6rem;
+    border-top: 1px solid var(--l-border);
+}
+
+.usage-title {
+    font-family: var(--font-disp);
+    font-weight: 700;
+    font-size: 1rem;
+    letter-spacing: -0.01em;
+    color: var(--l-text);
+    margin-bottom: 1rem;
+}
+
+.usage-cards {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 0.7rem;
+    margin-bottom: 1.2rem;
+}
+
+.usage-card {
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid var(--l-border);
+    border-radius: 11px;
+    padding: 0.8rem 1rem;
+}
+
+.usage-num {
+    font-family: var(--font-mono);
+    font-weight: 700;
+    font-size: 1.15rem;
+    color: var(--l-accent-2);
+    word-break: break-all;
+}
+
+.usage-label {
+    font-size: 0.72rem;
+    color: var(--l-muted);
+    margin-top: 0.2rem;
+    letter-spacing: 0.03em;
+}
+
+.usage-models {
+    margin-top: 0.4rem;
+}
+
+.usage-models h3 {
+    font-size: 0.8rem;
+    font-weight: 700;
+    color: var(--l-muted);
+    margin-bottom: 0.5rem;
+    letter-spacing: 0.04em;
+}
+
+.usage-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.78rem;
+}
+
+.usage-table th,
+.usage-table td {
+    text-align: left;
+    padding: 0.4rem 0.5rem;
+    border-bottom: 1px solid var(--l-border);
+    color: var(--l-muted);
+}
+
+.usage-table th {
+    color: var(--l-faint);
+    font-weight: 600;
+    font-size: 0.7rem;
+    letter-spacing: 0.04em;
+}
+
+.usage-table td:first-child {
+    color: var(--l-text);
+    font-family: var(--font-mono);
+    word-break: break-all;
+}
+
+.usage-table td:last-child,
+.usage-table th:last-child {
+    text-align: right;
+}
+
+.usage-loading,
+.usage-error {
+    font-size: 0.85rem;
+    color: var(--l-muted);
+    padding: 0.4rem 0;
+}
+
+.usage-error {
+    color: var(--l-red);
+}
+
 .footer-link a {
     color: var(--l-muted);
     text-decoration: none;
@@ -455,6 +554,11 @@ body::before {
 
     <button class="btn btn-primary" type="button" id="btn-save">Add Tokens</button>
 
+    <div class="usage-section">
+        <h2 class="usage-title">Usage</h2>
+        <div id="usage-stats" class="usage-loading">Loading...</div>
+    </div>
+
     <div class="footer-link">
         <a href="/health" target="_blank">Health</a> &middot;
         <a href="/v1/models" target="_blank">Models</a> &middot;
@@ -471,6 +575,49 @@ body::before {
     var statusEl = document.getElementById("status");
     var dsInput = document.getElementById("deepseek-tokens");
     var qwInput = document.getElementById("qwen-tokens");
+    var usageEl = document.getElementById("usage-stats");
+
+    function fmt(n) {
+        return (n || 0).toLocaleString("en-US");
+    }
+
+    function renderUsage(data) {
+        var totals = data.totals || {};
+        var byModel = data.by_model || {};
+        var html = '<div class="usage-cards">';
+        html += '<div class="usage-card"><div class="usage-num">' + fmt(totals.requests) + '</div><div class="usage-label">Requests</div></div>';
+        html += '<div class="usage-card"><div class="usage-num">' + fmt(totals.prompt_tokens) + '</div><div class="usage-label">Prompt tokens</div></div>';
+        html += '<div class="usage-card"><div class="usage-num">' + fmt(totals.completion_tokens) + '</div><div class="usage-label">Completion tokens</div></div>';
+        html += '<div class="usage-card"><div class="usage-num">' + fmt(totals.total_tokens) + '</div><div class="usage-label">Total tokens</div></div>';
+        html += '</div>';
+        var models = Object.keys(byModel);
+        if (models.length) {
+            html += '<div class="usage-models"><h3>By model</h3><table class="usage-table"><thead><tr><th>Model</th><th>Requests</th><th>Tokens</th></tr></thead><tbody>';
+            models.sort();
+            for (var i = 0; i < models.length; i++) {
+                var m = byModel[models[i]] || {};
+                html += '<tr><td>' + models[i] + '</td><td>' + fmt(m.requests) + '</td><td>' + fmt(m.total_tokens) + '</td></tr>';
+            }
+            html += '</tbody></table></div>';
+        }
+        usageEl.className = "usage-stats";
+        usageEl.innerHTML = html;
+    }
+
+    function loadUsage() {
+        fetch(BASE + "/v1/usage")
+            .then(function (r) {
+                if (!r.ok) throw new Error("HTTP " + r.status);
+                return r.json();
+            })
+            .then(renderUsage)
+            .catch(function (e) {
+                usageEl.className = "usage-error";
+                usageEl.textContent = "Usage unavailable: " + e.message;
+            });
+    }
+
+    loadUsage();
 
     function showStatus(msg, type) {
         statusEl.textContent = msg;

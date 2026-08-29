@@ -58,6 +58,13 @@ GROUPS = [
         ],
     ),
     (
+        "Usage",
+        [
+            ("DANYAPI_USAGE_ENABLED", "Enable usage tracking / token counter stats (1/0)", "flag"),
+            ("DANYAPI_USAGE_MAX_RECORDS", "Max recent usage records kept for /v1/usage", "int"),
+        ],
+    ),
+    (
         "Logging",
         [
             ("DANYAPI_LOG_LEVEL", "Log level (DEBUG/INFO/WARNING/ERROR)", "level"),

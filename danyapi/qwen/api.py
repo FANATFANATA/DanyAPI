@@ -14,6 +14,7 @@ from .. import tools as toolemu
 from ..accounts import account_lock
 from ..config import settings
 from ..deepseek.stream import IncrementalSSE
+from ..usage import record_usage
 from .client import QwenClient, QwenError
 from .stream import QwenStreamReconstructor, error_code
 
@@ -231,6 +232,7 @@ async def collect_non_stream(
     tools=None,
     tool_choice=None,
     response_format=None,
+    user=None,
 ):
     await _human_delay()
     async with account_lock(lock, settings.acquire_timeout):
@@ -325,6 +327,15 @@ async def collect_non_stream(
             raise HTTPException(400, "context length exceeded: conversation too long, start a new conversation")
         usage = _accumulate_usage(session, rec)
         account.sessions.touch_last_message(session_key, rec.response_id)
+        record_usage(
+            "qwen",
+            model,
+            usage["prompt_tokens"],
+            usage["completion_tokens"],
+            usage["total_tokens"],
+            user=user,
+            session_id=session_key,
+        )
 
         if not rec.has_content and rec.error:
             raise HTTPException(_error_status(error_code(rec.error)), _error_body(rec))
@@ -380,6 +391,7 @@ async def stream_openai(
     tools=None,
     tool_choice=None,
     response_format=None,
+    user=None,
 ):
     chunk_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
@@ -652,6 +664,15 @@ async def stream_openai(
             return
         usage = _accumulate_usage(session, rec)
         account.sessions.touch_last_message(session_key, rec.response_id)
+        record_usage(
+            "qwen",
+            model,
+            usage["prompt_tokens"],
+            usage["completion_tokens"],
+            usage["total_tokens"],
+            user=user,
+            session_id=session_key,
+        )
 
         if not rec.has_content and rec.error:
             err = rec.error
@@ -780,6 +801,7 @@ async def collect_image(
     model,
     model_id,
     context_seq: tuple[str, ...] | None = None,
+    user=None,
 ):
     await _human_delay()
     async with account_lock(lock, settings.acquire_timeout):
@@ -854,6 +876,15 @@ async def collect_image(
             raise HTTPException(400, "context length exceeded: conversation too long, start a new conversation")
         usage = _accumulate_usage(session, rec)
         account.sessions.touch_last_message(session_key, rec.response_id)
+        record_usage(
+            "qwen",
+            model,
+            usage["prompt_tokens"],
+            usage["completion_tokens"],
+            usage["total_tokens"],
+            user=user,
+            session_id=session_key,
+        )
 
         if not rec.has_content and rec.error:
             raise HTTPException(_error_status(error_code(rec.error)), _error_body(rec))
@@ -875,6 +906,7 @@ async def stream_image(
     model,
     model_id,
     context_seq: tuple[str, ...] | None = None,
+    user=None,
 ):
     chunk_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
@@ -1100,8 +1132,17 @@ async def stream_image(
             )
             yield "data: [DONE]\n\n"
             return
-        _accumulate_usage(session, rec)
+        usage = _accumulate_usage(session, rec)
         account.sessions.touch_last_message(session_key, rec.response_id)
+        record_usage(
+            "qwen",
+            model,
+            usage["prompt_tokens"],
+            usage["completion_tokens"],
+            usage["total_tokens"],
+            user=user,
+            session_id=session_key,
+        )
 
         if not rec.has_content and rec.error:
             err = rec.error

@@ -8,6 +8,15 @@ OpenAI-compatible HTTP API built on Python + FastAPI. Instead of the paid APIs i
 [![Docker](https://img.shields.io/badge/GHCR-ghcr.io%2Ffanatfanata%2Fdanyapi-blue)](https://github.com/FANATFANATA/DanyAPI/pkgs/container/danyapi)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/FANATFANATA/DanyAPI/blob/main/LICENSE)
 
+## Public hosted instance (full free)
+
+Don't want to self-host? A public, fully free instance is already running in production - no signup, no keys, no limits on your side:
+
+- API base URL: `https://danyapi.cloudpub.ru/v1/`
+- Landing page: `https://danyapi.cloudpub.ru/`
+
+Point any OpenAI-compatible client at `https://danyapi.cloudpub.ru/v1/` with a dummy `api_key` and it just works. The instance is backed by the same free provider tokens described below; treat it as best-effort.
+
 ## Install & Upgrade
 
 Requires Python 3.10+ (CI tests 3.10-3.14).

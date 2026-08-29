@@ -30,6 +30,8 @@ from ..qwen import api as qwen_api
 from ..qwen.accounts import QwenAccount
 from ..qwen.client import QwenClient, QwenError
 from ..store import JsonStore
+from ..tokens import estimate_tokens
+from ..usage import init_tracker, record_usage
 
 log = logging.getLogger("danyapi.api")
 
@@ -199,6 +201,10 @@ async def lifespan(app: FastAPI):
     qwen_context_store = JsonStore("qwen-contexts", "default" if cache_enabled else None)
     deepseek_affinity_store = JsonStore("deepseek-affinities", "default" if cache_enabled else None)
     qwen_affinity_store = JsonStore("qwen-affinities", "default" if cache_enabled else None)
+    if settings.usage_enabled:
+        app.state.usage = init_tracker(store=JsonStore("usage", "default"), max_records=settings.usage_max_records)
+    else:
+        app.state.usage = None
     try:
         if settings.deepseek_tokens:
             for i, token in enumerate(settings.deepseek_tokens):
@@ -692,6 +698,16 @@ def _pool_stats(pool) -> dict | None:
         return None
 
 
+def _usage_summary() -> dict | None:
+    tracker = getattr(app.state, "usage", None)
+    if tracker is None:
+        return None
+    try:
+        return tracker.snapshot()["totals"]
+    except Exception:
+        return None
+
+
 @app.get("/health")
 async def health() -> dict:
     pool = getattr(app.state, "pool", None)
@@ -702,7 +718,16 @@ async def health() -> dict:
         "qwen": qwen_pool is not None,
         "deepseek_stats": _pool_stats(pool),
         "qwen_stats": _pool_stats(qwen_pool),
+        "usage": _usage_summary(),
     }
+
+
+@app.get("/v1/usage")
+async def usage_stats() -> dict:
+    tracker = getattr(app.state, "usage", None)
+    if tracker is None:
+        raise HTTPException(404, "usage tracking is disabled")
+    return tracker.snapshot()
 
 
 @app.get("/v1/models")
@@ -801,6 +826,7 @@ async def image_generations(req: ImageGenerationRequest) -> dict:
             prompt=req.prompt,
             model=req.model,
             model_id=req.model,
+            user=req.user,
         )
     except AccountPoolBusy:
         raise HTTPException(429, "all accounts are busy, try again later") from None
@@ -855,9 +881,10 @@ def _include_usage(req: ChatCompletionRequest) -> bool:
     return bool(opts.get("include_usage"))
 
 
-def _deepseek_usage(total: int) -> dict:
+def _deepseek_usage(total: int, prompt: str = "") -> dict:
     value = max(0, int(total or 0))
-    return {"prompt_tokens": 0, "completion_tokens": value, "total_tokens": value}
+    prompt_tokens = estimate_tokens(prompt)
+    return {"prompt_tokens": prompt_tokens, "completion_tokens": value, "total_tokens": prompt_tokens + value}
 
 
 def _advance_session_usage(session, accumulated_total: int) -> int:
@@ -977,6 +1004,7 @@ async def _chat_completions_deepseek(req: ChatCompletionRequest) -> Any:
         "tools": getattr(req, "tools", None),
         "tool_choice": getattr(req, "tool_choice", None),
         "response_format": getattr(req, "response_format", None),
+        "user": getattr(req, "user", None),
     }
     if req.stream:
         return StreamingResponse(
@@ -1037,6 +1065,7 @@ async def _chat_completions_qwen(req: ChatCompletionRequest) -> Any:
         "tools": getattr(req, "tools", None),
         "tool_choice": getattr(req, "tool_choice", None),
         "response_format": getattr(req, "response_format", None),
+        "user": getattr(req, "user", None),
     }
     if req.stream:
         return StreamingResponse(
@@ -1477,6 +1506,7 @@ async def _collect_non_stream(
     tools=None,
     tool_choice=None,
     response_format=None,
+    user=None,
 ):
     await _human_delay()
     async with account_lock(lock, settings.acquire_timeout):
@@ -1627,12 +1657,22 @@ async def _collect_non_stream(
         if not (content or reasoning) and rec.hint_error:
             raise HTTPException(429, _busy_error_body(rec))
         request_tokens = _advance_session_usage(session, rec.accumulated_tokens)
+        usage = _deepseek_usage(request_tokens, prompt)
         account.sessions.touch_last_message(session_key, rec.id or response_message_id)
+        record_usage(
+            "deepseek",
+            model,
+            usage["prompt_tokens"],
+            usage["completion_tokens"],
+            usage["total_tokens"],
+            user=user,
+            session_id=session_key,
+        )
         log.info("deepseek completion success (%.0fms)", (time.monotonic() - started) * 1000)
         message, finish = _build_assistant_message(content, reasoning, tool_mode, tool_schemas)
         if finish == "stop":
             finish = _finish_reason(rec.status)
-        response = _build_completion_response(model, message, finish, _deepseek_usage(request_tokens), session_key)
+        response = _build_completion_response(model, message, finish, usage, session_key)
         if reduced_notice is not None:
             log.warning("deepseek response delivered from reduced context (%s)", model)
             response["error"] = {"message": reduced_notice, "finish_reason": RESPONSE_INCOMPLETE}
@@ -1660,6 +1700,7 @@ async def _stream_openai(
     tools=None,
     tool_choice=None,
     response_format=None,
+    user=None,
 ):
     chunk_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
@@ -1933,7 +1974,17 @@ async def _stream_openai(
             return
 
         request_tokens = _advance_session_usage(session, rec.accumulated_tokens)
+        usage = _deepseek_usage(request_tokens, prompt)
         account.sessions.touch_last_message(session_key, rec.id or response_message_id)
+        record_usage(
+            "deepseek",
+            model,
+            usage["prompt_tokens"],
+            usage["completion_tokens"],
+            usage["total_tokens"],
+            user=user,
+            session_id=session_key,
+        )
         log.info("deepseek completion success (%.0fms)", (time.monotonic() - started) * 1000)
 
         if tool_mode:
@@ -2020,7 +2071,7 @@ async def _stream_openai(
                     "created": created,
                     "model": model,
                     "choices": [],
-                    "usage": _deepseek_usage(request_tokens),
+                    "usage": usage,
                 }
             )
         yield _sse(
