@@ -1281,6 +1281,8 @@ def _xml_value(raw: str, json_type: Any) -> Any:
             return _loads_lenient(stripped)
         except ValueError:
             pass
+    if json_type == "string":
+        return _unescape_xml(stripped)
     if _XML_NESTED_RE.search(stripped):
         nested = _xml_invoke_arguments(stripped, None, False)
         if nested is not None:
@@ -1306,7 +1308,7 @@ def _xml_invoke_arguments(body: str, param_types: dict[str, Any] | None = None, 
         return params
     for match in _XML_ELEMENT.finditer(body):
         key = match.group(1).strip()
-        if key.lower() in _XML_SKIP_ELEMENTS:
+        if key.lower() in _XML_SKIP_ELEMENTS or key.lower() in _XML_HTML_TAGS:
             continue
         _xml_set_param(params, key, _xml_value(match.group(3), (param_types or {}).get(key)))
     if params:
