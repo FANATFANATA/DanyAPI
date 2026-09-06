@@ -13,7 +13,9 @@ def main() -> None:
         )
         sys.exit(1)
     from danyapi.config import settings
-    from danyapi.logging import uvicorn_log_config
+    from danyapi.logging import log_startup_info, uvicorn_log_config
+
+    log_startup_info()
 
     uvicorn.run(
         "danyapi.api.openai:app",

@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 
 import httpx
 
+from ..config import settings
+
 log = logging.getLogger("danyapi.deepseek")
 
 BASE_URL = "https://chat.deepseek.com"
@@ -48,6 +50,7 @@ class DeepSeekClient:
         token: str | None = None,
         device_id: str | None = None,
         timeout: float = 60.0,
+        proxy: str | None = None,
     ) -> None:
         self.token = token
         self.device_id = device_id or new_device_id()
@@ -65,6 +68,7 @@ class DeepSeekClient:
             headers=headers,
             timeout=httpx.Timeout(timeout),
             follow_redirects=True,
+            proxy=proxy or settings.proxy,
         )
 
     async def aclose(self) -> None:
@@ -101,6 +105,9 @@ class DeepSeekClient:
                 params={"did": self.device_id, "scope": "main"},
             )
             return resp.json().get("code") == 0
+        except (httpx.ConnectError, httpx.ProxyError, httpx.TimeoutException) as exc:
+            log.error("upstream connection failed (%s): check network/proxy settings", exc)
+            return False
         except (httpx.HTTPError, ValueError):
             return False
 

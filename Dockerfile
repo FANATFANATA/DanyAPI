@@ -8,12 +8,13 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY danyapi ./danyapi
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends gcc libc6-dev nodejs \
+    && apt-get install -y --no-install-recommends gcc libc6-dev nodejs curl \
     && gcc -O3 -pthread -funroll-loops -flto -fomit-frame-pointer -o danyapi/deepseek/pow_solver danyapi/deepseek/pow_solver.c \
     && apt-get purge -y gcc libc6-dev \
     && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
 
+ENV PYTHONUNBUFFERED=1
 ENV DANYAPI_HOST=0.0.0.0
 ENV DANYAPI_PORT=8000
 

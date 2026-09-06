@@ -42,9 +42,10 @@ def main() -> None:
     import uvicorn
 
     from danyapi.config import settings
-    from danyapi.logging import uvicorn_log_config
+    from danyapi.logging import log_startup_info, uvicorn_log_config
 
     print(f"DanyAPI starting on {settings.host}:{settings.port}")
+    log_startup_info()
     uvicorn.run(
         "danyapi.api.openai:app",
         host=settings.host,

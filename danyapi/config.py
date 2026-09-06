@@ -45,8 +45,10 @@ def _env_str(key: str, default: str = "") -> str:
 
 class Settings:
     def __init__(self) -> None:
-        self.host = os.environ.get("DANYAPI_HOST", "0.0.0.0")
-        self.port = _env_int("DANYAPI_PORT", 8000)
+        self.host = _env_str("DANYAPI_HOST") or _env_str("HOST") or "0.0.0.0"
+        self.port = _env_int("DANYAPI_PORT", 0) or _env_int("PORT", 0) or 8000
+        self.proxy = _env_str("DANYAPI_PROXY") or _env_str("PROXY") or None
+        self.api_key = _env_str("DANYAPI_API_KEY") or _env_str("API_KEY") or None
         tokens = [t.strip() for t in os.environ.get("DEEPSEEK_TOKENS", "").split(",") if t.strip()]
         self.deepseek_tokens = tokens
         qwen_tokens = [t.strip() for t in os.environ.get("QWEN_TOKENS", "").split(",") if t.strip()]
@@ -55,8 +57,8 @@ class Settings:
         self.acquire_timeout = _env_float_opt("DANYAPI_ACQUIRE_TIMEOUT")
         self.session_cache_size = _env_int("DANYAPI_SESSION_CACHE_SIZE", 128)
         self.session_ttl = _env_float("DANYAPI_SESSION_TTL_SECONDS", 3600.0)
-        self.log_level = _env_str("DANYAPI_LOG_LEVEL", "INFO") or "INFO"
-        self.log_file = _env_str("DANYAPI_LOG_FILE")
+        self.log_level = _env_str("DANYAPI_LOG_LEVEL") or _env_str("LOG_LEVEL") or "INFO"
+        self.log_file = _env_str("DANYAPI_LOG_FILE") or _env_str("LOG_FILE")
         self.log_max_bytes = _env_int("DANYAPI_LOG_MAX_BYTES", 10 * 1024 * 1024)
         self.log_backup_count = _env_int("DANYAPI_LOG_BACKUP_COUNT", 3)
         self.cache_dir = _env_str("DANYAPI_CACHE_DIR")

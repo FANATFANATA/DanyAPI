@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 
 import httpx
 
+from ..config import settings
+
 log = logging.getLogger("danyapi.qwen")
 
 BASE_URL = "https://chat.qwen.ai"
@@ -62,6 +64,7 @@ class QwenClient:
         self,
         token: str | None = None,
         timeout: float = 60.0,
+        proxy: str | None = None,
     ) -> None:
         self.token = token
         headers = {
@@ -75,6 +78,7 @@ class QwenClient:
             headers=headers,
             timeout=httpx.Timeout(timeout),
             follow_redirects=True,
+            proxy=proxy or settings.proxy,
         )
         if token:
             self.http.cookies.set("token", token, domain="chat.qwen.ai", path="/")
@@ -132,6 +136,9 @@ class QwenClient:
             if isinstance(nested, dict) and nested.get("id"):
                 return True
             return bool(payload.get("id"))
+        except (httpx.ConnectError, httpx.ProxyError, httpx.TimeoutException) as exc:
+            log.error("upstream connection failed (%s): check network/proxy settings", exc)
+            return False
         except (httpx.HTTPError, ValueError):
             return False
 

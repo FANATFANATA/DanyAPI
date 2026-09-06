@@ -1,0 +1,15 @@
+services:
+  danyapi:
+    # you can build from source: docker compose up --build
+    build: .
+    # or comment above out, and load latest from repo.
+    # image: ghcr.io/fanatfanata/danyapi:latest
+    container_name: danyapi
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./.env
+    volumes:
+      #- ./web:/app/web:ro
+      - /etc/localtime:/etc/localtime:ro

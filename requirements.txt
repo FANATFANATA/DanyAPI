@@ -1,6 +1,6 @@
 fastapi
 uvicorn
-httpx
+httpx[socks]
 pydantic
 python-dotenv
 pillow

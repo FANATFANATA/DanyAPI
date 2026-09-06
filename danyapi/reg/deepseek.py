@@ -7,6 +7,7 @@ import uuid
 
 import httpx
 
+from ..config import settings
 from ..pow import solve_challenge
 
 log = logging.getLogger("danyapi.reg.deepseek")
@@ -75,13 +76,20 @@ def guest_pow_header(salt: str, answer: int) -> dict[str, str]:
 
 
 class DeepSeekRegistrar:
-    def __init__(self, device_id: str | None = None, timeout: float = 60.0, waf_token: str | None = None) -> None:
+    def __init__(
+        self,
+        device_id: str | None = None,
+        timeout: float = 60.0,
+        waf_token: str | None = None,
+        proxy: str | None = None,
+    ) -> None:
         self.device_id = device_id or new_device_id()
         self.http = httpx.AsyncClient(
             base_url=BASE_URL,
             headers={"User-Agent": USER_AGENT, **CLIENT_HEADERS},
             timeout=httpx.Timeout(timeout),
             follow_redirects=True,
+            proxy=proxy or settings.proxy,
         )
         if waf_token:
             self.http.cookies.set("aws-waf-token", waf_token, domain="chat.deepseek.com", path="/")

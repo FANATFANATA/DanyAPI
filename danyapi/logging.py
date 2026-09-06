@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import logging
 import re
 import sys
@@ -156,7 +157,7 @@ def configure() -> None:
     root.setLevel(level)
 
     if not _has_handler(root, CONSOLE_HANDLER_NAME):
-        console = logging.StreamHandler()
+        console = logging.StreamHandler(sys.stdout)
         console.name = CONSOLE_HANDLER_NAME
         console.setLevel(level)
         console.setFormatter(_ColorFormatter())
@@ -195,3 +196,97 @@ def uvicorn_log_config() -> dict:
             "uvicorn.access": {"handlers": [], "level": level, "propagate": True},
         },
     }
+
+
+IP_CHECK_ENDPOINTS = [
+    "https://ifconfig.me/ip",
+    "https://api.ipify.org",
+    "https://icanhazip.com",
+]
+
+
+def _is_valid_ip(text: str) -> bool:
+    try:
+        ipaddress.ip_address(text.strip())
+        return True
+    except ValueError:
+        return False
+
+
+def get_outgoing_ip(proxy: str | None = None, timeout: float = 4.0) -> tuple[str | None, str | None]:
+    proxy_url = proxy if (isinstance(proxy, str) and proxy.strip()) else None
+    last_err: str | None = None
+
+    # 1. Try httpx
+    try:
+        import httpx
+
+        with httpx.Client(proxy=proxy_url, timeout=timeout) as client:
+            for url in IP_CHECK_ENDPOINTS:
+                try:
+                    resp = client.get(url)
+                    if resp.status_code == 200:
+                        candidate = resp.text.strip()
+                        if candidate and _is_valid_ip(candidate):
+                            return candidate, None
+                except Exception as exc:
+                    last_err = f"{type(exc).__name__}: {exc}"
+                    continue
+    except Exception as exc:
+        last_err = f"{type(exc).__name__}: {exc}"
+
+    # 2. Fallback to curl if available
+    try:
+        import shutil
+        import subprocess
+
+        curl_path = shutil.which("curl")
+        if curl_path:
+            for url in IP_CHECK_ENDPOINTS:
+                cmd = [curl_path, "-s", "--max-time", str(int(timeout))]
+                if proxy_url:
+                    if proxy_url.startswith("socks5://") or proxy_url.startswith("socks5h://"):
+                        socks_addr = proxy_url.split("://", 1)[1]
+                        cmd.extend(["--socks5-hostname", socks_addr])
+                    else:
+                        cmd.extend(["-x", proxy_url])
+                cmd.append(url)
+                try:
+                    res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 1)
+                    candidate = res.stdout.strip()
+                    if res.returncode == 0 and candidate and _is_valid_ip(candidate):
+                        return candidate, None
+                except Exception:
+                    continue
+    except Exception:
+        pass
+
+    return None, last_err
+
+
+def log_startup_info() -> None:
+    from danyapi.config import settings
+
+    log = logging.getLogger("danyapi")
+
+    raw_proxy = getattr(settings, "proxy", None)
+    proxy = raw_proxy if (isinstance(raw_proxy, str) and raw_proxy.strip()) else None
+    proxy_desc = f"via proxy {proxy}" if proxy else "direct, no proxy"
+
+    try:
+        ip, err = get_outgoing_ip(proxy=proxy, timeout=4.0)
+        if ip:
+            log.info("outgoing IP: %s (%s)", ip, proxy_desc)
+        elif err:
+            log.warning("could not determine outgoing IP (%s): %s", proxy_desc, err)
+        else:
+            log.warning("could not determine outgoing IP (%s)", proxy_desc)
+    except Exception as exc:
+        log.warning("could not determine outgoing IP (%s): %s", proxy_desc, exc)
+
+    raw_api_key = getattr(settings, "api_key", None)
+    api_key = raw_api_key if (isinstance(raw_api_key, str) and raw_api_key.strip()) else None
+    if api_key:
+        log.info("authentication: Bearer token required")
+    else:
+        log.info("authentication: open (no API_KEY set)")

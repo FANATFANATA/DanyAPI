@@ -7,6 +7,7 @@ import json
 import logging
 import random
 import re
+import secrets
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -17,7 +18,7 @@ from typing import Any
 import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
@@ -125,7 +126,7 @@ class FileSpec(BaseModel):
 
 
 class ChatCompletionRequest(BaseModel):
-    model: str = Field(default="deepseek-v4-flash")
+    model: str | None = None
     messages: list[ChatMessage] = Field(default_factory=list)
     stream: bool = False
     temperature: float | None = None
@@ -271,6 +272,8 @@ async def lifespan(app: FastAPI):
             app.state.qwen_models = []
         if not accounts and not qwen_accounts:
             raise RuntimeError("no valid credentials: set DEEPSEEK_TOKENS or QWEN_TOKENS")
+        app.state.default_model = _determine_default_model(app)
+        log.info("default model: %s", app.state.default_model)
         yield
     finally:
         for ds_acct in accounts:
@@ -316,6 +319,22 @@ async def _fetch_qwen_models(client: QwenClient) -> list[dict]:
         log.warning("qwen models fetch returned nothing, using defaults")
         return QWEN_DEFAULT_MODELS
     return models
+
+
+def _determine_default_model(app_obj: FastAPI | None = None) -> str:
+    target = app_obj or app
+    pool = getattr(target.state, "pool", None)
+    qwen_pool = getattr(target.state, "qwen_pool", None)
+    qwen_models: list[dict] = getattr(target.state, "qwen_models", [])
+
+    if pool and pool.accounts:
+        return next(iter(MODEL_TYPE_BY_NAME), "deepseek-v4-flash")
+    if qwen_pool and qwen_pool.accounts and qwen_models:
+        chat_models = [m["id"] for m in qwen_models if m.get("model_type") == "chat"]
+        if chat_models:
+            return chat_models[0]
+        return qwen_models[0]["id"]
+    return "deepseek-v4-flash"
 
 
 app = FastAPI(title="DanyAPI", lifespan=lifespan)
@@ -490,6 +509,9 @@ async def add_tokens(tokens: dict) -> dict:
     _write_env_tokens(merged_ds, merged_qw)
     settings.deepseek_tokens = merged_ds
     settings.qwen_tokens = merged_qw
+    if added_ds or added_qw:
+        app.state.default_model = _determine_default_model(app)
+        log.info("default model updated: %s", app.state.default_model)
 
     parts = []
     if added_ds:
@@ -522,8 +544,11 @@ async def _extract_request_model(request: Request) -> str | None:
         return None
     if isinstance(payload, dict):
         model = payload.get("model")
-        if isinstance(model, str):
-            return model
+        if isinstance(model, str) and model.strip():
+            return model.strip()
+        default_m = getattr(app.state, "default_model", None)
+        if default_m:
+            return f"{default_m} (default)"
     return None
 
 
@@ -543,11 +568,13 @@ def _log_request_failure(request: Request, model: str | None, duration: float, s
     )
 
 
-def _log_request_success(request: Request, duration: float) -> None:
+def _log_request_success(request: Request, duration: float, model: str | None = None) -> None:
+    model_part = f"model={model} " if model else ""
     log.info(
-        "%s %s success (%.0fms)",
+        "%s %s %ssuccess (%.0fms)",
         request.method,
         request.url.path,
+        model_part,
         duration,
     )
 
@@ -573,8 +600,41 @@ async def _log_request_failures(request: Request, call_next):
             status=response.status_code,
         )
     elif request.url.path == "/v1/chat/completions":
-        _log_request_success(request, (time.monotonic() - started) * 1000)
+        _log_request_success(request, (time.monotonic() - started) * 1000, await _extract_request_model(request))
     return response
+
+
+PUBLIC_PATHS = {"/", "/favicon.ico", "/health"}
+
+
+@app.middleware("http")
+async def _authenticate_request(request: Request, call_next):
+    if settings.api_key and request.method != "OPTIONS":
+        path = request.url.path.rstrip("/") or "/"
+        if path not in PUBLIC_PATHS and not path.startswith("/docs"):
+            auth_header = request.headers.get("Authorization", "")
+            token = ""
+            if auth_header.startswith("Bearer "):
+                token = auth_header[7:].strip()
+            elif auth_header:
+                token = auth_header.strip()
+
+            if not token:
+                token = request.headers.get("x-api-key", "").strip()
+
+            if not token or not secrets.compare_digest(token, settings.api_key):
+                return JSONResponse(
+                    status_code=401,
+                    content={
+                        "error": {
+                            "message": "Incorrect API key provided or missing authorization token.",
+                            "type": "invalid_request_error",
+                            "param": None,
+                            "code": "invalid_api_key",
+                        }
+                    },
+                )
+    return await call_next(request)
 
 
 MAX_FILES_PER_REQUEST = 50
@@ -813,6 +873,8 @@ def _resolve_provider(model: str) -> str:
 
 @app.post("/v1/chat/completions")
 async def chat_completions(req: ChatCompletionRequest) -> Any:
+    if not req.model:
+        req.model = getattr(app.state, "default_model", "deepseek-v4-flash")
     provider = _resolve_provider(req.model)
     if provider == "qwen":
         return await _chat_completions_qwen(req)
@@ -850,7 +912,7 @@ async def image_generations(req: ImageGenerationRequest) -> dict:
             data.append({"url": url})
             continue
         try:
-            async with httpx.AsyncClient(follow_redirects=True, timeout=30) as hc:
+            async with httpx.AsyncClient(follow_redirects=True, timeout=30, proxy=settings.proxy) as hc:
                 img_resp = await hc.get(url)
             if img_resp.status_code != 200:
                 log.warning("image download failed (%s) for %s, returning url", img_resp.status_code, url)
