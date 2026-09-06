@@ -12,11 +12,13 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from email import policy
+from email.parser import BytesParser
 from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -136,6 +138,7 @@ class ChatCompletionRequest(BaseModel):
     session_id: str | None = None
     user: str | None = None
     files: list[FileSpec] | None = None
+    file_ids: list[str] | None = None
     tools: list[Any] | None = None
     tool_choice: Any = None
     parallel_tool_calls: bool | None = None
@@ -552,10 +555,19 @@ async def _extract_request_model(request: Request) -> str | None:
     return None
 
 
-def _log_request_failure(request: Request, model: str | None, duration: float, status: int | None = None, exc: Exception | None = None) -> None:
+def _log_request_failure(
+    request: Request,
+    model: str | None,
+    duration: float,
+    status: int | None = None,
+    exc: Exception | None = None,
+    detail: str | None = None,
+) -> None:
     model_part = f"model={model}" if model else "model=?"
     if status is not None:
         reason = f"status={status}"
+        if detail:
+            reason += f" detail={detail}"
     else:
         reason = f"error={str(exc) if exc else 'unknown'}"
     log.warning(
@@ -590,14 +602,17 @@ async def _log_request_failures(request: Request, call_next):
             await _extract_request_model(request),
             (time.monotonic() - started) * 1000,
             exc=exc,
+            detail=getattr(exc, "detail", None),
         )
         raise
     if response.status_code >= 400:
+        detail = getattr(getattr(request, "state", None), "error_detail", None)
         _log_request_failure(
             request,
             await _extract_request_model(request),
             (time.monotonic() - started) * 1000,
             status=response.status_code,
+            detail=detail,
         )
     elif request.url.path == "/v1/chat/completions":
         _log_request_success(request, (time.monotonic() - started) * 1000, await _extract_request_model(request))
@@ -635,6 +650,138 @@ async def _authenticate_request(request: Request, call_next):
                     },
                 )
     return await call_next(request)
+
+
+class FileStagingManager:
+    """Tracks uploaded file IDs staged for automatic attachment to chat completions."""
+
+    def __init__(self, ttl: float = 3600.0) -> None:
+        self._lock = asyncio.Lock()
+        self._by_session: dict[str, list[dict]] = {}
+        self._by_client: dict[str, list[dict]] = {}
+        self._ttl = max(0.0, ttl)
+
+    async def stage(self, file_record: dict, session_id: str | None = None, client_key: str | None = None) -> None:
+        now = time.monotonic()
+        record = dict(file_record)
+        record["staged_at"] = now
+        async with self._lock:
+            if session_id:
+                self._by_session.setdefault(session_id, []).append(record)
+            elif client_key:
+                self._by_client.setdefault(client_key, []).append(record)
+
+    async def consume_records(self, session_id: str | None = None, client_key: str | None = None) -> list[dict]:
+        now = time.monotonic()
+        records_out: list[dict] = []
+        async with self._lock:
+            if session_id and session_id in self._by_session:
+                records = self._by_session.pop(session_id, [])
+                for r in records:
+                    if self._ttl <= 0 or (now - r.get("staged_at", now) < self._ttl):
+                        records_out.append(r)
+            if client_key and client_key in self._by_client:
+                records = self._by_client.pop(client_key, [])
+                for r in records:
+                    if self._ttl <= 0 or (now - r.get("staged_at", now) < self._ttl):
+                        records_out.append(r)
+        return records_out
+
+    async def consume(self, session_id: str | None = None, client_key: str | None = None) -> list[str]:
+        records = await self.consume_records(session_id=session_id, client_key=client_key)
+        return [r["id"] for r in records if "id" in r]
+
+
+file_staging = FileStagingManager(ttl=getattr(settings, "session_ttl", 3600.0) or 3600.0)
+
+
+def _get_client_key(request: Request | None) -> str:
+    if request is None:
+        return "default"
+    auth = request.headers.get("authorization", "")
+    if auth.startswith("Bearer "):
+        token = auth[7:].strip()
+        if token:
+            return f"auth:{hashlib.sha256(token.encode()).hexdigest()[:16]}"
+    if request.client and request.client.host:
+        return f"ip:{request.client.host}"
+    return "default"
+
+
+async def _extract_file_upload(request: Request) -> tuple[bytes, str, str, str | None, str, str | None]:
+    content_type_header = request.headers.get("content-type", "")
+
+    if "application/json" in content_type_header:
+        body = await request.json()
+        raw_b64 = body.get("file") or body.get("content")
+        if not raw_b64:
+            raise HTTPException(400, "JSON file upload missing 'file' or 'content' base64 field")
+        try:
+            data = base64.b64decode(raw_b64)
+        except Exception as exc:
+            raise HTTPException(400, f"Invalid base64 payload: {exc}") from exc
+        filename = body.get("filename") or body.get("name") or "upload.bin"
+        ctype = body.get("content_type") or "application/octet-stream"
+        session_id = body.get("session_id")
+        purpose = body.get("purpose") or "assistants"
+        model = body.get("model")
+        return data, filename, ctype, session_id, purpose, model
+
+    if "multipart/form-data" in content_type_header:
+        data = None
+        filename = "upload.bin"
+        ctype = "application/octet-stream"
+        session_id = None
+        purpose = "assistants"
+        model = None
+        try:
+            form = await request.form()
+            file_field = form.get("file")
+            if file_field is not None and hasattr(file_field, "read"):
+                data = await file_field.read()
+                filename = getattr(file_field, "filename", "upload.bin") or "upload.bin"
+                ctype = getattr(file_field, "content_type", "application/octet-stream") or "application/octet-stream"
+            session_id = form.get("session_id")
+            purpose = form.get("purpose", "assistants")
+            model = form.get("model")
+        except Exception:
+            body_bytes = await request.body()
+            msg = BytesParser(policy=policy.default).parsebytes(
+                b"Content-Type: " + content_type_header.encode("latin1", "replace") + b"\r\n\r\n" + body_bytes
+            )
+            for part in msg.iter_parts():
+                cd = part.get_param("name", header="content-disposition")
+                if cd == "file":
+                    data = part.get_payload(decode=True)
+                    fn = part.get_filename()
+                    if fn:
+                        filename = fn
+                    ct = part.get_content_type()
+                    if ct and ct != "application/octet-stream":
+                        ctype = ct
+                elif cd == "session_id":
+                    val = part.get_payload(decode=True)
+                    session_id = val.decode("utf-8", errors="replace").strip() if val else None
+                elif cd == "purpose":
+                    val = part.get_payload(decode=True)
+                    purpose = val.decode("utf-8", errors="replace").strip() if val else "assistants"
+                elif cd == "model":
+                    val = part.get_payload(decode=True)
+                    model = val.decode("utf-8", errors="replace").strip() if val else None
+
+        if data is None:
+            raise HTTPException(400, "Multipart form missing 'file' field")
+        return data, filename, ctype, session_id, purpose, model
+
+    body_bytes = await request.body()
+    if not body_bytes:
+        raise HTTPException(400, "Empty request body")
+    filename = request.query_params.get("filename", "upload.bin")
+    ctype = request.headers.get("content-type", "application/octet-stream")
+    session_id = request.query_params.get("session_id")
+    purpose = request.query_params.get("purpose", "assistants")
+    model = request.query_params.get("model")
+    return body_bytes, filename, ctype, session_id, purpose, model
 
 
 MAX_FILES_PER_REQUEST = 50
@@ -705,6 +852,8 @@ def _validate_attachments(attachments: list[Attachment], model_type: str) -> Non
         raise HTTPException(400, "deepseek-v4-pro does not support file attachments")
     if model_type == "vision" and any(not att.is_image for att in attachments):
         raise HTTPException(400, "deepseek-v4-vision accepts images only")
+    if model_type == "default" and any(att.is_image for att in attachments):
+        raise HTTPException(400, "deepseek-v4-flash does not support image attachments; use deepseek-v4-vision")
 
 
 async def _fresh_pow_upload_headers(account) -> dict:
@@ -872,13 +1021,14 @@ def _resolve_provider(model: str) -> str:
 
 
 @app.post("/v1/chat/completions")
-async def chat_completions(req: ChatCompletionRequest) -> Any:
+async def chat_completions(req: ChatCompletionRequest, request: Request = None) -> Any:
+    user_specified_model = bool(req.model)
     if not req.model:
         req.model = getattr(app.state, "default_model", "deepseek-v4-flash")
     provider = _resolve_provider(req.model)
     if provider == "qwen":
         return await _chat_completions_qwen(req)
-    return await _chat_completions_deepseek(req)
+    return await _chat_completions_deepseek(req, request=request, user_specified_model=user_specified_model)
 
 
 @app.post("/v1/images/generations")
@@ -912,7 +1062,12 @@ async def image_generations(req: ImageGenerationRequest) -> dict:
             data.append({"url": url})
             continue
         try:
-            async with httpx.AsyncClient(follow_redirects=True, timeout=30, proxy=settings.proxy) as hc:
+            async with httpx.AsyncClient(
+                headers={"User-Agent": settings.user_agent},
+                follow_redirects=True,
+                timeout=30,
+                proxy=settings.proxy,
+            ) as hc:
                 img_resp = await hc.get(url)
             if img_resp.status_code != 200:
                 log.warning("image download failed (%s) for %s, returning url", img_resp.status_code, url)
@@ -932,6 +1087,257 @@ async def image_generations(req: ImageGenerationRequest) -> dict:
         "data": data,
         "usage": result.get("usage"),
         "session_id": result.get("session_id"),
+    }
+
+
+@app.post("/v1/files")
+async def upload_file_endpoint(request: Request) -> dict:
+    data, filename, ctype, session_id, purpose, model = await _extract_file_upload(request)
+
+    if len(data) > MAX_FILE_SIZE:
+        raise HTTPException(400, f"file {filename} exceeds {MAX_FILE_SIZE // (1024*1024)} MB limit")
+
+    pool: AccountPool = getattr(app.state, "pool", None)
+    if pool is None or not pool.healthy:
+        raise HTTPException(503, "deepseek provider is not configured or no healthy accounts available")
+
+    # Resolve account with session affinity if session_id is given
+    account = None
+    if session_id:
+        account = pool.account_for_session(session_id)
+    if account is None:
+        try:
+            account, _ = await pool.acquire(session_id)
+        except AccountPoolBusy:
+            raise HTTPException(429, "all accounts are busy, please retry shortly") from None
+        if session_id:
+            pool.register(account.index, session_id)
+
+    model_type = "vision" if ctype.startswith("image/") else "default"
+    if model:
+        resolved_type = MODEL_TYPE_BY_NAME.get(model)
+        if resolved_type:
+            model_type = resolved_type
+
+    pow_headers = await _fresh_pow_upload_headers(account)
+    try:
+        info = await account.client.upload_file(
+            data=data,
+            filename=filename,
+            content_type=ctype,
+            model_type=model_type,
+            thinking_enabled=False,
+            pow_headers=pow_headers,
+        )
+    except DeepSeekError as exc:
+        _handle_account_error(account, exc)
+        raise HTTPException(_deepseek_status(exc), f"file upload failed: {exc}") from exc
+
+    file_id = info.get("id")
+    if not file_id:
+        raise HTTPException(502, "file upload failed: no file id returned from DeepSeek")
+
+    is_image = ctype.startswith("image/") or filename.lower().endswith((".jpg", ".jpeg", ".png", ".webp", ".gif"))
+    client_key = _get_client_key(request)
+    file_record = {
+        "id": file_id,
+        "object": "file",
+        "bytes": len(data),
+        "created_at": int(time.time()),
+        "filename": filename,
+        "purpose": purpose,
+        "session_id": session_id,
+        "status": "processed",
+        "content_type": ctype,
+        "model_type": model_type,
+        "is_image": is_image,
+    }
+    await file_staging.stage(file_record, session_id=session_id, client_key=client_key)
+    log.info("uploaded and staged file %s (%s, %d bytes) for session=%s", file_id, filename, len(data), session_id)
+    return file_record
+
+
+@app.get("/v1/files/{file_id}")
+async def get_file_endpoint(file_id: str) -> dict:
+    pool: AccountPool = getattr(app.state, "pool", None)
+    if pool is None or not pool.healthy:
+        raise HTTPException(503, "deepseek provider is not configured or no healthy accounts available")
+
+    for acct in pool.healthy:
+        try:
+            files = await acct.client.fetch_files([file_id])
+            if files:
+                f = files[0]
+                return {
+                    "id": f.get("id", file_id),
+                    "object": "file",
+                    "bytes": f.get("file_size", 0),
+                    "created_at": f.get("created_at", int(time.time())),
+                    "filename": f.get("file_name", ""),
+                    "purpose": "assistants",
+                    "status": "processed",
+                    "raw": f,
+                }
+        except Exception:
+            continue
+    raise HTTPException(404, f"file {file_id} not found")
+
+
+@app.get("/v1/sessions")
+async def list_sessions(
+    account: int | None = None,
+    pinned: bool = False,
+    count: int = 20,
+) -> dict:
+    pool: AccountPool = getattr(app.state, "pool", None)
+    if pool is None or not pool.healthy:
+        raise HTTPException(503, "deepseek provider is not configured or no healthy accounts available")
+
+    target_accounts: list[Any] = []
+    if account is not None:
+        if 0 <= account < len(pool.accounts):
+            acct = pool.accounts[account]
+            if acct.broken:
+                raise HTTPException(400, f"Account #{account} is currently marked broken")
+            target_accounts = [acct]
+        else:
+            raise HTTPException(400, f"Invalid account index: {account}. Valid: 0..{len(pool.accounts)-1}")
+    else:
+        target_accounts = pool.healthy
+
+    count = max(1, min(count, 100))
+    all_sessions: list[dict] = []
+    for acct in target_accounts:
+        try:
+            items = await acct.client.fetch_page(pinned=pinned, count=count)
+            for item in items:
+                sid = item.get("id")
+                if sid:
+                    pool.register(acct.index, sid)
+                item["account_index"] = acct.index
+                all_sessions.append(item)
+        except Exception as exc:
+            log.warning("failed to fetch sessions for account #%d: %s", acct.index, exc)
+
+    return {
+        "object": "list",
+        "data": all_sessions,
+    }
+
+
+def _resolve_session_uuid(pool: AccountPool, session_id: str) -> str:
+    target_account = pool.account_for_session(session_id)
+    if target_account is not None:
+        sess = target_account.sessions.get(session_id)
+        if sess is not None and getattr(sess, "id", None):
+            return sess.id
+    for acct in pool.accounts:
+        sess = acct.sessions.get(session_id)
+        if sess is not None and getattr(sess, "id", None):
+            return sess.id
+    return session_id
+
+
+@app.get("/v1/sessions/{session_id}")
+async def get_session(session_id: str, account: int | None = None) -> dict:
+    pool: AccountPool = getattr(app.state, "pool", None)
+    if pool is None or not pool.healthy:
+        raise HTTPException(503, "deepseek provider is not configured or no healthy accounts available")
+
+    upstream_id = _resolve_session_uuid(pool, session_id)
+
+    target_account = None
+    if account is not None:
+        if 0 <= account < len(pool.accounts):
+            target_account = pool.accounts[account]
+        else:
+            raise HTTPException(400, f"Invalid account index: {account}")
+    else:
+        target_account = pool.account_for_session(session_id) or pool.account_for_session(upstream_id)
+
+    if target_account is not None and not target_account.broken:
+        try:
+            messages = await target_account.client.history_messages(upstream_id)
+            pool.register(target_account.index, session_id)
+            if upstream_id != session_id:
+                pool.register(target_account.index, upstream_id)
+            return {
+                "id": session_id,
+                "object": "chat.session",
+                "account_index": target_account.index,
+                "messages": messages,
+            }
+        except DeepSeekError as exc:
+            if exc.biz_code in (404, 40004):
+                pass
+            else:
+                raise HTTPException(_deepseek_status(exc), f"DeepSeek error: {exc}") from exc
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log.warning("failed to fetch session %s from account #%d: %s", session_id, target_account.index, exc)
+
+    # Search across healthy accounts
+    for acct in pool.healthy:
+        if target_account is not None and acct.index == target_account.index:
+            continue
+        try:
+            messages = await acct.client.history_messages(upstream_id)
+            pool.register(acct.index, session_id)
+            if upstream_id != session_id:
+                pool.register(acct.index, upstream_id)
+            return {
+                "id": session_id,
+                "object": "chat.session",
+                "account_index": acct.index,
+                "messages": messages,
+            }
+        except Exception:
+            continue
+
+    raise HTTPException(404, f"Session {session_id} not found")
+
+
+@app.delete("/v1/sessions/{session_id}")
+async def delete_session_endpoint(session_id: str, account: int | None = None) -> dict:
+    pool: AccountPool = getattr(app.state, "pool", None)
+    if pool is None or not pool.healthy:
+        raise HTTPException(503, "deepseek provider is not configured or no healthy accounts available")
+
+    upstream_id = _resolve_session_uuid(pool, session_id)
+
+    target_account = None
+    if account is not None and 0 <= account < len(pool.accounts):
+        target_account = pool.accounts[account]
+    else:
+        target_account = pool.account_for_session(session_id) or pool.account_for_session(upstream_id)
+
+    if target_account is None:
+        for acct in pool.healthy:
+            try:
+                msgs = await acct.client.history_messages(upstream_id)
+                if msgs is not None:
+                    target_account = acct
+                    break
+            except Exception:
+                continue
+
+    if target_account is None:
+        raise HTTPException(404, f"Session {session_id} not found")
+
+    try:
+        await target_account.client.delete_session(upstream_id)
+    except DeepSeekError as exc:
+        raise HTTPException(_deepseek_status(exc), f"Delete session failed: {exc}") from exc
+
+    target_account.sessions.forget(session_id)
+    target_account.sessions.forget(upstream_id)
+    pool.forget(session_id)
+    pool.forget(upstream_id)
+    return {
+        "id": session_id,
+        "object": "chat.session",
+        "deleted": True,
     }
 
 
@@ -1048,22 +1454,70 @@ async def _stream_guard(gen, model: str):
             yield line
 
 
-async def _chat_completions_deepseek(req: ChatCompletionRequest) -> Any:
+async def _chat_completions_deepseek(
+    req: ChatCompletionRequest,
+    request: Request | None = None,
+    user_specified_model: bool = True,
+) -> Any:
     pool: AccountPool = app.state.pool
     if pool is None:
         raise HTTPException(503, "deepseek provider is not configured")
+
+    account, existing_sid, context_seq, prompt, tool_mode = await _acquire_and_build(pool, req)
+
+    attachments = _collect_attachments(req)
+    client_key = _get_client_key(request)
+    staged_records = await file_staging.consume_records(session_id=existing_sid or req.session_id, client_key=client_key)
+
+    has_image = any(att.is_image for att in attachments) or any(
+        r.get("is_image") or r.get("model_type") == "vision" or str(r.get("filename", "")).lower().endswith((".jpg", ".jpeg", ".png", ".webp", ".gif"))
+        for r in staged_records
+    )
+
+    if not has_image and req.file_ids and not user_specified_model:
+        try:
+            file_meta = await account.client.fetch_files(req.file_ids[:5])
+            if any(f.get("is_image") or f.get("model_kind") == "VISION" for f in file_meta):
+                has_image = True
+        except Exception:
+            pass
+
+    default_model = getattr(app.state, "default_model", "deepseek-v4-flash")
+    if has_image and (not user_specified_model or req.model == default_model):
+        req.model = "deepseek-v4-vision"
+        log.info("auto-selected deepseek-v4-vision for image attachments (session=%s)", existing_sid or req.session_id)
 
     model_type = _resolve_model(req.model)
     thinking = req.thinking if req.thinking is not None else _is_reasoning_model(req.model)
     search = bool(req.search) and model_type == "default"
 
-    account, existing_sid, context_seq, prompt, tool_mode = await _acquire_and_build(pool, req)
-
-    attachments = _collect_attachments(req)
     _validate_attachments(attachments, model_type)
-    ref_file_ids = None
+    ref_file_ids_list: list[str] = []
+
+    # 1. Any explicitly passed file IDs
+    if req.file_ids:
+        ref_file_ids_list.extend(req.file_ids)
+
+    # 2. Any auto-staged files from POST /v1/files
+    for r in staged_records:
+        if "id" in r:
+            ref_file_ids_list.append(r["id"])
+
+    # 3. Any inline attachments uploaded on the fly
     if attachments:
-        ref_file_ids = await _upload_attachments(account, attachments, model_type, thinking)
+        inline_ids = await _upload_attachments(account, attachments, model_type, thinking)
+        ref_file_ids_list.extend(inline_ids)
+
+    ref_file_ids: list[str] | None = None
+    if ref_file_ids_list:
+        seen: set[str] = set()
+        deduped: list[str] = []
+        for fid in ref_file_ids_list:
+            if fid not in seen:
+                seen.add(fid)
+                deduped.append(fid)
+        ref_file_ids = deduped
+        log.info("attached %d file(s) to completion: %s", len(ref_file_ids), ref_file_ids)
 
     common = {
         "account": account,
@@ -1175,6 +1629,14 @@ async def _send_completion(
     search,
     ref_file_ids=None,
 ):
+    log.debug(
+        "deepseek completion request: session=%s parent=%s model_type=%s prompt_len=%d files=%s",
+        session_id,
+        parent_message_id,
+        model_type,
+        len(prompt),
+        ref_file_ids,
+    )
     try:
         resp = await client.completion(
             chat_session_id=session_id,
@@ -1194,28 +1656,37 @@ async def _send_completion(
     if resp.status_code != 200:
         body = await resp.aread()
         await resp.aclose()
-        raise HTTPException(resp.status_code, body[:500].decode("utf-8", errors="replace"))
+        err_msg = body[:500].decode("utf-8", errors="replace")
+        log.warning("deepseek upstream error (%s): %s", resp.status_code, err_msg)
+        raise HTTPException(resp.status_code, err_msg)
 
     content_type = resp.headers.get("content-type", "")
     if "text/event-stream" not in content_type:
         body = await resp.aread()
         await resp.aclose()
+        raw_body = body[:500].decode("utf-8", errors="replace")
         try:
             payload = json.loads(body)
         except json.JSONDecodeError as exc:
-            raise HTTPException(502, body[:500].decode("utf-8", errors="replace")) from exc
+            log.warning("deepseek non-stream non-json response (%s): %s", resp.status_code, raw_body)
+            raise HTTPException(502, raw_body) from exc
         data = payload.get("data") or {}
         if data.get("biz_code"):
             code = data["biz_code"]
+            msg = data.get("biz_msg") or ""
             status = 401 if code in DEEPSEEK_AUTH_ERROR_CODES else 502
-            raise HTTPException(status, f"DeepSeek error {code}: {data.get('biz_msg')}")
+            log.warning("deepseek upstream error %s: %s", code, msg)
+            raise HTTPException(status, f"DeepSeek error {code}: {msg}")
         if payload.get("code"):
             code = payload["code"]
+            msg = payload.get("msg") or payload.get("message") or ""
             status = 401 if code in DEEPSEEK_AUTH_ERROR_CODES else 502
+            log.warning("deepseek upstream error %s: %s", code, msg)
             raise HTTPException(
                 status,
-                f"DeepSeek error {code}: {payload.get('msg') or payload.get('message')}",
+                f"DeepSeek error {code}: {msg}",
             )
+        log.warning("deepseek unexpected non-stream response: %s", raw_body)
         raise HTTPException(502, "unexpected non-stream response")
     return resp
 
@@ -1227,6 +1698,27 @@ def _is_retryable_hint(rec: MessageReconstructor) -> bool:
 
 RETRYABLE_HTTP_STATUSES = {408, 425, 429, 500, 502, 503, 504}
 STALE_SESSION_STATUSES = {400, 404}
+DEEPSEEK_STALE_SESSION_CODES = {26, 40004, 40005, 40006, 40007, 40011, 40018}
+
+
+def _is_stale_session_error(exc: HTTPException) -> bool:
+    if exc.status_code in STALE_SESSION_STATUSES:
+        return True
+    detail = str(getattr(exc, "detail", "") or "").lower()
+    if any(phrase in detail for phrase in (
+        "invalid message id",
+        "chat session not found",
+        "parent message",
+        "message not found",
+        "session not found",
+        "session closed",
+        "session expired",
+    )):
+        return True
+    for code in DEEPSEEK_STALE_SESSION_CODES:
+        if f"error {code}:" in detail or f"error {code}" in detail or f"biz error {code}" in detail:
+            return True
+    return False
 
 
 def _retry_delay(attempt: int) -> float:
@@ -1627,7 +2119,7 @@ async def _collect_non_stream(
                         rec = MessageReconstructor()
                         rec.hint_error = input_hint
                         break
-                    if exc.status_code in STALE_SESSION_STATUSES and had_cached_session and not stale_rebuilt and messages is not None:
+                    if _is_stale_session_error(exc) and had_cached_session and not stale_rebuilt and messages is not None:
                         stale_rebuilt = True
                         _drop_session(pool, account, session_key)
                         try:
@@ -1635,7 +2127,7 @@ async def _collect_non_stream(
                             tool_schemas = toolemu.tool_schema_map(tools)
                         except (ValueError, TypeError, AttributeError) as build_exc:
                             raise exc from build_exc
-                        log.warning("deepseek session %s is stale (%s), rebuilt full history into a fresh chat", session_key, exc.status_code)
+                        log.warning("deepseek session %s is stale (%s - %s), rebuilt full history into a fresh chat", session_key, exc.status_code, exc.detail)
                         session, session_key, parent_message_id = await _prepare_session(account, pool, existing_sid, context_seq)
                         stop_message_id = None
                         response_message_id = None
@@ -1644,8 +2136,9 @@ async def _collect_non_stream(
                         attempt += 1
                         delay = _retry_delay(attempt)
                         log.warning(
-                            "deepseek provider error (%s), retry %d/%d in %.1fs",
+                            "deepseek provider error (%s - %s), retry %d/%d in %.1fs",
                             exc.status_code,
+                            exc.detail,
                             attempt,
                             MAX_RETRIES,
                             delay,
@@ -1708,7 +2201,8 @@ async def _collect_non_stream(
             raise HTTPException(429, _busy_error_body(rec))
         request_tokens = _advance_session_usage(session, rec.accumulated_tokens)
         usage = _deepseek_usage(request_tokens, prompt)
-        account.sessions.touch_last_message(session_key, rec.id or response_message_id)
+        if content or reasoning:
+            account.sessions.touch_last_message(session_key, rec.id or response_message_id)
         record_usage(
             "deepseek",
             model,
@@ -1801,7 +2295,7 @@ async def _stream_openai(
                     rec = MessageReconstructor()
                     rec.hint_error = input_hint
                     break
-                if exc.status_code in STALE_SESSION_STATUSES and had_cached_session and not stale_rebuilt and messages is not None:
+                if _is_stale_session_error(exc) and had_cached_session and not stale_rebuilt and messages is not None:
                     stale_rebuilt = True
                     _drop_session(pool, account, session_key)
                     try:
@@ -1812,7 +2306,7 @@ async def _stream_openai(
                         for line in _stream_error_sse(chunk_id, created, model, detail, session_key):
                             yield line
                         return
-                    log.warning("deepseek session %s is stale (%s), rebuilt full history into a fresh chat", session_key, exc.status_code)
+                    log.warning("deepseek session %s is stale (%s - %s), rebuilt full history into a fresh chat", session_key, exc.status_code, exc.detail)
                     session, session_key, parent_message_id = await _prepare_session(account, pool, existing_sid, context_seq)
                     stop_message_id = None
                     response_message_id = None
@@ -1821,8 +2315,9 @@ async def _stream_openai(
                     attempt += 1
                     delay = _retry_delay(attempt)
                     log.warning(
-                        "deepseek provider error (%s), retry %d/%d in %.1fs",
+                        "deepseek provider error (%s - %s), retry %d/%d in %.1fs",
                         exc.status_code,
+                        exc.detail,
                         attempt,
                         MAX_RETRIES,
                         delay,

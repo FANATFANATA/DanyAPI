@@ -21,7 +21,7 @@ CLIENT_HEADERS = {
     "x-client-timezone-offset": "0",
 }
 
-USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+USER_AGENT = settings.user_agent
 
 
 def new_device_id() -> str:
@@ -51,16 +51,19 @@ class DeepSeekClient:
         device_id: str | None = None,
         timeout: float = 60.0,
         proxy: str | None = None,
+        user_agent: str | None = None,
     ) -> None:
         self.token = token
         self.device_id = device_id or new_device_id()
+        ua = user_agent or settings.user_agent or USER_AGENT
         headers = {
-            "User-Agent": USER_AGENT,
             "Referer": "https://chat.deepseek.com/",
             "Origin": "https://chat.deepseek.com",
             "Accept": "*/*",
             **CLIENT_HEADERS,
         }
+        if ua:
+            headers["User-Agent"] = ua
         if token:
             headers["Authorization"] = f"Bearer {token}"
         self.http = httpx.AsyncClient(

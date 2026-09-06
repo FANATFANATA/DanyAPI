@@ -16,7 +16,8 @@ BASE_URL = "https://chat.qwen.ai"
 
 WEB_VERSION = "0.2.83"
 
-USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
+USER_AGENT = settings.user_agent
+
 
 COMMON_HEADERS = {
     "Accept": "application/json, text/plain, */*",
@@ -65,12 +66,15 @@ class QwenClient:
         token: str | None = None,
         timeout: float = 60.0,
         proxy: str | None = None,
+        user_agent: str | None = None,
     ) -> None:
         self.token = token
+        ua = user_agent or settings.user_agent or USER_AGENT
         headers = {
-            "User-Agent": USER_AGENT,
             **COMMON_HEADERS,
         }
+        if ua:
+            headers["User-Agent"] = ua
         if token:
             headers["Authorization"] = f"Bearer {token}"
         self.http = httpx.AsyncClient(

@@ -82,11 +82,16 @@ class DeepSeekRegistrar:
         timeout: float = 60.0,
         waf_token: str | None = None,
         proxy: str | None = None,
+        user_agent: str | None = None,
     ) -> None:
         self.device_id = device_id or new_device_id()
+        ua = user_agent or settings.user_agent or USER_AGENT
+        headers = {**CLIENT_HEADERS}
+        if ua:
+            headers["User-Agent"] = ua
         self.http = httpx.AsyncClient(
             base_url=BASE_URL,
-            headers={"User-Agent": USER_AGENT, **CLIENT_HEADERS},
+            headers=headers,
             timeout=httpx.Timeout(timeout),
             follow_redirects=True,
             proxy=proxy or settings.proxy,

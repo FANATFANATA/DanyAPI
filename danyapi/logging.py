@@ -217,11 +217,17 @@ def get_outgoing_ip(proxy: str | None = None, timeout: float = 4.0) -> tuple[str
     proxy_url = proxy if (isinstance(proxy, str) and proxy.strip()) else None
     last_err: str | None = None
 
+    try:
+        from .config import settings
+        ua = getattr(settings, "user_agent", "curl/7.88.1")
+    except Exception:
+        ua = "curl/7.88.1"
+
     # 1. Try httpx
     try:
         import httpx
 
-        with httpx.Client(proxy=proxy_url, timeout=timeout) as client:
+        with httpx.Client(headers={"User-Agent": ua}, proxy=proxy_url, timeout=timeout) as client:
             for url in IP_CHECK_ENDPOINTS:
                 try:
                     resp = client.get(url)
@@ -243,7 +249,7 @@ def get_outgoing_ip(proxy: str | None = None, timeout: float = 4.0) -> tuple[str
         curl_path = shutil.which("curl")
         if curl_path:
             for url in IP_CHECK_ENDPOINTS:
-                cmd = [curl_path, "-s", "--max-time", str(int(timeout))]
+                cmd = [curl_path, "-s", "-A", ua, "--max-time", str(int(timeout))]
                 if proxy_url:
                     if proxy_url.startswith("socks5://") or proxy_url.startswith("socks5h://"):
                         socks_addr = proxy_url.split("://", 1)[1]

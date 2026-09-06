@@ -17,6 +17,8 @@ By default it binds to all IPs on the system at port 8000. If you want to run it
 
 If you want to force incoming requests to you to have a Bearer-token, you can set that in DANYAPI_API_KEY. If it's not set, all requests are accepted (only run it locally then!)
 
+You can customize the upstream User-Agent header sent to DeepSeek and Qwen by setting DANYAPI_USERAGENT (defaults to a modern Chrome browser string).
+
 ### Settings
 The 'session' is like a chat conversation. So each call you make can be grouped together in the same session (which saves lots of context tokens, as it remembers prior conversation). You can set the session_id to whatever, ex a name, etc. It saves 128 by default for 7 days, but examine the .env.example and change.
 
@@ -53,14 +55,26 @@ danyapi  | (21:59:23) POST /v1/chat/completions success (3650ms)
 # ENDPOINTS
 
 ### LLM Endpoints (OpenAI-Compatible)
-- POST **/v1/chat/completions** — Chat, reasoning (thinking), search, tools, sessions (session_id), and streaming.
+- POST **/v1/chat/completions** — Chat, reasoning (thinking), search, tools, sessions (session_id), file attachments, and streaming.
     * messages (array, required): List of message objects (role: system | user | assistant, content: string).
-    * optional: model (string), stream (boolean, default: false), thinking (boolean), search (boolean), session_id (string): continue conversation, tools (array).
+    * optional: model (string), stream (boolean, default: false), thinking (boolean), search (boolean), session_id (string): continue conversation, tools (array), file_ids (array): explicit file IDs to attach. Uploaded files for this session are also automatically attached.
 - POST **/v1/images/generations** — Text-to-image generation powered by Qwen.
     * prompt (string, required): Text description of the image to generate.
     * optional: model (string, default: qwen-image-gen), n (integer, default: 1), size (string, default: 1024x1024), response_format (string, default: url).
 
 - _Note: If Bearer Auth given, that will be required in calls_.
+
+### File & Image Uploads (DeepSeek)
+- POST **/v1/files** — Upload files or images to DeepSeek with dynamic Proof-of-Work (PoW) challenge solving. Files are streamed in-memory directly to DeepSeek (no disk storage) and automatically staged to attach to your next chat completion.
+    * file (binary / multipart, or base64 JSON string, required)
+    * optional: session_id (string): associates the file with a session and pins to that account, purpose (string, default: assistants), model (string).
+- GET **/v1/files/{file_id}** — Retrieve status and metadata for an uploaded file.
+
+### Session Management (DeepSeek)
+- GET **/v1/sessions** — List active chat sessions stored on DeepSeek across accounts.
+    * optional: account (integer): filter by account index, pinned (boolean, default: false), count (integer, default: 20, max: 100).
+- GET **/v1/sessions/{session_id}** — Retrieve full conversation history and messages for a session.
+- DELETE **/v1/sessions/{session_id}** — Delete a chat session from DeepSeek and evict from cache.
 
 ### Models & Token Management
 - GET **/v1/models** — List of all available DeepSeek and Qwen models.
@@ -120,9 +134,96 @@ curl -s http://localhost:8000/v1/images/generations \
   }'
 ```  
 
+### Image Uploads (Deepseek)
+Uploading with CURL in this example:
+
+```
+curl -X POST http://localhost:8000/v1/files \
+  -F "file=@/Users/george/Downloads/person.jpg" \
+  -F "session_id=george"
+```
+
+Then querying it (need deepseek-v4-vision):
+```
+curl -s -m 120 http://localhost:8000/v1/chat/completions -H "Content-Type: application/json" -d '{"model":"deepseek-v4-vision","messages":[{"role":"user","content":"Describe the attached image."}],"session_id":"george"}' 
+```
+
 ### Usage Tracking
 You can use the webpage (if it's enabled to see from a browser), or:
 
 ```
 curl -s http://localhost:8000/v1/usage
+```
+
+### File & Image Uploads (with Auto-Attachment)
+
+You can upload files or images directly to DeepSeek. Files are streamed in-memory (no local disk storage) and automatically solved with cryptographic Proof of Work (PoW).
+
+**1. Upload via multipart form (associating with session "george"):**
+```
+curl -s -X POST http://localhost:8000/v1/files \
+  -F "file=@annual_report.pdf" \
+  -F "session_id=george"
+```
+
+**2. Or upload via JSON with base64 data:**
+```
+curl -s -X POST http://localhost:8000/v1/files \
+  -H "Content-Type: application/json" \
+  -d '{
+    "file": "SGVsbG8gV29ybGQ=",
+    "filename": "notes.txt",
+    "session_id": "george"
+  }'
+```
+
+**3. Automatic Attachment in Chat:**
+Now when you send a prompt with `"session_id": "george"`, the uploaded file(s) are **automatically attached** to the model prompt:
+```
+curl -s http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "session_id": "george",
+    "messages": [
+      {"role": "user", "content": "Please summarize the file I just uploaded."}
+    ]
+  }'
+```
+
+**4. Explicit Attachment by File ID:**
+You can also re-use previously uploaded files by passing their file IDs explicitly:
+```
+curl -s http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "session_id": "george",
+    "file_ids": ["file-xxxxxxxx"],
+    "messages": [
+      {"role": "user", "content": "What are the main findings in this file?"}
+    ]
+  }'
+```
+
+**5. Inspect File Status:**
+```
+curl -s http://localhost:8000/v1/files/file-xxxxxxxx
+```
+
+### Session Management
+
+Inspect, retrieve message history, or delete server-side sessions on DeepSeek:
+
+**List active sessions:**
+```
+curl -s "http://localhost:8000/v1/sessions?count=10"
+```
+
+**Get session details and message contents:**
+```
+curl -s http://localhost:8000/v1/sessions/george
+```
+
+**Delete a session:**
+```
+curl -s -X DELETE http://localhost:8000/v1/sessions/george
 ```

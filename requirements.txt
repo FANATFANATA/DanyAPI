@@ -4,3 +4,4 @@ httpx[socks]
 pydantic
 python-dotenv
 pillow
+python-multipart

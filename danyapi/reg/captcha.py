@@ -61,7 +61,9 @@ class TwoCaptchaSolver(HcaptchaSolver):
         self.poll_interval = poll_interval
 
     async def solve(self) -> str:
-        async with httpx.AsyncClient(timeout=30.0, proxy=settings.proxy) as http:
+        async with httpx.AsyncClient(
+            headers={"User-Agent": settings.user_agent}, timeout=30.0, proxy=settings.proxy
+        ) as http:
             try:
                 resp = await http.get(
                     "https://2captcha.com/in.php",
@@ -107,7 +109,9 @@ class CapSolverSolver(HcaptchaSolver):
         self.poll_interval = poll_interval
 
     async def solve(self) -> str:
-        async with httpx.AsyncClient(timeout=30.0, proxy=settings.proxy) as http:
+        async with httpx.AsyncClient(
+            headers={"User-Agent": settings.user_agent}, timeout=30.0, proxy=settings.proxy
+        ) as http:
             try:
                 resp = await http.post(
                     "https://api.capsolver.com/createTask",
