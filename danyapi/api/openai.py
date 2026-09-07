@@ -1127,6 +1127,12 @@ async def upload_file_endpoint(request: Request) -> dict:
     ds_pool: AccountPool = getattr(app.state, "pool", None)
     qw_pool: AccountPool = getattr(app.state, "qwen_pool", None)
 
+    if target_provider is None and session_id:
+        if qw_pool and qw_pool.account_for_session(session_id) is not None:
+            target_provider = "qwen"
+        elif ds_pool and ds_pool.account_for_session(session_id) is not None:
+            target_provider = "deepseek"
+
     use_qwen = (target_provider == "qwen") or (
         target_provider is None and not (ds_pool and ds_pool.healthy) and (qw_pool and qw_pool.healthy)
     )
