@@ -30,7 +30,7 @@ from ..qwen import api as qwen_api
 from ..qwen.accounts import QwenAccount
 from ..qwen.client import QwenClient, QwenError
 from ..store import JsonStore
-from ..tokens import estimate_tokens
+from ..tokens import count_messages_tokens, estimate_tokens
 from ..usage import init_tracker, record_usage
 
 log = logging.getLogger("danyapi.api")
@@ -509,71 +509,119 @@ async def add_tokens(tokens: dict) -> dict:
     }
 
 
-async def _extract_request_model(request: Request) -> str | None:
+async def _extract_request_body(request: Request) -> dict[str, Any]:
     try:
         body = await request.body()
     except Exception:
-        return None
+        return {}
     if not body:
-        return None
+        return {}
     try:
         payload = json.loads(body)
     except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
-        return None
+        return {}
     if isinstance(payload, dict):
-        model = payload.get("model")
-        if isinstance(model, str):
-            return model
-    return None
+        return payload
+    return {}
 
 
-def _log_request_failure(request: Request, model: str | None, duration: float, status: int | None = None, exc: Exception | None = None) -> None:
-    model_part = f"model={model}" if model else "model=?"
+def _request_client_ip(request: Request) -> str:
+    headers = request.headers
+    forwarded = headers.get("x-forwarded-for")
+    if forwarded:
+        first = forwarded.split(",", 1)[0].strip()
+        if first:
+            return first
+    real_ip = headers.get("x-real-ip")
+    if real_ip:
+        return real_ip.strip()
+    client = request.client
+    if client is not None and client.host:
+        return client.host
+    return "-"
+
+
+def _request_details(request: Request, payload: dict[str, Any]) -> str:
+    parts = []
+    user_agent = request.headers.get("user-agent")
+    if user_agent:
+        parts.append(f"ua={user_agent[:120].replace('{', '{{').replace('}', '}}')}")
+    model = payload.get("model")
+    if isinstance(model, str) and model:
+        parts.append(f"model={model}")
+    session_id = payload.get("session_id")
+    if isinstance(session_id, str) and session_id:
+        parts.append(f"sid={session_id}")
+    user = payload.get("user")
+    if isinstance(user, str) and user:
+        parts.append(f"user={user}")
+    stream = payload.get("stream")
+    if isinstance(stream, bool):
+        parts.append(f"stream={int(stream)}")
+    messages = payload.get("messages")
+    if isinstance(messages, list):
+        parts.append(f"msgs={len(messages)}")
+        parts.append(f"tokens={count_messages_tokens(messages)}")
+    return " ".join(parts)
+
+
+def _log_request_failure(request: Request, payload: dict[str, Any], duration: float, status: int | None = None, exc: Exception | None = None) -> None:
+    details = _request_details(request, payload)
+    details_part = f" {details}" if details else ""
+    ip = _request_client_ip(request)
     if status is not None:
         reason = f"status={status}"
     else:
         reason = f"error={str(exc) if exc else 'unknown'}"
     log.warning(
-        "%s %s failed: %s %s (%.0fms)",
+        "%s %s %s%s failed: %s (%.0fms)",
         request.method,
         request.url.path,
-        model_part,
+        ip,
+        details_part,
         reason.replace("{", "{{").replace("}", "}}"),
         duration,
     )
 
 
-def _log_request_success(request: Request, duration: float) -> None:
+def _log_request_success(request: Request, payload: dict[str, Any], duration: float) -> None:
+    details = _request_details(request, payload)
+    details_part = f" {details}" if details else ""
+    ip = _request_client_ip(request)
     log.info(
-        "%s %s success (%.0fms)",
+        "%s %s %s%s ok (%.0fms)",
         request.method,
         request.url.path,
+        ip,
+        details_part,
         duration,
     )
 
 
 @app.middleware("http")
-async def _log_request_failures(request: Request, call_next):
+async def _log_requests(request: Request, call_next):
     started = time.monotonic()
+    payload = await _extract_request_body(request)
     try:
         response = await call_next(request)
     except Exception as exc:
         _log_request_failure(
             request,
-            await _extract_request_model(request),
+            payload,
             (time.monotonic() - started) * 1000,
             exc=exc,
         )
         raise
+    duration = (time.monotonic() - started) * 1000
     if response.status_code >= 400:
         _log_request_failure(
             request,
-            await _extract_request_model(request),
-            (time.monotonic() - started) * 1000,
+            payload,
+            duration,
             status=response.status_code,
         )
-    elif request.url.path == "/v1/chat/completions":
-        _log_request_success(request, (time.monotonic() - started) * 1000)
+    else:
+        _log_request_success(request, payload, duration)
     return response
 
 
