@@ -37,6 +37,8 @@ GREEN = "\033[32m"
 RED = "\033[31m"
 RESET = "\033[0m"
 
+STEP_TIMEOUT_SECONDS = 1200.0
+
 StepRunner: TypeAlias = list[str] | Callable[[], tuple[bool, str]]
 StepResult: TypeAlias = tuple[str, bool, float, str, str]
 
@@ -132,7 +134,7 @@ def check_repo_guards() -> tuple[bool, str]:
     return False, f"{len(problems)} problem(s):\n" + "\n".join(shown)
 
 
-def run_step(name: str, runner: StepRunner) -> StepResult:
+def run_step(name: str, runner: StepRunner, timeout: float = STEP_TIMEOUT_SECONDS) -> StepResult:
     started = time.monotonic()
     if isinstance(runner, list):
         cmd = runner
@@ -146,10 +148,14 @@ def run_step(name: str, runner: StepRunner) -> StepResult:
                 encoding="utf-8",
                 errors="replace",
                 check=False,
+                timeout=timeout,
             )
         except FileNotFoundError:
             elapsed = time.monotonic() - started
             return name, False, elapsed, f"tool not found: {cmd[0]}", detail
+        except subprocess.TimeoutExpired:
+            elapsed = time.monotonic() - started
+            return name, False, elapsed, f"timed out after {timeout:.0f}s: {cmd[0]}", detail
         elapsed = time.monotonic() - started
         ok = proc.returncode == 0
         parts: list[str] = []
