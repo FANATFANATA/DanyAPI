@@ -119,7 +119,7 @@ async def _prepare_session(account, pool, existing_sid: str | None, model_id: st
     return session, session_key
 
 
-async def _send_completion(client: QwenClient, session, prompt: str, model_id: str, thinking: bool, search: bool, chat_type: str = "t2t"):
+async def _send_completion(client: QwenClient, session, prompt: str, model_id: str, thinking: bool, search: bool, chat_type: str = "t2t", files: list[dict] | None = None):
     try:
         resp = await client.completion(
             chat_session_id=session.id,
@@ -129,6 +129,7 @@ async def _send_completion(client: QwenClient, session, prompt: str, model_id: s
             thinking=thinking,
             search=search,
             chat_type=chat_type,
+            files=files,
         )
     except httpx.HTTPStatusError as exc:
         raise HTTPException(exc.response.status_code, exc.response.text[:500]) from exc
@@ -283,6 +284,7 @@ async def _collect_response(
     had_cached_session,
     tool_mode,
     tool_schemas,
+    files=None,
 ):
     stop_response_id: str | None = None
     stale_rebuilt = False
@@ -291,7 +293,7 @@ async def _collect_response(
     try:
         while True:
             try:
-                resp = await _send_completion(account.client, session, prompt, model_id, thinking, search, chat_type)
+                resp = await _send_completion(account.client, session, prompt, model_id, thinking, search, chat_type, files=files)
             except ContextLimitError:
                 _drop_session(pool, account, session_key)
                 raise HTTPException(400, "context length exceeded: conversation too long, start a new conversation") from None
@@ -381,6 +383,7 @@ async def collect_non_stream(
     tool_choice=None,
     response_format=None,
     user=None,
+    files=None,
 ):
     await _human_delay()
     async with account_lock(lock, settings.acquire_timeout):
@@ -411,6 +414,7 @@ async def collect_non_stream(
             had_cached_session,
             tool_mode,
             tool_schemas,
+            files=files,
         )
 
         if _is_context_limit(rec) and not rec.has_content:
@@ -483,6 +487,7 @@ async def stream_openai(
     tool_choice=None,
     response_format=None,
     user=None,
+    files=None,
 ):
     chunk_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
@@ -512,7 +517,7 @@ async def stream_openai(
         attempt = 0
         while True:
             try:
-                resp = await _send_completion(account.client, session, prompt, model_id, thinking, search)
+                resp = await _send_completion(account.client, session, prompt, model_id, thinking, search, files=files)
             except ContextLimitError:
                 _drop_session(pool, account, session_key)
                 for line in _stream_context_limit_lines(chunk_id, created, model, session_key):

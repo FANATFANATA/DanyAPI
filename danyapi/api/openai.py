@@ -703,6 +703,14 @@ class FileStagingManager:
         records = await self.consume_records(session_id=session_id, client_key=client_key)
         return [r["id"] for r in records if "id" in r]
 
+    async def find(self, file_id: str) -> dict | None:
+        async with self._lock:
+            for recs in list(self._by_session.values()) + list(self._by_client.values()):
+                for r in recs:
+                    if r.get("id") == file_id:
+                        return r
+        return None
+
 
 file_staging = FileStagingManager(ttl=getattr(settings, "session_ttl", 3600.0) or 3600.0)
 
@@ -1039,7 +1047,7 @@ async def chat_completions(req: ChatCompletionRequest, request: Request = None) 
         req.model = getattr(app.state, "default_model", "deepseek-v4-flash")
     provider = _resolve_provider(req.model)
     if provider == "qwen":
-        return await _chat_completions_qwen(req)
+        return await _chat_completions_qwen(req, request=request)
     return await _chat_completions_deepseek(req, request=request, user_specified_model=user_specified_model)
 
 
@@ -1109,7 +1117,69 @@ async def upload_file_endpoint(request: Request) -> dict:
     if len(data) > MAX_FILE_SIZE:
         raise HTTPException(400, f"file {filename} exceeds {MAX_FILE_SIZE // (1024*1024)} MB limit")
 
-    pool: AccountPool = getattr(app.state, "pool", None)
+    target_provider = None
+    if model:
+        try:
+            target_provider = _resolve_provider(model)
+        except HTTPException:
+            target_provider = None
+
+    ds_pool: AccountPool = getattr(app.state, "pool", None)
+    qw_pool: AccountPool = getattr(app.state, "qwen_pool", None)
+
+    use_qwen = (target_provider == "qwen") or (
+        target_provider is None and not (ds_pool and ds_pool.healthy) and (qw_pool and qw_pool.healthy)
+    )
+
+    if use_qwen:
+        if qw_pool is None or not qw_pool.healthy:
+            raise HTTPException(503, "qwen provider is not configured or no healthy accounts available")
+
+        account = None
+        if session_id:
+            account = qw_pool.account_for_session(session_id)
+        if account is None:
+            try:
+                account, _ = await qw_pool.acquire(session_id)
+            except AccountPoolBusy:
+                raise HTTPException(429, "all accounts are busy, please retry shortly") from None
+            if session_id:
+                qw_pool.register(account.index, session_id)
+
+        try:
+            q_att = await account.client.upload_file(
+                data=data,
+                filename=filename,
+                content_type=ctype,
+            )
+        except Exception as exc:
+            raise HTTPException(502, f"qwen file upload failed: {exc}") from exc
+
+        file_id = q_att.get("id")
+        if not file_id:
+            raise HTTPException(502, "file upload failed: no file id returned from Qwen")
+
+        is_image = ctype.startswith("image/") or filename.lower().endswith((".jpg", ".jpeg", ".png", ".webp", ".gif"))
+        client_key = _get_client_key(request)
+        file_record = {
+            "id": file_id,
+            "object": "file",
+            "bytes": len(data),
+            "created_at": int(time.time()),
+            "filename": filename,
+            "purpose": purpose,
+            "session_id": session_id,
+            "status": "processed",
+            "content_type": ctype,
+            "is_image": is_image,
+            "provider": "qwen",
+            "qwen_attachment": q_att,
+        }
+        await file_staging.stage(file_record, session_id=session_id, client_key=client_key)
+        log.info("uploaded and staged qwen file %s (%s, %d bytes) for session=%s", file_id, filename, len(data), session_id)
+        return file_record
+
+    pool: AccountPool = ds_pool
     if pool is None or not pool.healthy:
         raise HTTPException(503, "deepseek provider is not configured or no healthy accounts available")
 
@@ -1171,6 +1241,19 @@ async def upload_file_endpoint(request: Request) -> dict:
 
 @app.get("/v1/files/{file_id}")
 async def get_file_endpoint(file_id: str) -> dict:
+    staged = await file_staging.find(file_id)
+    if staged:
+        return {
+            "id": staged.get("id", file_id),
+            "object": "file",
+            "bytes": staged.get("bytes", 0),
+            "created_at": staged.get("created_at", int(time.time())),
+            "filename": staged.get("filename", ""),
+            "purpose": staged.get("purpose", "assistants"),
+            "status": staged.get("status", "processed"),
+            "raw": staged,
+        }
+
     pool: AccountPool = getattr(app.state, "pool", None)
     if pool is None or not pool.healthy:
         raise HTTPException(503, "deepseek provider is not configured or no healthy accounts available")
@@ -1567,7 +1650,7 @@ async def _chat_completions_deepseek(
         raise HTTPException(429, "all accounts are busy, try again later") from None
 
 
-async def _chat_completions_qwen(req: ChatCompletionRequest) -> Any:
+async def _chat_completions_qwen(req: ChatCompletionRequest, request: Request | None = None) -> Any:
     pool: AccountPool = app.state.qwen_pool
     if pool is None:
         raise HTTPException(503, "qwen provider is not configured")
@@ -1575,7 +1658,24 @@ async def _chat_completions_qwen(req: ChatCompletionRequest) -> Any:
     thinking = req.thinking if req.thinking is not None else True
     search = bool(req.search)
 
+    client_key = _get_client_key(request)
+    staged_records = await file_staging.consume_records(session_id=req.session_id, client_key=client_key)
+    qwen_files: list[dict] = []
+    for r in staged_records:
+        q_att = r.get("qwen_attachment")
+        if q_att:
+            qwen_files.append(q_att)
+
     account, existing_sid, context_seq, prompt, tool_mode = await _acquire_and_build(pool, req, {"model": req.model})
+
+    inline_attachments = _collect_attachments(req)
+    if inline_attachments:
+        for att in inline_attachments:
+            q_att = await account.client.upload_file(att.data, att.name, att.content_type)
+            qwen_files.append(q_att)
+
+    if qwen_files:
+        log.info("attached %d file(s) to qwen completion", len(qwen_files))
 
     common = {
         "account": account,
@@ -1595,6 +1695,7 @@ async def _chat_completions_qwen(req: ChatCompletionRequest) -> Any:
         "tool_choice": getattr(req, "tool_choice", None),
         "response_format": getattr(req, "response_format", None),
         "user": getattr(req, "user", None),
+        "files": qwen_files or None,
     }
     if req.stream:
         return StreamingResponse(

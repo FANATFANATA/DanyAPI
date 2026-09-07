@@ -68,15 +68,29 @@ class QwenClient:
         proxy: str | None = None,
         user_agent: str | None = None,
     ) -> None:
-        self.token = token
+        raw_token = token or ""
+        extracted_token = raw_token
+        aux_cookies: dict[str, str] = {}
+        if ";" in raw_token or "token=" in raw_token:
+            for part in raw_token.split(";"):
+                part = part.strip()
+                if "=" in part:
+                    k, v = part.split("=", 1)
+                    k, v = k.strip(), v.strip()
+                    if k == "token":
+                        extracted_token = v
+                    elif k:
+                        aux_cookies[k] = v
+
+        self.token = extracted_token
         ua = user_agent or settings.user_agent or USER_AGENT
         headers = {
             **COMMON_HEADERS,
         }
         if ua:
             headers["User-Agent"] = ua
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
+        if extracted_token:
+            headers["Authorization"] = f"Bearer {extracted_token}"
         self.http = httpx.AsyncClient(
             base_url=BASE_URL,
             headers=headers,
@@ -84,8 +98,10 @@ class QwenClient:
             follow_redirects=True,
             proxy=proxy or settings.proxy,
         )
-        if token:
-            self.http.cookies.set("token", token, domain="chat.qwen.ai", path="/")
+        if extracted_token:
+            self.http.cookies.set("token", extracted_token, domain="chat.qwen.ai", path="/")
+        for k, v in aux_cookies.items():
+            self.http.cookies.set(k, v, domain="chat.qwen.ai", path="/")
 
     async def aclose(self) -> None:
         await self.http.aclose()
@@ -168,6 +184,45 @@ class QwenClient:
         log.info("qwen create chat success (%.0fms)", (time.monotonic() - started) * 1000)
         return chat_id
 
+    async def upload_file(
+        self,
+        data: bytes,
+        filename: str,
+        content_type: str = "image/jpeg",
+    ) -> dict:
+        """Uploads a file directly to Alibaba Cloud OSS and returns Qwen file attachment metadata.
+
+        Ref: https://github.com/youssefvdel/qwengate/blob/dev/src/services/qwenFileUpload.ts
+        """
+        from .upload import build_qwen_file_attachment, parse_and_poll, upload_to_oss
+
+        is_image = content_type.startswith("image/")
+        filetype = "image" if is_image else "file"
+        body = {
+            "filename": filename,
+            "filesize": str(len(data)),
+            "filetype": filetype,
+        }
+        res = await self._post("/api/v2/files/getstsToken", json_body=body)
+        sts = res.get("data") if isinstance(res, dict) and "data" in res else res
+        if not isinstance(sts, dict) or not sts.get("file_id"):
+            raise QwenError(-1, f"getstsToken failed: invalid STS response: {res}")
+
+        await upload_to_oss(self.http, sts, data, content_type)
+
+        att = build_qwen_file_attachment(
+            sts=sts,
+            filename=filename,
+            filesize=len(data),
+            content_type=content_type,
+            attachment_type="image" if is_image else "file",
+        )
+
+        if not is_image:
+            await parse_and_poll(self, sts["file_id"])
+
+        return att
+
     async def completion(
         self,
         chat_session_id: str,
@@ -177,6 +232,7 @@ class QwenClient:
         thinking: bool = False,
         search: bool = False,
         chat_type: str = "t2t",
+        files: list[dict] | None = None,
     ) -> httpx.Response:
         log.debug("qwen completion start session=%s model=%s chat_type=%s", chat_session_id, model, chat_type)
         ts = int(datetime.datetime.now().timestamp())
@@ -199,7 +255,7 @@ class QwenClient:
             "role": "user",
             "content": prompt,
             "user_action": "chat",
-            "files": [],
+            "files": files or [],
             "timestamp": ts,
             "models": [model],
             "model": "",

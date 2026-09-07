@@ -8,9 +8,10 @@ The config has 3 main areas: tokens, connections and settings (session, logging)
 ### Tokens
 Edit the *.env* file with the tokens.
 
-Start up Deepseek or Qwen and login. Then open the Developer-Debugger and look at the network requests. Look for a request with 'completion' in it. Click on that and look for the Authorization: Bearer XXXXXXXXXXX.
+- **DeepSeek**: Open `chat.deepseek.com`, open DevTools Network tab, look for a request with `/chat/completion`, and copy the token from `Authorization: Bearer XXXXXXXXXXX`.
+- **Qwen**: Open `chat.qwen.ai`, open DevTools Application/Storage -> Cookies (or Network tab), and copy the value of the `token` cookie (the JWT starting with `eyJhbGci...`). You can also paste your entire browser cookie header string into `QWEN_TOKENS`.
 
-That sequence of characters is what you need to put into the DEEPSEEK/QWEN tokens. It will send the requests like your user-id based on that token. Don't let other people use this API as it may get your user banned. Treat this system as a privilege to use.
+Put that token into `DEEPSEEK_TOKENS` or `QWEN_TOKENS` in your `.env`. Multiple accounts can be comma-separated. Don't let untrusted users access this API. Treat this system as a privilege to use.
 
 ### Connections
 By default it binds to all IPs on the system at port 8000. If you want to run it through a proxy (ex. to make it appear to have a residential IP), you would set the proxy in DANYAPI_PROXY.
@@ -64,11 +65,13 @@ danyapi  | (21:59:23) POST /v1/chat/completions success (3650ms)
 
 - _Note: If Bearer Auth given, that will be required in calls_.
 
-### File & Image Uploads (DeepSeek)
-- POST **/v1/files** — Upload files or images to DeepSeek with dynamic Proof-of-Work (PoW) challenge solving. Files are streamed in-memory directly to DeepSeek (no disk storage) and automatically staged to attach to your next chat completion.
-    * file (binary / multipart, or base64 JSON string, required)
-    * optional: session_id (string): associates the file with a session and pins to that account, purpose (string, default: assistants), model (string).
-- GET **/v1/files/{file_id}** — Retrieve status and metadata for an uploaded file.
+### File & Image Uploads (DeepSeek & Qwen)
+- POST **/v1/files** — Upload files or images with automatic provider routing:
+    * **DeepSeek**: Uploads directly using dynamic Proof-of-Work (PoW) challenge solving.
+    * **Qwen**: Uploads directly to Alibaba Cloud OSS using STS temporary credentials.
+    * Files are streamed in-memory (no local disk storage) and automatically staged to attach to your next chat completion for that `session_id`.
+    * Parameters: `file` (binary / multipart, or base64 JSON string, required), optional: `session_id` (string), `model` (string, e.g. `qwen3.7-plus` or `deepseek-v4-vision`), `purpose` (string, default: `assistants`).
+- GET **/v1/files/{file_id}** — Retrieve status and metadata for an uploaded or staged file.
 
 ### Session Management (DeepSeek)
 - GET **/v1/sessions** — List active chat sessions stored on DeepSeek across accounts.
