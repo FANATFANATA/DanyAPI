@@ -219,6 +219,7 @@ def get_outgoing_ip(proxy: str | None = None, timeout: float = 4.0) -> tuple[str
 
     try:
         from .config import settings
+
         ua = getattr(settings, "user_agent", "curl/7.88.1")
     except Exception:
         ua = "curl/7.88.1"

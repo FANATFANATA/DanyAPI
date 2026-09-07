@@ -640,16 +640,11 @@ async def _authenticate_request(request: Request, call_next):
         path = request.url.path.rstrip("/") or "/"
         if path not in PUBLIC_PATHS and not path.startswith("/docs"):
             auth_header = request.headers.get("Authorization", "")
-            api_key_token = ""
-            if auth_header.startswith("Bearer "):
-                api_key_token = auth_header[7:].strip()
-            elif auth_header:
-                api_key_token = auth_header.strip()
+            extracted_auth = auth_header[7:].strip() if auth_header.startswith("Bearer ") else auth_header.strip()
+            if not extracted_auth:
+                extracted_auth = request.headers.get("x-api-key", "").strip()
 
-            if not api_key_token:
-                api_key_token = request.headers.get("x-api-key", "").strip()
-
-            if not api_key_token or not secrets.compare_digest(api_key_token, settings.api_key):
+            if not extracted_auth or not secrets.compare_digest(extracted_auth, settings.api_key):
                 return JSONResponse(
                     status_code=401,
                     content={
@@ -1047,11 +1042,11 @@ def _resolve_provider(model: str) -> str:
 
 
 @app.post("/v1/chat/completions")
-async def chat_completions(req: ChatCompletionRequest, request: Request | None = None) -> Any:
+async def chat_completions(req: ChatCompletionRequest, request: Request) -> Any:
     user_specified_model = bool(req.model)
-    if not req.model:
-        req.model = getattr(app.state, "default_model", "deepseek-v4-flash")
-    provider = _resolve_provider(req.model)
+    model_name = req.model or str(getattr(app.state, "default_model", "deepseek-v4-flash"))
+    req.model = model_name
+    provider = _resolve_provider(model_name)
     if provider == "qwen":
         return await _chat_completions_qwen(req, request=request)
     return await _chat_completions_deepseek(req, request=request, user_specified_model=user_specified_model)

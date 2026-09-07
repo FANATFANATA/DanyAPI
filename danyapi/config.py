@@ -49,10 +49,7 @@ class Settings:
         self.port = _env_int("DANYAPI_PORT", 0) or _env_int("PORT", 0) or 8000
         self.proxy = _env_str("DANYAPI_PROXY") or _env_str("PROXY") or None
         self.api_key = _env_str("DANYAPI_API_KEY") or _env_str("API_KEY") or None
-        self.user_agent = (
-            _env_str("DANYAPI_USERAGENT")
-            or _env_str("USER_AGENT")
-        )
+        self.user_agent = _env_str("DANYAPI_USERAGENT") or _env_str("USER_AGENT")
         tokens = [t.strip() for t in os.environ.get("DEEPSEEK_TOKENS", "").split(",") if t.strip()]
         self.deepseek_tokens = tokens
         qwen_tokens = [t.strip() for t in os.environ.get("QWEN_TOKENS", "").split(",") if t.strip()]
