@@ -119,7 +119,16 @@ async def _prepare_session(account, pool, existing_sid: str | None, model_id: st
     return session, session_key
 
 
-async def _send_completion(client: QwenClient, session, prompt: str, model_id: str, thinking: bool, search: bool, chat_type: str = "t2t", files: list[dict] | None = None):
+async def _send_completion(
+    client: QwenClient,
+    session,
+    prompt: str,
+    model_id: str,
+    thinking: bool,
+    search: bool,
+    chat_type: str = "t2t",
+    files: list[dict] | None = None,
+):
     try:
         resp = await client.completion(
             chat_session_id=session.id,

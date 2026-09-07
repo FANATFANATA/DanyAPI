@@ -7,7 +7,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import email.utils
-import hashlib
 import hmac
 import logging
 import time
@@ -19,12 +18,20 @@ import httpx
 if TYPE_CHECKING:
     from .client import QwenClient
 
+__all__ = [
+    "build_oss_canonical_request",
+    "build_qwen_file_attachment",
+    "hmac_sha1_base64",
+    "parse_and_poll",
+    "upload_to_oss",
+]
+
 log = logging.getLogger("danyapi.qwen.upload")
 
 
 def hmac_sha1_base64(key: str, message: str) -> str:
     """HMAC-SHA1 Base64 digest for Alibaba OSS authorization."""
-    sig = hmac.new(key.encode("utf-8"), message.encode("utf-8"), hashlib.sha1).digest()
+    sig = hmac.new(key.encode("utf-8"), message.encode("utf-8"), "sha1").digest()
     return base64.b64encode(sig).decode("utf-8")
 
 
@@ -72,10 +79,8 @@ async def upload_to_oss(
     key = sts.get("file_path", "")
     bucket = sts.get("bucketname", "qwen-webui-prod")
 
-    object_key = key
     bucket_prefix = f"{bucket}/"
-    if object_key.startswith(bucket_prefix):
-        object_key = object_key[len(bucket_prefix) :]
+    object_key = key.removeprefix(bucket_prefix)
 
     canonical_req = build_oss_canonical_request(
         method="PUT",
@@ -208,6 +213,6 @@ async def parse_and_poll(
                 if st == "failed":
                     log.warning("file parsing failed for %s", file_id)
                     return
-        except Exception:
-            pass
+        except Exception as exc:
+            log.debug("error polling parse status for %s: %s", file_id, exc)
         await asyncio.sleep(1.0)

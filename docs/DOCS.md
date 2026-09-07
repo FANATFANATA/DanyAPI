@@ -145,22 +145,10 @@ curl -s http://localhost:8000/v1/usage
 ```
 
 ### File & Image Uploads (DeepSeek & Qwen)
+It can attempt to figure out the model (ex. if session already exists), but it's safest to send it with the file upload request, include the session too.
 
-DanyAPI streams files in-memory without saving to local disk. Uploads are handled differently per provider:
-* **DeepSeek**: Solves cryptographic Proof of Work (PoW) challenges and streams to DeepSeek's upload endpoint.
-* **Qwen**: Requests temporary STS upload credentials from Qwen and uploads raw binary directly to Alibaba Cloud OSS (`qwen-webui-prod.oss-accelerate.aliyuncs.com`).
+Alternatively sending a URL will cause our backend to download it, and attach it (see #2).
 
-#### How does the system know which provider to upload for?
-1. **Explicitly via `model` (Recommended)**:
-   Pass `-F "model=qwen3.7-plus"` for Qwen, or `-F "model=deepseek-v4-vision"` for DeepSeek. DanyAPI resolves the provider from the model name.
-2. **Session Affinity**:
-   If `model` is omitted, but you provide a `session_id` previously used in chat, DanyAPI automatically uploads to that session's provider (Qwen or DeepSeek).
-3. **Active Accounts Fallback**:
-   If `model` is omitted and the session is new: if only Qwen tokens are configured, it uploads to Qwen; otherwise it defaults to DeepSeek.
-
----
-
-#### 1. Upload for Qwen (Multipart Form)
 ```bash
 curl -s -X POST http://localhost:8000/v1/files \
   -F "file=@person.jpg" \
@@ -218,46 +206,9 @@ curl -s http://localhost:8000/v1/chat/completions \
 ```
 DanyAPI automatically detects the target model (`qwen3.7-plus`), uploads the inline base64 image directly to Alibaba OSS, and sends it to Qwen on the fly.
 
----
+If you have the file_id from uploading previously, you can reference that again, ex.
 
-#### 3. Upload for DeepSeek (Multipart Form)
-```bash
-curl -s -X POST http://localhost:8000/v1/files \
-  -F "file=@person.jpg" \
-  -F "session_id=george-deepseek" \
-  -F "model=deepseek-v4-vision"
-```
-
-Query DeepSeek with `deepseek-v4-vision` (auto-attached):
-```bash
-curl -s http://localhost:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "deepseek-v4-vision",
-    "session_id": "george-deepseek",
-    "messages": [
-      {"role": "user", "content": "Describe the attached image in detail."}
-    ]
-  }'
-```
-
----
-
-#### 4. Upload via JSON Base64
-```bash
-curl -s -X POST http://localhost:8000/v1/files \
-  -H "Content-Type: application/json" \
-  -d '{
-    "file": "SGVsbG8gV29ybGQ=",
-    "filename": "notes.txt",
-    "session_id": "george-qwen",
-    "model": "qwen3.7-plus"
-  }'
-```
-
----
-
-#### 5. Explicit Attachment by File ID
+#### Explicit Attachment by File ID
 You can reuse previously uploaded files across calls by passing `file_ids`:
 ```bash
 curl -s http://localhost:8000/v1/chat/completions \

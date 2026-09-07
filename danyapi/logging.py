@@ -258,14 +258,14 @@ def get_outgoing_ip(proxy: str | None = None, timeout: float = 4.0) -> tuple[str
                         cmd.extend(["-x", proxy_url])
                 cmd.append(url)
                 try:
-                    res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 1)
+                    res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 1, check=False)
                     candidate = res.stdout.strip()
                     if res.returncode == 0 and candidate and _is_valid_ip(candidate):
                         return candidate, None
                 except Exception:
                     continue
-    except Exception:
-        pass
+    except Exception as exc:
+        last_err = str(exc)
 
     return None, last_err
 

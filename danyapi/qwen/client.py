@@ -68,12 +68,12 @@ class QwenClient:
         proxy: str | None = None,
         user_agent: str | None = None,
     ) -> None:
-        raw_token = token or ""
-        extracted_token = raw_token
+        raw_token = token
+        extracted_token = token
         aux_cookies: dict[str, str] = {}
-        if ";" in raw_token or "token=" in raw_token:
-            for part in raw_token.split(";"):
-                part = part.strip()
+        if raw_token and (";" in raw_token or "token=" in raw_token):
+            for item in raw_token.split(";"):
+                part = item.strip()
                 if "=" in part:
                     k, v = part.split("=", 1)
                     k, v = k.strip(), v.strip()

@@ -1,6 +1,5 @@
-import asyncio
-import base64
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 
 from danyapi.qwen.client import QwenClient
@@ -30,10 +29,7 @@ def test_build_oss_canonical_request():
         bucket="qwen-webui-prod",
         key="user1/file1_test.jpg",
     )
-    expected = (
-        "PUT\n\nimage/jpeg\nMon, 07 Sep 2026 19:42:56 GMT\n"
-        "x-oss-security-token:tok123\n/qwen-webui-prod/user1/file1_test.jpg"
-    )
+    expected = "PUT\n\nimage/jpeg\nMon, 07 Sep 2026 19:42:56 GMT\nx-oss-security-token:tok123\n/qwen-webui-prod/user1/file1_test.jpg"
     assert req == expected
 
 
@@ -54,11 +50,7 @@ def test_build_qwen_file_attachment():
 
 
 def test_qwen_client_cookie_parsing():
-    raw_cookie = (
-        "cna=test_cna; _bl_uid=uid123; "
-        "token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjEyMyJ9.sig; "
-        "atpsida=atp123; isg=isg123"
-    )
+    raw_cookie = "cna=test_cna; _bl_uid=uid123; token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjEyMyJ9.sig; atpsida=atp123; isg=isg123"
     client = QwenClient(token=raw_cookie)
     assert client.token == "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjEyMyJ9.sig"
     assert client.http.headers.get("Authorization") == f"Bearer {client.token}"

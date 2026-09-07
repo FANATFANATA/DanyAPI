@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -640,16 +640,16 @@ async def _authenticate_request(request: Request, call_next):
         path = request.url.path.rstrip("/") or "/"
         if path not in PUBLIC_PATHS and not path.startswith("/docs"):
             auth_header = request.headers.get("Authorization", "")
-            token = ""
+            api_key_token = ""
             if auth_header.startswith("Bearer "):
-                token = auth_header[7:].strip()
+                api_key_token = auth_header[7:].strip()
             elif auth_header:
-                token = auth_header.strip()
+                api_key_token = auth_header.strip()
 
-            if not token:
-                token = request.headers.get("x-api-key", "").strip()
+            if not api_key_token:
+                api_key_token = request.headers.get("x-api-key", "").strip()
 
-            if not token or not secrets.compare_digest(token, settings.api_key):
+            if not api_key_token or not secrets.compare_digest(api_key_token, settings.api_key):
                 return JSONResponse(
                     status_code=401,
                     content={
@@ -740,15 +740,15 @@ async def _extract_file_upload(request: Request) -> tuple[bytes, str, str, str |
             data = base64.b64decode(raw_b64)
         except Exception as exc:
             raise HTTPException(400, f"Invalid base64 payload: {exc}") from exc
-        filename = body.get("filename") or body.get("name") or "upload.bin"
-        ctype = body.get("content_type") or "application/octet-stream"
-        session_id = body.get("session_id")
-        purpose = body.get("purpose") or "assistants"
-        model = body.get("model")
+        filename = str(body.get("filename") or body.get("name") or "upload.bin")
+        ctype = str(body.get("content_type") or "application/octet-stream")
+        session_id = str(body.get("session_id")) if body.get("session_id") else None
+        purpose = str(body.get("purpose") or "assistants")
+        model = str(body.get("model")) if body.get("model") else None
         return data, filename, ctype, session_id, purpose, model
 
     if "multipart/form-data" in content_type_header:
-        data = None
+        data_bytes: bytes | None = None
         filename = "upload.bin"
         ctype = "application/octet-stream"
         session_id = None
@@ -758,49 +758,55 @@ async def _extract_file_upload(request: Request) -> tuple[bytes, str, str, str |
             form = await request.form()
             file_field = form.get("file")
             if file_field is not None and hasattr(file_field, "read"):
-                data = await file_field.read()
-                filename = getattr(file_field, "filename", "upload.bin") or "upload.bin"
-                ctype = getattr(file_field, "content_type", "application/octet-stream") or "application/octet-stream"
-            session_id = form.get("session_id")
-            purpose = form.get("purpose", "assistants")
-            model = form.get("model")
+                read_res = await file_field.read()  # type: ignore[union-attr]
+                if isinstance(read_res, (bytes, bytearray)):
+                    data_bytes = bytes(read_res)
+                filename = str(getattr(file_field, "filename", "upload.bin") or "upload.bin")
+                ctype = str(getattr(file_field, "content_type", "application/octet-stream") or "application/octet-stream")
+            session_id = str(form.get("session_id")) if form.get("session_id") else None
+            purpose = str(form.get("purpose") or "assistants")
+            model = str(form.get("model")) if form.get("model") else None
         except Exception:
             body_bytes = await request.body()
-            msg = BytesParser(policy=policy.default).parsebytes(
-                b"Content-Type: " + content_type_header.encode("latin1", "replace") + b"\r\n\r\n" + body_bytes
-            )
+            header_bytes = b"Content-Type: " + content_type_header.encode("latin1", "replace") + b"\r\n\r\n"
+            msg = BytesParser(policy=policy.default).parsebytes(header_bytes + body_bytes)
             for part in msg.iter_parts():
                 cd = part.get_param("name", header="content-disposition")
                 if cd == "file":
-                    data = part.get_payload(decode=True)
+                    payload = part.get_payload(decode=True)
+                    if isinstance(payload, (bytes, bytearray)):
+                        data_bytes = bytes(payload)
                     fn = part.get_filename()
                     if fn:
-                        filename = fn
+                        filename = str(fn)
                     ct = part.get_content_type()
                     if ct and ct != "application/octet-stream":
-                        ctype = ct
+                        ctype = str(ct)
                 elif cd == "session_id":
                     val = part.get_payload(decode=True)
-                    session_id = val.decode("utf-8", errors="replace").strip() if val else None
+                    if isinstance(val, (bytes, bytearray)):
+                        session_id = val.decode("utf-8", errors="replace").strip() or None
                 elif cd == "purpose":
                     val = part.get_payload(decode=True)
-                    purpose = val.decode("utf-8", errors="replace").strip() if val else "assistants"
+                    if isinstance(val, (bytes, bytearray)):
+                        purpose = val.decode("utf-8", errors="replace").strip() or "assistants"
                 elif cd == "model":
                     val = part.get_payload(decode=True)
-                    model = val.decode("utf-8", errors="replace").strip() if val else None
+                    if isinstance(val, (bytes, bytearray)):
+                        model = val.decode("utf-8", errors="replace").strip() or None
 
-        if data is None:
+        if data_bytes is None:
             raise HTTPException(400, "Multipart form missing 'file' field")
-        return data, filename, ctype, session_id, purpose, model
+        return data_bytes, filename, ctype, session_id, purpose, model
 
     body_bytes = await request.body()
     if not body_bytes:
         raise HTTPException(400, "Empty request body")
-    filename = request.query_params.get("filename", "upload.bin")
-    ctype = request.headers.get("content-type", "application/octet-stream")
-    session_id = request.query_params.get("session_id")
-    purpose = request.query_params.get("purpose", "assistants")
-    model = request.query_params.get("model")
+    filename = str(request.query_params.get("filename", "upload.bin"))
+    ctype = str(request.headers.get("content-type", "application/octet-stream"))
+    session_id = str(request.query_params.get("session_id")) if request.query_params.get("session_id") else None
+    purpose = str(request.query_params.get("purpose", "assistants"))
+    model = str(request.query_params.get("model")) if request.query_params.get("model") else None
     return body_bytes, filename, ctype, session_id, purpose, model
 
 
@@ -1041,7 +1047,7 @@ def _resolve_provider(model: str) -> str:
 
 
 @app.post("/v1/chat/completions")
-async def chat_completions(req: ChatCompletionRequest, request: Request = None) -> Any:
+async def chat_completions(req: ChatCompletionRequest, request: Request | None = None) -> Any:
     user_specified_model = bool(req.model)
     if not req.model:
         req.model = getattr(app.state, "default_model", "deepseek-v4-flash")
@@ -1124,8 +1130,8 @@ async def upload_file_endpoint(request: Request) -> dict:
         except HTTPException:
             target_provider = None
 
-    ds_pool: AccountPool = getattr(app.state, "pool", None)
-    qw_pool: AccountPool = getattr(app.state, "qwen_pool", None)
+    ds_pool: AccountPool | None = getattr(app.state, "pool", None)
+    qw_pool: AccountPool | None = getattr(app.state, "qwen_pool", None)
 
     if target_provider is None and session_id:
         if qw_pool and qw_pool.account_for_session(session_id) is not None:
@@ -1260,7 +1266,7 @@ async def get_file_endpoint(file_id: str) -> dict:
             "raw": staged,
         }
 
-    pool: AccountPool = getattr(app.state, "pool", None)
+    pool: AccountPool | None = getattr(app.state, "pool", None)
     if pool is None or not pool.healthy:
         raise HTTPException(503, "deepseek provider is not configured or no healthy accounts available")
 
@@ -1290,7 +1296,7 @@ async def list_sessions(
     pinned: bool = False,
     count: int = 20,
 ) -> dict:
-    pool: AccountPool = getattr(app.state, "pool", None)
+    pool: AccountPool | None = getattr(app.state, "pool", None)
     if pool is None or not pool.healthy:
         raise HTTPException(503, "deepseek provider is not configured or no healthy accounts available")
 
@@ -1341,7 +1347,7 @@ def _resolve_session_uuid(pool: AccountPool, session_id: str) -> str:
 
 @app.get("/v1/sessions/{session_id}")
 async def get_session(session_id: str, account: int | None = None) -> dict:
-    pool: AccountPool = getattr(app.state, "pool", None)
+    pool: AccountPool | None = getattr(app.state, "pool", None)
     if pool is None or not pool.healthy:
         raise HTTPException(503, "deepseek provider is not configured or no healthy accounts available")
 
@@ -1401,7 +1407,7 @@ async def get_session(session_id: str, account: int | None = None) -> dict:
 
 @app.delete("/v1/sessions/{session_id}")
 async def delete_session_endpoint(session_id: str, account: int | None = None) -> dict:
-    pool: AccountPool = getattr(app.state, "pool", None)
+    pool: AccountPool | None = getattr(app.state, "pool", None)
     if pool is None or not pool.healthy:
         raise HTTPException(503, "deepseek provider is not configured or no healthy accounts available")
 
@@ -1575,29 +1581,33 @@ async def _chat_completions_deepseek(
         for r in staged_records
     )
 
-    if not has_image and req.file_ids and not user_specified_model:
+    req_file_ids = getattr(req, "file_ids", None)
+    if not has_image and req_file_ids and not user_specified_model:
         try:
-            file_meta = await account.client.fetch_files(req.file_ids[:5])
+            file_meta = await account.client.fetch_files(req_file_ids[:5])
             if any(f.get("is_image") or f.get("model_kind") == "VISION" for f in file_meta):
                 has_image = True
-        except Exception:
-            pass
+        except Exception as exc:
+            log.debug("failed to fetch files metadata: %s", exc)
 
     default_model = getattr(app.state, "default_model", "deepseek-v4-flash")
     if has_image and (not user_specified_model or req.model == default_model):
         req.model = "deepseek-v4-vision"
         log.info("auto-selected deepseek-v4-vision for image attachments (session=%s)", existing_sid or req.session_id)
 
-    model_type = _resolve_model(req.model)
-    thinking = req.thinking if req.thinking is not None else _is_reasoning_model(req.model)
+    model_name: str = req.model or default_model
+    req.model = model_name
+
+    model_type = _resolve_model(model_name)
+    thinking = req.thinking if req.thinking is not None else _is_reasoning_model(model_name)
     search = bool(req.search) and model_type == "default"
 
     _validate_attachments(attachments, model_type)
     ref_file_ids_list: list[str] = []
 
     # 1. Any explicitly passed file IDs
-    if req.file_ids:
-        ref_file_ids_list.extend(req.file_ids)
+    if req_file_ids:
+        ref_file_ids_list.extend(req_file_ids)
 
     # 2. Any auto-staged files from POST /v1/files
     for r in staged_records:
@@ -1645,7 +1655,7 @@ async def _chat_completions_deepseek(
     }
     if req.stream:
         return StreamingResponse(
-            _stream_guard(_stream_openai(lock=account.sem, **common), req.model),
+            _stream_guard(_stream_openai(lock=account.sem, **common), model_name),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -1672,7 +1682,10 @@ async def _chat_completions_qwen(req: ChatCompletionRequest, request: Request | 
         if q_att:
             qwen_files.append(q_att)
 
-    account, existing_sid, context_seq, prompt, tool_mode = await _acquire_and_build(pool, req, {"model": req.model})
+    model_name: str = req.model or "qwen3.7-plus"
+    req.model = model_name
+
+    account, existing_sid, context_seq, prompt, tool_mode = await _acquire_and_build(pool, req, {"model": model_name})
 
     inline_attachments = _collect_attachments(req)
     if inline_attachments:
@@ -1688,8 +1701,8 @@ async def _chat_completions_qwen(req: ChatCompletionRequest, request: Request | 
         "pool": pool,
         "existing_sid": existing_sid,
         "prompt": prompt,
-        "model": req.model,
-        "model_id": req.model,
+        "model": model_name,
+        "model_id": model_name,
         "thinking": thinking,
         "search": search,
         "tool_schemas": toolemu.tool_schema_map(getattr(req, "tools", None)),
@@ -1705,7 +1718,7 @@ async def _chat_completions_qwen(req: ChatCompletionRequest, request: Request | 
     }
     if req.stream:
         return StreamingResponse(
-            _stream_guard(qwen_api.stream_openai(lock=account.sem, **common), req.model),
+            _stream_guard(qwen_api.stream_openai(lock=account.sem, **common), model_name),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
