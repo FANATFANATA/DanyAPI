@@ -55,42 +55,42 @@ danyapi  | (21:59:23) POST /v1/chat/completions success (3650ms)
 
 # ENDPOINTS
 
-### LLM Endpoints (OpenAI-Compatible)
-- POST **/v1/chat/completions** — Chat, reasoning (thinking), search, tools, sessions (session_id), file attachments, and streaming.
+#### LLM Endpoints (OpenAI-Compatible)
+- POST **/v1/chat/completions** - Chat, reasoning (thinking), search, tools, sessions (session_id), file attachments, and streaming.
     * messages (array, required): List of message objects (role: system | user | assistant, content: string).
     * optional: model (string), stream (boolean, default: false), thinking (boolean), search (boolean), session_id (string): continue conversation, tools (array), file_ids (array): explicit file IDs to attach. Uploaded files for this session are also automatically attached.
-- POST **/v1/images/generations** — Text-to-image generation powered by Qwen.
+- POST **/v1/images/generations** - Text-to-image generation powered by Qwen.
     * prompt (string, required): Text description of the image to generate.
     * optional: model (string, default: qwen-image-gen), n (integer, default: 1), size (string, default: 1024x1024), response_format (string, default: url).
 
 - _Note: If Bearer Auth given, that will be required in calls_.
 
 ### File & Image Uploads (DeepSeek & Qwen)
-- POST **/v1/files** — Upload files or images with automatic provider routing:
+- POST **/v1/files** - Upload files or images with automatic provider routing:
     * **DeepSeek**: Uploads directly using dynamic Proof-of-Work (PoW) challenge solving.
     * **Qwen**: Uploads directly to Alibaba Cloud OSS using STS temporary credentials.
     * Files are streamed in-memory (no local disk storage) and automatically staged to attach to your next chat completion for that `session_id`.
     * Parameters: `file` (binary / multipart, or base64 JSON string, required), optional: `session_id` (string), `model` (string, e.g. `qwen3.7-plus` or `deepseek-v4-vision`), `purpose` (string, default: `assistants`).
-- GET **/v1/files/{file_id}** — Retrieve status and metadata for an uploaded or staged file.
+- GET **/v1/files/{file_id}** - Retrieve status and metadata for an uploaded or staged file.
 
 ### Session Management (DeepSeek)
-- GET **/v1/sessions** — List active chat sessions stored on DeepSeek across accounts.
+- GET **/v1/sessions** - List active chat sessions stored on DeepSeek across accounts.
     * optional: account (integer): filter by account index, pinned (boolean, default: false), count (integer, default: 20, max: 100).
-- GET **/v1/sessions/{session_id}** — Retrieve full conversation history and messages for a session.
-- DELETE **/v1/sessions/{session_id}** — Delete a chat session from DeepSeek and evict from cache.
+- GET **/v1/sessions/{session_id}** - Retrieve full conversation history and messages for a session.
+- DELETE **/v1/sessions/{session_id}** - Delete a chat session from DeepSeek and evict from cache.
 
 ### Models & Token Management
-- GET **/v1/models** — List of all available DeepSeek and Qwen models.
-- GET **/v1/usage** — Real-time request and token consumption statistics.
-- POST **/v1/tokens** — Hot-add new tokens without restarting the server.
+- GET **/v1/models** - List of all available DeepSeek and Qwen models.
+- GET **/v1/usage** - Real-time request and token consumption statistics.
+- POST **/v1/tokens** - Hot-add new tokens without restarting the server.
 
 ### Health & Diagnostics
-- GET **/health** — Provider readiness, active accounts, and cache metrics.
+- GET **/health** - Provider readiness, active accounts, and cache metrics.
 
 ### Web UI & Documentation
-- GET **/** — Interactive token management and usage dashboard.
-- GET **/docs/** — Landing page, playground, and guides.
-- GET **/openapi.json** & **GET /redoc** — OpenAPI specs and ReDoc interactive viewer.
+- GET **/** - Interactive token management and usage dashboard.
+- GET **/docs/** - Landing page, playground, and guides.
+- GET **/openapi.json** & **GET /redoc** - OpenAPI specs and ReDoc interactive viewer.
 
 
 # EXAMPLES
@@ -183,7 +183,7 @@ Response:
 }
 ```
 
-Now query Qwen with the same `session_id` — the uploaded image is **automatically attached**:
+Now query Qwen with the same `session_id` - the uploaded image is **automatically attached**:
 ```bash
 curl -s http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
