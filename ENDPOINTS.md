@@ -42,26 +42,43 @@ curl -X POST http://localhost:8000/v1/chat/completions \
 
 ## 2. File & Image Uploads
 
-Files uploaded via DanyAPI are streamed directly in-memory to DeepSeek with dynamic cryptographic Proof of Work (PoW) challenge solving. Files are **never stored on local disk**.
+Files uploaded via DanyAPI are streamed directly in-memory without saving to local disk.
+- **DeepSeek**: Solves Proof of Work (PoW) challenges and streams to DeepSeek's upload endpoint.
+- **Qwen**: Obtains temporary STS upload credentials and streams binary bytes directly to Alibaba Cloud OSS (`qwen-webui-prod.oss-accelerate.aliyuncs.com`).
 
 ### `POST /v1/files`
-Upload a file or image to DeepSeek. Uploaded files are **automatically staged** and attached to your next chat completion.
+Upload a file or image to DeepSeek or Qwen. Uploaded files are **automatically staged** and attached to your next chat completion for that `session_id`.
+
+- **Provider Resolution**:
+  - Pass `model=qwen3.7-plus` (or any Qwen model) to upload to **Qwen**.
+  - Pass `model=deepseek-v4-vision` (or any DeepSeek model) to upload to **DeepSeek**.
+  - If `model` is omitted, DanyAPI uses the provider from the active session (`session_id`), or whichever provider pool is configured.
 
 - **Supported Upload Formats**:
   1. Standard `multipart/form-data` (`file=@path/to/file`)
-  2. JSON body with base64 payload (`{"file": "<base64>", "filename": "...", "session_id": "..."}`)
+  2. JSON body with base64 payload (`{"file": "<base64>", "filename": "...", "session_id": "...", "model": "..."}`)
 - **Parameters**:
   - `file`: The binary file or base64 string (required).
-  - `session_id`: Optional string. If provided, pins upload to that session's DeepSeek account and stages the file specifically for that session.
+  - `session_id`: Optional string. Associates and stages the file specifically for that chat session.
+  - `model`: Optional string (e.g. `"qwen3.7-plus"` or `"deepseek-v4-vision"`).
   - `purpose`: Optional string (default: `"assistants"`).
-  - `model`: Optional string (e.g. `"deepseek-v4-vision"`).
 
-#### Multipart Upload (curl)
+#### Multipart Upload for Qwen (curl)
+```bash
+curl -X POST http://localhost:8000/v1/files \
+  -H "Authorization: Bearer $API_KEY" \
+  -F "file=@person.jpg" \
+  -F "session_id=my-qwen-session" \
+  -F "model=qwen3.7-plus"
+```
+
+#### Multipart Upload for DeepSeek (curl)
 ```bash
 curl -X POST http://localhost:8000/v1/files \
   -H "Authorization: Bearer $API_KEY" \
   -F "file=@document.pdf" \
-  -F "session_id=my-session"
+  -F "session_id=my-ds-session" \
+  -F "model=deepseek-v4-flash"
 ```
 
 #### JSON Base64 Upload
