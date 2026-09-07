@@ -3,7 +3,7 @@ services:
     # you can build from source: docker compose up --build
     build: .
     # or comment above out, and load latest from repo.
-    # image: ghcr.io/fanatfanata/danyapi:latest
+    # image: ghcr.io/mindflowgo/danyapi:latest
     container_name: danyapi
     restart: unless-stopped
     ports:
