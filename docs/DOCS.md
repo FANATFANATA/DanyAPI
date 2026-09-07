@@ -42,7 +42,7 @@ Attaching to danyapi
 
 danyapi  | (21:37:33) outgoing IP: 99.88.77.66 (via proxy socks5://host.docker.internal:1080)
 danyapi  | (21:37:33) authentication: open (no API_KEY set)
-danyapi  | (21:37:35) deepseek accounts ready: 1
+danyapi  | (21:37:35) deepseek accounts ready: 1 (deepseek-v4-flash, deepseek-v4-pro, deepseek-v4-vision)
 danyapi  | (21:37:35) default model: deepseek-v4-flash
 danyapi  | (21:37:35) DanyAPI running on http://0.0.0.0:8000 (Press CTRL+C to quit)
 danyapi  | (21:42:35) deepseek create session success (1520ms)

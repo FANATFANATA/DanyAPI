@@ -231,7 +231,15 @@ async def lifespan(app: FastAPI):
                         stable_id=_token_stable_id(token),
                     )
                 )
-            log.info("deepseek accounts ready: %d", len(accounts))
+            if accounts:
+                ds_models = list(MODEL_TYPE_BY_NAME.keys())
+                log.info(
+                    "deepseek accounts ready: %d (%s)",
+                    len(accounts),
+                    ", ".join(ds_models),
+                )
+            else:
+                log.info("deepseek accounts ready: 0")
         if settings.qwen_tokens:
             for i, token in enumerate(settings.qwen_tokens):
                 qw_client = QwenClient(token=token, timeout=settings.timeout)
@@ -249,7 +257,6 @@ async def lifespan(app: FastAPI):
                         stable_id=_token_stable_id(token),
                     )
                 )
-            log.info("qwen accounts ready: %d", len(qwen_accounts))
         if accounts:
             app.state.pool = AccountPool(
                 accounts,
@@ -270,9 +277,14 @@ async def lifespan(app: FastAPI):
                 affinity_store=qwen_affinity_store,
             )
             app.state.qwen_models = await _fetch_qwen_models(qwen_accounts[0].client)
+            qw_models = list(dict.fromkeys(m["id"] for m in app.state.qwen_models if isinstance(m, dict) and m.get("id")))
+            models_str = f" ({', '.join(qw_models)})" if qw_models else ""
+            log.info("qwen accounts ready: %d%s", len(qwen_accounts), models_str)
         else:
             app.state.qwen_pool = None
             app.state.qwen_models = []
+            if settings.qwen_tokens:
+                log.info("qwen accounts ready: 0")
         if not accounts and not qwen_accounts:
             raise RuntimeError("no valid credentials: set DEEPSEEK_TOKENS or QWEN_TOKENS")
         app.state.default_model = _determine_default_model(app)
