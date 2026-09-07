@@ -1308,7 +1308,10 @@ def _xml_invoke_arguments(body: str, param_types: dict[str, Any] | None = None, 
         return params
     for match in _XML_ELEMENT.finditer(body):
         key = match.group(1).strip()
-        if key.lower() in _XML_SKIP_ELEMENTS or key.lower() in _XML_HTML_TAGS:
+        lowered = key.lower()
+        if lowered in _XML_SKIP_ELEMENTS:
+            continue
+        if lowered in _XML_HTML_TAGS and lowered not in _ARGS_ALIASES:
             continue
         _xml_set_param(params, key, _xml_value(match.group(3), (param_types or {}).get(key)))
     if params:

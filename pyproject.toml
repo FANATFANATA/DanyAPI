@@ -11,7 +11,7 @@ asyncio_mode = "auto"
 filterwarnings = ["ignore:Using `httpx` with `starlette.testclient` is deprecated.*"]
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.12"
 
 [tool.pyright]
 include = ["danyapi", "docs", "tests"]
