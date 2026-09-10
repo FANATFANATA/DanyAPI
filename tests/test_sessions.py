@@ -476,7 +476,7 @@ def test_deepseek_stateless_request_resolves_cached_session():
         pool.resolve_context = MagicMock(return_value="sess-a")
         openai_mod.app.state.pool = pool
         req = SimpleNamespace(
-            model="deepseek-v4-flash",
+            model="deepseek-v4.1-flash",
             stream=False,
             thinking=False,
             search=False,
@@ -512,7 +512,7 @@ def test_deepseek_cached_missing_session_renders_full_history():
         pool.resolve_context = MagicMock(return_value="sess-a")
         openai_mod.app.state.pool = pool
         req = SimpleNamespace(
-            model="deepseek-v4-flash",
+            model="deepseek-v4.1-flash",
             stream=False,
             thinking=False,
             search=False,
@@ -550,7 +550,7 @@ def test_deepseek_explicit_session_bypasses_context_resolution():
         pool.resolve_context = MagicMock()
         openai_mod.app.state.pool = pool
         req = SimpleNamespace(
-            model="deepseek-v4-flash",
+            model="deepseek-v4.1-flash",
             stream=False,
             thinking=False,
             search=False,
@@ -687,7 +687,7 @@ def test_deepseek_sequential_single_message_session_accumulates():
         pool.acquire = AsyncMock(side_effect=[(account, None), (account, "seq-1")])
         openai_mod.app.state.pool = pool
         base = {
-            "model": "deepseek-v4-flash",
+            "model": "deepseek-v4.1-flash",
             "stream": False,
             "thinking": False,
             "search": False,
@@ -728,7 +728,7 @@ def test_deepseek_cached_session_hit_sends_only_delta():
         pool.resolve_context = MagicMock(return_value="cached-1")
         openai_mod.app.state.pool = pool
         req = SimpleNamespace(
-            model="deepseek-v4-flash",
+            model="deepseek-v4.1-flash",
             stream=False,
             thinking=False,
             search=False,

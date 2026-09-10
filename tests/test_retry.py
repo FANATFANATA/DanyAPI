@@ -97,7 +97,7 @@ def _args(acct, pool=None, existing_sid: str | None = "s1"):
         "existing_sid": existing_sid,
         "lock": acct.sem,
         "prompt": "x",
-        "model": "deepseek-v4-flash",
+        "model": "deepseek-v4.1-flash",
         "model_type": "default",
         "thinking": False,
         "search": False,
@@ -323,13 +323,11 @@ async def test_stream_full_consumption_does_not_stop_upstream():
 
 def test_model_type_mapping():
     assert openai_mod.MODEL_TYPE_BY_NAME == {
-        "deepseek-v4-flash": "default",
-        "deepseek-v4-pro": "expert",
-        "deepseek-v4-vision": "vision",
+        "deepseek-v4.1-flash": "default",
     }
 
 
-async def test_search_gated_to_flash_and_thinking_allowed():
+async def test_search_and_thinking_allowed():
     captured = {}
     orig = openai_mod._collect_non_stream
 
@@ -355,53 +353,29 @@ async def test_search_gated_to_flash_and_thinking_allowed():
             )
             await openai_mod._chat_completions_deepseek(req)
 
-        await run("deepseek-v4-flash", search=True, thinking=None)
+        await run("deepseek-v4.1-flash", search=True, thinking=None)
         assert captured["model_type"] == "default"
         assert captured["search"] is True
         assert captured["thinking"] is False
 
-        await run("deepseek-v4-pro", search=True, thinking=None)
-        assert captured["model_type"] == "expert"
-        assert captured["search"] is False
-        assert captured["thinking"] is False
-
-        await run("deepseek-v4-pro-thinking", search=True, thinking=None)
-        assert captured["model_type"] == "expert"
-        assert captured["search"] is False
+        await run("deepseek-v4.1-flash-thinking", search=True, thinking=None)
+        assert captured["model_type"] == "default"
+        assert captured["search"] is True
         assert captured["thinking"] is True
 
-        await run("deepseek-v4-vision", search=True, thinking=True)
-        assert captured["model_type"] == "vision"
+        await run("deepseek-v4.1-flash", search=False, thinking=True)
+        assert captured["model_type"] == "default"
         assert captured["search"] is False
         assert captured["thinking"] is True
     finally:
         openai_mod._collect_non_stream = orig
 
 
-def test_pro_rejects_all_files():
+def test_accepts_files():
     from danyapi.api.openai import Attachment, _validate_attachments
 
-    with pytest.raises(Exception) as excinfo:
-        _validate_attachments([Attachment(b"x", "a.txt", "text/plain", False)], "expert")
-    exc = excinfo.value
-    assert isinstance(exc, openai_mod.HTTPException)
-    assert exc.status_code == 400
-
-
-def test_vision_rejects_text_files():
-    from danyapi.api.openai import Attachment, _validate_attachments
-
-    with pytest.raises(Exception) as excinfo:
-        _validate_attachments([Attachment(b"x", "a.txt", "text/plain", False)], "vision")
-    exc = excinfo.value
-    assert isinstance(exc, openai_mod.HTTPException)
-    assert exc.status_code == 400
-
-
-def test_vision_accepts_images():
-    from danyapi.api.openai import Attachment, _validate_attachments
-
-    _validate_attachments([Attachment(b"x", "a.png", "image/png", True)], "vision")
+    _validate_attachments([Attachment(b"x", "a.txt", "text/plain", False)], "default")
+    _validate_attachments([Attachment(b"x", "a.png", "image/png", True)], "default")
 
 
 def test_too_many_files_rejected():
@@ -423,7 +397,7 @@ def test_collect_attachments_from_image_url_and_files():
     img_b64 = b64.b64encode(b"pngdata").decode()
     file_b64 = b64.b64encode(b"hello").decode()
     req = SimpleNamespace(
-        model="deepseek-v4-flash",
+        model="deepseek-v4.1-flash",
         messages=[
             ChatMessage(
                 role="user",

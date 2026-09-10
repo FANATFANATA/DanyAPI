@@ -13,16 +13,16 @@ def cache_dir(tmp_path, monkeypatch):
 
 def test_record_and_snapshot():
     tracker = UsageTracker()
-    tracker.record("deepseek", "deepseek-v4-flash", 10, 20, 30)
+    tracker.record("deepseek", "deepseek-v4.1-flash", 10, 20, 30)
     tracker.record("qwen", "qwen3.8-max", 5, 7, 12, user="alice")
     snap = tracker.snapshot()
     assert snap["totals"] == {"requests": 2, "prompt_tokens": 15, "completion_tokens": 27, "total_tokens": 42}
-    assert snap["by_model"]["deepseek-v4-flash"]["requests"] == 1
-    assert snap["by_model"]["deepseek-v4-flash"]["total_tokens"] == 30
+    assert snap["by_model"]["deepseek-v4.1-flash"]["requests"] == 1
+    assert snap["by_model"]["deepseek-v4.1-flash"]["total_tokens"] == 30
     assert snap["by_provider"]["qwen"]["total_tokens"] == 12
     assert snap["by_user"]["alice"]["requests"] == 1
     assert len(snap["recent"]) == 2
-    assert snap["recent"][0]["model"] == "deepseek-v4-flash"
+    assert snap["recent"][0]["model"] == "deepseek-v4.1-flash"
     assert snap["recent"][1]["user"] == "alice"
 
 

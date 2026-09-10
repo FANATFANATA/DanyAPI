@@ -122,7 +122,7 @@ def _deepseek_args(acct, tool_mode=True):
         "existing_sid": "s1",
         "lock": acct.sem,
         "prompt": "x",
-        "model": "deepseek-v4-flash",
+        "model": "deepseek-v4.1-flash",
         "model_type": "default",
         "thinking": False,
         "search": False,

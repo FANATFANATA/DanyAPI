@@ -34,7 +34,7 @@ def test_request_client_ip_no_client():
 def test_request_details_all_fields():
     request = _req({"user-agent": "curl/8.0"})
     payload = {
-        "model": "deepseek-v4-flash",
+        "model": "deepseek-v4.1-flash",
         "session_id": "s123",
         "user": "alice",
         "stream": True,
@@ -42,7 +42,7 @@ def test_request_details_all_fields():
     }
     details = openai_mod._request_details(request, payload)
     assert "ua=curl/8.0" in details
-    assert "model=deepseek-v4-flash" in details
+    assert "model=deepseek-v4.1-flash" in details
     assert "sid=s123" in details
     assert "user=alice" in details
     assert "stream=1" in details
@@ -94,9 +94,9 @@ def test_extract_request_body_valid():
         "root_path": "",
     }
     request = Request(scope, receive=None)
-    request._body = b'{"model": "deepseek-v4-flash", "user": "bob"}'
+    request._body = b'{"model": "deepseek-v4.1-flash", "user": "bob"}'
     payload = asyncio.run(openai_mod._extract_request_body(request))
-    assert payload == {"model": "deepseek-v4-flash", "user": "bob"}
+    assert payload == {"model": "deepseek-v4.1-flash", "user": "bob"}
 
 
 def test_log_requests_success_via_client(caplog):

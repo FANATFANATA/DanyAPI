@@ -36,9 +36,7 @@ from ..usage import init_tracker, record_usage
 log = logging.getLogger("danyapi.api")
 
 MODEL_TYPE_BY_NAME = {
-    "deepseek-v4-flash": "default",
-    "deepseek-v4-pro": "expert",
-    "deepseek-v4-vision": "vision",
+    "deepseek-v4.1-flash": "default",
 }
 
 REASONING_SUFFIXES = ("-thinking",)
@@ -125,7 +123,7 @@ class FileSpec(BaseModel):
 
 
 class ChatCompletionRequest(BaseModel):
-    model: str = Field(default="deepseek-v4-flash")
+    model: str = Field(default="deepseek-v4.1-flash")
     messages: list[ChatMessage] = Field(default_factory=list)
     stream: bool = False
     temperature: float | None = None
@@ -689,10 +687,6 @@ def _validate_attachments(attachments: list[Attachment], model_type: str) -> Non
     for att in attachments:
         if len(att.data) > MAX_FILE_SIZE:
             raise HTTPException(400, f"file {att.name} exceeds 100 MB limit")
-    if model_type == "expert":
-        raise HTTPException(400, "deepseek-v4-pro does not support file attachments")
-    if model_type == "vision" and any(not att.is_image for att in attachments):
-        raise HTTPException(400, "deepseek-v4-vision accepts images only")
 
 
 async def _fresh_pow_upload_headers(account) -> dict:
@@ -1041,7 +1035,7 @@ async def _chat_completions_deepseek(req: ChatCompletionRequest) -> Any:
 
     model_type = _resolve_model(req.model)
     thinking = req.thinking if req.thinking is not None else _is_reasoning_model(req.model)
-    search = bool(req.search) and model_type == "default"
+    search = bool(req.search)
 
     account, existing_sid, context_seq, prompt, tool_mode = await _acquire_and_build(pool, req)
 
