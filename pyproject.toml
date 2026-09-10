@@ -9,6 +9,9 @@ select = ["B", "C4", "E", "F", "FURB", "I", "PLW", "RUF", "UP"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 filterwarnings = ["ignore:Using `httpx` with `starlette.testclient` is deprecated.*"]
+markers = [
+    "live: tests that hit the real DeepSeek API (requires DEEPSEEK_TOKENS env var)",
+]
 
 [tool.mypy]
 python_version = "3.12"
