@@ -1205,6 +1205,19 @@ def _is_retryable_hint(rec: MessageReconstructor) -> bool:
     return bool(hint and hint.get("finish_reason") in RETRYABLE_FINISH_REASONS)
 
 
+FAKE_CONTEXT_HINT_MARKERS = ("length limit reached",)
+
+
+def _is_fake_context_hint(rec: MessageReconstructor) -> bool:
+    hint = rec.hint_error
+    if not hint:
+        return False
+    message = hint.get("message")
+    if not isinstance(message, str):
+        return False
+    return any(marker in message.casefold() for marker in FAKE_CONTEXT_HINT_MARKERS)
+
+
 RETRYABLE_HTTP_STATUSES = {408, 425, 429, 500, 502, 503, 504}
 STALE_SESSION_STATUSES = {400, 404}
 
@@ -1461,7 +1474,7 @@ async def _collect_continuation(
                 await asyncio.sleep(delay)
                 continue
             return None
-        if not (rec.content or rec.reasoning) and _is_retryable_hint(rec) and attempt < MAX_RETRIES:
+        if not (rec.content or rec.reasoning) and (_is_retryable_hint(rec) or _is_fake_context_hint(rec)) and attempt < MAX_RETRIES:
             attempt += 1
             delay = _retry_delay(attempt)
             log.warning(
@@ -1633,7 +1646,7 @@ async def _collect_non_stream(
                         await asyncio.sleep(delay)
                         continue
                     raise
-                if not (rec.content or rec.reasoning) and _is_retryable_hint(rec) and attempt < MAX_RETRIES:
+                if not (rec.content or rec.reasoning) and (_is_retryable_hint(rec) or _is_fake_context_hint(rec)) and attempt < MAX_RETRIES:
                     attempt += 1
                     delay = _retry_delay(attempt)
                     log.warning(
@@ -1889,7 +1902,7 @@ async def _stream_openai(
                         await _try_stop_stream(account.client, session.id, stop_message_id)
             if got_content:
                 break
-            if _is_retryable_hint(rec) and attempt < MAX_RETRIES:
+            if (_is_retryable_hint(rec) or _is_fake_context_hint(rec)) and attempt < MAX_RETRIES:
                 attempt += 1
                 delay = _retry_delay(attempt)
                 log.warning(

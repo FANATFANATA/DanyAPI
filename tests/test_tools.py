@@ -93,7 +93,7 @@ def test_render_tool_schema_tool_choice_function_dict():
     assert "get_weather" in schema
 
 
-def test_render_tool_schema_strict_flag_rendered():
+def test_render_tool_schema_strict_flag_skipped():
     tool = {
         "type": "function",
         "function": {"name": "calc", "strict": True, "parameters": {"type": "object", "properties": {"x": {"type": "number"}}}},
@@ -101,7 +101,7 @@ def test_render_tool_schema_strict_flag_rendered():
     schema = render_tool_schema([tool])
     assert schema is not None
     assert schema is not None
-    assert "strict" in schema
+    assert "strict" not in schema
 
 
 def test_render_tool_schema_compact_parameters_json():
@@ -2143,8 +2143,8 @@ def test_choice_name_unknown_dict():
 def test_render_schema_tool_without_parameters():
     schema = render_tool_schema([{"function": {"name": "a", "description": "d"}}])
     assert schema is not None
+    assert "1. name: a" in schema
     assert "   parameters (JSON Schema)" not in schema
-    assert '<invoke name="a"></invoke>' in schema
 
 
 def test_render_message_tool_calls_non_dict():
@@ -2350,8 +2350,8 @@ def test_tool_schema_map_string_parameters_json():
 def test_render_tool_schema_parameterless_example():
     schema = render_tool_schema([NO_ARGS_TOOL])
     assert schema is not None
-    assert '<invoke name="ping"></invoke>' in schema
-    assert "no <parameter> children" in schema
+    assert "1. name: ping" in schema
+    assert "no <parameter> children" not in schema
 
 
 def test_parse_xml_tool_calls_invoke_without_parameters():
@@ -2470,22 +2470,22 @@ def test_tool_schema_map_aliases_attached():
     assert mapping["bash"]["_aliases"] == ["exec_command", "shell", "run_cmd"]
 
 
-def test_render_tool_schema_aliases_line():
+def test_render_tool_schema_aliases_not_rendered():
     schema = render_tool_schema([SHELL_TOOL])
     assert schema is not None
-    assert "aliases accepted: exec_command, shell, run_cmd" in schema
+    assert "aliases accepted" not in schema
 
 
-def test_render_tool_schema_examples_capped():
+def test_render_tool_schema_no_examples():
     tools = [{"type": "function", "function": {"name": f"tool_{i}", "description": "d"}} for i in range(5)]
     schema = render_tool_schema(tools)
     assert schema is not None
-    assert '<invoke name="tool_0">' in schema
-    assert '<invoke name="tool_2">' in schema
+    assert '<invoke name="tool_0">' not in schema
+    assert '<invoke name="tool_2">' not in schema
     assert '<invoke name="tool_3">' not in schema
 
 
-def test_render_tool_schema_example_multi_parameter():
+def test_render_tool_schema_no_example_multi_parameter():
     tool = {
         "type": "function",
         "function": {
@@ -2498,11 +2498,11 @@ def test_render_tool_schema_example_multi_parameter():
     }
     schema = render_tool_schema([tool])
     assert schema is not None
-    assert '<parameter name="x">1</parameter>' in schema
-    assert '<parameter name="y">1</parameter>' in schema
+    assert '<parameter name="x">1</parameter>' not in schema
+    assert '<parameter name="y">1</parameter>' not in schema
 
 
-def test_render_tool_schema_example_array_object_values():
+def test_render_tool_schema_no_example_array_object_values():
     tool = {
         "type": "function",
         "function": {
@@ -2512,11 +2512,11 @@ def test_render_tool_schema_example_array_object_values():
     }
     schema = render_tool_schema([tool])
     assert schema is not None
-    assert '<parameter name="items">[]</parameter>' in schema
-    assert '<parameter name="opts">{}</parameter>' in schema
+    assert '<parameter name="items">[]</parameter>' not in schema
+    assert '<parameter name="opts">{}</parameter>' not in schema
 
 
-def test_tail_includes_function_names_reminder():
+def test_tail_without_function_names_reminder():
     messages = [
         Message(role="user", content="What is the weather?"),
         Message(role="assistant", tool_calls=[{"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": '{"city": "Moscow"}'}}]),
@@ -2524,7 +2524,7 @@ def test_tail_includes_function_names_reminder():
     ]
     prompt, tool_mode = build_prompt(messages, [WEATHER_TOOL], None, has_session=True)
     assert tool_mode
-    assert "Available functions: get_weather" in prompt
+    assert "Available functions:" not in prompt
     assert "You have access to the following functions" not in prompt
     assert "Continue the conversation" in prompt
 
@@ -2540,7 +2540,7 @@ def test_tail_without_tools_has_no_reminder():
     assert "Continue the conversation" in prompt
 
 
-def test_history_mode_appends_recency_reminder():
+def test_history_mode_omits_recency_reminder():
     messages = [
         Message(role="user", content="What is the weather?"),
         Message(role="assistant", content="It is 22C."),
@@ -2548,8 +2548,9 @@ def test_history_mode_appends_recency_reminder():
     ]
     prompt, tool_mode = build_prompt(messages, [WEATHER_TOOL], None, has_session=False)
     assert tool_mode
-    assert prompt.rstrip().endswith("reply with your final answer.")
-    assert prompt.index("Remember: to call any function") > prompt.index("And in Rome?")
+    assert "get_weather" in prompt
+    assert "And in Rome?" in prompt
+    assert "Remember: to call any function" not in prompt
 
 
 def test_history_mode_without_tools_no_reminder():
@@ -2595,6 +2596,43 @@ def test_parse_xml_selfclose_alias_with_sibling_inside_wrapper():
     calls, _ = parse_tool_calls('<tool_calls><bash command="ls"/><Exec_Command/></tool_calls>', schemas)
     assert calls is not None
     assert [(c.name, json.loads(c.arguments)) for c in calls] == [("bash", {"command": "ls"}), ("bash", {})]
+
+
+def test_parse_xml_calls_wrapper_invisible():
+    text = '<calls>\n<invoke name="get_weather"><parameter name="city">Moscow</parameter></invoke>\n</calls>'
+    calls, wrapper = parse_tool_calls(text)
+    assert calls is not None
+    assert len(calls) == 1
+    assert calls[0].name == "get_weather"
+    assert json.loads(calls[0].arguments) == {"city": "Moscow"}
+    assert wrapper == ""
+
+
+def test_parse_xml_underscore_calls_wrapper_invisible():
+    text = '<_calls><invoke name="get_weather"><parameter name="city">Oslo</parameter></invoke></_calls>'
+    calls, wrapper = parse_tool_calls(text, tool_schemas=tool_schema_map([WEATHER_TOOL]))
+    assert calls is not None
+    assert len(calls) == 1
+    assert calls[0].name == "get_weather"
+    assert json.loads(calls[0].arguments) == {"city": "Oslo"}
+    assert wrapper == ""
+
+
+def test_parse_xml_calls_wrapper_selfclose_tool_invisible():
+    schemas = tool_schema_map([SHELL_TOOL])
+    calls, wrapper = parse_tool_calls('<calls><bash command="ls"/></calls>', schemas)
+    assert calls is not None
+    assert [(c.name, json.loads(c.arguments)) for c in calls] == [("bash", {"command": "ls"})]
+    assert wrapper == ""
+
+
+def test_parse_json_calls_key_wrapper():
+    text = '{"calls": [{"name": "get_weather", "arguments": {"city": "Moscow"}}]}'
+    calls, wrapper = parse_tool_calls(text)
+    assert calls is not None
+    assert len(calls) == 1
+    assert calls[0].name == "get_weather"
+    assert wrapper == ""
 
 
 def test_parse_html_wrapped_known_tool_no_longer_shadowed():

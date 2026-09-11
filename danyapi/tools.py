@@ -54,11 +54,13 @@ _DSML_HIDDEN_NAKED = re.compile(
 _XML_ELEMENT = re.compile(r"<([a-zA-Z_][a-zA-Z0-9_-]*)\b([^>]*)>(.*?)</\1>", re.DOTALL | re.IGNORECASE)
 _XML_SELFCLOSE = re.compile(r"<([a-zA-Z_][a-zA-Z0-9_-]*)\b([^>]*?)/>", re.DOTALL | re.IGNORECASE)
 _XML_WRAPPER_OPEN = re.compile(
-    r"<(?:tool_calls|tool_call|function_calls|function_call|tools)\b[^>]*>",
+    r"<(?:tool_calls|tool_call|function_calls|function_call|tools|calls|_calls)\b[^>]*>",
     re.IGNORECASE,
 )
 _XML_SKIP_ELEMENTS = frozenset(
     {
+        "calls",
+        "_calls",
         "tool_calls",
         "tool_call",
         "function_calls",
@@ -92,11 +94,11 @@ _XML_GENERIC_TOOL_TAGS = frozenset(
     }
 )
 _XML_OPEN_TAG = re.compile(
-    r"<(?:tool_calls|tool_call|function_calls|function_call|functions|function|tools)\b[^>]*>",
+    r"<(?:tool_calls|tool_call|function_calls|function_call|functions|function|tools|calls|_calls)\b[^>]*>",
     re.IGNORECASE,
 )
 _XML_CLOSE_TAG = re.compile(
-    r"</(?:tool_calls|tool_call|function_calls|function_call|functions|function|tools)\s*>",
+    r"</(?:tool_calls|tool_call|function_calls|function_call|functions|function|tools|calls|_calls)\s*>",
     re.IGNORECASE,
 )
 _XML_HTML_TAGS = frozenset(
@@ -227,7 +229,7 @@ _XML_ATTR_RE = re.compile(r"([a-zA-Z_][a-zA-Z0-9_.-]*)\s*=\s*(\"[^\"]*\"|'[^']*'
 _XML_NESTED_RE = re.compile(r"<[a-zA-Z_]")
 _PYTHON_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*")
 _PYTHON_CALL_RE = re.compile(r"\s*([A-Za-z_][A-Za-z0-9_-]*)\s*\(")
-_XML_WRAPPER_CLOSE_RE = re.compile(r"</(?:tool_calls|tool_call|function_calls|function_call|tools)\s*>", re.IGNORECASE)
+_XML_WRAPPER_CLOSE_RE = re.compile(r"</(?:tool_calls|tool_call|function_calls|function_call|tools|calls|_calls)\s*>", re.IGNORECASE)
 _XML_TOOL_NAMES = r"invoke|toolinvoke|tool_invoke|use_tool|tool_use|call|function|tool"
 _XML_TOOL_ELEMENT_RE = re.compile(
     rf"<(?:{_XML_TOOL_NAMES})\b([^>]*)>(.*?)</(?:{_XML_TOOL_NAMES})\s*>",
@@ -274,50 +276,28 @@ def _strip_dsml(text: str) -> str:
 
 
 TOOL_CALL_INSTRUCTION = (
-    "You have access to the following functions. Call them when the user's request requires it.\n\n"
     "{functions}\n\n"
-    "When you need to call one or more functions, reply with ONLY an XML block in exactly this format:\n"
+    "To call a function, reply with ONLY:\n"
     "<tool_calls>\n"
-    '<invoke name="TOOL_NAME">\n'
-    '<parameter name="ARG_NAME">value</parameter>\n'
+    '<invoke name="FN">\n'
+    '<parameter name="ARG">value</parameter>\n'
     "</invoke>\n"
-    "</tool_calls>\n\n"
-    "Example:\n"
-    "{example}\n\n"
-    "Rules:\n"
-    "- Call ONLY functions from the list above; copy each function name character-for-character.\n"
-    "- Never invent, rename, abbreviate, translate, or guess function names.\n"
-    "- Use the exact argument keys from the definitions above; never invent or rename argument keys.\n"
-    "- Put every function call in its own <invoke> element inside the <tool_calls> block.\n"
-    "- Emit several sibling <invoke> elements for several independent calls.\n"
-    "- Put every argument in its own <parameter> element; the name attribute must be the exact argument key.\n"
-    "- If a function has no parameters, or you need no arguments, emit its <invoke> element with no <parameter> children.\n"
-    "- Omit optional arguments you do not need.\n"
-    "- If none of the functions fit the request, reply normally with your answer instead of calling anything.\n"
-    "- No markdown fences, no code blocks, no comments, no text before or after the XML block, no other XML tags.\n"
+    "</tool_calls>\n"
+    "Use the exact function names and argument keys from the list above.\n"
+    "Put independent calls in separate sibling <invoke> elements.\n"
+    "No text before or after the <tool_calls> block.\n"
     "{choice}"
 )
 
 TOOL_TAIL_REMINDER = (
-    "If another function call is needed, reply with ONLY an XML block:\n"
-    "<tool_calls>\n"
-    '<invoke name="FUNCTION_NAME">\n'
-    '<parameter name="ARG_NAME">value</parameter>\n'
-    "</invoke>\n"
-    "</tool_calls>\n"
-    "Call functions ONLY by their exact names listed here; never invent function names.\n"
-    "Available functions: {names}\n"
-    "If no further function call is needed, reply with your final answer."
-)
-
-TOOL_HISTORY_REMINDER = (
-    "Remember: to call any function, reply ONLY with the <tool_calls> XML block using the exact function names and argument keys defined above; "
-    "if no function call is needed, reply with your final answer."
+    "Continue the conversation and provide the final answer based on the tool results.\n"
+    "If another function call is needed, reply with only the <tool_calls> XML block in the defined format.\n"
+    "If not, reply with your final answer."
 )
 
 CHOICE_INSTRUCTIONS = {
     "required": "You MUST call one or more functions from the list above.",
-    "function": "You MUST call exactly the function specified below and no other functions.",
+    "function": "You MUST call a function.",
 }
 
 JSON_MODE_INSTRUCTION = """You must reply with ONLY a valid JSON object, no markdown fences, no extra text, no explanations, no comments inside the JSON.
@@ -375,50 +355,6 @@ def _choice_name(tool_choice: Any) -> str | None:
     return None
 
 
-def _tool_names(tools: list[Any] | None) -> list[str]:
-    names: list[str] = []
-    if not tools:
-        return names
-    for tool in tools:
-        fn = _tool_function(tool)
-        if fn is not None and isinstance(fn.get("name"), str) and fn["name"]:
-            names.append(fn["name"])
-    return names
-
-
-_EXAMPLE_MAX_FUNCTIONS = 3
-_EXAMPLE_MAX_PARAMETERS = 3
-
-
-def _example_value(spec: Any) -> str:
-    ptype = spec.get("type") if isinstance(spec, dict) else None
-    if isinstance(ptype, list):
-        ptype = next((t for t in ptype if isinstance(t, str) and t != "null"), None)
-    return {
-        "integer": "1",
-        "number": "1",
-        "boolean": "true",
-        "array": "[]",
-        "object": "{}",
-    }.get(ptype if isinstance(ptype, str) else "", "value")
-
-
-def _example_tool_call(fn: dict) -> str:
-    name = fn.get("name") or "tool"
-    params = fn.get("parameters")
-    properties = params.get("properties") if isinstance(params, dict) else None
-    if isinstance(properties, dict) and properties:
-        lines = [f'<parameter name="{key}">{_example_value(spec)}</parameter>' for key, spec in list(properties.items())[:_EXAMPLE_MAX_PARAMETERS]]
-        joined = "\n".join(lines)
-        return f'<invoke name="{name}">\n{joined}\n</invoke>'
-    return f'<invoke name="{name}"></invoke>'
-
-
-def _examples_block(functions: list[dict]) -> str:
-    invokes = "\n".join(_example_tool_call(fn) for fn in functions[:_EXAMPLE_MAX_FUNCTIONS])
-    return f"<tool_calls>\n{invokes}\n</tool_calls>"
-
-
 def render_tool_schema(tools: list[Any] | None, tool_choice: Any = None) -> str | None:
     if not tools:
         return None
@@ -437,20 +373,13 @@ def render_tool_schema(tools: list[Any] | None, tool_choice: Any = None) -> str 
         lines.append(f"{i}. name: {fn['name']}")
         if fn.get("description"):
             lines.append(f"   description: {fn['description']}")
-        aliases = fn.get("aliases")
-        if isinstance(aliases, (list, tuple)):
-            rendered = ", ".join(a for a in aliases if isinstance(a, str) and a)
-            if rendered:
-                lines.append(f"   aliases accepted: {rendered}")
-        if fn.get("strict"):
-            lines.append("   strict: true (output arguments must match the schema exactly)")
         params = fn.get("parameters")
         if params is not None:
             if isinstance(params, str):
                 params_json = params
             else:
                 params_json = json.dumps(params, ensure_ascii=False, separators=(",", ":"))
-            lines.append(f"   parameters (JSON Schema): {params_json}")
+            lines.append(f"   parameters: {params_json}")
     if choice in CHOICE_INSTRUCTIONS:
         choice_line = CHOICE_INSTRUCTIONS[choice]
     elif isinstance(choice, str) and choice not in ("auto", "none", "required"):
@@ -459,7 +388,6 @@ def render_tool_schema(tools: list[Any] | None, tool_choice: Any = None) -> str 
         choice_line = "If you do not need to call any function, reply normally with your answer."
     return TOOL_CALL_INSTRUCTION.format(
         functions="\n".join(lines),
-        example=_examples_block(functions),
         choice=choice_line,
     )
 
@@ -571,15 +499,13 @@ def _render_history(messages: list[Any]) -> str:
     return "\n".join(parts)
 
 
-def _render_tool_tail(messages: list[Any], tool_names: list[str] | None = None) -> str:
+def _render_tool_tail(messages: list[Any]) -> str:
     parts = []
     for msg in messages:
         role = getattr(msg, "role", None)
         if role in ("tool", "function"):
             parts.append(render_message(msg))
-    parts.append("Continue the conversation and provide the final answer based on the tool results.")
-    if tool_names:
-        parts.append(TOOL_TAIL_REMINDER.format(names=", ".join(tool_names)))
+    parts.append(TOOL_TAIL_REMINDER)
     return "\n".join(parts)
 
 
@@ -698,8 +624,7 @@ def build_prompt(
     if has_session:
         tail = _tail_after_last_user(messages)
         if _is_tool_round_tail(tail):
-            tail_prompt = _render_tool_tail(tail, _tool_names(tools) if tools_present else None)
-            return tail_prompt, True
+            return _render_tool_tail(tail), True
         base = extract_last_user(messages)
         blocks = []
         if json_block:
@@ -714,8 +639,6 @@ def build_prompt(
             prompt = f"{schema}\n\n{prompt}"
         if json_block:
             prompt = f"{json_block}\n\n{prompt}"
-        if schema:
-            prompt = f"{prompt}\n\n{TOOL_HISTORY_REMINDER}"
         if not prompt.strip():
             prompt = schema or extract_last_user(messages)
         return prompt, tools_present or tool_round_active
@@ -1093,6 +1016,10 @@ def _is_jsonish_arguments(value: Any) -> bool:
 def _extract_wrapped_calls(obj: dict) -> list[ToolCall] | None:
     calls: list[ToolCall] = []
     raw = obj.get("tool_calls")
+    if raw is None:
+        raw = obj.get("calls")
+    if raw is None:
+        raw = obj.get("_calls")
     if isinstance(raw, list):
         for item in raw:
             call = _extract_one_call(item)

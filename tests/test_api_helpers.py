@@ -209,6 +209,16 @@ def test_is_retryable_hint():
     assert not openai_mod._is_retryable_hint(_rec(hint=None))
 
 
+def test_is_fake_context_hint():
+    assert openai_mod._is_fake_context_hint(
+        _rec(hint={"message": "Length limit reached. Please start a new chat.", "finish_reason": "context_length_exceeded"})
+    )
+    assert openai_mod._is_fake_context_hint(_rec(hint={"message": "length limit reached", "finish_reason": "context_length_exceeded"}))
+    assert not openai_mod._is_fake_context_hint(_rec(hint={"message": "Server is busy.", "finish_reason": "server_busy"}))
+    assert not openai_mod._is_fake_context_hint(_rec(hint=None))
+    assert not openai_mod._is_fake_context_hint(_rec(hint={}))
+
+
 def test_is_retryable_http():
     assert openai_mod._is_retryable_http(openai_mod.HTTPException(429, "x"))
     assert openai_mod._is_retryable_http(openai_mod.HTTPException(502, "x"))

@@ -40,6 +40,19 @@ CTX_SSE = (
 )
 
 
+FAKE_CTX_SSE = (
+    "event: ready\n"
+    'data: {"request_message_id":1,"response_message_id":2,"model_type":"default"}\n'
+    "\n"
+    "event: hint\n"
+    'data: {"type":"error","content":"Length limit reached. Please start a new chat.","clear_response":true,"finish_reason":"context_length_exceeded"}\n'
+    "\n"
+    "event: close\n"
+    'data: {"click_behavior":"retry","auto_resume":false}\n'
+    "\n"
+)
+
+
 class FakeSession:
     def __init__(self, sid: str = "c1", last_message_id: str | None = None) -> None:
         self.id = sid
@@ -109,6 +122,23 @@ async def test_non_stream_retries_then_success():
     result = await _collect_non_stream(**_args(acct))
     assert result["choices"][0]["message"]["content"] == "Привет"
     assert acct.pow.make_header.await_count == 2
+    assert acct.client.completion.await_count == 2
+
+
+async def test_non_stream_retries_fake_context_hint_then_success():
+    acct = FakeAccount([FAKE_CTX_SSE, OK_SSE])
+    result = await _collect_non_stream(**_args(acct))
+    assert result["choices"][0]["message"]["content"] == "Привет"
+    assert acct.client.completion.await_count == 2
+
+
+async def test_stream_retries_fake_context_hint_then_success():
+    acct = FakeAccount([FAKE_CTX_SSE, OK_SSE])
+    gen = _stream_openai(**_args(acct))
+    lines = list(await _collect(gen))
+    joined = "".join(lines)
+    assert '"content": "При"' in joined
+    assert '"finish_reason": "stop"' in joined
     assert acct.client.completion.await_count == 2
 
 
