@@ -142,6 +142,28 @@ async def test_stream_retries_fake_context_hint_then_success():
     assert acct.client.completion.await_count == 2
 
 
+async def test_non_stream_reports_502_after_fake_context_hint_retries():
+    acct = FakeAccount([FAKE_CTX_SSE] * (openai_mod.MAX_RETRIES + 1))
+    with pytest.raises(Exception) as excinfo:
+        await _collect_non_stream(**_args(acct))
+    exc = excinfo.value
+    assert isinstance(exc, openai_mod.HTTPException)
+    assert exc.status_code == 502
+    assert "Length limit reached" not in exc.detail
+    assert "unexpected length-limit hint" in exc.detail
+
+
+async def test_stream_reports_error_after_fake_context_hint_retries():
+    acct = FakeAccount([FAKE_CTX_SSE] * (openai_mod.MAX_RETRIES + 1))
+    gen = _stream_openai(**_args(acct))
+    lines = list(await _collect(gen))
+    joined = "".join(lines)
+    assert '"error"' in joined
+    assert "Length limit reached" not in joined
+    assert "unexpected length-limit hint" in joined
+    assert joined.rstrip().endswith("data: [DONE]")
+
+
 async def test_non_stream_raises_429_after_retries():
     acct = FakeAccount([BUSY_SSE] * (openai_mod.MAX_RETRIES + 1))
     with pytest.raises(Exception) as excinfo:

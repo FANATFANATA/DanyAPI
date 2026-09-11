@@ -1327,6 +1327,16 @@ def _busy_error_body(rec: MessageReconstructor) -> str:
     )
 
 
+FAKE_CONTEXT_HINT_ERROR_MESSAGE = "DeepSeek returned an unexpected length-limit hint and the response is empty"
+
+
+def _fake_context_error_body() -> str:
+    return json.dumps(
+        {"error": {"message": FAKE_CONTEXT_HINT_ERROR_MESSAGE, "finish_reason": "server_error"}},
+        ensure_ascii=False,
+    )
+
+
 async def _try_stop_stream(client, session_id: str, message_id: str | None) -> None:
     if not session_id or not message_id:
         return
@@ -1698,6 +1708,9 @@ async def _collect_non_stream(
         content = rec.content
         reasoning = rec.reasoning
         if not (content or reasoning) and rec.hint_error:
+            if _is_fake_context_hint(rec):
+                log.warning("deepseek fake context-length hint after retries")
+                raise HTTPException(502, _fake_context_error_body())
             raise HTTPException(429, _busy_error_body(rec))
         request_tokens = _advance_session_usage(session, rec.accumulated_tokens)
         usage = _deepseek_usage(request_tokens, prompt)
@@ -2004,6 +2017,11 @@ async def _stream_openai(
                 yield line
             return
         if not (rec.content or rec.reasoning) and rec.hint_error:
+            if _is_fake_context_hint(rec):
+                log.warning("deepseek fake context-length hint after retries")
+                for line in _stream_error_sse(chunk_id, created, model, FAKE_CONTEXT_HINT_ERROR_MESSAGE, session_key, "server_error", "error"):
+                    yield line
+                return
             hint = rec.hint_error
             for line in _stream_error_sse(
                 chunk_id,

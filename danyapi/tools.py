@@ -300,8 +300,7 @@ CHOICE_INSTRUCTIONS = {
     "function": "You MUST call a function.",
 }
 
-JSON_MODE_INSTRUCTION = """You must reply with ONLY a valid JSON object, no markdown fences, no extra text, no explanations, no comments inside the JSON.
-{constraints}"""
+JSON_MODE_INSTRUCTION = "You must reply with ONLY a valid JSON object.{constraints}"
 
 
 @dataclass
@@ -591,7 +590,7 @@ def extract_system(messages: list[Any]) -> str:
 def render_json_mode(response_format: Any) -> str | None:
     if response_format is None:
         return None
-    constraints = "The JSON object must be the only thing in your reply."
+    constraints = ""
     schema: Any = None
     if isinstance(response_format, str):
         if response_format != "json_object":
@@ -606,7 +605,7 @@ def render_json_mode(response_format: Any) -> str | None:
     else:
         return None
     if schema is not None:
-        constraints = f"The JSON object must match this JSON Schema:\n{json.dumps(schema, ensure_ascii=False)}"
+        constraints = f"\nThe JSON object must match this JSON Schema:\n{json.dumps(schema, ensure_ascii=False)}"
     return JSON_MODE_INSTRUCTION.format(constraints=constraints)
 
 
