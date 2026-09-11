@@ -537,3 +537,31 @@ def test_append_non_str_in_list():
     rec.message = {"items": [5]}
     rec.handle(SSEEvent(None, {"p": "response/items/0", "o": "APPEND", "v": "x"}))
     assert rec.message["items"] == [5]
+
+
+def test_parse_sse_event_name_reset_on_empty_block():
+    raw = 'event: ready\n\ndata: {"text":"hi"}\n'
+    events = parse_sse(raw)
+    assert len(events) == 1
+    assert events[0].event is None
+    assert events[0].data == {"text": "hi"}
+
+
+def test_parse_sse_data_after_comment_empty_block():
+    raw = "event: ready\n\ndata: x\n\n"
+    events = parse_sse(raw)
+    assert len(events) == 1
+    assert events[0].event is None
+    assert events[0].data == "x"
+
+
+def test_extend_with_updates_diffs_tracking():
+    rec = MessageReconstructor()
+    rec.message = {"fragments": [{"type": "RESPONSE", "content": "a"}]}
+    rec.take_diffs()
+    other = MessageReconstructor()
+    other.message = {"fragments": [{"type": "RESPONSE", "content": "b"}]}
+    rec.extend_with(other)
+    c_diff, _ = rec.take_diffs()
+    assert c_diff == "b"
+    assert rec.content == "ab"

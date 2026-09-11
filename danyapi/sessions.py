@@ -137,10 +137,17 @@ class SessionRegistry:
                 if bind_key != new_id:
                     self._sessions[bind_key] = (session, now)
                 self._sessions.move_to_end(bind_key)
+                if bind_key != new_id:
+                    self._sessions.move_to_end(new_id)
                 while len(self._sessions) > self._maxsize:
-                    evicted, _ = self._sessions.popitem(last=False)
+                    protect = {new_id, bind_key}
+                    evictable = [k for k in self._sessions if k not in protect]
+                    if not evictable:
+                        break
+                    oldest = min(evictable, key=lambda k: self._sessions[k][1])
+                    self._sessions.pop(oldest, None)
                     if self._store is not None:
-                        self._store.discard(self._session_key(evicted))
+                        self._store.discard(self._session_key(oldest))
                 if self._store is not None:
                     self._store.set(self._session_key(new_id), self._serialize(session))
                     if bind_key != new_id:

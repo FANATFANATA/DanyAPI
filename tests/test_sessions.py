@@ -223,6 +223,16 @@ def test_obtain_binds_requested_alias():
     assert client.counter == 1
 
 
+def test_obtain_never_evicts_fresh_alias_binding():
+    client = FakeSessionClient()
+    reg = SessionRegistry(client, maxsize=1)
+    s1, k1 = asyncio.run(reg.obtain("alias-1"))
+    assert k1 == "alias-1"
+    assert reg.get("alias-1") is s1
+    assert reg.get(s1.id) is s1
+    assert client.counter == 1
+
+
 def test_obtain_alias_rebinds_on_qwen_model_switch():
     client = FakeSessionClient()
     reg = QwenSessionRegistry(client)

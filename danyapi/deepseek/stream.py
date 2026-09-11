@@ -219,6 +219,8 @@ class MessageReconstructor:
         return c_diff, r_diff
 
     def extend_with(self, other: MessageReconstructor) -> None:
+        old_content = self.content
+        old_reasoning = self.reasoning
         other_fragments = (other.message or {}).get("fragments")
         if isinstance(other_fragments, list) and other_fragments:
             fragments = self.message.get("fragments")
@@ -233,6 +235,8 @@ class MessageReconstructor:
         if other.accumulated_tokens:
             self.message["accumulated_token_usage"] = other.accumulated_tokens
         self.hint_error = other.hint_error
+        self._prev_content = old_content
+        self._prev_reasoning = old_reasoning
 
     @property
     def status(self) -> str | None:

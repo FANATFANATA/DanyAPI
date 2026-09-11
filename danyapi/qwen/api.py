@@ -7,6 +7,7 @@ import random
 import time
 import uuid
 from collections.abc import Iterator
+from typing import Any
 
 import httpx
 from fastapi import HTTPException
@@ -265,25 +266,25 @@ def _accumulate_usage(session, rec: QwenStreamReconstructor) -> dict:
 
 
 async def _collect_response(
-    account,
-    pool,
-    session,
-    session_key,
-    prompt,
-    model_id,
-    thinking,
-    search,
-    chat_type,
-    existing_sid,
-    context_seq,
-    messages,
-    tools,
-    tool_choice,
-    response_format,
-    had_cached_session,
-    tool_mode,
-    tool_schemas,
-):
+    account: Any,
+    pool: Any,
+    session: Any,
+    session_key: str | None,
+    prompt: str,
+    model_id: str,
+    thinking: bool,
+    search: bool,
+    chat_type: str,
+    existing_sid: str | None,
+    context_seq: tuple[str, ...] | None,
+    messages: list[Any] | None,
+    tools: Any,
+    tool_choice: Any,
+    response_format: Any,
+    had_cached_session: bool,
+    tool_mode: bool,
+    tool_schemas: Any,
+) -> tuple[QwenStreamReconstructor, Any, Any, str, bool, Any]:
     stop_response_id: str | None = None
     stale_rebuilt = False
     attempt = 0
@@ -819,230 +820,3 @@ async def collect_image(
             "usage": usage,
             "session_id": session_key,
         }
-
-
-async def stream_image(
-    account,
-    pool,
-    existing_sid,
-    lock,
-    prompt,
-    model,
-    model_id,
-    context_seq: tuple[str, ...] | None = None,
-    user=None,
-):
-    chunk_id = f"chatcmpl-{uuid.uuid4().hex}"
-    created = int(time.time())
-
-    await _human_delay()
-    async with account_lock(lock, settings.acquire_timeout):
-        try:
-            session, session_key = await _prepare_session(account, pool, existing_sid, model_id, context_seq)
-        except HTTPException as exc:
-            detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
-            for line in _stream_error_lines(chunk_id, created, model, detail):
-                yield line
-            return
-
-        rec: QwenStreamReconstructor | None = None
-        stop_response_id: str | None = None
-        attempt = 0
-        while True:
-            try:
-                resp = await _send_completion(account.client, session, prompt, model_id, False, False, chat_type="t2i")
-            except ContextLimitError:
-                _drop_session(pool, account, session_key)
-                for line in _stream_context_limit_lines(chunk_id, created, model, session_key):
-                    yield line
-                return
-            except HTTPException as exc:
-                if _is_retryable_http(exc) and attempt < MAX_RETRIES:
-                    attempt += 1
-                    delay = _retry_delay(attempt)
-                    log.warning(
-                        "qwen image provider error (%s), retry %d/%d in %.1fs",
-                        exc.status_code,
-                        attempt,
-                        MAX_RETRIES,
-                        delay,
-                    )
-                    await asyncio.sleep(delay)
-                    continue
-                detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
-                for line in _stream_error_lines(chunk_id, created, model, detail, session_key):
-                    yield line
-                return
-            rec = QwenStreamReconstructor()
-            incremental = IncrementalSSE()
-            got_content = False
-            pending: list[str] = []
-            stopped = False
-            try:
-                async for chunk in resp.aiter_bytes():
-                    for event in incremental.feed(chunk):
-                        rec.handle(event)
-                        c_diff, r_diff = rec.take_diffs()
-                        if c_diff or r_diff:
-                            got_content = True
-                        if not pending:
-                            pending.append(
-                                _sse(
-                                    {
-                                        "id": chunk_id,
-                                        "object": "chat.completion.chunk",
-                                        "created": created,
-                                        "model": model,
-                                        "choices": [
-                                            {
-                                                "index": 0,
-                                                "delta": {"role": "assistant"},
-                                                "finish_reason": None,
-                                            }
-                                        ],
-                                    }
-                                )
-                            )
-                        delta: dict = {}
-                        if c_diff:
-                            delta["content"] = c_diff
-                        if r_diff:
-                            delta["reasoning_content"] = r_diff
-                        if delta:
-                            pending.append(
-                                _sse(
-                                    {
-                                        "id": chunk_id,
-                                        "object": "chat.completion.chunk",
-                                        "created": created,
-                                        "model": model,
-                                        "choices": [
-                                            {
-                                                "index": 0,
-                                                "delta": delta,
-                                                "finish_reason": None,
-                                            }
-                                        ],
-                                    }
-                                )
-                            )
-                        if got_content:
-                            for line in pending:
-                                yield line
-                            pending.clear()
-            except BaseException:
-                stopped = True
-                if rec.response_id:
-                    stop_response_id = rec.response_id
-                await _try_stop_stream(account.client, session.id, stop_response_id)
-                raise
-            finally:
-                if rec.response_id:
-                    stop_response_id = rec.response_id
-                try:
-                    await resp.aclose()
-                except Exception as exc:
-                    log.debug("response close failed: %s", exc)
-                    if not stopped:
-                        await _try_stop_stream(account.client, session.id, stop_response_id)
-            if got_content:
-                break
-            if _is_retryable_error(rec) and attempt < MAX_RETRIES:
-                attempt += 1
-                delay = _retry_delay(attempt)
-                log.warning(
-                    "qwen image retryable error (%s), retry %d/%d in %.1fs",
-                    error_code(rec.error),
-                    attempt,
-                    MAX_RETRIES,
-                    delay,
-                )
-                await asyncio.sleep(delay)
-                continue
-            break
-
-        assert rec is not None
-        if _is_context_limit(rec) and not rec.has_content:
-            _drop_session(pool, account, session_key)
-            for line in _stream_context_limit_lines(chunk_id, created, model, session_key):
-                yield line
-            return
-        usage = _accumulate_usage(session, rec)
-        account.sessions.touch_last_message(session_key, rec.response_id)
-        record_usage(
-            "qwen",
-            model,
-            usage["prompt_tokens"],
-            usage["completion_tokens"],
-            usage["total_tokens"],
-            user=user,
-            session_id=session_key,
-        )
-
-        if not rec.has_content and rec.error:
-            err = rec.error
-            code = error_code(rec.error)
-            for line in _stream_error_lines(
-                chunk_id,
-                created,
-                model,
-                err.get("details") or err.get("message") or "Qwen server error, try again later",
-                session_key,
-                code,
-                code or "error",
-            ):
-                yield line
-            return
-
-        if rec.image_urls:
-            image_content = "\n".join(rec.image_urls)
-            yield _sse(
-                {
-                    "id": chunk_id,
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": model,
-                    "choices": [
-                        {
-                            "index": 0,
-                            "delta": {"content": image_content},
-                            "finish_reason": None,
-                        }
-                    ],
-                }
-            )
-        elif rec.content:
-            yield _sse(
-                {
-                    "id": chunk_id,
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": model,
-                    "choices": [
-                        {
-                            "index": 0,
-                            "delta": {"content": rec.content},
-                            "finish_reason": None,
-                        }
-                    ],
-                }
-            )
-
-        yield _sse(
-            {
-                "id": chunk_id,
-                "object": "chat.completion.chunk",
-                "created": created,
-                "model": model,
-                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
-            }
-        )
-        yield _sse(
-            {
-                "id": chunk_id,
-                "session_id": session_key,
-                "object": "chat.completion.chunk",
-                "choices": [],
-            }
-        )
-        yield "data: [DONE]\n\n"

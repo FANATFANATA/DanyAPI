@@ -221,6 +221,15 @@ def test_hash_byte_output():
     assert deepseek_hash_v1(b"x", output_bytes=16) == deepseek_hash_v1(b"x")[:16]
 
 
+def test_hash_output_truncated_to_exact_byte_count():
+    for n in (1, 3, 5, 7, 33, 135, 137, 200):
+        digest = deepseek_hash_v1(b"payload", output_bytes=n)
+        assert len(digest) == n
+    ref = deepseek_hash_v1(b"payload")
+    for n in (1, 3, 5, 7, 16, 31):
+        assert deepseek_hash_v1(b"payload", output_bytes=n) == ref[:n]
+
+
 def test_solve_python_finds_answer():
     salt = "chk"
     expire_at = 1700000000000

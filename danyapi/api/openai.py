@@ -79,6 +79,8 @@ RESPONSE_INCOMPLETE = "response_incomplete"
 RESPONSE_INCOMPLETE_MESSAGE = "Response is incomplete: provider errors interrupted the continuation, please retry"
 REDUCED_CONTEXT_MESSAGE = "Response was generated from reduced context because the original input exceeded the model limit and may be incomplete"
 
+_TOKENS_LOCK = asyncio.Lock()
+
 
 class DeepSeekStreamError(Exception):
     pass
@@ -392,119 +394,120 @@ def _write_env_tokens(ds_tokens: list[str], qw_tokens: list[str]) -> None:
 
 @app.post("/v1/tokens")
 async def add_tokens(tokens: dict) -> dict:
-    new_ds = [t.strip() for t in tokens.get("deepseek_tokens", []) if t.strip()]
-    new_qw = [t.strip() for t in tokens.get("qwen_tokens", []) if t.strip()]
-    if not new_ds and not new_qw:
-        raise HTTPException(400, "no tokens provided")
+    async with _TOKENS_LOCK:
+        new_ds = [t.strip() for t in tokens.get("deepseek_tokens", []) if t.strip()]
+        new_qw = [t.strip() for t in tokens.get("qwen_tokens", []) if t.strip()]
+        if not new_ds and not new_qw:
+            raise HTTPException(400, "no tokens provided")
 
-    existing_ds, existing_qw = _read_env_tokens()
-    ds_to_add = [t for t in new_ds if t not in existing_ds]
-    qw_to_add = [t for t in new_qw if t not in existing_qw]
+        existing_ds, existing_qw = _read_env_tokens()
+        ds_to_add = [t for t in new_ds if t not in existing_ds]
+        qw_to_add = [t for t in new_qw if t not in existing_qw]
 
-    if not ds_to_add and not qw_to_add:
-        raise HTTPException(400, "all provided tokens already exist")
+        if not ds_to_add and not qw_to_add:
+            raise HTTPException(400, "all provided tokens already exist")
 
-    added_ds = 0
-    added_qw = 0
-    skipped_ds = 0
-    skipped_qw = 0
+        added_ds = 0
+        added_qw = 0
+        skipped_ds = 0
+        skipped_qw = 0
 
-    cache_enabled = settings.cache_enabled
-    ds_store = JsonStore("deepseek-sessions", "default" if cache_enabled else None)
-    qw_store = JsonStore("qwen-sessions", "default" if cache_enabled else None)
-    ds_context_store = JsonStore("deepseek-contexts", "default" if cache_enabled else None)
-    qw_context_store = JsonStore("qwen-contexts", "default" if cache_enabled else None)
-    ds_affinity_store = JsonStore("deepseek-affinities", "default" if cache_enabled else None)
-    qw_affinity_store = JsonStore("qwen-affinities", "default" if cache_enabled else None)
+        cache_enabled = settings.cache_enabled
+        ds_store = JsonStore("deepseek-sessions", "default" if cache_enabled else None)
+        qw_store = JsonStore("qwen-sessions", "default" if cache_enabled else None)
+        ds_context_store = JsonStore("deepseek-contexts", "default" if cache_enabled else None)
+        qw_context_store = JsonStore("qwen-contexts", "default" if cache_enabled else None)
+        ds_affinity_store = JsonStore("deepseek-affinities", "default" if cache_enabled else None)
+        qw_affinity_store = JsonStore("qwen-affinities", "default" if cache_enabled else None)
 
-    pool: AccountPool | None = getattr(app.state, "pool", None)
-    qwen_pool: AccountPool | None = getattr(app.state, "qwen_pool", None)
+        pool: AccountPool | None = getattr(app.state, "pool", None)
+        qwen_pool: AccountPool | None = getattr(app.state, "qwen_pool", None)
 
-    for token in ds_to_add:
-        client = DeepSeekClient(token=token, timeout=settings.timeout)
-        if not await client.check_auth():
-            log.warning("new deepseek token invalid/expired, skipping")
-            await client.aclose()
-            skipped_ds += 1
-            continue
-        acct = DeepSeekAccount(
-            len(pool.accounts) if pool else 0,
-            client,
-            session_cache_size=settings.session_cache_size,
-            ttl=settings.session_ttl,
-            store=ds_store,
-            stable_id=_token_stable_id(token),
-        )
-        if pool is None:
-            pool = AccountPool(
-                [acct],
+        for token in ds_to_add:
+            client = DeepSeekClient(token=token, timeout=settings.timeout)
+            if not await client.check_auth():
+                log.warning("new deepseek token invalid/expired, skipping")
+                await client.aclose()
+                skipped_ds += 1
+                continue
+            acct = DeepSeekAccount(
+                len(pool.accounts) if pool else 0,
+                client,
                 session_cache_size=settings.session_cache_size,
                 ttl=settings.session_ttl,
-                context_store=ds_context_store,
-                affinity_store=ds_affinity_store,
+                store=ds_store,
+                stable_id=_token_stable_id(token),
             )
-            app.state.pool = pool
-        else:
-            pool.add_account(acct)
-        added_ds += 1
-        log.info("hot-added deepseek token (total accounts: %d)", len(pool.accounts))
+            if pool is None:
+                pool = AccountPool(
+                    [acct],
+                    session_cache_size=settings.session_cache_size,
+                    ttl=settings.session_ttl,
+                    context_store=ds_context_store,
+                    affinity_store=ds_affinity_store,
+                )
+                app.state.pool = pool
+            else:
+                pool.add_account(acct)
+            added_ds += 1
+            log.info("hot-added deepseek token (total accounts: %d)", len(pool.accounts))
 
-    for token in qw_to_add:
-        qw_client = QwenClient(token=token, timeout=settings.timeout)
-        if not await qw_client.check_auth():
-            log.warning("new qwen token invalid/expired, skipping")
-            await qw_client.aclose()
-            skipped_qw += 1
-            continue
-        qw_acct = QwenAccount(
-            len(qwen_pool.accounts) if qwen_pool else 0,
-            qw_client,
-            session_cache_size=settings.session_cache_size,
-            ttl=settings.session_ttl,
-            store=qw_store,
-            stable_id=_token_stable_id(token),
-        )
-        if qwen_pool is None:
-            qwen_pool = AccountPool(
-                [qw_acct],
-                label="qwen",
+        for token in qw_to_add:
+            qw_client = QwenClient(token=token, timeout=settings.timeout)
+            if not await qw_client.check_auth():
+                log.warning("new qwen token invalid/expired, skipping")
+                await qw_client.aclose()
+                skipped_qw += 1
+                continue
+            qw_acct = QwenAccount(
+                len(qwen_pool.accounts) if qwen_pool else 0,
+                qw_client,
                 session_cache_size=settings.session_cache_size,
                 ttl=settings.session_ttl,
-                context_store=qw_context_store,
-                affinity_store=qw_affinity_store,
+                store=qw_store,
+                stable_id=_token_stable_id(token),
             )
-            app.state.qwen_pool = qwen_pool
-            try:
-                app.state.qwen_models = await _fetch_qwen_models(qw_client)
-            except Exception as exc:
-                log.warning("failed to prefetch qwen models: %s", exc)
-        else:
-            qwen_pool.add_account(qw_acct)
-        added_qw += 1
-        log.info("hot-added qwen token (total accounts: %d)", len(qwen_pool.accounts))
+            if qwen_pool is None:
+                qwen_pool = AccountPool(
+                    [qw_acct],
+                    label="qwen",
+                    session_cache_size=settings.session_cache_size,
+                    ttl=settings.session_ttl,
+                    context_store=qw_context_store,
+                    affinity_store=qw_affinity_store,
+                )
+                app.state.qwen_pool = qwen_pool
+                try:
+                    app.state.qwen_models = await _fetch_qwen_models(qw_client)
+                except Exception as exc:
+                    log.warning("failed to prefetch qwen models: %s", exc)
+            else:
+                qwen_pool.add_account(qw_acct)
+            added_qw += 1
+            log.info("hot-added qwen token (total accounts: %d)", len(qwen_pool.accounts))
 
-    merged_ds = existing_ds + ds_to_add
-    merged_qw = existing_qw + qw_to_add
-    _write_env_tokens(merged_ds, merged_qw)
-    settings.deepseek_tokens = merged_ds
-    settings.qwen_tokens = merged_qw
+        merged_ds = existing_ds + ds_to_add
+        merged_qw = existing_qw + qw_to_add
+        _write_env_tokens(merged_ds, merged_qw)
+        settings.deepseek_tokens = merged_ds
+        settings.qwen_tokens = merged_qw
 
-    parts = []
-    if added_ds:
-        parts.append(f"deepseek: +{added_ds}")
-    if added_qw:
-        parts.append(f"qwen: +{added_qw}")
-    if skipped_ds:
-        parts.append(f"deepseek skipped: {skipped_ds}")
-    if skipped_qw:
-        parts.append(f"qwen skipped: {skipped_qw}")
+        parts = []
+        if added_ds:
+            parts.append(f"deepseek: +{added_ds}")
+        if added_qw:
+            parts.append(f"qwen: +{added_qw}")
+        if skipped_ds:
+            parts.append(f"deepseek skipped: {skipped_ds}")
+        if skipped_qw:
+            parts.append(f"qwen skipped: {skipped_qw}")
 
-    return {
-        "success": True,
-        "message": "Tokens added and activated." if (added_ds or added_qw) else "No valid tokens to add.",
-        "added": {"deepseek": added_ds, "qwen": added_qw},
-        "skipped": {"deepseek": skipped_ds, "qwen": skipped_qw},
-    }
+        return {
+            "success": True,
+            "message": "Tokens added and activated." if (added_ds or added_qw) else "No valid tokens to add.",
+            "added": {"deepseek": added_ds, "qwen": added_qw},
+            "skipped": {"deepseek": skipped_ds, "qwen": skipped_qw},
+        }
 
 
 async def _extract_request_body(request: Request) -> dict[str, Any]:
@@ -1782,6 +1785,7 @@ async def _stream_openai(
         response_message_id = None
         stop_message_id: str | None = None
         content_buf = ""
+        role_sent = False
         started = time.monotonic()
         had_cached_session = bool(existing_sid) and account.sessions.get(existing_sid) is not None
         stale_rebuilt = False
@@ -1955,6 +1959,23 @@ async def _stream_openai(
                 rec.extend_with(cont_rec)
                 cont_parent = cont_rec.id or cont_parent
                 if cont_rec.content:
+                    if not role_sent:
+                        role_sent = True
+                        yield _sse(
+                            {
+                                "id": chunk_id,
+                                "object": "chat.completion.chunk",
+                                "created": created,
+                                "model": model,
+                                "choices": [
+                                    {
+                                        "index": 0,
+                                        "delta": {"role": "assistant"},
+                                        "finish_reason": None,
+                                    }
+                                ],
+                            }
+                        )
                     if tool_mode:
                         content_buf += cont_rec.content
                     else:
@@ -1968,6 +1989,23 @@ async def _stream_openai(
                             }
                         )
                 if cont_rec.reasoning:
+                    if not role_sent:
+                        role_sent = True
+                        yield _sse(
+                            {
+                                "id": chunk_id,
+                                "object": "chat.completion.chunk",
+                                "created": created,
+                                "model": model,
+                                "choices": [
+                                    {
+                                        "index": 0,
+                                        "delta": {"role": "assistant"},
+                                        "finish_reason": None,
+                                    }
+                                ],
+                            }
+                        )
                     yield _sse(
                         {
                             "id": chunk_id,
@@ -1992,16 +2030,53 @@ async def _stream_openai(
                     stop_message_id = response_message_id
                     reduced_notice = REDUCED_CONTEXT_MESSAGE
                     if rec.content:
-                        yield _sse(
-                            {
-                                "id": chunk_id,
-                                "object": "chat.completion.chunk",
-                                "created": created,
-                                "model": model,
-                                "choices": [{"index": 0, "delta": {"content": rec.content}, "finish_reason": None}],
-                            }
-                        )
+                        if not role_sent:
+                            role_sent = True
+                            yield _sse(
+                                {
+                                    "id": chunk_id,
+                                    "object": "chat.completion.chunk",
+                                    "created": created,
+                                    "model": model,
+                                    "choices": [
+                                        {
+                                            "index": 0,
+                                            "delta": {"role": "assistant"},
+                                            "finish_reason": None,
+                                        }
+                                    ],
+                                }
+                            )
+                        if tool_mode:
+                            content_buf += rec.content
+                        else:
+                            yield _sse(
+                                {
+                                    "id": chunk_id,
+                                    "object": "chat.completion.chunk",
+                                    "created": created,
+                                    "model": model,
+                                    "choices": [{"index": 0, "delta": {"content": rec.content}, "finish_reason": None}],
+                                }
+                            )
                     if rec.reasoning:
+                        if not role_sent:
+                            role_sent = True
+                            yield _sse(
+                                {
+                                    "id": chunk_id,
+                                    "object": "chat.completion.chunk",
+                                    "created": created,
+                                    "model": model,
+                                    "choices": [
+                                        {
+                                            "index": 0,
+                                            "delta": {"role": "assistant"},
+                                            "finish_reason": None,
+                                        }
+                                    ],
+                                }
+                            )
                         yield _sse(
                             {
                                 "id": chunk_id,

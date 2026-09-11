@@ -82,13 +82,6 @@ def _args(acct, pool=None):
     }
 
 
-async def _collect(agen):
-    out = []
-    async for item in agen:
-        out.append(item)
-    return out
-
-
 async def test_collect_image_success():
     acct = FakeAccount([IMG_SSE])
     result = await qwen_api.collect_image(**_args(acct))
@@ -126,52 +119,6 @@ async def test_collect_image_auth_error_raises_401():
     assert excinfo.value.status_code == 401
     body = json.loads(excinfo.value.detail)
     assert body["error"]["code"] == "unauthorized"
-
-
-async def test_stream_image_success_emits_urls():
-    acct = FakeAccount([IMG_SSE])
-    gen = qwen_api.stream_image(**_args(acct))
-    lines = await _collect(gen)
-    joined = "".join(lines)
-    assert "https://cdn.qwenlm.ai/a.png" in joined
-    assert '"finish_reason": "stop"' in joined
-    assert '"session_id": "s1"' in joined
-    assert joined.rstrip().endswith("data: [DONE]")
-
-
-async def test_stream_image_error_after_retries():
-    acct = FakeAccount([BUSY_SSE] * (qwen_api.MAX_RETRIES + 1))
-    gen = qwen_api.stream_image(**_args(acct))
-    lines = await _collect(gen)
-    joined = "".join(lines)
-    assert "Too_Many_Requests" in joined
-    assert joined.rstrip().endswith("data: [DONE]")
-    assert acct.client.completion.await_count == qwen_api.MAX_RETRIES + 1
-
-
-async def test_stream_image_context_limit_emits_length():
-    acct = FakeAccount([CTX_SSE])
-    pool = MagicMock()
-    gen = qwen_api.stream_image(**_args(acct, pool=pool))
-    lines = await _collect(gen)
-    joined = "".join(lines)
-    assert '"finish_reason": "length"' in joined
-    assert "context length exceeded" in joined
-    assert joined.rstrip().endswith("data: [DONE]")
-    pool.forget.assert_called_once_with("s1")
-    acct.sessions.forget.assert_called_once_with("s1")
-
-
-async def test_stream_image_prepare_session_error():
-    acct = FakeAccount([IMG_SSE])
-    acct.sessions.obtain = AsyncMock(side_effect=qwen_api.HTTPException(401, "bad"))
-    gen = qwen_api.stream_image(**_args(acct))
-    lines = await _collect(gen)
-    joined = "".join(lines)
-    assert '"error"' in joined
-    assert "bad" in joined
-    assert '"session_id": null' in joined
-    assert joined.rstrip().endswith("data: [DONE]")
 
 
 async def test_collect_image_stream_error_stops_upstream():

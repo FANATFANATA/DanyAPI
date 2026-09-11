@@ -28,8 +28,8 @@ def parse_sse(data: str) -> list[SSEEvent]:
         if line == "":
             if data_lines:
                 events.append(SSEEvent(event_name, _decode("\n".join(data_lines))))
-                event_name = None
-                data_lines = []
+            event_name = None
+            data_lines = []
             continue
         if line.startswith("event:"):
             event_name = line[len("event:") :].strip()

@@ -96,7 +96,7 @@ def deepseek_hash_v1(data: bytes, output_bytes: int = 32) -> bytes:
             out += struct.pack("<Q", state[i // 8])
         if len(out) < output_bytes:
             _keccak_f(state)
-    return bytes(out)
+    return bytes(out[:output_bytes])
 
 
 def deepseek_hash_v1_hex(data: bytes) -> str:
