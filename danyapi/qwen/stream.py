@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from ..deepseek.sse import SSEEvent
+from ..sseutil import SSEEvent
 
 ANSWER_PHASES = {"answer", "deep_research_answer", "ReportGeneration", "PdfMdGen"}
 IMAGE_PHASES = {"image", "image_generation", "image_gen", "t2i"}

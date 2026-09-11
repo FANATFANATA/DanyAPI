@@ -626,7 +626,7 @@ def test_too_many_files():
     )
     atts = openai_mod._collect_attachments(req)
     with pytest.raises(Exception) as excinfo:
-        openai_mod._validate_attachments(atts, "default")
+        openai_mod._validate_attachments(atts)
     assert excinfo.value.status_code == 400
 
 
@@ -977,7 +977,7 @@ def test_file_too_large():
     )
     atts = openai_mod._collect_attachments(req)
     with pytest.raises(Exception) as excinfo:
-        openai_mod._validate_attachments(atts, "default")
+        openai_mod._validate_attachments(atts)
     assert excinfo.value.status_code == 400
 
 

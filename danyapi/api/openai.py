@@ -299,8 +299,6 @@ async def _fetch_qwen_models(client: QwenClient) -> list[dict]:
             model_type = "image"
         elif "t2v" in chat_types:
             model_type = "video"
-        elif chat_types:
-            model_type = "chat"
         else:
             model_type = "chat"
         models.append(
@@ -682,14 +680,14 @@ def _collect_attachments(req: ChatCompletionRequest) -> list[Attachment]:
     return attachments
 
 
-def _validate_attachments(attachments: list[Attachment], model_type: str) -> None:
+def _validate_attachments(attachments: list[Attachment]) -> None:
     if not attachments:
         return
     if len(attachments) > MAX_FILES_PER_REQUEST:
         raise HTTPException(400, f"too many files: max {MAX_FILES_PER_REQUEST} per request")
     for att in attachments:
         if len(att.data) > MAX_FILE_SIZE:
-            raise HTTPException(400, f"file {att.name} exceeds 100 MB limit")
+            raise HTTPException(400, f"file {att.name} exceeds {MAX_FILE_SIZE // (1024 * 1024)} MB limit")
 
 
 async def _fresh_pow_upload_headers(account) -> dict:
@@ -728,11 +726,12 @@ def _resolve_model(model: str) -> str:
     if model_type is not None:
         return model_type
     for suffix in REASONING_SUFFIXES:
-        if model.endswith(suffix):
-            base_type = MODEL_TYPE_BY_NAME.get(model[: -len(suffix)])
-            if base_type is not None:
-                return base_type
-            break
+        if not model.endswith(suffix):
+            continue
+        base_type = MODEL_TYPE_BY_NAME.get(model[: -len(suffix)])
+        if base_type is not None:
+            return base_type
+        break
     raise HTTPException(404, f"Unknown model: {model}")
 
 
@@ -1043,7 +1042,7 @@ async def _chat_completions_deepseek(req: ChatCompletionRequest) -> Any:
     account, existing_sid, context_seq, prompt, tool_mode = await _acquire_and_build(pool, req)
 
     attachments = _collect_attachments(req)
-    _validate_attachments(attachments, model_type)
+    _validate_attachments(attachments)
     ref_file_ids = None
     if attachments:
         ref_file_ids = await _upload_attachments(account, attachments, model_type, thinking)
@@ -1079,7 +1078,7 @@ async def _chat_completions_deepseek(req: ChatCompletionRequest) -> Any:
         )
 
     try:
-        return await _collect_non_stream(lock=account.sem, **common)
+        return await _collect_non_stream(lock=account.sem, **{k: v for k, v in common.items() if k != "include_usage"})
     except AccountPoolBusy:
         raise HTTPException(429, "all accounts are busy, try again later") from None
 
@@ -1121,7 +1120,7 @@ async def _chat_completions_qwen(req: ChatCompletionRequest) -> Any:
         )
 
     try:
-        return await qwen_api.collect_non_stream(lock=account.sem, **common)
+        return await qwen_api.collect_non_stream(lock=account.sem, **{k: v for k, v in common.items() if k != "include_usage"})
     except AccountPoolBusy:
         raise HTTPException(429, "all accounts are busy, try again later") from None
 
@@ -1586,7 +1585,6 @@ async def _collect_non_stream(
     ref_file_ids=None,
     tool_mode=False,
     tool_schemas=None,
-    include_usage=False,
     context_seq: tuple[str, ...] | None = None,
     reduced_prompts: list[tuple[str, bool, dict[str, Any]]] | None = None,
     messages=None,

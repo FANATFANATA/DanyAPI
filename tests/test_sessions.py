@@ -654,8 +654,8 @@ def test_qwen_cached_wrong_model_renders_full_history():
         qwen_api.collect_non_stream = orig
 
 
-def test_deepseek_non_stream_accepts_include_usage():
-    assert "include_usage" in openai_mod._collect_non_stream.__code__.co_varnames
+def test_deepseek_non_stream_has_no_include_usage():
+    assert "include_usage" not in openai_mod._collect_non_stream.__code__.co_varnames
 
 
 class FakeDeepSeekCreateClient:
@@ -798,8 +798,8 @@ def test_qwen_sequential_single_message_session_accumulates():
         qwen_api.collect_non_stream = orig
 
 
-def test_qwen_non_stream_accepts_include_usage():
-    assert "include_usage" in qwen_api.collect_non_stream.__code__.co_varnames
+def test_qwen_non_stream_has_no_include_usage():
+    assert "include_usage" not in qwen_api.collect_non_stream.__code__.co_varnames
 
 
 def test_restore_empty_key_without_prefix(sessions_store):

@@ -6,14 +6,12 @@ import pytest
 from danyapi.tools import (
     ToolCall,
     _coerce_scalar,
-    _content_fingerprint,
     _content_text,
     _extract_calls,
     _extract_one_call,
     _fix_unbalanced_json,
     _has_history,
     _is_jsonish_arguments,
-    _is_tool_round_tail,
     _loads_lenient,
     _normalize_single_quotes,
     _parse_bare_array_calls,
@@ -1073,11 +1071,11 @@ def test_content_text_variants():
 
 
 def test_content_fingerprint_variants():
-    assert _content_fingerprint(42) == ""
-    assert _content_fingerprint([{"type": "image_url", "image_url": "data:x"}]) == "data:x"
-    assert _content_fingerprint([42, "str"]) == "str"
-    assert _content_fingerprint([{"type": "other", "text": 5}]) == ""
-    assert _content_fingerprint([{"type": "image_url", "image_url": 42}]) == ""
+    assert _content_text(42, with_images=True, separator="\n") == ""
+    assert _content_text([{"type": "image_url", "image_url": "data:x"}], with_images=True, separator="\n") == "data:x"
+    assert _content_text([42, "str"], with_images=True, separator="\n") == "str"
+    assert _content_text([{"type": "other", "text": 5}], with_images=True, separator="\n") == ""
+    assert _content_text([{"type": "image_url", "image_url": 42}], with_images=True, separator="\n") == ""
 
 
 def test_render_tool_call_mention_variants():
@@ -1250,7 +1248,7 @@ def test_content_text_string_items():
 
 
 def test_content_fingerprint_string_items():
-    assert _content_fingerprint(["a"]) == "a"
+    assert _content_text(["a"], with_images=True, separator="\n") == "a"
 
 
 def test_extract_last_user_string_items():
@@ -1263,10 +1261,10 @@ def test_has_history_tool_role():
 
 
 def test_is_tool_round_tail_variants():
-    assert _is_tool_round_tail([Message("tool", "x")])
-    assert _is_tool_round_tail([Message("assistant", tool_calls=[{"id": "c", "type": "function", "function": {"name": "f", "arguments": "{}"}}])])
-    assert _is_tool_round_tail([Message("assistant", content=[{"type": "tool_call", "id": "c", "function": {"name": "f", "arguments": "{}"}}])])
-    assert not _is_tool_round_tail([Message("user", "hi")])
+    assert is_tool_round([Message("tool", "x")])
+    assert is_tool_round([Message("assistant", tool_calls=[{"id": "c", "type": "function", "function": {"name": "f", "arguments": "{}"}}])])
+    assert is_tool_round([Message("assistant", content=[{"type": "tool_call", "id": "c", "function": {"name": "f", "arguments": "{}"}}])])
+    assert not is_tool_round([Message("user", "hi")])
 
 
 def test_build_prompt_history_with_json_mode():
@@ -2191,7 +2189,7 @@ def test_is_tool_round_content_without_calls():
 
 def test_is_tool_round_tail_content_list():
     msg = Message("assistant", content=[{"type": "text", "text": "x"}])
-    assert not _is_tool_round_tail([msg])
+    assert not is_tool_round([msg])
 
 
 def test_extract_system_empty_text():

@@ -310,12 +310,6 @@ def test_set_path_non_dict_node():
     assert target["a"] == {"b": 1}
 
 
-def test_set_path_through_scalar():
-    target = {"a": [5]}
-    _set_path(target, ["a", "0", "b"], 1)
-    assert target == {"a": [5]}
-
-
 def test_set_path_scalar_mid_path():
     target = {"a": [5]}
     _set_path(target, ["a", "0", "b", "c"], 1)

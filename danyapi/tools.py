@@ -313,6 +313,7 @@ class ToolCall:
     def create(cls, name: str, arguments: Any) -> ToolCall:
         call_id = f"call_{uuid.uuid4().hex[:12]}"
         if name == "edit" and isinstance(arguments, dict):
+            arguments = dict(arguments)
             if "oldString" in arguments and not isinstance(arguments["oldString"], str):
                 arguments["oldString"] = json.dumps(arguments["oldString"], ensure_ascii=False)
             if "newString" in arguments and not isinstance(arguments["newString"], str):
@@ -391,41 +392,25 @@ def render_tool_schema(tools: list[Any] | None, tool_choice: Any = None) -> str 
     )
 
 
-def _content_text(content: Any) -> str:
+def _content_text(content: Any, *, with_images: bool = False, separator: str = "") -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        parts = []
+        parts: list[str] = []
         for item in content:
             if isinstance(item, str):
                 parts.append(item)
             elif isinstance(item, dict):
                 if isinstance(item.get("text"), str):
                     parts.append(item["text"])
-                elif item.get("type") == "image_url":
-                    continue
-        return "".join(parts).strip()
-    return ""
-
-
-def _content_fingerprint(content: Any) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts = []
-        for item in content:
-            if isinstance(item, str):
-                parts.append(item)
-            elif isinstance(item, dict):
-                if isinstance(item.get("text"), str):
-                    parts.append(item["text"])
-                elif item.get("type") == "image_url":
+                elif item.get("type") == "image_url" and with_images:
                     image_url = item.get("image_url")
                     if isinstance(image_url, str):
                         parts.append(image_url)
                     elif isinstance(image_url, dict) and isinstance(image_url.get("url"), str):
                         parts.append(image_url["url"])
-        return "\n".join(parts)
+        result = separator.join(parts)
+        return result if separator else result.strip()
     return ""
 
 
@@ -436,7 +421,7 @@ def context_sequence(messages: list[Any], user: str | None = None) -> tuple[str,
         role = getattr(msg, "role", "user")
         if role not in ("system", "user"):
             continue
-        content = _content_fingerprint(getattr(msg, "content", ""))
+        content = _content_text(getattr(msg, "content", ""), with_images=True, separator="\n")
         if not content.strip():
             continue
         digest = hashlib.sha256(f"{role}\0{content}{scope}".encode()).hexdigest()
@@ -573,10 +558,6 @@ def _tail_after_last_user(messages: list[Any]) -> list[Any]:
     return list(messages[index + 1 :])
 
 
-def _is_tool_round_tail(messages: list[Any]) -> bool:
-    return is_tool_round(messages)
-
-
 def extract_system(messages: list[Any]) -> str:
     parts = []
     for msg in messages:
@@ -622,7 +603,7 @@ def build_prompt(
 
     if has_session:
         tail = _tail_after_last_user(messages)
-        if _is_tool_round_tail(tail):
+        if is_tool_round(tail):
             return _render_tool_tail(tail), True
         base = extract_last_user(messages)
         blocks = []
@@ -1045,11 +1026,6 @@ def _extract_calls(obj: dict) -> list[ToolCall] | None:
         return calls
     name, arguments = _call_item_fields(obj)
     if isinstance(name, str) and name and _is_jsonish_arguments(arguments):
-        if name == "edit" and isinstance(arguments, dict):
-            if "oldString" in arguments and not isinstance(arguments["oldString"], str):
-                arguments["oldString"] = json.dumps(arguments["oldString"], ensure_ascii=False)
-            if "newString" in arguments and not isinstance(arguments["newString"], str):
-                arguments["newString"] = json.dumps(arguments["newString"], ensure_ascii=False)
         return [ToolCall.create(name, arguments)]
     return None
 

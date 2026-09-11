@@ -375,7 +375,6 @@ async def collect_non_stream(
     search,
     tool_mode=False,
     tool_schemas=None,
-    include_usage=False,
     context_seq: tuple[str, ...] | None = None,
     messages=None,
     tools=None,

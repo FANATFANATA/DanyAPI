@@ -426,8 +426,8 @@ async def test_search_and_thinking_allowed():
 def test_accepts_files():
     from danyapi.api.openai import Attachment, _validate_attachments
 
-    _validate_attachments([Attachment(b"x", "a.txt", "text/plain", False)], "default")
-    _validate_attachments([Attachment(b"x", "a.png", "image/png", True)], "default")
+    _validate_attachments([Attachment(b"x", "a.txt", "text/plain", False)])
+    _validate_attachments([Attachment(b"x", "a.png", "image/png", True)])
 
 
 def test_too_many_files_rejected():
@@ -435,7 +435,7 @@ def test_too_many_files_rejected():
 
     many = [Attachment(b"x", f"{i}.txt", "text/plain", False) for i in range(MAX_FILES_PER_REQUEST + 1)]
     with pytest.raises(Exception) as excinfo:
-        _validate_attachments(many, "default")
+        _validate_attachments(many)
     exc = excinfo.value
     assert isinstance(exc, openai_mod.HTTPException)
     assert exc.status_code == 400
