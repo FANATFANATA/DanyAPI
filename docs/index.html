@@ -147,6 +147,11 @@
                 <p data-i18n="f5_d"><code>response_format</code> with <code>json_object</code> and <code>json_schema</code> - structured output for your agents.</p>
             </article>
             <article class="card reveal">
+                <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></div>
+                <h3 data-i18n="f9_t">BYOK</h3>
+                <p data-i18n="f9_d">Per-user token management with registration, login cookies, and exclusive provider tokens - deploy a multi-user instance.</p>
+            </article>
+            <article class="card reveal">
                 <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg></div>
                 <h3 data-i18n="f7_t">Web search</h3>
                 <p data-i18n="f7_d">Turn on grounded, up-to-date answers with the <code>search</code> flag on DeepSeek models.</p>
@@ -210,6 +215,7 @@
             <div class="tab-bar">
                 <button class="tab active" data-tab="install" data-i18n="qs_tab_install">Install</button>
                 <button class="tab" data-tab="docker" data-i18n="qs_tab_docker">Docker</button>
+                <button class="tab" data-tab="byok-docker" data-i18n="qs_tab_byok">BYOK Docker</button>
             </div>
             <div class="code-pane active" data-pane="install">
                 <div class="pane-head">
@@ -239,6 +245,22 @@
   ghcr.io/fanatfanata/danyapi:latest</code></pre>
                 <p class="pane-note" data-i18n="qs_docker_note">Prebuilt image, pushed on every commit and every version tag. The native PoW solver is compiled into the image for maximum speed.</p>
             </div>
+            <div class="code-pane" data-pane="byok-docker">
+                <div class="pane-head">
+                    <span>BYOK mode</span>
+                    <button class="copy-btn" data-copy='docker run -d -p 8000:8000 \
+  -e DEEPSEEK_TOKENS="" \
+  -e QWEN_TOKENS="" \
+  -e BYOK_MODE=1 \
+  ghcr.io/fanatfanata/danyapi:latest' data-i18n="copy">Copy</button>
+                </div>
+                <pre><code>docker run -d -p <span class="c-num">8000</span>:<span class="c-num">8000</span> \
+  -e DEEPSEEK_TOKENS=<span class="c-str">""</span> \
+  -e QWEN_TOKENS=<span class="c-str">""</span> \
+  -e BYOK_MODE=<span class="c-num">1</span> \
+  ghcr.io/fanatfanata/danyapi:latest</code></pre>
+                <p class="pane-note">Run without server tokens. Users register themselves and add their own provider tokens via the dashboard.</p>
+            </div>
         </div>
     </section>
 
@@ -267,6 +289,10 @@
             <details class="faq">
                 <summary data-i18n="q8">Is there usage tracking?</summary>
                 <p data-i18n="a8"><code>GET /v1/usage</code> returns token usage totals, per-model and per-user breakdowns. Disable with <code>DANYAPI_USAGE_ENABLED=0</code>.</p>
+            </details>
+            <details class="faq">
+                <summary data-i18n="q9">What is BYOK and how to enable it?</summary>
+                <p data-i18n="a9">BYOK is per-user token management. Set <code>BYOK_MODE=1</code> in your <code>.env</code> so users can register, add their own DeepSeek and Qwen tokens, and use them independently of the server pool.</p>
             </details>
         </div>
     </section>

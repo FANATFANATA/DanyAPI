@@ -23,6 +23,8 @@ from pydantic import BaseModel, Field, field_validator
 
 from .. import tools as toolemu
 from ..accounts import AccountPool, AccountPoolBusy, DeepSeekAccount, account_lock
+from ..byok import get_manager as _get_byok_manager
+from ..byok import set_manager as _set_byok_manager
 from ..config import settings
 from ..deepseek.client import DeepSeekClient, DeepSeekError, DeepSeekSession
 from ..deepseek.stream import IncrementalSSE, MessageReconstructor
@@ -177,6 +179,21 @@ class ResponsesRequest(BaseModel):
     search: bool | None = None
 
 
+class ByokLoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class ByokRegisterRequest(BaseModel):
+    username: str
+    password: str
+
+
+class ByokTokenAddRequest(BaseModel):
+    provider: str
+    token: str
+
+
 IMAGE_SIZE_RE = re.compile(r"^(\d{2,5})\s*[*x\u00d7,]\s*(\d{2,5})$", re.IGNORECASE)
 MIN_IMAGE_DIM = 16
 MAX_IMAGE_DIM = 8192
@@ -242,6 +259,12 @@ async def lifespan(app: FastAPI):
         app.state.usage = init_tracker(store=JsonStore("usage", "default"), max_records=settings.usage_max_records)
     else:
         app.state.usage = None
+    from ..byok import ByokManager
+    from ..byok import reset_manager as _reset_byok
+
+    mgr = ByokManager.from_settings()
+    _set_byok_manager(mgr)
+    _byok_mgr_for_app = mgr
     try:
         if settings.deepseek_tokens:
             for i, token in enumerate(settings.deepseek_tokens):
@@ -316,6 +339,8 @@ async def lifespan(app: FastAPI):
                 continue
             seen.add(id(client))
             await client.aclose()
+        _set_byok_manager(None)
+        _reset_byok()
 
 
 async def _fetch_qwen_models(client: QwenClient) -> list[dict]:
@@ -2433,3 +2458,145 @@ async def _stream_openai(
             }
         )
         yield "data: [DONE]\n\n"
+
+
+# ======================== BYOK Routes ========================
+
+
+@app.get("/byok/status")
+async def byok_status():
+    if not settings.byok_mode:
+        return {"enabled": False}
+    mgr = _get_byok_manager()
+    if mgr is None:
+        return {"enabled": True, "authenticated": False}
+    return {"enabled": True, "initialized": True}
+
+
+@app.post("/byok/register")
+async def byok_register(body: ByokRegisterRequest):
+    if not settings.byok_mode:
+        raise HTTPException(403, "BYOK mode is disabled")
+    mgr = _get_byok_manager()
+    if mgr is None:
+        raise HTTPException(503, "BYOK not initialized")
+    ok, result = mgr.register(body.username, body.password)
+    if ok:
+        return {"registered": True, "user_id": result}
+    return {"registered": False, "error": result}
+
+
+@app.post("/byok/login")
+async def byok_login(body: ByokLoginRequest):
+    if not settings.byok_mode:
+        raise HTTPException(403, "BYOK mode is disabled")
+    mgr = _get_byok_manager()
+    if mgr is None:
+        raise HTTPException(503, "BYOK not initialized")
+    session_key = mgr.login(body.username, body.password)
+    if session_key is None:
+        raise HTTPException(401, "invalid credentials")
+    resp = Response(content=json.dumps({"session_key": session_key}))
+    resp.set_cookie(
+        key="byok_session",
+        value=session_key,
+        httponly=True,
+        samesite="lax",
+        max_age=int(settings.session_ttl) if settings.session_ttl else 86400,
+    )
+    return resp
+
+
+@app.get("/byok/logout")
+async def byok_logout(request: Request):
+    session_key = request.cookies.get("byok_session")
+    if not session_key:
+        raise HTTPException(401, "not logged in")
+    mgr = _get_byok_manager()
+    if mgr is None:
+        raise HTTPException(503, "BYOK not initialized")
+    mgr.logout(session_key)
+    resp = Response(content=json.dumps({"logged_out": True}))
+    resp.delete_cookie(key="byok_session")
+    return resp
+
+
+@app.get("/byok/me")
+async def byok_me(request: Request):
+    if not settings.byok_mode:
+        raise HTTPException(403, "BYOK mode is disabled")
+    mgr = _get_byok_manager()
+    if mgr is None:
+        raise HTTPException(503, "BYOK not initialized")
+    session_key = request.cookies.get("byok_session")
+    if not session_key:
+        raise HTTPException(401, "not authenticated")
+    user_id = mgr.auth_check(session_key)
+    if user_id is None:
+        raise HTTPException(401, "invalid or expired session")
+    user = mgr._store.get_user(user_id)
+    return {
+        "authenticated": True,
+        "user_id": user_id,
+        "username": user.get("username") if user else None,
+    }
+
+
+@app.post("/byok/token")
+async def byok_add_token(request: Request, body: ByokTokenAddRequest):
+    if not settings.byok_mode:
+        raise HTTPException(403, "BYOK mode is disabled")
+    mgr = _get_byok_manager()
+    if mgr is None:
+        raise HTTPException(503, "BYOK not initialized")
+    session_key = request.cookies.get("byok_session")
+    if not session_key:
+        raise HTTPException(401, "not authenticated")
+    user_id = mgr.auth_check(session_key)
+    if user_id is None:
+        raise HTTPException(401, "invalid or expired session")
+    provider = body.provider.lower().strip()
+    if provider not in ("deepseek", "qwen"):
+        raise HTTPException(400, f"invalid provider: {provider!r}")
+    token_str = body.token.strip()
+    if not token_str:
+        raise HTTPException(400, "token is empty")
+    result = mgr.add_token(user_id, provider, token_str)
+    return result
+
+
+@app.get("/byok/tokens")
+async def byok_get_tokens(request: Request):
+    if not settings.byok_mode:
+        raise HTTPException(403, "BYOK mode is disabled")
+    mgr = _get_byok_manager()
+    if mgr is None:
+        raise HTTPException(503, "BYOK not initialized")
+    session_key = request.cookies.get("byok_session")
+    if not session_key:
+        raise HTTPException(401, "not authenticated")
+    user_id = mgr.auth_check(session_key)
+    if user_id is None:
+        raise HTTPException(401, "invalid or expired session")
+    tokens_list = mgr.get_user_tokens(user_id)
+    return {"tokens": [{"provider": t["provider"]} for t in tokens_list]}
+
+
+@app.delete("/byok/token/{provider}")
+async def byok_delete_token(request: Request, provider: str):
+    if not settings.byok_mode:
+        raise HTTPException(403, "BYOK mode is disabled")
+    mgr = _get_byok_manager()
+    if mgr is None:
+        raise HTTPException(503, "BYOK not initialized")
+    session_key = request.cookies.get("byok_session")
+    if not session_key:
+        raise HTTPException(401, "not authenticated")
+    user_id = mgr.auth_check(session_key)
+    if user_id is None:
+        raise HTTPException(401, "invalid or expired session")
+    provider = provider.lower().strip()
+    if provider not in ("deepseek", "qwen"):
+        raise HTTPException(400, f"invalid provider: {provider!r}")
+    removed = mgr.remove_token(user_id, provider)
+    return {"removed": removed}

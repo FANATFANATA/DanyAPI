@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import os
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +49,10 @@ def _env_str(key: str, default: str = "") -> str:
     return os.environ.get(key, default).strip()
 
 
+def _uuid4_hex() -> str:
+    return uuid.uuid4().hex
+
+
 class Settings:
     def __init__(self) -> None:
         self.host = os.environ.get("DANYAPI_HOST", "0.0.0.0")
@@ -71,6 +76,8 @@ class Settings:
         self.usage_enabled = os.environ.get("DANYAPI_USAGE_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off")
         self.usage_max_records = _env_int("DANYAPI_USAGE_MAX_RECORDS", 1000)
         self.auto_update = os.environ.get("DANYAPI_AUTO_UPDATE", "1").strip().lower() not in ("0", "false", "no", "off")
+        self.byok_mode = os.environ.get("BYOK_MODE", "").strip().lower() in ("1", "true", "yes", "on")
+        self.byok_salt = _env_str("BYOK_SALT") or _uuid4_hex()
 
 
 settings = Settings()

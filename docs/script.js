@@ -97,6 +97,8 @@
             f7_d: "Включайте актуальные ответы флагом <code>search</code> на моделях DeepSeek.",
             f8_t: "Вложения файлов",
             f8_d: "Изображения и текстовые файлы как base64 или data URI. Vision, OCR и анализ файлов по модели.",
+            f9_t: "BYOK (Bring Your Own Key)",
+            f9_d: "Управление токенами на каждого пользователя с регистрацией, куками авторизации и персональными токенами - разверни мульти-юзер инстанс.",
             models_eyebrow: "Модели",
             models_title: "Два бесплатных провайдера.",
             models_title_hi: "Один OpenAI API.",
@@ -115,6 +117,7 @@
             qs_sub: "Установка одной командой на Windows, Linux и macOS.",
             qs_tab_install: "Установка",
             qs_tab_docker: "Docker",
+            qs_tab_byok: "BYOK Docker",
             qs_pane_install: "PowerShell",
             qs_pane_install_alt: "Linux / macOS",
             qs_install_note: "Скрипт клонирует репозиторий, ставит зависимости, создаёт <code>.env</code>, проверяет токены и подсказывает, как запустить сервер. Обновляется сам при каждом старте.",
@@ -160,7 +163,12 @@
             hosted_sub: "A public, fully free DanyAPI instance is already live in production. No signup, no keys, no setup - just point your client at it.",
             hosted_pane_api: "API base URL",
             hosted_pane_site: "Landing page",
-            hosted_note: "Use any OpenAI-compatible client with a dummy <code>api_key</code>. The instance runs on the same free provider tokens - best-effort, but zero cost for you."
+            hosted_note: "Use any OpenAI-compatible client with a dummy <code>api_key</code>. The instance runs on the same free provider tokens - best-effort, but zero cost for you.",
+            f9_t: "BYOK (Bring Your Own Key)",
+            f9_d: "Per-user token management with registration, login cookies, and exclusive provider tokens - deploy a multi-user instance.",
+            qs_tab_byok: "BYOK Docker",
+            q9: "What is BYOK and how to enable it?",
+            a9: "BYOK is per-user token management. Set <code>BYOK_MODE=1</code> in your <code>.env</code> so users can register, add their own DeepSeek and Qwen tokens, and use them independently of the server pool."
         }
     };
 

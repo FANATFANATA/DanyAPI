@@ -4,7 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>DanyAPI</title>
-<meta name="description" content="DanyAPI free OpenAI-compatible API. Add your DeepSeek and Qwen tokens." />
+<meta name="description" content="DanyAPI free OpenAI-compatible API. Manage your tokens or register as a new user." />
 <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2040%2040'%3E%3Cdefs%3E%3ClinearGradient%20id='g'%20x1='0'%20y1='0'%20x2='1'%20y2='1'%3E%3Cstop%20offset='0'%20stop-color='%236c7bff'/%3E%3Cstop%20offset='1'%20stop-color='%2322d3ee'/%3E%3C/linearGradient%3E%3C/defs%3E%3Cpath%20d='M20%202.5L35%2011V29L20%2037.5L5%2029V11Z'%20fill='none'%20stroke='url(%23g)'%20stroke-width='2.6'%20stroke-linejoin='round'/%3E%3Cpath%20d='M20%2013.5L12.5%2026.5H27.5Z'%20fill='none'%20stroke='url(%23g)'%20stroke-width='1.8'%20stroke-linejoin='round'/%3E%3Ccircle%20cx='20'%20cy='13.5'%20r='3'%20fill='url(%23g)'/%3E%3Ccircle%20cx='12.5'%20cy='26.5'%20r='3'%20fill='url(%23g)'/%3E%3Ccircle%20cx='27.5'%20cy='26.5'%20r='3'%20fill='url(%23g)'/%3E%3C/svg%3E" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -348,6 +348,93 @@ body::before {
     box-shadow: 0 16px 40px -12px rgba(108, 123, 255, 0.85);
 }
 
+.btn-secondary {
+    background: rgba(255, 255, 255, 0.05);
+    border-color: var(--l-border-strong);
+    color: var(--l-muted);
+}
+
+.btn-secondary:hover {
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--l-text);
+}
+
+.btn-sm {
+    padding: 0.5rem 1rem;
+    font-size: 0.82rem;
+    margin-top: 0;
+    width: auto;
+}
+
+.token-list {
+    margin-top: 1.2rem;
+}
+
+.token-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.6rem 0.8rem;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid var(--l-border);
+    border-radius: 8px;
+    margin-bottom: 0.5rem;
+    font-size: 0.85rem;
+}
+
+.token-item .provider-name {
+    font-family: var(--font-mono);
+    color: var(--l-accent-2);
+    font-weight: 600;
+}
+
+.token-item .token-token {
+    color: var(--l-muted);
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    flex: 1;
+    margin: 0 0.8rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.auth-section {
+    margin-top: 2.2rem;
+    padding-top: 1.6rem;
+    border-top: 1px solid var(--l-border);
+}
+
+.auth-toggle {
+    display: flex;
+    gap: 0.5rem;
+    margin-bottom: 1.2rem;
+}
+
+.auth-toggle button {
+    flex: 1;
+    padding: 0.55rem 1rem;
+    border: 1px solid var(--l-border-strong);
+    background: transparent;
+    color: var(--l-muted);
+    border-radius: 8px;
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.2s, color 0.2s;
+}
+
+.auth-toggle button.active {
+    background: var(--accent-soft);
+    color: var(--l-text);
+    border-color: var(--l-accent);
+}
+
+.hidden {
+    display: none !important;
+}
+
 .footer-link {
     display: block;
     text-align: center;
@@ -531,28 +618,68 @@ body::before {
             <span class="brand-name">Dany<span class="brand-accent">API</span></span>
         </a>
         <h1><span class="grad-text">Token Manager</span></h1>
-        <p>Support the project add your free provider tokens</p>
+        <p>Manage your provider tokens or server admin tokens</p>
     </div>
 
-    <div class="form-group">
-        <label for="deepseek-tokens">DeepSeek Tokens</label>
-        <input type="text" id="deepseek-tokens"
-               placeholder="token1, token2, token3..." value="" autocomplete="off" spellcheck="false" />
+    <div id="auth-panel">
+        <div class="auth-toggle">
+            <button type="button" id="tab-login" class="active" data-tab="login">Login / Register</button>
+            <button type="button" id="tab-server" data-tab="server">Admin Tokens</button>
+        </div>
+
+        <div id="panel-login">
+            <div class="form-group">
+                <label for="byok-user">Username</label>
+                <input type="text" id="byok-user" placeholder="your_username" autocomplete="username" spellcheck="false" />
+            </div>
+            <div class="form-group">
+                <label for="byok-pass">Password</label>
+                <input type="password" id="byok-pass" placeholder="••••••••" autocomplete="new-password" />
+            </div>
+            <button class="btn btn-primary" type="button" id="btn-login">Login</button>
+            <button class="btn btn-secondary" type="button" id="btn-register" style="margin-top:0.5rem;">Register new account</button>
+        </div>
+
+        <div id="panel-server" class="hidden">
+            <div class="form-group">
+                <label for="deepseek-tokens">DeepSeek Tokens</label>
+                <input type="text" id="deepseek-tokens"
+                       placeholder="token1, token2, token3..." value="" autocomplete="off" spellcheck="false" />
+            </div>
+
+            <div class="form-group">
+                <label for="qwen-tokens">Qwen Tokens</label>
+                <input type="text" id="qwen-tokens"
+                       placeholder="token1, token2, token3..." value="" autocomplete="off" spellcheck="false" />
+            </div>
+            <button class="btn btn-primary" type="button" id="btn-save">Add Tokens</button>
+        </div>
     </div>
 
-    <div class="form-group">
-        <label for="qwen-tokens">Qwen Tokens</label>
-        <input type="text" id="qwen-tokens"
-               placeholder="token1, token2, token3..." value="" autocomplete="off" spellcheck="false" />
+    <div id="user-panel" class="hidden">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem;">
+            <span style="font-family:var(--font-mono);font-size:0.85rem;color:var(--l-text);" id="user-display"></span>
+            <button class="btn btn-sm btn-secondary" type="button" id="btn-logout">Logout</button>
+        </div>
+
+        <div class="form-group">
+            <label for="add-provider">Provider</label>
+            <input type="text" id="add-provider" placeholder="deepseek" autocomplete="off" spellcheck="false" />
+        </div>
+        <div class="form-group">
+            <label for="add-token">Provider Token</label>
+            <input type="text" id="add-token" placeholder="sk-..." autocomplete="off" spellcheck="false" />
+        </div>
+        <button class="btn btn-primary" type="button" id="btn-add-token">Add Token</button>
+
+        <div class="token-list" id="token-list"></div>
     </div>
 
     <div class="info-box">
-        <strong>No limits.</strong> Tokens are used server-side. Your consumers just point their OpenAI client at this instance no keys needed on their side. Each token adds parallel generation capacity.
+        <strong>No limits.</strong> Your tokens are used exclusively by you. Each token adds parallel generation capacity for your account.
     </div>
 
     <div id="status" class="status"></div>
-
-    <button class="btn btn-primary" type="button" id="btn-save">Add Tokens</button>
 
     <div class="usage-section">
         <h2 class="usage-title">Usage</h2>
@@ -573,9 +700,15 @@ body::before {
 
     var BASE = window.location.origin;
     var statusEl = document.getElementById("status");
+    var authPanel = document.getElementById("auth-panel");
+    var userPanel = document.getElementById("user-panel");
+    var userDisplay = document.getElementById("user-display");
     var dsInput = document.getElementById("deepseek-tokens");
     var qwInput = document.getElementById("qwen-tokens");
     var usageEl = document.getElementById("usage-stats");
+    var tokenListEl = document.getElementById("token-list");
+    var isByok = false;
+    var currentUserId = null;
 
     function fmt(n) {
         return (n || 0).toLocaleString("en-US");
@@ -624,6 +757,180 @@ body::before {
         statusEl.className = "status " + type;
     }
 
+    function checkAuth() {
+        fetch(BASE + "/byok/me")
+            .then(function (r) {
+                if (!r.ok) throw new Error("not authenticated");
+                return r.json();
+            })
+            .then(function (data) {
+                if (data.authenticated) {
+                    isByok = true;
+                    currentUserId = data.user_id;
+                    userDisplay.textContent = "Logged in as " + (data.username || "");
+                    authPanel.classList.add("hidden");
+                    userPanel.classList.remove("hidden");
+                    loadUserTokens();
+                } else {
+                    authPanel.classList.remove("hidden");
+                    userPanel.classList.add("hidden");
+                }
+            })
+            .catch(function () {
+                authPanel.classList.remove("hidden");
+                userPanel.classList.add("hidden");
+            });
+    }
+
+    function loadUserTokens() {
+        fetch(BASE + "/byok/tokens")
+            .then(function (r) {
+                if (!r.ok) throw new Error("HTTP " + r.status);
+                return r.json();
+            })
+            .then(function (data) {
+                var tokens = data.tokens || [];
+                var html = "";
+                for (var i = 0; i < tokens.length; i++) {
+                    html += '<div class="token-item">';
+                    html += '<span class="provider-name">' + tokens[i].provider + '</span>';
+                    html += '<span class="token-token">●●●●●●●●</span>';
+                    html += '<button class="btn btn-sm btn-secondary" type="button" data-del="' + tokens[i].provider + '">Remove</button>';
+                    html += '</div>';
+                }
+                if (!tokens.length) {
+                    html = '<div style="color:var(--l-muted);font-size:0.82rem;padding:0.5rem 0;">No tokens added yet</div>';
+                }
+                tokenListEl.innerHTML = html;
+                tokenListEl.querySelectorAll("[data-del]").forEach(function (btn) {
+                    btn.addEventListener("click", function () {
+                        var prov = btn.getAttribute("data-del");
+                        fetch(BASE + "/byok/token/" + prov, { method: "DELETE" })
+                            .then(function (r) { return r.json(); })
+                            .then(function (data) {
+                                if (data.removed) {
+                                    showStatus("Token removed", "success");
+                                    loadUserTokens();
+                                } else {
+                                    showStatus("Failed to remove token", "error");
+                                }
+                            })
+                            .catch(function () { showStatus("Connection error", "error"); });
+                    });
+                });
+            })
+            .catch(function (e) {
+                tokenListEl.innerHTML = '<div class="usage-error">Failed to load tokens: ' + e.message + '</div>';
+            });
+    }
+
+    document.getElementById("tab-login").addEventListener("click", function () {
+        setTab(this, "login");
+    });
+    document.getElementById("tab-server").addEventListener("click", function () {
+        setTab(this, "server");
+    });
+
+    function setTab(btn, tabName) {
+        document.getElementById("tab-login").classList.toggle("active", tabName === "login");
+        document.getElementById("tab-server").classList.toggle("active", tabName === "server");
+        document.getElementById("panel-login").classList.toggle("hidden", tabName !== "login");
+        document.getElementById("panel-server").classList.toggle("hidden", tabName !== "server");
+    }
+
+    document.getElementById("btn-login").addEventListener("click", function () {
+        var username = document.getElementById("byok-user").value.trim();
+        var password = document.getElementById("byok-pass").value;
+        if (!username || !password) {
+            showStatus("Enter username and password", "error");
+            return;
+        }
+        showStatus("Logging in\u2026", "loading");
+        fetch(BASE + "/byok/login", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ username: username, password: password })
+        })
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+                if (data.session_key) {
+                    showStatus("Logged in successfully!", "success");
+                    checkAuth();
+                    document.getElementById("byok-user").value = "";
+                    document.getElementById("byok-pass").value = "";
+                } else {
+                    showStatus("Invalid credentials", "error");
+                }
+            })
+            .catch(function (e) {
+                showStatus("Connection error: " + e.message, "error");
+            });
+    });
+
+    document.getElementById("btn-register").addEventListener("click", function () {
+        var username = document.getElementById("byok-user").value.trim();
+        var password = document.getElementById("byok-pass").value;
+        if (!username || !password) {
+            showStatus("Enter username and password", "error");
+            return;
+        }
+        showStatus("Registering\u2026", "loading");
+        fetch(BASE + "/byok/register", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ username: username, password: password })
+        })
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+                if (data.registered) {
+                    showStatus("Account created! You can now log in.", "success");
+                } else {
+                    showStatus(data.error || "Registration failed", "error");
+                }
+            })
+            .catch(function (e) {
+                showStatus("Connection error: " + e.message, "error");
+            });
+    });
+
+    document.getElementById("btn-logout").addEventListener("click", function () {
+        fetch(BASE + "/byok/logout", { method: "GET" })
+            .then(function () {
+                checkAuth();
+                showStatus("Logged out", "success");
+            })
+            .catch(function () { showStatus("Logout failed", "error"); });
+    });
+
+    document.getElementById("btn-add-token").addEventListener("click", function () {
+        var provider = document.getElementById("add-provider").value.trim().toLowerCase();
+        var tokenStr = document.getElementById("add-token").value.trim();
+        if (!provider || !tokenStr) {
+            showStatus("Enter provider and token", "error");
+            return;
+        }
+        if (provider !== "deepseek" && provider !== "qwen") {
+            showStatus("Provider must be 'deepseek' or 'qwen'", "error");
+            return;
+        }
+        showStatus("Adding token\u2026", "loading");
+        fetch(BASE + "/byok/token", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ provider: provider, token: tokenStr })
+        })
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+                showStatus("Token added for " + provider, "success");
+                document.getElementById("add-provider").value = "";
+                document.getElementById("add-token").value = "";
+                loadUserTokens();
+            })
+            .catch(function (e) {
+                showStatus("Connection error: " + e.message, "error");
+            });
+    });
+
     document.getElementById("btn-save").addEventListener("click", function () {
         var dsRaw = dsInput.value.trim();
         var qwRaw = qwInput.value.trim();
@@ -667,6 +974,8 @@ body::before {
                 showStatus("Connection error: " + e.message, "error");
             });
     });
+
+    checkAuth();
 })();
 </script>
 </body>

@@ -1780,13 +1780,12 @@ def _parse_yaml_calls(text: str) -> list[ToolCall] | None:
             current_args = {}
             args_mode = False
             item_text = line[2:].strip()
-            if ":" in item_text:
+            if ":" not in item_text:
+                current_name = _yaml_name(item_text)
+            else:
                 key, value = _yaml_key_value(item_text)
                 if key == "name":
                     current_name = _yaml_name(value)
-                continue
-            else:
-                current_name = _yaml_name(item_text)
             continue
         if current_name is None:
             key, value = _yaml_key_value(line)

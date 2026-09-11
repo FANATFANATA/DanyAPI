@@ -1,9 +1,35 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "danyapi"
+version = "0.1.0"
+description = "OpenAI-compatible API proxy for DeepSeek and Qwen"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "httpx",
+    "pydantic",
+    "python-dotenv",
+    "pillow",
+]
+
+[tool.setuptools.packages.find]
+include = ["danyapi*"]
+exclude = ["web*", "docs*", "tests*"]
+
 [tool.ruff]
 line-length = 160
 target-version = "py310"
 
 [tool.ruff.lint]
 select = ["B", "C4", "E", "F", "FURB", "I", "PLW", "RUF", "UP"]
+ignore = ["PLW0603"]
+
+[tool.ruff.lint.per-file-ignores]
+"danyapi/byok/*" = []
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
