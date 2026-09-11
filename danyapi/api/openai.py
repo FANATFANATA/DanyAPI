@@ -32,6 +32,7 @@ from ..qwen.client import QwenClient, QwenError
 from ..store import JsonStore
 from ..tokens import count_messages_tokens, estimate_tokens
 from ..usage import init_tracker, record_usage
+from . import responses as responses_api
 
 log = logging.getLogger("danyapi.api")
 
@@ -152,6 +153,30 @@ class ImageGenerationRequest(BaseModel):
     user: str | None = None
 
 
+class ResponsesRequest(BaseModel):
+    model: str = Field(default="deepseek-v4.1-flash")
+    input: Any = ""
+    instructions: str | None = None
+    stream: bool = False
+    temperature: float | None = None
+    top_p: float | None = None
+    max_output_tokens: int | None = None
+    tools: list[Any] | None = None
+    tool_choice: Any = None
+    parallel_tool_calls: bool | None = None
+    text: Any = None
+    response_format: Any = None
+    reasoning: Any = None
+    previous_response_id: str | None = None
+    store: bool = True
+    metadata: Any = None
+    truncation: str = "disabled"
+    user: str | None = None
+    session_id: str | None = None
+    thinking: bool | None = None
+    search: bool | None = None
+
+
 IMAGE_SIZE_RE = re.compile(r"^(\d{2,5})\s*[*x\u00d7,]\s*(\d{2,5})$", re.IGNORECASE)
 MIN_IMAGE_DIM = 16
 MAX_IMAGE_DIM = 8192
@@ -205,6 +230,8 @@ async def lifespan(app: FastAPI):
     qwen_context_store = JsonStore("qwen-contexts", "default" if cache_enabled else None)
     deepseek_affinity_store = JsonStore("deepseek-affinities", "default" if cache_enabled else None)
     qwen_affinity_store = JsonStore("qwen-affinities", "default" if cache_enabled else None)
+    responses_store = JsonStore("responses", "default" if cache_enabled else None)
+    app.state.responses_store = responses_store
     app.state.deepseek_session_store = deepseek_session_store
     app.state.qwen_session_store = qwen_session_store
     app.state.deepseek_context_store = deepseek_context_store
@@ -423,6 +450,10 @@ def _shared_store(attr: str, name: str) -> JsonStore:
         store = JsonStore(name, "default" if settings.cache_enabled else None)
         setattr(app.state, attr, store)
     return store
+
+
+def _responses_store() -> JsonStore:
+    return _shared_store("responses_store", "responses")
 
 
 @app.post("/v1/tokens")
@@ -912,6 +943,121 @@ async def chat_completions(req: ChatCompletionRequest) -> Any:
     if provider == "qwen":
         return await _chat_completions_qwen(req)
     return await _chat_completions_deepseek(req)
+
+
+def _responses_provider_call(req: ResponsesRequest) -> Any:
+    if _resolve_provider(req.model) == "qwen":
+        return _chat_completions_qwen
+    return _chat_completions_deepseek
+
+
+def _responses_chat_request(req: ResponsesRequest, provider_messages: list[dict], session_id: str | None) -> ChatCompletionRequest:
+    return ChatCompletionRequest(
+        model=req.model,
+        messages=[ChatMessage(**message) for message in provider_messages],
+        stream=req.stream,
+        temperature=req.temperature,
+        top_p=req.top_p,
+        thinking=req.thinking,
+        search=req.search,
+        session_id=session_id,
+        user=req.user,
+        tools=responses_api.convert_tools(req.tools),
+        tool_choice=responses_api.convert_tool_choice(req.tool_choice),
+        parallel_tool_calls=req.parallel_tool_calls,
+        response_format=responses_api.extract_response_format(req.text, req.response_format),
+        stream_options={"include_usage": True} if req.stream else None,
+    )
+
+
+@app.post("/v1/responses")
+async def create_response(req: ResponsesRequest) -> Any:
+    provider_call = _responses_provider_call(req)
+    store = _responses_store()
+    try:
+        new_input = responses_api.normalize_input(req.input)
+    except responses_api.ResponsesInputError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    base_conversation: list[dict] = []
+    if req.previous_response_id:
+        record = store.get(req.previous_response_id)
+        if not isinstance(record, dict):
+            raise HTTPException(404, f"response {req.previous_response_id} not found")
+        stored = record.get("conversation")
+        if isinstance(stored, list):
+            base_conversation = stored
+    conversation = list(base_conversation) + new_input
+
+    provider_messages: list[dict] = []
+    if req.instructions:
+        provider_messages.append({"role": "system", "content": req.instructions})
+    provider_messages.extend(conversation)
+
+    session_id = None if req.previous_response_id else req.session_id
+    chat_req = _responses_chat_request(req, provider_messages, session_id)
+
+    info = responses_api.RequestInfo(
+        model=req.model,
+        instructions=req.instructions,
+        max_output_tokens=req.max_output_tokens,
+        temperature=req.temperature,
+        top_p=req.top_p,
+        tool_choice=req.tool_choice,
+        tools=req.tools,
+        parallel_tool_calls=req.parallel_tool_calls,
+        previous_response_id=req.previous_response_id,
+        store=req.store,
+        metadata=req.metadata,
+        user=req.user,
+        text_format=responses_api.response_text_format(req.text),
+        truncation=req.truncation,
+        reasoning=req.reasoning,
+    )
+
+    response_id = f"resp_{uuid.uuid4().hex}"
+    created_at = int(time.time())
+
+    if req.stream:
+        chat_resp = await provider_call(chat_req)
+        conversation_snapshot = conversation
+
+        def _on_complete(final: dict) -> None:
+            if not req.store:
+                return
+            stored_conversation = conversation_snapshot + responses_api.messages_from_output(final.get("output"))
+            store.set(response_id, {"public": final, "conversation": stored_conversation})
+
+        return StreamingResponse(
+            responses_api.translate_stream(chat_resp.body_iterator, info, response_id, created_at, _on_complete),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    chat_dict = await provider_call(chat_req)
+    result = responses_api.response_from_chat(chat_dict, info, response_id, created_at)
+    if req.store:
+        stored_conversation = conversation + responses_api.messages_from_output(result.get("output"))
+        store.set(response_id, {"public": result, "conversation": stored_conversation})
+    return result
+
+
+@app.get("/v1/responses/{response_id}")
+async def get_response(response_id: str) -> dict:
+    record = _responses_store().get(response_id)
+    if not isinstance(record, dict):
+        raise HTTPException(404, f"response {response_id} not found")
+    public = record.get("public")
+    return public if isinstance(public, dict) else {}
+
+
+@app.delete("/v1/responses/{response_id}")
+async def delete_response(response_id: str) -> dict:
+    store = _responses_store()
+    if not isinstance(store.get(response_id), dict):
+        raise HTTPException(404, f"response {response_id} not found")
+    store.discard(response_id)
+    return {"id": response_id, "object": "response.deleted", "deleted": True}
 
 
 @app.post("/v1/images/generations")
