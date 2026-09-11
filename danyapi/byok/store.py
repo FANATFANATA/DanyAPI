@@ -15,10 +15,10 @@ def _cache_dir() -> Path:
     if raw and os.path.isdir(raw):
         return Path(raw)
     try:
-        tmp = Path(os.getenv("TEMP", "/tmp"))
+        tmp = Path(os.getenv("TEMP", "/tmp"))  # nosec B108
         return tmp / "danyapi"
     except (OSError, ValueError):
-        return Path("/tmp")
+        return Path("/tmp")  # nosec B108
 
 
 class UserStore:

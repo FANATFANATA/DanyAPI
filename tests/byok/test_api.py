@@ -10,13 +10,12 @@ def enabled_app():
     import tempfile
 
     from danyapi.api.openai import app
-    from danyapi.byok import ByokManager, set_manager
+    from danyapi.byok import set_manager
 
     tmpdir = tempfile.mkdtemp()
     with patch("danyapi.api.openai.settings") as mock_settings:
         mock_settings.byok_mode = True
         mock_settings.session_ttl = 3600.0
-        mgr = ByokManager.from_settings.__func__(None) if False else None  # noqa: F841
         store_path = Path(tmpdir) / "byok"
         store_path.mkdir(parents=True, exist_ok=True)
         from danyapi.byok.manager import ByokManager as BM

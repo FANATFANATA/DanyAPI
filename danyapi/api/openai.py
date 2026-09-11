@@ -264,7 +264,6 @@ async def lifespan(app: FastAPI):
 
     mgr = ByokManager.from_settings()
     _set_byok_manager(mgr)
-    _byok_mgr_for_app = mgr
     try:
         if settings.deepseek_tokens:
             for i, token in enumerate(settings.deepseek_tokens):
