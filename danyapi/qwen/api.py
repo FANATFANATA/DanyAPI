@@ -297,6 +297,8 @@ async def _collect_response(
                 _drop_session(pool, account, session_key)
                 raise HTTPException(400, "context length exceeded: conversation too long, start a new conversation") from None
             except HTTPException as exc:
+                if exc.status_code == 401:
+                    account.mark_broken()
                 if exc.status_code in STALE_SESSION_STATUSES and had_cached_session and not stale_rebuilt and messages is not None:
                     stale_rebuilt = True
                     _drop_session(pool, account, session_key)
@@ -353,6 +355,7 @@ async def _collect_response(
                     MAX_RETRIES,
                     delay,
                 )
+                await _try_stop_stream(account.client, session.id, stop_response_id)
                 await asyncio.sleep(delay)
                 continue
             return rec, session, session_key, prompt, tool_mode, tool_schemas
@@ -519,6 +522,8 @@ async def stream_openai(
                     yield line
                 return
             except HTTPException as exc:
+                if exc.status_code == 401:
+                    account.mark_broken()
                 if exc.status_code in STALE_SESSION_STATUSES and had_cached_session and not stale_rebuilt and messages is not None:
                     stale_rebuilt = True
                     _drop_session(pool, account, session_key)
@@ -531,7 +536,13 @@ async def stream_openai(
                             yield line
                         return
                     log.warning("qwen chat %s is stale (%s), rebuilt full history into a fresh chat", session_key, exc.status_code)
-                    session, session_key = await _prepare_session(account, pool, existing_sid, model_id, context_seq)
+                    try:
+                        session, session_key = await _prepare_session(account, pool, existing_sid, model_id, context_seq)
+                    except HTTPException as prep_exc:
+                        detail = prep_exc.detail if isinstance(prep_exc.detail, str) else str(prep_exc.detail)
+                        for line in _stream_error_lines(chunk_id, created, model, detail, session_key):
+                            yield line
+                        return
                     stop_response_id = None
                     continue
                 if _is_retryable_http(exc) and attempt < MAX_RETRIES:
@@ -554,6 +565,7 @@ async def stream_openai(
             incremental = IncrementalSSE()
             got_content = False
             pending: list[str] = []
+            role_sent = False
             stopped = False
             try:
                 async for chunk in resp.aiter_bytes():
@@ -562,7 +574,8 @@ async def stream_openai(
                         c_diff, r_diff = rec.take_diffs()
                         if c_diff or r_diff:
                             got_content = True
-                        if not pending:
+                        if not role_sent:
+                            role_sent = True
                             pending.append(
                                 _sse(
                                     {
@@ -637,6 +650,7 @@ async def stream_openai(
                     MAX_RETRIES,
                     delay,
                 )
+                await _try_stop_stream(account.client, session.id, stop_response_id)
                 await asyncio.sleep(delay)
                 continue
             break

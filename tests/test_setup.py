@@ -123,3 +123,49 @@ def test_collect_provider_returns_tokens_key_only(monkeypatch):
     monkeypatch.setattr("builtins.input", lambda _: "tok1,tok2")
     creds = setup.collect_provider("Qwen", {}, {})
     assert creds == {"QWEN_TOKENS": "tok1,tok2"}
+
+
+class _Proc:
+    def __init__(self, stdout):
+        self.stdout = stdout
+
+
+def test_rustup_target_reachable_present(monkeypatch):
+    monkeypatch.setattr(setup.subprocess, "run", lambda *a, **k: _Proc("aarch64-unknown-linux-android\n"))
+    assert setup.rustup_target_reachable() is True
+
+
+def test_rustup_target_reachable_missing(monkeypatch):
+    monkeypatch.setattr(setup.subprocess, "run", lambda *a, **k: _Proc("x86_64-unknown-linux-gnu\n"))
+    assert setup.rustup_target_reachable() is False
+
+
+def test_rustup_target_reachable_no_rustup(monkeypatch):
+    def boom(*a, **k):
+        raise OSError("no rustup")
+
+    monkeypatch.setattr(setup.subprocess, "run", boom)
+    assert setup.rustup_target_reachable() is True
+
+
+def test_update_env_removes_duplicates(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text("A=old1\nB=keep\nA=old2\n", encoding="utf-8")
+    monkeypatch.setattr(setup, "ENV_FILE", env_file)
+    monkeypatch.setattr(setup, "ROOT", tmp_path)
+    setup.update_env({"A": "new"})
+    text = env_file.read_text(encoding="utf-8")
+    assert text.count("A=") == 1
+    assert "A=new" in text
+    assert "B=keep" in text
+
+
+def test_update_env_appends_new_key(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text("A=1\n", encoding="utf-8")
+    monkeypatch.setattr(setup, "ENV_FILE", env_file)
+    monkeypatch.setattr(setup, "ROOT", tmp_path)
+    setup.update_env({"C": "3"})
+    text = env_file.read_text(encoding="utf-8")
+    assert "A=1" in text
+    assert "C=3" in text

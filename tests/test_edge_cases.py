@@ -164,3 +164,45 @@ def test_guard_executes_main():
     finally:
         if saved is not None:
             sys.modules["danyapi.__main__"] = saved
+
+
+def test_set_path_assigns_list_element():
+    target = {"fragments": [{"content": "hello"}]}
+    _set_path(target, ["fragments", "0"], {"content": "new"})
+    assert target["fragments"][0] == {"content": "new"}
+
+
+def test_batch_does_not_poison_last_op():
+    rec = MessageReconstructor()
+    rec.message = {"fragments": [{"type": "RESPONSE", "content": "A"}]}
+    rec._last_op = "APPEND"
+    rec._last_path = "response/fragments/0/content"
+    rec.handle(SSEEvent(None, {"o": "BATCH", "p": "response", "v": [{"p": "accumulated_token_usage", "v": 10}]}))
+    assert rec._last_op == "APPEND"
+    assert rec._last_path == "response/fragments/0/content"
+    rec.handle(SSEEvent(None, {"v": "B"}))
+    assert rec.content == "AB"
+
+
+def test_image_url_strips_trailing_punctuation():
+    rec = QwenStreamReconstructor()
+    rec.handle(SSEEvent(None, {"choices": [{"delta": {"phase": "answer", "content": "see https://cdn.qwenlm.ai/pic.png."}}]}))
+    assert rec.image_urls == ["https://cdn.qwenlm.ai/pic.png"]
+
+
+def test_summary_dict_items_extract_text():
+    rec = QwenStreamReconstructor()
+    rec.handle(
+        SSEEvent(
+            None,
+            {"choices": [{"delta": {"phase": "thinking_summary", "extra": {"summary_thought": {"content": [{"text": "a"}, "b"]}}}}]},
+        )
+    )
+    assert rec.reasoning == "a\n\nb"
+
+
+def test_error_event_keeps_usage():
+    rec = QwenStreamReconstructor()
+    rec.handle(SSEEvent(None, {"usage": {"input_tokens": 3, "output_tokens": 4}, "error": {"code": "x"}}))
+    assert rec.usage == {"input_tokens": 3, "output_tokens": 4}
+    assert rec.error == {"code": "x"}

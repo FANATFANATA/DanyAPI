@@ -100,6 +100,13 @@ def _set_path(target: dict, parts: list[str], value: Any) -> None:
         if i == len(parts) - 1:
             if isinstance(node, dict):
                 node[part] = value
+            elif isinstance(node, list):
+                try:
+                    idx = int(part)
+                except ValueError:
+                    return
+                if -len(node) <= idx < len(node):
+                    node[idx] = value
             return
         try:
             if isinstance(node, list):
@@ -230,8 +237,9 @@ class MessageReconstructor:
             return
         op = data.get("o", self._last_op)
         path = data.get("p", self._last_path)
-        self._last_op = op
-        self._last_path = path
+        if op != "BATCH":
+            self._last_op = op
+            self._last_path = path
         _apply_delta(self.message, op, path, data["v"])
 
     def _aggregate(self, types: tuple[str, ...]) -> str:

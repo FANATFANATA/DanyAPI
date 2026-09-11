@@ -10,7 +10,8 @@ IMAGE_PHASES = {"image", "image_generation", "image_gen", "t2i"}
 THINK_PHASES = {"think", "DeepThinking"}
 SUMMARY_PHASE = "thinking_summary"
 
-_IMAGE_URL_RE = re.compile(r"!\[[^\]]*\]\((https?://[^\s)]+)\)|(https?://cdn\.qwenlm\.ai/[^\s)\"]+)")
+_IMAGE_URL_RE = re.compile(r"!\[[^\]]*\]\((https?://[^\s)>'\"]+)\)|(https?://cdn\.qwenlm\.ai/[^\s)>'\"]+)")
+_TRAILING_PUNCT = ".,;:!?"
 
 
 def _delta_text(delta: dict, key: str) -> str:
@@ -21,10 +22,21 @@ def _delta_text(delta: dict, key: str) -> str:
 def _extract_image_urls(text: str) -> list[str]:
     urls: list[str] = []
     for match in _IMAGE_URL_RE.finditer(text):
-        url = match.group(1) or match.group(2)
+        url = (match.group(1) or match.group(2) or "").rstrip(_TRAILING_PUNCT)
         if url:
             urls.append(url)
     return urls
+
+
+def _summary_text(item: Any) -> str:
+    if isinstance(item, str):
+        return item
+    if isinstance(item, dict):
+        for key in ("text", "content", "value", "summary"):
+            value = item.get(key)
+            if isinstance(value, str) and value:
+                return value
+    return ""
 
 
 class QwenStreamReconstructor:
@@ -60,12 +72,12 @@ class QwenStreamReconstructor:
             self.finished = True
         if data.get("response_id"):
             self.response_id = data["response_id"]
+        if isinstance(data.get("usage"), dict):
+            self.usage = data["usage"]
         if data.get("error"):
             error = data["error"]
             self.error = error if isinstance(error, dict) else {"code": "Internal_Server_Error", "details": error}
             return
-        if isinstance(data.get("usage"), dict):
-            self.usage = data["usage"]
         choices = data.get("choices")
         if not isinstance(choices, list) or not choices:
             return
@@ -126,7 +138,7 @@ class QwenStreamReconstructor:
                 if isinstance(summary, dict):
                     items = summary.get("content")
                     if isinstance(items, list):
-                        joined = "\n\n".join(str(item) for item in items if item)
+                        joined = "\n\n".join(text for text in (_summary_text(item) for item in items) if text)
                         if joined:
                             self.reasoning = joined
 

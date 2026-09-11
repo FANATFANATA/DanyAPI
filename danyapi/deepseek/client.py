@@ -86,13 +86,18 @@ class DeepSeekClient:
 
     @staticmethod
     def _biz(resp: dict) -> dict:
+        if not isinstance(resp, dict):
+            raise DeepSeekError(-1, "unexpected response shape")
         code = resp.get("code")
         if code:
             raise DeepSeekError(code, resp.get("msg") or resp.get("message") or "")
-        data = resp.get("data") or {}
+        data = resp.get("data")
+        if not isinstance(data, dict):
+            data = {}
         if data.get("biz_code"):
             raise DeepSeekError(data["biz_code"], data.get("biz_msg", ""))
-        return data.get("biz_data") or {}
+        biz_data = data.get("biz_data")
+        return biz_data if isinstance(biz_data, dict) else {}
 
     async def check_auth(self) -> bool:
         try:
@@ -107,7 +112,7 @@ class DeepSeekClient:
     async def get_user(self) -> dict:
         resp = await self._post("/api/v0/users", None)
         biz = self._biz(resp)
-        return biz or {}
+        return biz if isinstance(biz, dict) else {}
 
     async def create_pow_challenge(self, target_path: str = "/api/v0/chat/completion") -> dict:
         resp = await self._post("/api/v0/chat/create_pow_challenge", {"target_path": target_path})
@@ -122,7 +127,9 @@ class DeepSeekClient:
         started = time.monotonic()
         resp = await self._post("/api/v0/chat_session/create", {})
         biz = self._biz(resp)
-        raw = biz["chat_session"]
+        raw = biz.get("chat_session")
+        if not isinstance(raw, dict) or not raw.get("id"):
+            raise DeepSeekError(-1, "no chat_session in response")
         session = DeepSeekSession(id=raw["id"], title=raw.get("title") or "")
         log.info("deepseek create session success (%.0fms)", (time.monotonic() - started) * 1000)
         return session
@@ -209,19 +216,21 @@ class DeepSeekClient:
         except ValueError as exc:
             raise DeepSeekError(-1, "invalid JSON from history_messages") from exc
         biz = self._biz(payload)
-        return (biz or {}).get("chat_messages", [])
+        return biz.get("chat_messages", []) if isinstance(biz, dict) else []
 
     async def rename_session(self, chat_session_id: str, title: str) -> None:
-        await self._post(
-            "/api/v0/chat_session/update_title",
-            {
-                "chat_session_id": chat_session_id,
-                "title": title,
-            },
+        self._biz(
+            await self._post(
+                "/api/v0/chat_session/update_title",
+                {
+                    "chat_session_id": chat_session_id,
+                    "title": title,
+                },
+            )
         )
 
     async def delete_session(self, chat_session_id: str) -> None:
-        await self._post("/api/v0/chat_session/delete", {"chat_session_id": chat_session_id})
+        self._biz(await self._post("/api/v0/chat_session/delete", {"chat_session_id": chat_session_id}))
 
     async def completion(
         self,
@@ -252,10 +261,12 @@ class DeepSeekClient:
         return await self.http.send(req, stream=True)
 
     async def stop_stream(self, chat_session_id: str, message_id: str | None) -> None:
-        await self._post(
-            "/api/v0/chat/stop_stream",
-            {
-                "chat_session_id": chat_session_id,
-                "message_id": message_id,
-            },
+        self._biz(
+            await self._post(
+                "/api/v0/chat/stop_stream",
+                {
+                    "chat_session_id": chat_session_id,
+                    "message_id": message_id,
+                },
+            )
         )

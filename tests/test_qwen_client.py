@@ -51,6 +51,22 @@ def test_biz_success_returns_data():
     assert QwenClient._biz({"success": True, "data": {"a": 1}}) == {"a": 1}
 
 
+def test_biz_non_dict_raises():
+    with pytest.raises(QwenError):
+        QwenClient._biz(["not", "a", "dict"])
+
+
+def test_session_registry_reuse_unknown_model():
+    from danyapi.qwen.accounts import QwenSessionRegistry
+
+    registry = QwenSessionRegistry(MagicMock(spec=QwenClient), 8, 0)
+    session = QwenSession(id="c1", model=None)
+    assert registry._reuse(session, "c1", model="m") is True
+    assert session.model == "m"
+    other = QwenSession(id="c2", model="different")
+    assert registry._reuse(other, "c2", model="m") is False
+
+
 def test_biz_success_without_data():
     assert QwenClient._biz({"success": True}) == {}
 

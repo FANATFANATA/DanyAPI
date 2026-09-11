@@ -60,12 +60,16 @@ class JsonStore:
     def _write(self) -> None:
         if self._path is None:
             return
+        tmp = self._path.with_name(self._path.name + ".tmp")
         try:
-            tmp = self._path.with_name(self._path.name + ".tmp")
             tmp.write_text(json.dumps(self._data, ensure_ascii=False), encoding="utf-8")
             os.replace(tmp, self._path)
-        except OSError as exc:
+        except (OSError, TypeError, ValueError) as exc:
             log.warning("cache write failed for %s: %s", self._path, exc)
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def get(self, key: str, default: Any = None) -> Any:
         with self._lock:

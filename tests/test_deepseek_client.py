@@ -400,3 +400,56 @@ async def test_stop_stream():
 
     await client.stop_stream("cs1", "m1")
     client.http.post.assert_awaited_once_with("/api/v0/chat/stop_stream", json={"chat_session_id": "cs1", "message_id": "m1"})
+
+
+async def test_biz_non_dict_raises():
+    with pytest.raises(DeepSeekError):
+        DeepSeekClient._biz(["not", "a", "dict"])
+
+
+async def test_biz_data_not_dict_returns_empty():
+    assert DeepSeekClient._biz({"code": 0, "data": ["weird"]}) == {}
+
+
+async def test_create_session_missing_raises():
+    client = make_client()
+    client._post = AsyncMock(return_value={"code": 0, "data": {"biz_data": {}}})
+    with pytest.raises(DeepSeekError, match="no chat_session"):
+        await client.create_session()
+
+
+async def test_create_session_success():
+    client = make_client()
+    client._post = AsyncMock(return_value={"code": 0, "data": {"biz_data": {"chat_session": {"id": "s1", "title": "T"}}}})
+    session = await client.create_session()
+    assert session.id == "s1"
+    assert session.title == "T"
+
+
+async def test_rename_session_biz_error():
+    client = make_client()
+    client._post = AsyncMock(return_value={"code": 40001, "msg": "expired"})
+    with pytest.raises(DeepSeekError):
+        await client.rename_session("cs1", "title")
+
+
+async def test_delete_session_biz_error():
+    client = make_client()
+    client._post = AsyncMock(return_value={"code": 40001, "msg": "expired"})
+    with pytest.raises(DeepSeekError):
+        await client.delete_session("cs1")
+
+
+async def test_stop_stream_biz_error():
+    client = make_client()
+    client._post = AsyncMock(return_value={"code": 40001, "msg": "expired"})
+    with pytest.raises(DeepSeekError):
+        await client.stop_stream("cs1", "m1")
+
+
+async def test_rename_delete_success():
+    client = make_client()
+    client._post = AsyncMock(return_value={"code": 0})
+    await client.rename_session("cs1", "title")
+    await client.delete_session("cs1")
+    assert client._post.await_count == 2

@@ -171,15 +171,19 @@ def configure() -> None:
                 path,
             )
         else:
-            file_handler = _make_file_handler(
-                str(path),
-                _coerce_max_bytes(settings.log_max_bytes),
-                _coerce_backup_count(settings.log_backup_count),
-            )
-            file_handler.name = FILE_HANDLER_NAME
-            file_handler.setLevel(level)
-            file_handler.addFilter(_LifecycleFilter())
-            root.addHandler(file_handler)
+            try:
+                file_handler = _make_file_handler(
+                    str(path),
+                    _coerce_max_bytes(settings.log_max_bytes),
+                    _coerce_backup_count(settings.log_backup_count),
+                )
+            except OSError as exc:
+                logging.getLogger(__name__).warning("cannot open log file %s: %s, using console only", path, exc)
+            else:
+                file_handler.name = FILE_HANDLER_NAME
+                file_handler.setLevel(level)
+                file_handler.addFilter(_LifecycleFilter())
+                root.addHandler(file_handler)
 
 
 def uvicorn_log_config() -> dict:

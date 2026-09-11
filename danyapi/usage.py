@@ -63,22 +63,30 @@ class UsageTracker:
             return
         totals = data.get("totals")
         if isinstance(totals, dict):
-            self._totals = {key: int(value) for key, value in totals.items() if isinstance(value, (int, float))}
+            merged = {"requests": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+            for key, value in totals.items():
+                if key in merged and isinstance(value, (int, float)):
+                    merged[key] = int(value)
+            self._totals = merged
         for attr, key in (("_by_model", "by_model"), ("_by_provider", "by_provider"), ("_by_user", "by_user")):
             bucket = data.get(key)
             if isinstance(bucket, dict):
                 restored: dict[str, dict[str, int]] = {}
                 for name, entry in bucket.items():
                     if isinstance(entry, dict):
-                        restored[name] = {k: int(v) for k, v in entry.items() if isinstance(v, (int, float))}
+                        row = {"requests": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+                        for field, value in entry.items():
+                            if field in row and isinstance(value, (int, float)):
+                                row[field] = int(value)
+                        restored[name] = row
                 setattr(self, attr, restored)
 
     def _serialize(self) -> dict[str, Any]:
         return {
-            "totals": self._totals,
-            "by_model": self._by_model,
-            "by_provider": self._by_provider,
-            "by_user": self._by_user,
+            "totals": dict(self._totals),
+            "by_model": {key: dict(value) for key, value in self._by_model.items()},
+            "by_provider": {key: dict(value) for key, value in self._by_provider.items()},
+            "by_user": {key: dict(value) for key, value in self._by_user.items()},
         }
 
     @staticmethod

@@ -33,10 +33,15 @@ def new_uuid() -> str:
     return str(uuid.uuid4())
 
 
+_WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
 def timezone_header() -> str:
     now = datetime.datetime.now().astimezone()
     offset = now.strftime("%z")
-    return f"{now.strftime('%a %b %d %Y %H:%M:%S')} GMT{offset}"
+    stamp = f"{_WEEKDAYS[now.weekday()]} {_MONTHS[now.month - 1]} {now.day:02d} {now.year} {now.hour:02d}:{now.minute:02d}:{now.second:02d}"
+    return f"{stamp} GMT{offset}"
 
 
 @dataclass
@@ -94,6 +99,8 @@ class QwenClient:
 
     @staticmethod
     def _biz(payload: dict) -> dict:
+        if not isinstance(payload, dict):
+            raise QwenError(-1, "unexpected response shape")
         if not payload.get("success", False):
             data = payload.get("data")
             if isinstance(data, dict) and data.get("code"):
@@ -126,6 +133,8 @@ class QwenClient:
             if resp.status_code != 200:
                 return False
             payload = resp.json()
+            if not isinstance(payload, dict):
+                return False
             if payload.get("success") is True:
                 return True
             nested = payload.get("data")

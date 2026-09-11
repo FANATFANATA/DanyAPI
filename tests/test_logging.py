@@ -126,3 +126,52 @@ def test_configure_skips_directory_log_file(clean_handlers, saved_settings, tmp_
     settings.log_backup_count = 1
     dlog.configure()
     assert root_handler_names(root).count(dlog.FILE_HANDLER_NAME) == 0
+
+
+def test_configure_unwritable_log_file_falls_back(clean_handlers, saved_settings, tmp_path):
+    root = logging.getLogger()
+    blocker = tmp_path / "blocker"
+    blocker.write_text("file", encoding="utf-8")
+    settings.log_file = str(blocker / "app.log")
+    settings.log_max_bytes = 1024
+    settings.log_backup_count = 1
+    dlog.configure()
+    assert root_handler_names(root).count(dlog.FILE_HANDLER_NAME) == 0
+
+
+def test_lifecycle_filter_drops_noise():
+    flt = dlog._LifecycleFilter()
+    access = logging.LogRecord("uvicorn.access", logging.INFO, "", 0, "msg", (), None)
+    assert flt.filter(access) is False
+    lifecycle = logging.LogRecord("x", logging.INFO, "", 0, "Waiting for application startup.", (), None)
+    assert flt.filter(lifecycle) is False
+    prefix = logging.LogRecord("x", logging.INFO, "", 0, "Started server process [1]", (), None)
+    assert flt.filter(prefix) is False
+    running = logging.LogRecord("x", logging.INFO, "", 0, "Uvicorn running on http://0.0.0.0:8000", (), None)
+    assert flt.filter(running) is True
+    assert "DanyAPI running on" in running.getMessage()
+
+
+def test_color_formatter_success_and_error(monkeypatch):
+    import io
+
+    class TTY(io.StringIO):
+        def isatty(self):
+            return True
+
+    monkeypatch.setattr(dlog.sys, "stderr", TTY())
+    fmt = dlog._ColorFormatter()
+    ok = logging.LogRecord("x", logging.INFO, "", 0, "all ok", (), None)
+    assert dlog.SUCCESS_COLOR in fmt.format(ok)
+    bad = logging.LogRecord("x", logging.ERROR, "", 0, "boom", (), None)
+    assert dlog.LEVEL_COLORS["ERROR"] in fmt.format(bad)
+
+
+def test_color_formatter_plain_without_tty(monkeypatch):
+    import io
+
+    monkeypatch.setattr(dlog.sys, "stderr", None)
+    monkeypatch.setattr(dlog.sys, "stdout", io.StringIO())
+    fmt = dlog._ColorFormatter()
+    record = logging.LogRecord("x", logging.ERROR, "", 0, "boom", (), None)
+    assert "\033[" not in fmt.format(record)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 from pathlib import Path
 from typing import Any
@@ -26,17 +27,21 @@ def _env_int(key: str, default: int) -> int:
 
 def _env_float(key: str, default: float) -> float:
     try:
-        return float(os.environ.get(key, default))
+        value = float(os.environ.get(key, default))
     except ValueError:
         return default
+    return value if math.isfinite(value) else default
 
 
 def _env_float_opt(key: str) -> float | None:
     raw = os.environ.get(key, "")
     try:
-        return float(raw) if raw else None
+        value = float(raw) if raw else None
     except ValueError:
         return None
+    if value is None or not math.isfinite(value):
+        return None
+    return value if value > 0 else None
 
 
 def _env_str(key: str, default: str = "") -> str:

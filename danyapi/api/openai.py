@@ -17,7 +17,7 @@ from typing import Any
 import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
@@ -205,6 +205,12 @@ async def lifespan(app: FastAPI):
     qwen_context_store = JsonStore("qwen-contexts", "default" if cache_enabled else None)
     deepseek_affinity_store = JsonStore("deepseek-affinities", "default" if cache_enabled else None)
     qwen_affinity_store = JsonStore("qwen-affinities", "default" if cache_enabled else None)
+    app.state.deepseek_session_store = deepseek_session_store
+    app.state.qwen_session_store = qwen_session_store
+    app.state.deepseek_context_store = deepseek_context_store
+    app.state.qwen_context_store = qwen_context_store
+    app.state.deepseek_affinity_store = deepseek_affinity_store
+    app.state.qwen_affinity_store = qwen_affinity_store
     if settings.usage_enabled:
         app.state.usage = init_tracker(store=JsonStore("usage", "default"), max_records=settings.usage_max_records)
     else:
@@ -273,10 +279,16 @@ async def lifespan(app: FastAPI):
             raise RuntimeError("no valid credentials: set DEEPSEEK_TOKENS or QWEN_TOKENS")
         yield
     finally:
-        for ds_acct in accounts:
-            await ds_acct.client.aclose()
-        for qw_acct in qwen_accounts:
-            await qw_acct.client.aclose()
+        seen: set[int] = set()
+        clients = [acct.client for acct in accounts] + [acct.client for acct in qwen_accounts]
+        for pool_obj in (getattr(app.state, "pool", None), getattr(app.state, "qwen_pool", None)):
+            if pool_obj is not None:
+                clients.extend(acct.client for acct in pool_obj.accounts)
+        for client in clients:
+            if id(client) in seen:
+                continue
+            seen.add(id(client))
+            await client.aclose()
 
 
 async def _fetch_qwen_models(client: QwenClient) -> list[dict]:
@@ -321,7 +333,7 @@ app = FastAPI(title="DanyAPI", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -335,13 +347,13 @@ if docs_path.is_dir():
 async def root():
     web_path = Path(__file__).resolve().parents[2] / "web" / "index.html"
     if web_path.exists():
-        return web_path.read_text()
+        return await asyncio.to_thread(web_path.read_text, encoding="utf-8")
     return HTMLResponse("<h1>DanyAPI</h1><p>Web interface not found</p>", status_code=404)
 
 
 @app.get("/favicon.ico")
 async def favicon():
-    return HTMLResponse(status_code=204)
+    return Response(status_code=204)
 
 
 def _env_path() -> Path:
@@ -390,19 +402,42 @@ def _write_env_tokens(ds_tokens: list[str], qw_tokens: list[str]) -> None:
     env_file.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
 
 
+def _env_token_list(value: Any, field: str) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise HTTPException(400, f"{field} must be a list of strings")
+    result: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise HTTPException(400, f"{field} must contain only strings")
+        token = item.strip()
+        if token:
+            result.append(token)
+    return result
+
+
+def _shared_store(attr: str, name: str) -> JsonStore:
+    store = getattr(app.state, attr, None)
+    if store is None:
+        store = JsonStore(name, "default" if settings.cache_enabled else None)
+        setattr(app.state, attr, store)
+    return store
+
+
 @app.post("/v1/tokens")
 async def add_tokens(tokens: dict) -> dict:
     async with _TOKENS_LOCK:
-        new_ds = [t.strip() for t in tokens.get("deepseek_tokens", []) if t.strip()]
-        new_qw = [t.strip() for t in tokens.get("qwen_tokens", []) if t.strip()]
+        new_ds = _env_token_list(tokens.get("deepseek_tokens"), "deepseek_tokens")
+        new_qw = _env_token_list(tokens.get("qwen_tokens"), "qwen_tokens")
         if not new_ds and not new_qw:
             raise HTTPException(400, "no tokens provided")
 
         existing_ds, existing_qw = _read_env_tokens()
-        ds_to_add = [t for t in new_ds if t not in existing_ds]
-        qw_to_add = [t for t in new_qw if t not in existing_qw]
+        ds_candidates = [t for t in dict.fromkeys(new_ds) if t not in existing_ds]
+        qw_candidates = [t for t in dict.fromkeys(new_qw) if t not in existing_qw]
 
-        if not ds_to_add and not qw_to_add:
+        if not ds_candidates and not qw_candidates:
             raise HTTPException(400, "all provided tokens already exist")
 
         added_ds = 0
@@ -410,18 +445,19 @@ async def add_tokens(tokens: dict) -> dict:
         skipped_ds = 0
         skipped_qw = 0
 
-        cache_enabled = settings.cache_enabled
-        ds_store = JsonStore("deepseek-sessions", "default" if cache_enabled else None)
-        qw_store = JsonStore("qwen-sessions", "default" if cache_enabled else None)
-        ds_context_store = JsonStore("deepseek-contexts", "default" if cache_enabled else None)
-        qw_context_store = JsonStore("qwen-contexts", "default" if cache_enabled else None)
-        ds_affinity_store = JsonStore("deepseek-affinities", "default" if cache_enabled else None)
-        qw_affinity_store = JsonStore("qwen-affinities", "default" if cache_enabled else None)
+        ds_store = _shared_store("deepseek_session_store", "deepseek-sessions")
+        qw_store = _shared_store("qwen_session_store", "qwen-sessions")
+        ds_context_store = _shared_store("deepseek_context_store", "deepseek-contexts")
+        qw_context_store = _shared_store("qwen_context_store", "qwen-contexts")
+        ds_affinity_store = _shared_store("deepseek_affinity_store", "deepseek-affinities")
+        qw_affinity_store = _shared_store("qwen_affinity_store", "qwen-affinities")
 
         pool: AccountPool | None = getattr(app.state, "pool", None)
         qwen_pool: AccountPool | None = getattr(app.state, "qwen_pool", None)
+        accepted_ds: list[str] = []
+        accepted_qw: list[str] = []
 
-        for token in ds_to_add:
+        for token in ds_candidates:
             client = DeepSeekClient(token=token, timeout=settings.timeout)
             if not await client.check_auth():
                 log.warning("new deepseek token invalid/expired, skipping")
@@ -447,10 +483,11 @@ async def add_tokens(tokens: dict) -> dict:
                 app.state.pool = pool
             else:
                 pool.add_account(acct)
+            accepted_ds.append(token)
             added_ds += 1
             log.info("hot-added deepseek token (total accounts: %d)", len(pool.accounts))
 
-        for token in qw_to_add:
+        for token in qw_candidates:
             qw_client = QwenClient(token=token, timeout=settings.timeout)
             if not await qw_client.check_auth():
                 log.warning("new qwen token invalid/expired, skipping")
@@ -475,17 +512,20 @@ async def add_tokens(tokens: dict) -> dict:
                     affinity_store=qw_affinity_store,
                 )
                 app.state.qwen_pool = qwen_pool
-                try:
-                    app.state.qwen_models = await _fetch_qwen_models(qw_client)
-                except Exception as exc:
-                    log.warning("failed to prefetch qwen models: %s", exc)
             else:
                 qwen_pool.add_account(qw_acct)
+            accepted_qw.append(token)
             added_qw += 1
             log.info("hot-added qwen token (total accounts: %d)", len(qwen_pool.accounts))
 
-        merged_ds = existing_ds + ds_to_add
-        merged_qw = existing_qw + qw_to_add
+        if added_qw and qwen_pool is not None:
+            try:
+                app.state.qwen_models = await _fetch_qwen_models(qwen_pool.accounts[0].client)
+            except Exception as exc:
+                log.warning("failed to refresh qwen models: %s", exc)
+
+        merged_ds = existing_ds + accepted_ds
+        merged_qw = existing_qw + accepted_qw
         _write_env_tokens(merged_ds, merged_qw)
         settings.deepseek_tokens = merged_ds
         settings.qwen_tokens = merged_qw
@@ -508,12 +548,22 @@ async def add_tokens(tokens: dict) -> dict:
         }
 
 
+MAX_LOGGED_BODY = 256 * 1024
+
+
 async def _extract_request_body(request: Request) -> dict[str, Any]:
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > MAX_LOGGED_BODY:
+                return {}
+        except ValueError:
+            return {}
     try:
         body = await request.body()
     except Exception:
         return {}
-    if not body:
+    if not body or len(body) > MAX_LOGGED_BODY:
         return {}
     try:
         payload = json.loads(body)
@@ -578,7 +628,7 @@ def _log_request_failure(request: Request, payload: dict[str, Any], duration: fl
         request.url.path,
         ip,
         details_part,
-        reason.replace("{", "{{").replace("}", "}}"),
+        reason,
         duration,
     )
 
@@ -643,8 +693,9 @@ def _split_data_uri(uri: str) -> tuple[str, bytes]:
     if not payload:
         raise HTTPException(400, "invalid data URI: missing base64 payload")
     content_type = meta.split(";", 1)[0] or "application/octet-stream"
+    compact = "".join(payload.split())
     try:
-        data = base64.b64decode(payload, validate=True)
+        data = base64.b64decode(compact, validate=True)
     except ValueError as exc:
         raise HTTPException(400, "invalid base64 in image_url") from exc
     return content_type, data
@@ -1061,9 +1112,7 @@ async def _chat_completions_deepseek(req: ChatCompletionRequest) -> Any:
         "tool_mode": tool_mode,
         "include_usage": _include_usage(req),
         "context_seq": context_seq,
-        "reduced_prompts": _reduced_prompt_variants(
-            req.messages, getattr(req, "tools", None), getattr(req, "tool_choice", None), getattr(req, "response_format", None), prompt
-        ),
+        "reduced_prompts": None,
         "messages": req.messages,
         "tools": getattr(req, "tools", None),
         "tool_choice": getattr(req, "tool_choice", None),
@@ -1417,6 +1466,7 @@ async def _send_deepseek_stream(
     incremental = IncrementalSSE()
     response_message_id: str | None = None
     stop_message_id: str | None = None
+    stopped = False
     try:
         async for chunk in resp.aiter_bytes():
             for event in incremental.feed(chunk):
@@ -1428,11 +1478,13 @@ async def _send_deepseek_stream(
         for event in incremental.finish():
             rec.handle(event)
     except (httpx.HTTPError, RuntimeError) as exc:
+        stopped = True
         if rec.id:
             stop_message_id = rec.id
         await _try_stop_stream(account.client, session.id, stop_message_id)
         raise DeepSeekStreamError(f"Stream processing failed: {exc}") from exc
     except BaseException:
+        stopped = True
         if rec.id:
             stop_message_id = rec.id
         await _try_stop_stream(account.client, session.id, stop_message_id)
@@ -1444,7 +1496,8 @@ async def _send_deepseek_stream(
             await resp.aclose()
         except Exception as exc:
             log.debug("response close failed: %s", exc)
-            await _try_stop_stream(account.client, session.id, stop_message_id)
+            if not stopped:
+                await _try_stop_stream(account.client, session.id, stop_message_id)
     return rec, response_message_id, stop_message_id
 
 
@@ -1486,7 +1539,12 @@ async def _collect_continuation(
                 await asyncio.sleep(delay)
                 continue
             return None
-        if not (rec.content or rec.reasoning) and (_is_retryable_hint(rec) or _is_fake_context_hint(rec)) and attempt < MAX_RETRIES:
+        if (
+            not (rec.content or rec.reasoning)
+            and not _is_input_exceeds_limit(rec)
+            and (_is_retryable_hint(rec) or _is_fake_context_hint(rec))
+            and attempt < MAX_RETRIES
+        ):
             attempt += 1
             delay = _retry_delay(attempt)
             log.warning(
@@ -1547,6 +1605,7 @@ async def _collect_reduced(
     search,
     ref_file_ids=None,
 ):
+    await _human_delay()
     for prompt, _tool_mode, _tool_schemas in reduced_prompts:
         session_key = None
         try:
@@ -1657,7 +1716,12 @@ async def _collect_non_stream(
                         await asyncio.sleep(delay)
                         continue
                     raise
-                if not (rec.content or rec.reasoning) and (_is_retryable_hint(rec) or _is_fake_context_hint(rec)) and attempt < MAX_RETRIES:
+                if (
+                    not (rec.content or rec.reasoning)
+                    and not _is_input_exceeds_limit(rec)
+                    and (_is_retryable_hint(rec) or _is_fake_context_hint(rec))
+                    and attempt < MAX_RETRIES
+                ):
                     attempt += 1
                     delay = _retry_delay(attempt)
                     log.warning(
@@ -1695,14 +1759,17 @@ async def _collect_non_stream(
                 incomplete_message = _incomplete_message(cont_rec)
                 if not cont_rec.content:
                     break
-            if incomplete_message is not None and not (rec.content or rec.reasoning) and reduced_prompts:
-                _drop_session(pool, account, session_key)
-                reduced = await _collect_reduced(account, pool, reduced_prompts, model_type, thinking, search, ref_file_ids)
-                if reduced is not None:
-                    rec, session, session_key = reduced
-                    response_message_id = rec.id or response_message_id
-                    stop_message_id = response_message_id
-                    reduced_notice = REDUCED_CONTEXT_MESSAGE
+            if incomplete_message is not None and not (rec.content or rec.reasoning):
+                if reduced_prompts is None and messages is not None:
+                    reduced_prompts = _reduced_prompt_variants(messages, tools, tool_choice, response_format, prompt)
+                if reduced_prompts:
+                    _drop_session(pool, account, session_key)
+                    reduced = await _collect_reduced(account, pool, reduced_prompts, model_type, thinking, search, ref_file_ids)
+                    if reduced is not None:
+                        rec, session, session_key = reduced
+                        response_message_id = rec.id or response_message_id
+                        stop_message_id = response_message_id
+                        reduced_notice = REDUCED_CONTEXT_MESSAGE
         if incomplete_message is not None and reduced_notice is None:
             log.warning("deepseek response incomplete: %s", incomplete_message)
             raise HTTPException(502, _incomplete_error_body(incomplete_message))
@@ -1917,7 +1984,7 @@ async def _stream_openai(
                         await _try_stop_stream(account.client, session.id, stop_message_id)
             if got_content:
                 break
-            if (_is_retryable_hint(rec) or _is_fake_context_hint(rec)) and attempt < MAX_RETRIES:
+            if not _is_input_exceeds_limit(rec) and (_is_retryable_hint(rec) or _is_fake_context_hint(rec)) and attempt < MAX_RETRIES:
                 attempt += 1
                 delay = _retry_delay(attempt)
                 log.warning(
@@ -2019,71 +2086,74 @@ async def _stream_openai(
                 incomplete_message = _incomplete_message(cont_rec)
                 if not (cont_rec.content or cont_rec.reasoning):
                     break
-            if incomplete_message is not None and not (rec.content or rec.reasoning) and reduced_prompts:
-                _drop_session(pool, account, session_key)
-                reduced = await _collect_reduced(account, pool, reduced_prompts, model_type, thinking, search, ref_file_ids)
-                if reduced is not None:
-                    rec, session, session_key = reduced
-                    response_message_id = rec.id or response_message_id
-                    stop_message_id = response_message_id
-                    reduced_notice = REDUCED_CONTEXT_MESSAGE
-                    if rec.content:
-                        if not role_sent:
-                            role_sent = True
+            if incomplete_message is not None and not (rec.content or rec.reasoning):
+                if reduced_prompts is None and messages is not None:
+                    reduced_prompts = _reduced_prompt_variants(messages, tools, tool_choice, response_format, prompt)
+                if reduced_prompts:
+                    _drop_session(pool, account, session_key)
+                    reduced = await _collect_reduced(account, pool, reduced_prompts, model_type, thinking, search, ref_file_ids)
+                    if reduced is not None:
+                        rec, session, session_key = reduced
+                        response_message_id = rec.id or response_message_id
+                        stop_message_id = response_message_id
+                        reduced_notice = REDUCED_CONTEXT_MESSAGE
+                        if rec.content:
+                            if not role_sent:
+                                role_sent = True
+                                yield _sse(
+                                    {
+                                        "id": chunk_id,
+                                        "object": "chat.completion.chunk",
+                                        "created": created,
+                                        "model": model,
+                                        "choices": [
+                                            {
+                                                "index": 0,
+                                                "delta": {"role": "assistant"},
+                                                "finish_reason": None,
+                                            }
+                                        ],
+                                    }
+                                )
+                            if tool_mode:
+                                content_buf += rec.content
+                            else:
+                                yield _sse(
+                                    {
+                                        "id": chunk_id,
+                                        "object": "chat.completion.chunk",
+                                        "created": created,
+                                        "model": model,
+                                        "choices": [{"index": 0, "delta": {"content": rec.content}, "finish_reason": None}],
+                                    }
+                                )
+                        if rec.reasoning:
+                            if not role_sent:
+                                role_sent = True
+                                yield _sse(
+                                    {
+                                        "id": chunk_id,
+                                        "object": "chat.completion.chunk",
+                                        "created": created,
+                                        "model": model,
+                                        "choices": [
+                                            {
+                                                "index": 0,
+                                                "delta": {"role": "assistant"},
+                                                "finish_reason": None,
+                                            }
+                                        ],
+                                    }
+                                )
                             yield _sse(
                                 {
                                     "id": chunk_id,
                                     "object": "chat.completion.chunk",
                                     "created": created,
                                     "model": model,
-                                    "choices": [
-                                        {
-                                            "index": 0,
-                                            "delta": {"role": "assistant"},
-                                            "finish_reason": None,
-                                        }
-                                    ],
+                                    "choices": [{"index": 0, "delta": {"reasoning_content": rec.reasoning}, "finish_reason": None}],
                                 }
                             )
-                        if tool_mode:
-                            content_buf += rec.content
-                        else:
-                            yield _sse(
-                                {
-                                    "id": chunk_id,
-                                    "object": "chat.completion.chunk",
-                                    "created": created,
-                                    "model": model,
-                                    "choices": [{"index": 0, "delta": {"content": rec.content}, "finish_reason": None}],
-                                }
-                            )
-                    if rec.reasoning:
-                        if not role_sent:
-                            role_sent = True
-                            yield _sse(
-                                {
-                                    "id": chunk_id,
-                                    "object": "chat.completion.chunk",
-                                    "created": created,
-                                    "model": model,
-                                    "choices": [
-                                        {
-                                            "index": 0,
-                                            "delta": {"role": "assistant"},
-                                            "finish_reason": None,
-                                        }
-                                    ],
-                                }
-                            )
-                        yield _sse(
-                            {
-                                "id": chunk_id,
-                                "object": "chat.completion.chunk",
-                                "created": created,
-                                "model": model,
-                                "choices": [{"index": 0, "delta": {"reasoning_content": rec.reasoning}, "finish_reason": None}],
-                            }
-                        )
         if incomplete_message is not None and reduced_notice is None:
             log.warning("deepseek response incomplete: %s", incomplete_message)
             for line in _stream_error_sse(chunk_id, created, model, incomplete_message, session_key, RESPONSE_INCOMPLETE, RESPONSE_INCOMPLETE):

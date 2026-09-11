@@ -49,6 +49,19 @@ def test_acquire_timeout(settings_for):
     assert settings_for({"DANYAPI_ACQUIRE_TIMEOUT": "3"}).acquire_timeout == 3.0
 
 
+def test_non_finite_float_falls_back(settings_for):
+    assert settings_for({"DANYAPI_TIMEOUT": "nan"}).timeout == 60.0
+    assert settings_for({"DANYAPI_TIMEOUT": "inf"}).timeout == 60.0
+    assert settings_for({"DANYAPI_TIMEOUT": "-inf"}).timeout == 60.0
+
+
+def test_acquire_timeout_rejects_non_finite_and_non_positive(settings_for):
+    assert settings_for({"DANYAPI_ACQUIRE_TIMEOUT": "nan"}).acquire_timeout is None
+    assert settings_for({"DANYAPI_ACQUIRE_TIMEOUT": "inf"}).acquire_timeout is None
+    assert settings_for({"DANYAPI_ACQUIRE_TIMEOUT": "0"}).acquire_timeout is None
+    assert settings_for({"DANYAPI_ACQUIRE_TIMEOUT": "-4"}).acquire_timeout is None
+
+
 def test_invalid_cache_size_falls_back(settings_for):
     assert settings_for({"DANYAPI_SESSION_CACHE_SIZE": "bad"}).session_cache_size == 128
     assert settings_for({"DANYAPI_SESSION_CACHE_SIZE": "7"}).session_cache_size == 7

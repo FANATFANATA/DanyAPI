@@ -144,7 +144,7 @@ def rustup_target_reachable():
     except (OSError, subprocess.TimeoutExpired):
         return True
     lines = {line.strip() for line in proc.stdout.splitlines() if line.strip()}
-    return bool(lines) and "aarch64-unknown-linux-android" not in lines
+    return "aarch64-unknown-linux-android" in lines
 
 
 def run_pip(req):
@@ -238,13 +238,12 @@ def update_env(values):
     lines = ENV_FILE.read_text(encoding="utf-8").splitlines(keepends=True)
     for key, value in values.items():
         pattern = re.compile(rf"^\s*{re.escape(key)}\s*=")
-        found = False
-        for i, line in enumerate(lines):
-            if pattern.match(line):
-                lines[i] = f"{key}={quote(value)}\n"
-                found = True
-                break
-        if not found:
+        matching = [i for i, line in enumerate(lines) if pattern.match(line)]
+        if matching:
+            lines[matching[0]] = f"{key}={quote(value)}\n"
+            for i in reversed(matching[1:]):
+                del lines[i]
+        else:
             lines.append(f"{key}={quote(value)}\n")
     fd, path = tempfile.mkstemp(dir=str(ROOT), suffix=".env.tmp")
     try:

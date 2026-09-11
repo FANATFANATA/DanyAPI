@@ -52,7 +52,11 @@ class QwenSessionRegistry(SessionRegistry):
         return QwenSession(id=chat_id, model=model)
 
     def _reuse(self, session: QwenSession, session_id: str, **kwargs) -> bool:
-        return session.model == (kwargs.get("model") or "")
+        wanted = kwargs.get("model") or ""
+        if session.model is None:
+            session.model = wanted
+            return True
+        return session.model == wanted
 
     def _update_last(self, session: QwenSession, message_id: str) -> None:
         session.last_response_id = message_id

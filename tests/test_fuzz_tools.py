@@ -167,6 +167,35 @@ def test_loads_lenient_idempotent(raw: str) -> None:
         pass
 
 
+def test_dsml_marker_no_catastrophic_backtracking() -> None:
+    import time
+
+    text = "\u00a6" * 40
+    started = time.monotonic()
+    toolemu._strip_dsml(text)
+    assert time.monotonic() - started < 2.0
+
+
+def test_iter_json_objects_bounded() -> None:
+    import time
+
+    text = "{" * 4000 + "}" * 4000
+    started = time.monotonic()
+    toolemu.parse_tool_calls(text)
+    assert time.monotonic() - started < 2.0
+
+
+def test_strip_trailing_commas_keeps_comma_in_single_quoted_string() -> None:
+    assert toolemu._strip_trailing_commas("{'t': 'hi,}'}") == "{'t': 'hi,}'}"
+
+
+def test_double_quoted_comma_in_string_preserved() -> None:
+    result = toolemu.parse_tool_calls('{"name": "f", "arguments": {"text": "hi,}"}}')
+    assert result is not None
+    calls, _ = result
+    assert json.loads(calls[0].arguments)["text"] == "hi,}"
+
+
 if __name__ == "__main__":
     import pytest
 

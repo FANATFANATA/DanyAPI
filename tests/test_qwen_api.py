@@ -199,6 +199,14 @@ async def test_stream_success_streams_content():
     assert joined.rstrip().endswith("data: [DONE]")
 
 
+async def test_stream_role_delta_emitted_once():
+    acct = FakeAccount([OK_SSE])
+    gen = qwen_api.stream_openai(**_args(acct))
+    lines = await _collect(gen)
+    joined = "".join(lines)
+    assert joined.count('"role": "assistant"') == 1
+
+
 async def test_stream_success_streams_reasoning():
     acct = FakeAccount([THINK_SSE])
     gen = qwen_api.stream_openai(**_args(acct))

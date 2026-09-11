@@ -2052,3 +2052,180 @@ async def test_stream_tool_mode_reduced_emits_tool_calls():
     assert '"finish_reason": "response_incomplete"' in joined
     assert '"error"' in joined
     assert joined.rstrip().endswith("data: [DONE]")
+
+
+_STORE_ATTRS = (
+    "deepseek_session_store",
+    "qwen_session_store",
+    "deepseek_context_store",
+    "qwen_context_store",
+    "deepseek_affinity_store",
+    "qwen_affinity_store",
+)
+
+
+def _save_store_state():
+    return {attr: getattr(app.state, attr, None) for attr in _STORE_ATTRS}
+
+
+def _restore_store_state(saved):
+    for attr, value in saved.items():
+        if value is None:
+            if hasattr(app.state, attr):
+                delattr(app.state, attr)
+        else:
+            setattr(app.state, attr, value)
+
+
+def test_env_token_list_validation():
+    assert openai_mod._env_token_list(None, "x") == []
+    assert openai_mod._env_token_list([" a ", "", "b "], "x") == ["a", "b"]
+    with pytest.raises(openai_mod.HTTPException):
+        openai_mod._env_token_list("abc", "x")
+    with pytest.raises(openai_mod.HTTPException):
+        openai_mod._env_token_list([123], "x")
+
+
+async def test_add_tokens_rejects_no_tokens():
+    with pytest.raises(openai_mod.HTTPException) as excinfo:
+        await openai_mod.add_tokens({})
+    assert excinfo.value.status_code == 400
+
+
+def test_shared_store_reuses_state(monkeypatch, tmp_path):
+    from danyapi import store as store_mod
+
+    monkeypatch.setattr(store_mod.settings, "cache_dir", str(tmp_path))
+    saved = _save_store_state()
+    try:
+        openai_mod.app.state.deepseek_session_store = None
+        first = openai_mod._shared_store("deepseek_session_store", "deepseek-sessions")
+        second = openai_mod._shared_store("deepseek_session_store", "deepseek-sessions")
+        assert first is second
+    finally:
+        _restore_store_state(saved)
+
+
+async def test_add_tokens_skips_invalid_without_persisting(monkeypatch, tmp_path):
+    from danyapi import store as store_mod
+
+    monkeypatch.setattr(store_mod.settings, "cache_dir", str(tmp_path))
+    env_file = tmp_path / ".env"
+    env_file.write_text("", encoding="utf-8")
+    monkeypatch.setattr(openai_mod, "_env_path", lambda: env_file)
+    monkeypatch.setattr(openai_mod.DeepSeekClient, "check_auth", AsyncMock(return_value=False))
+    monkeypatch.setattr(openai_mod.DeepSeekClient, "aclose", AsyncMock())
+    saved = _save_store_state()
+    try:
+        result = await openai_mod.add_tokens({"deepseek_tokens": ["bad-token"]})
+    finally:
+        _restore_store_state(saved)
+    assert result["added"]["deepseek"] == 0
+    assert result["skipped"]["deepseek"] == 1
+    assert "bad-token" not in env_file.read_text(encoding="utf-8")
+
+
+async def test_add_tokens_persists_only_accepted(monkeypatch, tmp_path):
+    from danyapi import store as store_mod
+
+    monkeypatch.setattr(store_mod.settings, "cache_dir", str(tmp_path))
+    env_file = tmp_path / ".env"
+    env_file.write_text("DEEPSEEK_TOKENS=existing\nQWEN_TOKENS=\n", encoding="utf-8")
+    monkeypatch.setattr(openai_mod, "_env_path", lambda: env_file)
+    monkeypatch.setattr(openai_mod.DeepSeekClient, "check_auth", AsyncMock(side_effect=[True, False]))
+    monkeypatch.setattr(openai_mod.DeepSeekClient, "aclose", AsyncMock())
+    saved = _save_store_state()
+    saved_ds = settings.deepseek_tokens
+    try:
+        result = await openai_mod.add_tokens({"deepseek_tokens": ["good", "bad"]})
+    finally:
+        _restore_store_state(saved)
+        settings.deepseek_tokens = saved_ds
+    assert result["added"]["deepseek"] == 1
+    assert result["skipped"]["deepseek"] == 1
+    text = env_file.read_text(encoding="utf-8")
+    assert "existing,good" in text
+    assert "bad" not in text
+
+
+async def test_add_tokens_deduplicates_within_request(monkeypatch, tmp_path):
+    from danyapi import store as store_mod
+
+    monkeypatch.setattr(store_mod.settings, "cache_dir", str(tmp_path))
+    env_file = tmp_path / ".env"
+    env_file.write_text("", encoding="utf-8")
+    monkeypatch.setattr(openai_mod, "_env_path", lambda: env_file)
+    monkeypatch.setattr(openai_mod.DeepSeekClient, "check_auth", AsyncMock(return_value=True))
+    monkeypatch.setattr(openai_mod.DeepSeekClient, "aclose", AsyncMock())
+    saved = _save_store_state()
+    saved_ds = settings.deepseek_tokens
+    try:
+        result = await openai_mod.add_tokens({"deepseek_tokens": ["dup", "dup"]})
+    finally:
+        _restore_store_state(saved)
+        settings.deepseek_tokens = saved_ds
+    assert result["added"]["deepseek"] == 1
+    assert env_file.read_text(encoding="utf-8").count("dup") == 1
+
+
+async def test_add_tokens_qwen_hot_add(monkeypatch, tmp_path):
+    from danyapi import store as store_mod
+
+    monkeypatch.setattr(store_mod.settings, "cache_dir", str(tmp_path))
+    env_file = tmp_path / ".env"
+    env_file.write_text("", encoding="utf-8")
+    monkeypatch.setattr(openai_mod, "_env_path", lambda: env_file)
+    monkeypatch.setattr(openai_mod.QwenClient, "check_auth", AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        openai_mod.QwenClient,
+        "fetch_models",
+        AsyncMock(return_value=[{"id": "q1", "info": {"meta": {"chat_type": ["t2t"]}}}]),
+    )
+    monkeypatch.setattr(openai_mod.QwenClient, "aclose", AsyncMock())
+    saved = _save_store_state()
+    saved_qw = settings.qwen_tokens
+    saved_models = getattr(app.state, "qwen_models", None)
+    try:
+        result = await openai_mod.add_tokens({"qwen_tokens": ["q-token"]})
+        assert result["added"]["qwen"] == 1
+        assert app.state.qwen_pool is not None
+        assert app.state.qwen_models
+    finally:
+        _restore_store_state(saved)
+        settings.qwen_tokens = saved_qw
+        app.state.qwen_models = saved_models
+        app.state.qwen_pool = None
+
+
+def test_split_data_uri_missing_payload():
+    with pytest.raises(openai_mod.HTTPException):
+        openai_mod._split_data_uri("data:image/png;base64,")
+
+
+def test_split_data_uri_allows_whitespace():
+    content_type, data = openai_mod._split_data_uri("data:image/png;base64,YW Jj\nZA==")
+    assert content_type == "image/png"
+    assert data == b"abcd"
+
+
+async def test_log_requests_exception_path():
+    request = MagicMock()
+    request.method = "POST"
+    request.url.path = "/x"
+    request.headers = {}
+    request.body = AsyncMock(return_value=b"")
+    request.client = None
+
+    async def call_next(_request):
+        raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError):
+        await openai_mod._log_requests(request, call_next)
+
+
+async def test_image_generations_requires_qwen_pool():
+    app.state.qwen_pool = None
+    req = SimpleNamespace(size=None, session_id=None, prompt="x", model="q1")
+    with pytest.raises(openai_mod.HTTPException) as excinfo:
+        await openai_mod.image_generations(req)
+    assert excinfo.value.status_code == 503

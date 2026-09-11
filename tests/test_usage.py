@@ -60,6 +60,28 @@ def test_persist_restore(cache_dir):
     assert snap["by_user"]["bob"]["requests"] == 1
 
 
+def test_persist_multiple_records_survives_reload(cache_dir):
+    tracker = UsageTracker(store=JsonStore("usage-multi", "default"))
+    for _ in range(5):
+        tracker.record("deepseek", "m", 1, 2, 3)
+    restored = UsageTracker(store=JsonStore("usage-multi", "default"))
+    snap = restored.snapshot()
+    assert snap["totals"]["requests"] == 5
+    assert snap["totals"]["total_tokens"] == 15
+
+
+def test_restore_partial_totals_is_safe(cache_dir):
+    store = JsonStore("usage-partial", "default")
+    store.set("usage", {"totals": {"total_tokens": 5}, "by_model": {"m": {"requests": 1}}})
+    tracker = UsageTracker(store=store)
+    tracker.record("deepseek", "m", 1, 2, 3)
+    snap = tracker.snapshot()
+    assert snap["totals"]["requests"] == 1
+    assert snap["totals"]["total_tokens"] == 8
+    assert snap["by_model"]["m"]["completion_tokens"] == 2
+    assert snap["by_model"]["m"]["total_tokens"] == 3
+
+
 def test_reset(cache_dir):
     store = JsonStore("usage-reset", "default")
     tracker = UsageTracker(store=store)

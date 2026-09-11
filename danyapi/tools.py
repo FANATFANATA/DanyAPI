@@ -10,15 +10,15 @@ from difflib import get_close_matches
 from typing import Any
 
 _DSML_PIPE = r"|\u00a6\u01c0\u01c1\u05c0\u2016\u2223\u2502\u2551\u2758\ufe31\uff5c"
-_DSML_JUNK = r"[^\x00-\x7f]"
-_DSML_MARKER = rf"(?:[{_DSML_PIPE}]|{_DSML_JUNK})+\s*DSML\s*(?:[{_DSML_PIPE}]|{_DSML_JUNK})+"
+_DSML_CHAR = r"(?:[|]|[^\x00-\x7f])"
+_DSML_MARKER = rf"{_DSML_CHAR}+\s*DSML\s*{_DSML_CHAR}+"
 _DSML_PIPE_ANGLE = rf"[{_DSML_PIPE}<>]"
 _DSML_BLOCK = re.compile(
     rf"<{_DSML_PIPE_ANGLE}+\s*[a-zA-Z_][^<>]*\s*{_DSML_PIPE_ANGLE}+>\s*DSML\s*<{_DSML_PIPE_ANGLE}+\s*[a-zA-Z_][^<>]*\s*{_DSML_PIPE_ANGLE}+>",
     re.IGNORECASE,
 )
 _DSML_WRAP = re.compile(
-    rf"(?:[{_DSML_PIPE}]|{_DSML_JUNK})+\s*>\s*DSML\s*<\s*(?:[{_DSML_PIPE}]|{_DSML_JUNK})+",
+    rf"{_DSML_CHAR}+\s*>\s*DSML\s*<\s*{_DSML_CHAR}+",
     re.IGNORECASE,
 )
 _DSML_XML_NORMALIZE = re.compile(rf"<\s*(/?)\s*{_DSML_MARKER}\s*([a-zA-Z_][^<>]*)>", re.IGNORECASE)
@@ -648,22 +648,22 @@ def _strip_trailing_commas(text: str) -> str:
     out: list[str] = []
     i = 0
     n = len(text)
-    in_string = False
+    quote = ""
     escaped = False
     while i < n:
         ch = text[i]
-        if in_string:
+        if quote:
             out.append(ch)
             if escaped:
                 escaped = False
             elif ch == "\\":
                 escaped = True
-            elif ch == '"':
-                in_string = False
+            elif ch == quote:
+                quote = ""
             i += 1
             continue
-        if ch == '"':
-            in_string = True
+        if ch in "\"'":
+            quote = ch
             out.append(ch)
             i += 1
             continue
@@ -1477,13 +1477,26 @@ def _parse_bare_array_calls(text: str) -> list[ToolCall] | None:
     return calls or None
 
 
+_MAX_JSON_SCAN = 200_000
+_MAX_JSON_CANDIDATES = 2000
+_JSON_KEY_START = frozenset("_-.'" + "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
+
+
 def _iter_json_objects(text: str) -> Iterator[tuple[dict, int, int]]:
     i = 0
     length = len(text)
-    while True:
+    scanned = 0
+    attempts = 0
+    while scanned < _MAX_JSON_SCAN and attempts < _MAX_JSON_CANDIDATES:
         start = text.find("{", i)
         if start == -1:
             return
+        probe = start + 1
+        while probe < length and text[probe] in " \t\r\n":
+            probe += 1
+        if probe < length and text[probe] != '"' and text[probe] != "}" and text[probe] not in _JSON_KEY_START:
+            i = start + 1
+            continue
         depth = 0
         in_string = False
         escaped = False
@@ -1516,6 +1529,8 @@ def _iter_json_objects(text: str) -> Iterator[tuple[dict, int, int]]:
                         pass
                     break
             end += 1
+        scanned += end - start + 1
+        attempts += 1
         i = (end + 1) if (parsed or not closed) else (start + 1)
 
 
@@ -1900,31 +1915,25 @@ def parse_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | None =
 
 
 def parse_tool_calls_debug(text: str, tool_schemas: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
+    stripped = _strip_fences(_strip_dsml(text))
     report: dict[str, Any] = {
         "text": text,
-        "stripped": _strip_fences(_strip_dsml(text)),
+        "stripped": stripped,
         "parsed": False,
         "strategies": [],
         "calls": [],
         "renamed": [],
         "wrapper": "",
-        "unrecognized": _strip_fences(_strip_dsml(text)),
+        "unrecognized": stripped,
     }
     result = _parse_tool_calls_impl(text, tool_schemas, report)
     if result is not None:
         calls, wrapper = result
-        renamed = [{"from": call.name, "to": _normalize_call_name(call.name, tool_schemas)} for call in calls]
-        renamed = [item for item in renamed if item["from"] != item["to"]]
+        normalized = [(call, _normalize_call_name(call.name, tool_schemas)) for call in calls]
+        renamed = [{"from": call.name, "to": name} for call, name in normalized if call.name != name]
         report["parsed"] = True
         report["renamed"] = renamed
-        report["calls"] = [
-            {
-                "id": call.id,
-                "name": _normalize_call_name(call.name, tool_schemas),
-                "arguments": call.arguments,
-            }
-            for call in calls
-        ]
+        report["calls"] = [{"id": call.id, "name": name, "arguments": call.arguments} for call, name in normalized]
         report["wrapper"] = wrapper
         report["unrecognized"] = wrapper
     return report

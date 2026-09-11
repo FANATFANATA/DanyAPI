@@ -152,3 +152,11 @@ def test_clear_empty_returns_early(cache_dir):
     store = JsonStore("h", "default")
     store.clear()
     assert len(store) == 0
+
+
+def test_non_serializable_value_cleans_tmp(cache_dir):
+    store = JsonStore("ns", "default")
+    store.set("bad", object())
+    assert "bad" in store
+    assert store._path is not None
+    assert not (store._path.with_name(store._path.name + ".tmp")).exists()
