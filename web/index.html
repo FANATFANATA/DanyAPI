@@ -665,7 +665,10 @@ body::before {
 
         <div class="form-group">
             <label for="add-provider">Provider</label>
-            <input type="text" id="add-provider" placeholder="deepseek" autocomplete="off" spellcheck="false" />
+            <select id="add-provider" style="width:100%;padding:0.75rem 1rem;background:rgba(255,255,255,0.04);border:1px solid var(--l-border-strong);border-radius:11px;color:var(--l-text);font-size:0.92rem;font-family:var(--font-mono);transition:border-color 0.2s,box-shadow 0.2s;">
+                <option value="deepseek">deepseek</option>
+                <option value="qwen">qwen</option>
+            </select>
         </div>
         <div class="form-group">
             <label for="add-token">Provider Token</label>
@@ -681,11 +684,6 @@ body::before {
     </div>
 
     <div id="status" class="status"></div>
-
-    <div class="usage-section">
-        <h2 class="usage-title">Usage</h2>
-        <div id="usage-stats" class="usage-loading">Loading...</div>
-    </div>
 
     <div class="footer-link">
         <a href="/health" target="_blank">Health</a> &middot;
@@ -706,7 +704,6 @@ body::before {
     var userDisplay = document.getElementById("user-display");
     var dsInput = document.getElementById("deepseek-tokens");
     var qwInput = document.getElementById("qwen-tokens");
-    var usageEl = document.getElementById("usage-stats");
     var tokenListEl = document.getElementById("token-list");
     var isByok = false;
     var currentUserId = null;
@@ -715,44 +712,6 @@ body::before {
     function fmt(n) {
         return (n || 0).toLocaleString("en-US");
     }
-
-    function renderUsage(data) {
-        var totals = data.totals || {};
-        var byModel = data.by_model || {};
-        var html = '<div class="usage-cards">';
-        html += '<div class="usage-card"><div class="usage-num">' + fmt(totals.requests) + '</div><div class="usage-label">Requests</div></div>';
-        html += '<div class="usage-card"><div class="usage-num">' + fmt(totals.prompt_tokens) + '</div><div class="usage-label">Prompt tokens</div></div>';
-        html += '<div class="usage-card"><div class="usage-num">' + fmt(totals.completion_tokens) + '</div><div class="usage-label">Completion tokens</div></div>';
-        html += '<div class="usage-card"><div class="usage-num">' + fmt(totals.total_tokens) + '</div><div class="usage-label">Total tokens</div></div>';
-        html += '</div>';
-        var models = Object.keys(byModel);
-        if (models.length) {
-            html += '<div class="usage-models"><h3>By model</h3><table class="usage-table"><thead><tr><th>Model</th><th>Requests</th><th>Tokens</th></tr></thead><tbody>';
-            models.sort();
-            for (var i = 0; i < models.length; i++) {
-                var m = byModel[models[i]] || {};
-                html += '<tr><td>' + models[i] + '</td><td>' + fmt(m.requests) + '</td><td>' + fmt(m.total_tokens) + '</td></tr>';
-            }
-            html += '</tbody></table></div>';
-        }
-        usageEl.className = "usage-stats";
-        usageEl.innerHTML = html;
-    }
-
-    function loadUsage() {
-        fetch(BASE + "/v1/usage")
-            .then(function (r) {
-                if (!r.ok) throw new Error("HTTP " + r.status);
-                return r.json();
-            })
-            .then(renderUsage)
-            .catch(function (e) {
-                usageEl.className = "usage-error";
-                usageEl.textContent = "Usage unavailable: " + e.message;
-            });
-    }
-
-    loadUsage();
 
     function showStatus(msg, type) {
         statusEl.textContent = msg;
