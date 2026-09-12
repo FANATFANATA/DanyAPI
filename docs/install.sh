@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -e
 REPO_URL="https://github.com/FANATFANATA/DanyAPI"
-BRANCH="main"
+BRANCH="prod"
 TARGET="${DANYAPI_DIR:-$HOME/DanyAPI}"
 ZIP_URL="$REPO_URL/archive/refs/heads/$BRANCH.zip"
 

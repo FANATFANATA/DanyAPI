@@ -1,7 +1,7 @@
 $ErrorActionPreference = "Stop"
 
 $RepoUrl = "https://github.com/FANATFANATA/DanyAPI"
-$Branch = "main"
+$Branch = "prod"
 $ZipUrl = "$RepoUrl/archive/refs/heads/$Branch.zip"
 $Target = $env:DANYAPI_DIR
 if (-not $Target) { $Target = Join-Path $HOME "DanyAPI" }
