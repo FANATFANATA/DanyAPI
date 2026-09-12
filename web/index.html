@@ -626,6 +626,7 @@ body::before {
             <button type="button" id="tab-login" class="active" data-tab="login">Login / Register</button>
             <button type="button" id="tab-server" data-tab="server">Admin Tokens</button>
         </div>
+        <div id="byok-banner" style="display:none;background:rgba(34,211,153,0.08);border:1px solid rgba(34,211,153,0.25);border-radius:11px;padding:0.7rem 1rem;margin-bottom:1.2rem;font-size:0.82rem;color:var(--l-green);">BYOK mode active — using your personal tokens only</div>
 
         <div id="panel-login">
             <div class="form-group">
@@ -709,6 +710,7 @@ body::before {
     var tokenListEl = document.getElementById("token-list");
     var isByok = false;
     var currentUserId = null;
+    var byokModeEnabled = false;
 
     function fmt(n) {
         return (n || 0).toLocaleString("en-US");
@@ -755,6 +757,27 @@ body::before {
     function showStatus(msg, type) {
         statusEl.textContent = msg;
         statusEl.className = "status " + type;
+    }
+
+    function initByokMode() {
+        fetch(BASE + "/byok/status")
+            .then(function (r) {
+                if (!r.ok) throw new Error("not available");
+                return r.json();
+            })
+            .then(function (data) {
+                byokModeEnabled = data.enabled === true;
+                if (byokModeEnabled) {
+                    document.getElementById("tab-server").style.display = "none";
+                    document.getElementById("panel-server").classList.add("hidden");
+                    document.getElementById("byok-banner").style.display = "block";
+                    document.querySelector(".header p").textContent = "Manage your provider tokens or login to use your own keys";
+                }
+                checkAuth();
+            })
+            .catch(function () {
+                checkAuth();
+            });
     }
 
     function checkAuth() {
@@ -855,7 +878,7 @@ body::before {
             .then(function (data) {
                 if (data.session_key) {
                     showStatus("Logged in successfully!", "success");
-                    checkAuth();
+    initByokMode();
                     document.getElementById("byok-user").value = "";
                     document.getElementById("byok-pass").value = "";
                 } else {
