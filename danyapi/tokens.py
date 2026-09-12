@@ -3,9 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-_CJK_RE = re.compile(
-    r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3040-\u30ff\uac00-\ud7af]"
-)
+_CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3040-\u30ff\uac00-\ud7af]")
 _IMAGE_TOKEN_COST = 85
 
 

@@ -164,14 +164,10 @@ def ensure_rust_on_termux():
         return True
     pkg = shutil.which("pkg")
     if pkg is None:
-        print(
-            "Termux detected but 'pkg' is missing; cannot install Rust automatically."
-        )
+        print("Termux detected but 'pkg' is missing; cannot install Rust automatically.")
         print("Run: pkg install -y rust binutils clang cmake")
         return False
-    print(
-        "Rust not found. Installing Rust toolchain for Termux (needed to build pydantic-core)..."
-    )
+    print("Rust not found. Installing Rust toolchain for Termux (needed to build pydantic-core)...")
     rc = subprocess.call([pkg, "install", "-y", "rust", "binutils", "clang", "cmake"])
     return rc == 0
 
@@ -404,9 +400,7 @@ def collect_provider(name, current, defaults):
     storage = "userToken" if name == "DeepSeek" else "token"
     print()
     print(f"[ {name} ]")
-    print(
-        f"  Grab a token: open {host} -> DevTools -> Application -> Local Storage -> {storage}"
-    )
+    print(f"  Grab a token: open {host} -> DevTools -> Application -> Local Storage -> {storage}")
     tokens = read_value(
         f"  {name} tokens, comma-separated [{current.get(tokens_key, '') or '(empty)'}]: ",
         current.get(tokens_key, ""),
@@ -436,9 +430,7 @@ def validate_provider(name, creds, defaults):
             return creds
         print(f"  {name} credentials INVALID: {detail}")
         if _input_state.eof_seen or not ask(f"  Re-enter {name} credentials?", True):
-            print(
-                f"  Keeping {name} credentials as entered; the server may fail at startup."
-            )
+            print(f"  Keeping {name} credentials as entered; the server may fail at startup.")
             return creds
         creds = collect_provider(name, creds, defaults)
 
@@ -474,9 +466,7 @@ def create_shortcut():
                 "$sc.Save()",
             ]
         )
-        subprocess.check_call(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script]
-        )
+        subprocess.check_call(["powershell", "-NoProfile", "-NonInteractive", "-Command", script])
         return os.path.join(_desktop_dir(), "DanyAPI.lnk")
     if sys.platform.startswith("linux"):
         desktop = _desktop_dir()
@@ -495,17 +485,10 @@ def create_shortcut():
 
 def build_pow_solver():
     src = ROOT / "danyapi" / "deepseek" / "pow_solver.c"
-    out = (
-        ROOT
-        / "danyapi"
-        / "deepseek"
-        / ("pow_solver.exe" if os.name == "nt" else "pow_solver")
-    )
+    out = ROOT / "danyapi" / "deepseek" / ("pow_solver.exe" if os.name == "nt" else "pow_solver")
     cc = shutil.which("clang") or shutil.which("gcc") or shutil.which("cc")
     if cc is None:
-        print(
-            "No C compiler (clang/gcc/cc) found; skipping the native PoW solver build."
-        )
+        print("No C compiler (clang/gcc/cc) found; skipping the native PoW solver build.")
         print("The Python and Node fallbacks will still solve challenges, just slower.")
         return
     cc_name = os.path.basename(cc)
@@ -537,9 +520,7 @@ def build_pow_solver():
         variants.insert(0, [*base, "-ffast-math"])
     for i, flags in enumerate(variants):
         cmd = [cc, *flags, "-o", str(out), str(src)]
-        print(
-            f"Building native PoW solver ({'gcc tuned' if i == 0 and len(variants) > 1 else 'base'}): {' '.join(cmd)}"
-        )
+        print(f"Building native PoW solver ({'gcc tuned' if i == 0 and len(variants) > 1 else 'base'}): {' '.join(cmd)}")
         if subprocess.call(cmd, cwd=str(ROOT)) == 0:
             print(f"Native PoW solver built: {out}")
             return
@@ -585,26 +566,18 @@ def main():
     current = load_env()
     defaults = load_defaults()
     values = dict(current)
-    deepseek = validate_provider(
-        "DeepSeek", collect_provider("DeepSeek", current, defaults), defaults
-    )
-    qwen = validate_provider(
-        "Qwen", collect_provider("Qwen", current, defaults), defaults
-    )
+    deepseek = validate_provider("DeepSeek", collect_provider("DeepSeek", current, defaults), defaults)
+    qwen = validate_provider("Qwen", collect_provider("Qwen", current, defaults), defaults)
     values.update(deepseek)
     values.update(qwen)
 
     print()
-    print(
-        "Now the rest of the settings. Enter to keep the current value, !clear to erase, !reset to restore the default."
-    )
+    print("Now the rest of the settings. Enter to keep the current value, !clear to erase, !reset to restore the default.")
     for title, fields in GROUPS:
         print()
         print(f"[ {title} ]")
         for key, label, kind in fields:
-            values[key] = prompt(
-                key, label, kind, values.get(key, ""), defaults.get(key, "")
-            )
+            values[key] = prompt(key, label, kind, values.get(key, ""), defaults.get(key, ""))
 
     update_env(values)
     print()
@@ -613,9 +586,7 @@ def main():
     has_ds = any(v for v in deepseek.values() if v)
     has_qwen = any(v for v in qwen.values() if v)
     if not has_ds and not has_qwen:
-        print(
-            "Warning: no provider credentials configured. The server will not start until you add DeepSeek or Qwen tokens."
-        )
+        print("Warning: no provider credentials configured. The server will not start until you add DeepSeek or Qwen tokens.")
 
     if ask("Create a DanyAPI launcher shortcut on the desktop?", True):
         try:
@@ -626,9 +597,7 @@ def main():
 
     print()
     print(f"DanyAPI runs from: {ROOT}")
-    print(
-        "The server auto-updates to the latest GitHub release at every launch (DANYAPI_AUTO_UPDATE=0 disables)."
-    )
+    print("The server auto-updates to the latest GitHub release at every launch (DANYAPI_AUTO_UPDATE=0 disables).")
     print("Start it anytime with the desktop shortcut or:")
     print("  python app.py        (from the DanyAPI folder)")
     print("  python -m danyapi")

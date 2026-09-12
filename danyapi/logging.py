@@ -60,9 +60,7 @@ def _coerce_backup_count(value: int) -> int:
     return DEFAULT_BACKUP_COUNT
 
 
-def _make_file_handler(
-    log_file: str, max_bytes: int, backup_count: int
-) -> RotatingFileHandler:
+def _make_file_handler(log_file: str, max_bytes: int, backup_count: int) -> RotatingFileHandler:
     path = Path(log_file)
     path.parent.mkdir(parents=True, exist_ok=True)
     handler = RotatingFileHandler(
@@ -143,13 +141,9 @@ def _enable_windows_vt() -> None:
             if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
                 continue
             if not mode.value & enable_virtual_terminal_processing:
-                kernel32.SetConsoleMode(
-                    handle, mode.value | enable_virtual_terminal_processing
-                )
+                kernel32.SetConsoleMode(handle, mode.value | enable_virtual_terminal_processing)
     except Exception:
-        logging.getLogger(__name__).debug(
-            "failed to enable windows VT mode", exc_info=True
-        )
+        logging.getLogger(__name__).debug("failed to enable windows VT mode", exc_info=True)
 
 
 def configure() -> None:
@@ -187,9 +181,7 @@ def configure() -> None:
                     _coerce_backup_count(settings.log_backup_count),
                 )
             except OSError as exc:
-                logging.getLogger(__name__).warning(
-                    "cannot open log file %s: %s, using console only", path, exc
-                )
+                logging.getLogger(__name__).warning("cannot open log file %s: %s, using console only", path, exc)
             else:
                 file_handler.name = FILE_HANDLER_NAME
                 file_handler.setLevel(level)

@@ -1,6 +1,5 @@
 import pathlib
 
-
 IGNORE_PATTERNS = {
     "__pycache__",
     ".git",

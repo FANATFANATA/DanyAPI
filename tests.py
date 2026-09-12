@@ -25,7 +25,9 @@ PYTHON_DIRS = ["danyapi", "tests", "docs"]
 BANDIT_SKIPS = "B101,B104,B112,B311,B404,B603"
 PYLINT_DISABLES = "import-error,unsubscriptable-object,not-an-iterable"
 C_SOURCES = ["danyapi/deepseek/pow_solver.c"]
-CLANG_TIDY_CHECKS = "clang-diagnostic-*,clang-analyzer-*,-clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,-clang-analyzer-optin.taint.TaintedAlloc"
+CLANG_TIDY_CHECKS = (
+    "clang-diagnostic-*,clang-analyzer-*,-clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,-clang-analyzer-optin.taint.TaintedAlloc"
+)
 
 BANNED_PATTERNS = ["\u2014", "\u2013", "Zero keys.", "Ноль ключей.", "live demo"]
 GUARD_TEXT_DIRS = ["docs"]
@@ -73,9 +75,7 @@ def parse_args(argv: list[str]) -> tuple[int, list[str]]:
             try:
                 jobs = int(value)
             except ValueError:
-                print(
-                    f"tests: --jobs expects an integer, got {value!r}", file=sys.stderr
-                )
+                print(f"tests: --jobs expects an integer, got {value!r}", file=sys.stderr)
                 raise SystemExit(2) from None
             i += 1
             continue
@@ -98,12 +98,7 @@ def parse_args(argv: list[str]) -> tuple[int, list[str]]:
 def iter_guard_targets() -> list[Path]:
     targets = [ROOT / f for f in GUARD_TEXT_FILES]
     for d in GUARD_TEXT_DIRS:
-        targets.extend(
-            p
-            for p in (ROOT / d).rglob("*")
-            if p.is_file()
-            and p.suffix in {".html", ".js", ".css", ".py", ".md", ".sh", ".bat"}
-        )
+        targets.extend(p for p in (ROOT / d).rglob("*") if p.is_file() and p.suffix in {".html", ".js", ".css", ".py", ".md", ".sh", ".bat"})
     return sorted(targets)
 
 
@@ -145,9 +140,7 @@ def check_repo_guards() -> tuple[bool, str]:
     return False, f"{len(problems)} problem(s):\n" + "\n".join(shown)
 
 
-def run_step(
-    name: str, runner: StepRunner, timeout: float = STEP_TIMEOUT_SECONDS
-) -> StepResult:
+def run_step(name: str, runner: StepRunner, timeout: float = STEP_TIMEOUT_SECONDS) -> StepResult:
     started = time.monotonic()
     if isinstance(runner, list):
         cmd = runner
@@ -327,7 +320,6 @@ def main() -> int:
             mark = paint(raw.ljust(4), RED, use_color)
             critical_failed += 1
         print(f"{mark}  {name.ljust(width)}")
-    total = len(results)
     total_time = sum(elapsed for _name, _ok, elapsed, _out, _det in results)
     print()
     if critical_failed > 0:

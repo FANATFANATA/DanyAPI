@@ -168,9 +168,7 @@ async def _send_completion(
     if resp.status_code != 200:
         body = await resp.aread()
         await resp.aclose()
-        raise HTTPException(
-            resp.status_code, body[:500].decode("utf-8", errors="replace")
-        )
+        raise HTTPException(resp.status_code, body[:500].decode("utf-8", errors="replace"))
 
     content_type = resp.headers.get("content-type", "")
     if "text/event-stream" not in content_type:
@@ -178,9 +176,7 @@ async def _send_completion(
         await resp.aclose()
         text = body[:500].decode("utf-8", errors="replace")
         if "text/html" in content_type or b"requestInfo" in body:
-            raise HTTPException(
-                502, "Qwen WAF challenge: request blocked by anti-bot, try again later"
-            )
+            raise HTTPException(502, "Qwen WAF challenge: request blocked by anti-bot, try again later")
         try:
             payload = json.loads(body)
         except json.JSONDecodeError:
@@ -208,11 +204,7 @@ async def _send_completion(
 
 
 def _is_retryable_error(rec: QwenStreamReconstructor) -> bool:
-    return bool(
-        rec.error
-        and error_code(rec.error) in RETRYABLE_ERROR_CODES
-        and not rec.has_content
-    )
+    return bool(rec.error and error_code(rec.error) in RETRYABLE_ERROR_CODES and not rec.has_content)
 
 
 def _error_body(rec: QwenStreamReconstructor) -> str:
@@ -220,9 +212,7 @@ def _error_body(rec: QwenStreamReconstructor) -> str:
     return json.dumps(
         {
             "error": {
-                "message": err.get("details")
-                or err.get("message")
-                or "Qwen server error, try again later",
+                "message": err.get("details") or err.get("message") or "Qwen server error, try again later",
                 "code": err.get("code"),
             }
         },
@@ -267,9 +257,7 @@ def _stream_error_lines(
     yield "data: [DONE]\n\n"
 
 
-def _stream_context_limit_lines(
-    chunk_id: str, created: int, model: str, session_key: str | None = None
-) -> Iterator[str]:
+def _stream_context_limit_lines(chunk_id: str, created: int, model: str, session_key: str | None = None) -> Iterator[str]:
     yield from _stream_error_lines(
         chunk_id,
         created,
@@ -357,18 +345,11 @@ async def _collect_response(
             except HTTPException as exc:
                 if exc.status_code == 401:
                     account.mark_broken()
-                if (
-                    exc.status_code in STALE_SESSION_STATUSES
-                    and had_cached_session
-                    and not stale_rebuilt
-                    and messages is not None
-                ):
+                if exc.status_code in STALE_SESSION_STATUSES and had_cached_session and not stale_rebuilt and messages is not None:
                     stale_rebuilt = True
                     _drop_session(pool, account, session_key)
                     try:
-                        prompt, tool_mode = toolemu.build_prompt(
-                            messages, tools, tool_choice, False, response_format
-                        )
+                        prompt, tool_mode = toolemu.build_prompt(messages, tools, tool_choice, False, response_format)
                         tool_schemas = toolemu.tool_schema_map(tools)
                     except ValueError as build_exc:
                         raise exc from build_exc
@@ -377,9 +358,7 @@ async def _collect_response(
                         session_key,
                         exc.status_code,
                     )
-                    session, session_key = await _prepare_session(
-                        account, pool, existing_sid, model_id, context_seq
-                    )
+                    session, session_key = await _prepare_session(account, pool, existing_sid, model_id, context_seq)
                     stop_response_id = None
                     continue
                 if _is_retryable_http(exc) and attempt < MAX_RETRIES:
@@ -458,41 +437,33 @@ async def collect_non_stream(
 ):
     await _human_delay()
     async with account_lock(lock, settings.acquire_timeout):
-        session, session_key = await _prepare_session(
-            account, pool, existing_sid, model_id, context_seq
-        )
+        session, session_key = await _prepare_session(account, pool, existing_sid, model_id, context_seq)
         if session_key != existing_sid and messages is not None:
             try:
-                prompt, tool_mode = toolemu.build_prompt(
-                    messages, tools, tool_choice, False, response_format
-                )
+                prompt, tool_mode = toolemu.build_prompt(messages, tools, tool_choice, False, response_format)
             except ValueError:
                 pass
             tool_schemas = toolemu.tool_schema_map(tools)
-        had_cached_session = (
-            bool(existing_sid) and account.sessions.get(existing_sid) is not None
-        )
-        rec, session, session_key, prompt, tool_mode, tool_schemas = (
-            await _collect_response(
-                account,
-                pool,
-                session,
-                session_key,
-                prompt,
-                model_id,
-                thinking,
-                search,
-                "t2t",
-                existing_sid,
-                context_seq,
-                messages,
-                tools,
-                tool_choice,
-                response_format,
-                had_cached_session,
-                tool_mode,
-                tool_schemas,
-            )
+        had_cached_session = bool(existing_sid) and account.sessions.get(existing_sid) is not None
+        rec, session, session_key, prompt, tool_mode, tool_schemas = await _collect_response(
+            account,
+            pool,
+            session,
+            session_key,
+            prompt,
+            model_id,
+            thinking,
+            search,
+            "t2t",
+            existing_sid,
+            context_seq,
+            messages,
+            tools,
+            tool_choice,
+            response_format,
+            had_cached_session,
+            tool_mode,
+            tool_schemas,
         )
 
         if _is_context_limit(rec) and not rec.has_content:
@@ -521,9 +492,7 @@ async def collect_non_stream(
             if parsed is not None:
                 tool_calls, tool_text = parsed
                 if tool_calls:
-                    message = toolemu.format_tool_message(
-                        tool_calls, tool_text, rec.reasoning
-                    )
+                    message = toolemu.format_tool_message(tool_calls, tool_text, rec.reasoning)
                     finish = "tool_calls"
                 else:
                     message = {"role": "assistant", "content": rec.content}
@@ -577,9 +546,7 @@ async def stream_openai(
     await _human_delay()
     async with account_lock(lock, settings.acquire_timeout):
         try:
-            session, session_key = await _prepare_session(
-                account, pool, existing_sid, model_id, context_seq
-            )
+            session, session_key = await _prepare_session(account, pool, existing_sid, model_id, context_seq)
         except HTTPException as exc:
             detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
             for line in _stream_error_lines(chunk_id, created, model, detail):
@@ -588,9 +555,7 @@ async def stream_openai(
 
         if session_key != existing_sid and messages is not None:
             try:
-                prompt, tool_mode = toolemu.build_prompt(
-                    messages, tools, tool_choice, False, response_format
-                )
+                prompt, tool_mode = toolemu.build_prompt(messages, tools, tool_choice, False, response_format)
             except ValueError:
                 pass
             tool_schemas = toolemu.tool_schema_map(tools)
@@ -598,48 +563,29 @@ async def stream_openai(
         rec: QwenStreamReconstructor | None = None
         content_buf = ""
         stop_response_id: str | None = None
-        had_cached_session = (
-            bool(existing_sid) and account.sessions.get(existing_sid) is not None
-        )
+        had_cached_session = bool(existing_sid) and account.sessions.get(existing_sid) is not None
         stale_rebuilt = False
         attempt = 0
         while True:
             try:
-                resp = await _send_completion(
-                    account.client, session, prompt, model_id, thinking, search
-                )
+                resp = await _send_completion(account.client, session, prompt, model_id, thinking, search)
             except ContextLimitError:
                 _drop_session(pool, account, session_key)
-                for line in _stream_context_limit_lines(
-                    chunk_id, created, model, session_key
-                ):
+                for line in _stream_context_limit_lines(chunk_id, created, model, session_key):
                     yield line
                 return
             except HTTPException as exc:
                 if exc.status_code == 401:
                     account.mark_broken()
-                if (
-                    exc.status_code in STALE_SESSION_STATUSES
-                    and had_cached_session
-                    and not stale_rebuilt
-                    and messages is not None
-                ):
+                if exc.status_code in STALE_SESSION_STATUSES and had_cached_session and not stale_rebuilt and messages is not None:
                     stale_rebuilt = True
                     _drop_session(pool, account, session_key)
                     try:
-                        prompt, tool_mode = toolemu.build_prompt(
-                            messages, tools, tool_choice, False, response_format
-                        )
+                        prompt, tool_mode = toolemu.build_prompt(messages, tools, tool_choice, False, response_format)
                         tool_schemas = toolemu.tool_schema_map(tools)
                     except ValueError:
-                        detail = (
-                            exc.detail
-                            if isinstance(exc.detail, str)
-                            else str(exc.detail)
-                        )
-                        for line in _stream_error_lines(
-                            chunk_id, created, model, detail, session_key
-                        ):
+                        detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+                        for line in _stream_error_lines(chunk_id, created, model, detail, session_key):
                             yield line
                         return
                     log.warning(
@@ -648,18 +594,10 @@ async def stream_openai(
                         exc.status_code,
                     )
                     try:
-                        session, session_key = await _prepare_session(
-                            account, pool, existing_sid, model_id, context_seq
-                        )
+                        session, session_key = await _prepare_session(account, pool, existing_sid, model_id, context_seq)
                     except HTTPException as prep_exc:
-                        detail = (
-                            prep_exc.detail
-                            if isinstance(prep_exc.detail, str)
-                            else str(prep_exc.detail)
-                        )
-                        for line in _stream_error_lines(
-                            chunk_id, created, model, detail, session_key
-                        ):
+                        detail = prep_exc.detail if isinstance(prep_exc.detail, str) else str(prep_exc.detail)
+                        for line in _stream_error_lines(chunk_id, created, model, detail, session_key):
                             yield line
                         return
                     stop_response_id = None
@@ -677,9 +615,7 @@ async def stream_openai(
                     await asyncio.sleep(delay)
                     continue
                 detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
-                for line in _stream_error_lines(
-                    chunk_id, created, model, detail, session_key
-                ):
+                for line in _stream_error_lines(chunk_id, created, model, detail, session_key):
                     yield line
                 return
             rec = QwenStreamReconstructor()
@@ -758,9 +694,7 @@ async def stream_openai(
                 except Exception as exc:
                     log.debug("response close failed: %s", exc)
                     if not stopped:
-                        await _try_stop_stream(
-                            account.client, session.id, stop_response_id
-                        )
+                        await _try_stop_stream(account.client, session.id, stop_response_id)
             if got_content:
                 break
             if _is_retryable_error(rec) and attempt < MAX_RETRIES:
@@ -781,9 +715,7 @@ async def stream_openai(
         assert rec is not None
         if _is_context_limit(rec) and not rec.has_content:
             _drop_session(pool, account, session_key)
-            for line in _stream_context_limit_lines(
-                chunk_id, created, model, session_key
-            ):
+            for line in _stream_context_limit_lines(chunk_id, created, model, session_key):
                 yield line
             return
         usage = _accumulate_usage(session, rec)
@@ -805,9 +737,7 @@ async def stream_openai(
                 chunk_id,
                 created,
                 model,
-                err.get("details")
-                or err.get("message")
-                or "Qwen server error, try again later",
+                err.get("details") or err.get("message") or "Qwen server error, try again later",
                 session_key,
                 code,
                 code or "error",
@@ -827,9 +757,7 @@ async def stream_openai(
                                 "object": "chat.completion.chunk",
                                 "created": created,
                                 "model": model,
-                                "choices": [
-                                    {"index": 0, "delta": delta, "finish_reason": None}
-                                ],
+                                "choices": [{"index": 0, "delta": delta, "finish_reason": None}],
                             }
                         )
                     finish = "tool_calls"
@@ -915,33 +843,27 @@ async def collect_image(
 ):
     await _human_delay()
     async with account_lock(lock, settings.acquire_timeout):
-        session, session_key = await _prepare_session(
-            account, pool, existing_sid, model_id, context_seq
-        )
-        had_cached_session = (
-            bool(existing_sid) and account.sessions.get(existing_sid) is not None
-        )
-        rec, session, session_key, _prompt, _tool_mode, _tool_schemas = (
-            await _collect_response(
-                account,
-                pool,
-                session,
-                session_key,
-                prompt,
-                model_id,
-                False,
-                False,
-                "t2i",
-                existing_sid,
-                context_seq,
-                None,
-                None,
-                None,
-                None,
-                had_cached_session,
-                False,
-                None,
-            )
+        session, session_key = await _prepare_session(account, pool, existing_sid, model_id, context_seq)
+        had_cached_session = bool(existing_sid) and account.sessions.get(existing_sid) is not None
+        rec, session, session_key, _prompt, _tool_mode, _tool_schemas = await _collect_response(
+            account,
+            pool,
+            session,
+            session_key,
+            prompt,
+            model_id,
+            False,
+            False,
+            "t2i",
+            existing_sid,
+            context_seq,
+            None,
+            None,
+            None,
+            None,
+            had_cached_session,
+            False,
+            None,
         )
 
         if _is_context_limit(rec) and not rec.has_content:
