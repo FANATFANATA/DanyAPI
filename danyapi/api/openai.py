@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Cookie, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -265,67 +265,74 @@ async def lifespan(app: FastAPI):
     mgr = ByokManager.from_settings()
     _set_byok_manager(mgr)
     try:
-        if settings.deepseek_tokens:
-            for i, token in enumerate(settings.deepseek_tokens):
-                ds_client = DeepSeekClient(token=token, timeout=settings.timeout)
-                if not await ds_client.check_auth():
-                    log.warning("deepseek token #%d invalid/expired, skipping", i)
-                    await ds_client.aclose()
-                    continue
-                accounts.append(
-                    DeepSeekAccount(
-                        len(accounts),
-                        ds_client,
+        if not settings.byok_mode:
+            try:
+                if settings.deepseek_tokens:
+                    for i, token in enumerate(settings.deepseek_tokens):
+                        ds_client = DeepSeekClient(token=token, timeout=settings.timeout)
+                        if not await ds_client.check_auth():
+                            log.warning("deepseek token #%d invalid/expired, skipping", i)
+                            await ds_client.aclose()
+                            continue
+                        accounts.append(
+                            DeepSeekAccount(
+                                len(accounts),
+                                ds_client,
+                                session_cache_size=settings.session_cache_size,
+                                ttl=settings.session_ttl,
+                                store=deepseek_session_store,
+                                stable_id=_token_stable_id(token),
+                            )
+                        )
+                    log.info("deepseek accounts ready: %d", len(accounts))
+                if settings.qwen_tokens:
+                    for i, token in enumerate(settings.qwen_tokens):
+                        qw_client = QwenClient(token=token, timeout=settings.timeout)
+                        if not await qw_client.check_auth():
+                            log.warning("qwen token #%d invalid/expired, skipping", i)
+                            await qw_client.aclose()
+                            continue
+                        qwen_accounts.append(
+                            QwenAccount(
+                                len(qwen_accounts),
+                                qw_client,
+                                session_cache_size=settings.session_cache_size,
+                                ttl=settings.session_ttl,
+                                store=qwen_session_store,
+                                stable_id=_token_stable_id(token),
+                            )
+                        )
+                    log.info("qwen accounts ready: %d", len(qwen_accounts))
+                if accounts:
+                    app.state.pool = AccountPool(
+                        accounts,
                         session_cache_size=settings.session_cache_size,
                         ttl=settings.session_ttl,
-                        store=deepseek_session_store,
-                        stable_id=_token_stable_id(token),
+                        context_store=deepseek_context_store,
+                        affinity_store=deepseek_affinity_store,
                     )
-                )
-            log.info("deepseek accounts ready: %d", len(accounts))
-        if settings.qwen_tokens:
-            for i, token in enumerate(settings.qwen_tokens):
-                qw_client = QwenClient(token=token, timeout=settings.timeout)
-                if not await qw_client.check_auth():
-                    log.warning("qwen token #%d invalid/expired, skipping", i)
-                    await qw_client.aclose()
-                    continue
-                qwen_accounts.append(
-                    QwenAccount(
-                        len(qwen_accounts),
-                        qw_client,
+                else:
+                    app.state.pool = None
+                if qwen_accounts:
+                    app.state.qwen_pool = AccountPool(
+                        qwen_accounts,
+                        label="qwen",
                         session_cache_size=settings.session_cache_size,
                         ttl=settings.session_ttl,
-                        store=qwen_session_store,
-                        stable_id=_token_stable_id(token),
+                        context_store=qwen_context_store,
+                        affinity_store=qwen_affinity_store,
                     )
-                )
-            log.info("qwen accounts ready: %d", len(qwen_accounts))
-        if accounts:
-            app.state.pool = AccountPool(
-                accounts,
-                session_cache_size=settings.session_cache_size,
-                ttl=settings.session_ttl,
-                context_store=deepseek_context_store,
-                affinity_store=deepseek_affinity_store,
-            )
-        else:
-            app.state.pool = None
-        if qwen_accounts:
-            app.state.qwen_pool = AccountPool(
-                qwen_accounts,
-                label="qwen",
-                session_cache_size=settings.session_cache_size,
-                ttl=settings.session_ttl,
-                context_store=qwen_context_store,
-                affinity_store=qwen_affinity_store,
-            )
-            app.state.qwen_models = await _fetch_qwen_models(qwen_accounts[0].client)
-        else:
-            app.state.qwen_pool = None
-            app.state.qwen_models = []
-        if not accounts and not qwen_accounts:
-            raise RuntimeError("no valid credentials: set DEEPSEEK_TOKENS or QWEN_TOKENS")
+                    app.state.qwen_models = await _fetch_qwen_models(qwen_accounts[0].client)
+                else:
+                    app.state.qwen_pool = None
+                    app.state.qwen_models = []
+                if not accounts and not qwen_accounts:
+                    raise RuntimeError("no valid credentials: set DEEPSEEK_TOKENS or QWEN_TOKENS")
+            except RuntimeError:
+                raise
+            except Exception as exc:
+                log.error("failed to initialize server tokens: %s", exc)
+                raise
         yield
     finally:
         seen: set[int] = set()
@@ -962,17 +969,17 @@ def _resolve_provider(model: str) -> str:
 
 
 @app.post("/v1/chat/completions")
-async def chat_completions(req: ChatCompletionRequest) -> Any:
+async def chat_completions(req: ChatCompletionRequest, request: Request) -> Any:
     provider = _resolve_provider(req.model)
     if provider == "qwen":
-        return await _chat_completions_qwen(req)
-    return await _chat_completions_deepseek(req)
+        return await _chat_completions_qwen(req, request)
+    return await _chat_completions_deepseek(req, request)
 
 
-def _responses_provider_call(req: ResponsesRequest) -> Any:
+def _responses_provider_call(req: ResponsesRequest, request: Request | None = None) -> Any:
     if _resolve_provider(req.model) == "qwen":
-        return _chat_completions_qwen
-    return _chat_completions_deepseek
+        return lambda r: _chat_completions_qwen(r, request)
+    return lambda r: _chat_completions_deepseek(r, request)
 
 
 def _responses_chat_request(req: ResponsesRequest, provider_messages: list[dict], session_id: str | None) -> ChatCompletionRequest:
@@ -995,8 +1002,8 @@ def _responses_chat_request(req: ResponsesRequest, provider_messages: list[dict]
 
 
 @app.post("/v1/responses")
-async def create_response(req: ResponsesRequest) -> Any:
-    provider_call = _responses_provider_call(req)
+async def create_response(req: ResponsesRequest, request: Request) -> Any:
+    provider_call = _responses_provider_call(req, request)
     store = _responses_store()
     try:
         new_input = responses_api.normalize_input(req.input)
@@ -1251,8 +1258,386 @@ async def _stream_guard(gen, model: str):
             yield line
 
 
-async def _chat_completions_deepseek(req: ChatCompletionRequest) -> Any:
+async def _byok_deepseek(req: ChatCompletionRequest, request: Request | None) -> Any:
+    from ..byok import get_manager as _get_byok_mgr
+    from ..sessions import SessionRegistry as DeepSeekSessionRegistry
+    from ..pow import PowManager
+
+    session_key = None
+    if request is not None:
+        session_key = request.cookies.get("byok_session")
+
+    mgr = _get_byok_mgr()
+    if mgr is None:
+        raise HTTPException(503, "BYOK manager not initialized")
+
+    user_id = mgr.auth_check(session_key) if session_key else None
+    if user_id is None:
+        raise HTTPException(401, "authentication required")
+
+    token_str = mgr.get_provider_token(user_id, "deepseek")
+    if token_str is None:
+        raise HTTPException(400, "no deepseek token configured for your account")
+
+    client = DeepSeekClient(token=token_str, timeout=settings.timeout)
+    sem = asyncio.Semaphore(1)
+    sessions = DeepSeekSessionRegistry(client, maxsize=16, store=None)
+
+    try:
+        model_type = _resolve_model(req.model)
+        thinking = req.thinking if req.thinking is not None else _is_reasoning_model(req.model)
+        search = bool(req.search)
+
+        try:
+            prompt, tool_mode = toolemu.build_prompt(
+                req.messages,
+                getattr(req, "tools", None),
+                getattr(req, "tool_choice", None),
+                False,
+                getattr(req, "response_format", None),
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+        context_seq = toolemu.context_sequence(req.messages, user=getattr(req, "user", None))
+        existing_sid = req.session_id
+
+        attachments = _collect_attachments(req)
+        _validate_attachments(attachments)
+        ref_file_ids = None
+        if attachments:
+            ref_file_ids = await _upload_attachments(
+                account=type("FakeAccount", (), {"client": client, "pow": PowManager(), "sem": sem})(),
+                attachments=attachments,
+                model_type=model_type,
+                thinking=thinking,
+            )
+
+        common = {
+            "account": type(
+                "ByokAccount",
+                (),
+                {
+                    "sem": sem,
+                    "sessions": sessions,
+                    "client": client,
+                    "broken": False,
+                },
+            )(),
+            "pool": None,
+            "existing_sid": existing_sid,
+            "prompt": prompt,
+            "model": req.model,
+            "model_type": model_type,
+            "thinking": thinking,
+            "search": search,
+            "ref_file_ids": ref_file_ids,
+            "tool_schemas": toolemu.tool_schema_map(getattr(req, "tools", None)),
+            "tool_mode": tool_mode,
+            "include_usage": _include_usage(req),
+            "context_seq": context_seq,
+            "reduced_prompts": None,
+            "messages": req.messages,
+            "tools": getattr(req, "tools", None),
+            "tool_choice": getattr(req, "tool_choice", None),
+            "response_format": getattr(req, "response_format", None),
+            "user": getattr(req, "user", None),
+        }
+
+        if req.stream:
+            created = int(time.time())
+            chunk_id = f"chatcmpl-{uuid.uuid4().hex}"
+
+            async def _byok_stream():
+                nonlocal session_key
+                lock = asyncio.Lock()
+                async with lock:
+                    session, session_key = await sessions.obtain(existing_sid)
+
+                gen = _stream_openai(
+                    account=common["account"],
+                    pool=None,
+                    existing_sid=existing_sid,
+                    lock=sem,
+                    prompt=prompt,
+                    model=req.model,
+                    model_type=model_type,
+                    thinking=thinking,
+                    search=search,
+                    ref_file_ids=ref_file_ids,
+                    tool_schemas=common["tool_schemas"],
+                    tool_mode=tool_mode,
+                    include_usage=False,
+                    context_seq=context_seq,
+                    reduced_prompts=None,
+                    messages=req.messages,
+                    tools=getattr(req, "tools", None),
+                    tool_choice=getattr(req, "tool_choice", None),
+                    response_format=getattr(req, "response_format", None),
+                    user=getattr(req, "user", None),
+                )
+
+                first_chunk = True
+                try:
+                    async for item in gen:
+                        if first_chunk:
+                            first_chunk = False
+                        yield item
+                except HTTPException:
+                    raise
+                except Exception as exc:
+                    err_chunk, tail, done = _stream_error_sse(chunk_id, created, req.model, str(exc))
+                    yield err_chunk
+                    yield tail
+                    yield done
+                finally:
+                    try:
+                        await client.aclose()
+                    except Exception:
+                        pass
+
+            return StreamingResponse(
+                _byok_stream(),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
+
+        # Non-stream path
+        lock = asyncio.Lock()
+        async with lock:
+            session, sid = await sessions.obtain(existing_sid)
+
+        try:
+            result = await _collect_non_stream(
+                account=common["account"],
+                pool=None,
+                existing_sid=existing_sid,
+                lock=sem,
+                prompt=prompt,
+                model=req.model,
+                model_type=model_type,
+                thinking=thinking,
+                search=search,
+                ref_file_ids=ref_file_ids,
+                tool_schemas=common["tool_schemas"],
+                tool_mode=tool_mode,
+                context_seq=context_seq,
+                reduced_prompts=None,
+                messages=req.messages,
+                tools=getattr(req, "tools", None),
+                tool_choice=getattr(req, "tool_choice", None),
+                response_format=getattr(req, "response_format", None),
+                user=getattr(req, "user", None),
+            )
+            return result
+        except AccountPoolBusy:
+            raise HTTPException(429, "account busy") from None
+        except DeepSeekError as exc:
+            log.warning("deepseek byok error (%d): %s", exc.biz_code, exc.biz_msg)
+            raise HTTPException(_deepseek_status(exc), _deepseek_error_detail(exc)) from exc
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log.error("deepseek byok completion failed: %s", exc)
+            raise HTTPException(502, f"completion failed: {exc}") from exc
+        finally:
+            try:
+                await client.aclose()
+            except Exception:
+                pass
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        try:
+            await client.aclose()
+        except Exception:
+            pass
+        log.error("deepseek byok setup failed: %s", exc)
+        raise HTTPException(502, str(exc)) from exc
+
+
+async def _byok_qwen(req: ChatCompletionRequest, request: Request | None) -> Any:
+    from ..byok import get_manager as _get_byok_mgr
+    from ..qwen.accounts import QwenSessionRegistry
+
+    session_key = None
+    if request is not None:
+        session_key = request.cookies.get("byok_session")
+
+    mgr = _get_byok_mgr()
+    if mgr is None:
+        raise HTTPException(503, "BYOK manager not initialized")
+
+    user_id = mgr.auth_check(session_key) if session_key else None
+    if user_id is None:
+        raise HTTPException(401, "authentication required")
+
+    token_str = mgr.get_provider_token(user_id, "qwen")
+    if token_str is None:
+        raise HTTPException(400, "no qwen token configured for your account")
+
+    client = QwenClient(token=token_str, timeout=settings.timeout)
+    sem = asyncio.Semaphore(1)
+    sessions = QwenSessionRegistry(client, maxsize=16, store=None)
+
+    try:
+        thinking = req.thinking if req.thinking is not None else True
+        search = bool(req.search)
+
+        try:
+            prompt, tool_mode = toolemu.build_prompt(
+                req.messages,
+                getattr(req, "tools", None),
+                getattr(req, "tool_choice", None),
+                False,
+                getattr(req, "response_format", None),
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+        context_seq = toolemu.context_sequence(req.messages, user=getattr(req, "user", None))
+        existing_sid = req.session_id
+
+        common = {
+            "account": type(
+                "ByokQwenAccount",
+                (),
+                {
+                    "sem": sem,
+                    "sessions": sessions,
+                    "client": client,
+                    "broken": False,
+                    "index": 999,
+                },
+            )(),
+            "pool": None,
+            "existing_sid": existing_sid,
+            "prompt": prompt,
+            "model": req.model,
+            "model_id": req.model,
+            "thinking": thinking,
+            "search": search,
+            "tool_schemas": toolemu.tool_schema_map(getattr(req, "tools", None)),
+            "tool_mode": tool_mode,
+            "include_usage": _include_usage(req),
+            "context_seq": context_seq,
+            "messages": req.messages,
+            "tools": getattr(req, "tools", None),
+            "tool_choice": getattr(req, "tool_choice", None),
+            "response_format": getattr(req, "response_format", None),
+            "user": getattr(req, "user", None),
+        }
+
+        if req.stream:
+            created = int(time.time())
+            chunk_id = f"chatcmpl-{uuid.uuid4().hex}"
+
+            async def _byok_qwen_stream():
+                lock = asyncio.Lock()
+                async with lock:
+                    await sessions.obtain(existing_sid)
+
+                gen = qwen_api.stream_openai(
+                    account=common["account"],
+                    pool=None,
+                    existing_sid=existing_sid,
+                    lock=sem,
+                    prompt=prompt,
+                    model=req.model,
+                    model_id=req.model,
+                    thinking=thinking,
+                    search=search,
+                    tool_schemas=common["tool_schemas"],
+                    tool_mode=tool_mode,
+                    include_usage=False,
+                    context_seq=context_seq,
+                    messages=req.messages,
+                    tools=getattr(req, "tools", None),
+                    tool_choice=getattr(req, "tool_choice", None),
+                    response_format=getattr(req, "response_format", None),
+                    user=getattr(req, "user", None),
+                )
+
+                try:
+                    async for item in gen:
+                        yield item
+                except HTTPException:
+                    raise
+                except Exception as exc:
+                    err_msg = str(exc)
+                    err_data = json.dumps({"error": {"message": err_msg}}, ensure_ascii=False)
+                    yield f"data: {err_data}\n\n"
+                    yield "data: [DONE]\n\n"
+                finally:
+                    try:
+                        await client.aclose()
+                    except Exception:
+                        pass
+
+            return StreamingResponse(
+                _byok_qwen_stream(),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
+
+        # Non-stream path
+        lock = asyncio.Lock()
+        async with lock:
+            await sessions.obtain(existing_sid)
+
+        try:
+            result = await qwen_api.collect_non_stream(
+                account=common["account"],
+                pool=None,
+                existing_sid=existing_sid,
+                lock=sem,
+                prompt=prompt,
+                model=req.model,
+                model_id=req.model,
+                thinking=thinking,
+                search=search,
+                tool_schemas=common["tool_schemas"],
+                tool_mode=tool_mode,
+                context_seq=context_seq,
+                messages=req.messages,
+                tools=getattr(req, "tools", None),
+                tool_choice=getattr(req, "tool_choice", None),
+                response_format=getattr(req, "response_format", None),
+                user=getattr(req, "user", None),
+            )
+            return result
+        except QwenError as exc:
+            log.warning("qwen byok error (%s): %s", exc.code, exc.message)
+            raise HTTPException(502, f"qwen error: {exc.message}") from exc
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log.error("qwen byok completion failed: %s", exc)
+            raise HTTPException(502, f"completion failed: {exc}") from exc
+        finally:
+            try:
+                await client.aclose()
+            except Exception:
+                pass
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        try:
+            await client.aclose()
+        except Exception:
+            pass
+        log.error("qwen byok setup failed: %s", exc)
+        raise HTTPException(502, str(exc)) from exc
+
+
+async def _chat_completions_deepseek(req: ChatCompletionRequest, request: Request | None = None) -> Any:
     pool: AccountPool = app.state.pool
+
+    if pool is None and settings.byok_mode:
+        return await _byok_deepseek(req, request)
+
     if pool is None:
         raise HTTPException(503, "deepseek provider is not configured")
 
@@ -1302,8 +1687,12 @@ async def _chat_completions_deepseek(req: ChatCompletionRequest) -> Any:
         raise HTTPException(429, "all accounts are busy, try again later") from None
 
 
-async def _chat_completions_qwen(req: ChatCompletionRequest) -> Any:
+async def _chat_completions_qwen(req: ChatCompletionRequest, request: Request | None = None) -> Any:
     pool: AccountPool = app.state.qwen_pool
+
+    if pool is None and settings.byok_mode:
+        return await _byok_qwen(req, request)
+
     if pool is None:
         raise HTTPException(503, "qwen provider is not configured")
 
