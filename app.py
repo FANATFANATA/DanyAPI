@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -14,7 +15,7 @@ def ensure_env() -> None:
         return
     example = ROOT / ".env.example"
     if example.exists():
-        example.copy(env_file)
+        shutil.copyfile(example, env_file)
         print("Created .env from .env.example")
         print("Fill in DEEPSEEK_TOKENS / QWEN_TOKENS and run again.")
         sys.exit(1)
