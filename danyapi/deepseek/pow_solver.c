@@ -28,7 +28,7 @@
 #endif
 
 #define RATE 136
-#define ROUNDS 24
+#define ROUNDS 23
 #define MAX_DIGITS 32
 
 static const uint64_t RC[24] = {
@@ -156,7 +156,7 @@ static FORCE_INLINE void keccak_f(uint64_t *s)
     s[23] = p[23] ^ ((~p[24]) & p[20]);
     s[24] = p[24] ^ ((~p[20]) & p[21]);
 
-    s[0] ^= RC[r];
+    s[0] ^= RC[r + 1];
   }
 }
 
@@ -219,34 +219,9 @@ static FORCE_INLINE void inc_digits(char *buf, int *dlen)
   }
 }
 
-static FORCE_INLINE void prepare_template(uint64_t template_st[25],
-                                          const uint64_t base[25], size_t off0,
-                                          int dlen)
-{
-  memcpy(template_st, base, 25 * sizeof(uint64_t));
-  size_t pad_off = off0 + (size_t)dlen;
-  template_st[pad_off >> 3] ^= (uint64_t)0x06 << (8 * (pad_off & 7));
-  template_st[16] ^= (uint64_t)0x80 << 56;
-}
-
-static FORCE_INLINE int check_counter_fast(const uint64_t template_st[25],
-                                           size_t off0, const char *digits,
-                                           int dlen,
-                                           const uint64_t target64[4])
-{
-  uint64_t st[25];
-  memcpy(st, template_st, sizeof(st));
-  for (int i = 0; i < dlen; i++)
-    st[(off0 + (size_t)i) >> 3] ^= (uint64_t)(uint8_t)digits[i]
-                                   << (8 * ((off0 + (size_t)i) & 7));
-  keccak_f(st);
-  return (st[0] == target64[0]) && (st[1] == target64[1]) &&
-         (st[2] == target64[2]) && (st[3] == target64[3]);
-}
-
-static int check_counter_general(const uint64_t base[25], size_t off0,
-                                 const char *digits, int dlen,
-                                 const uint64_t target64[4])
+static FORCE_INLINE int check_counter(const uint64_t base[25], size_t off0,
+                                      const char *digits, int dlen,
+                                      const uint64_t target64[4])
 {
   uint64_t st[25];
   memcpy(st, base, sizeof(st));
@@ -262,6 +237,12 @@ static int check_counter_general(const uint64_t base[25], size_t off0,
     }
   }
   st[off >> 3] ^= (uint64_t)0x06 << (8 * (off & 7));
+  off++;
+  if (off == RATE)
+  {
+    keccak_f(st);
+    off = 0;
+  }
   st[16] ^= (uint64_t)0x80 << 56;
   keccak_f(st);
   return (st[0] == target64[0]) && (st[1] == target64[1]) &&
@@ -325,51 +306,13 @@ static void run_worker(WorkerArgs *a)
 
   char digits[MAX_DIGITS + 1];
   int dlen = to_digits(a->start, digits);
-  uint64_t next_dlen_c = 1;
-  for (int i = 0; i < dlen; i++)
-  {
-    if (next_dlen_c > UINT64_MAX / 10)
-    {
-      next_dlen_c = UINT64_MAX;
-      break;
-    }
-    next_dlen_c *= 10;
-  }
-
-  uint64_t template_st[25];
-  int can_fast = 0;
-  if (a->off0 + (size_t)dlen + 1 <= RATE)
-  {
-    prepare_template(template_st, a->base, a->off0, dlen);
-    can_fast = 1;
-  }
 
   for (uint64_t c = a->start; c < a->end; c++)
   {
     if ((c & 0x3ff) == 0 && c >= get_min_found())
       break;
 
-    if (c == next_dlen_c)
-    {
-      next_dlen_c = (next_dlen_c > UINT64_MAX / 10) ? UINT64_MAX
-                                                    : next_dlen_c * 10;
-      if (a->off0 + (size_t)dlen + 1 <= RATE)
-      {
-        prepare_template(template_st, a->base, a->off0, dlen);
-        can_fast = 1;
-      }
-      else
-      {
-        can_fast = 0;
-      }
-    }
-
-    int match = can_fast ? check_counter_fast(template_st, a->off0, digits,
-                                              dlen, a->target64)
-                         : check_counter_general(a->base, a->off0, digits, dlen,
-                                                 a->target64);
-
-    if (match)
+    if (check_counter(a->base, a->off0, digits, dlen, a->target64))
     {
       a->result = c;
       update_min_found(c);
@@ -522,13 +465,7 @@ int main(void)
   }
 
   uint64_t target64[4];
-  for (int i = 0; i < 4; i++)
-  {
-    uint64_t w = 0;
-    for (int b = 0; b < 8; b++)
-      w |= (uint64_t)target[i * 8 + b] << (8 * b);
-    target64[i] = w;
-  }
+  memcpy(target64, target, 32);
 
   char prefix[16500];
   int plen = snprintf(prefix, sizeof(prefix), "%s_%lld_", salt, expire_at);

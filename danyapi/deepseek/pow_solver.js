@@ -24,7 +24,6 @@ function solve(challenge, prefix, difficulty) {
       wasm_solve,
       __wbindgen_add_to_stack_pointer,
       __wbindgen_export_0: malloc,
-      __wbindgen_export_2: free,
     } = instance.exports;
     let m = new Uint8Array(memory.buffer);
     let view = new DataView(memory.buffer);
@@ -32,55 +31,31 @@ function solve(challenge, prefix, difficulty) {
       m = new Uint8Array(memory.buffer);
       view = new DataView(memory.buffer);
     }
-    const enc = new TextEncoder();
-    const hexBytes = enc.encode(challenge);
-    const pBytes = enc.encode(prefix);
-    const hexPtr = malloc(hexBytes.length, 1);
+    function writeStr(ptr, s) {
+      for (let i = 0; i < s.length; i++) m[ptr + i] = s.charCodeAt(i);
+    }
+    const hexPtr = malloc(challenge.length, 1);
     refresh();
-    m.set(hexBytes, hexPtr);
-    const pPtr = malloc(pBytes.length, 1);
+    writeStr(hexPtr, challenge);
+    const pPtr = malloc(prefix.length, 1);
     refresh();
-    m.set(pBytes, pPtr);
+    writeStr(pPtr, prefix);
     const retptr = __wbindgen_add_to_stack_pointer(-16);
     try {
-      try {
-        wasm_solve(
-          retptr,
-          hexPtr,
-          hexBytes.length,
-          pPtr,
-          pBytes.length,
-          difficulty,
-        );
-      } catch (e) {
-        wasm_solve(
-          retptr,
-          hexPtr,
-          hexBytes.length,
-          pPtr,
-          pBytes.length,
-          BigInt(difficulty),
-        );
-      }
+      wasm_solve(
+        retptr,
+        hexPtr,
+        challenge.length,
+        pPtr,
+        prefix.length,
+        difficulty,
+      );
       refresh();
       const status = view.getInt32(retptr, true);
-      if (status === 0) return null;
-      const floatVal = view.getFloat64(retptr + 8, true);
-      if (
-        Number.isInteger(floatVal) &&
-        floatVal >= 0 &&
-        floatVal <= Number.MAX_SAFE_INTEGER
-      ) {
-        return floatVal;
-      }
-      const bigVal = view.getBigUint64(retptr + 8, true);
-      return Number(bigVal);
+      const value = view.getFloat64(retptr + 8, true);
+      return status !== 0 ? Number(value) : null;
     } finally {
       __wbindgen_add_to_stack_pointer(16);
-      if (typeof free === "function") {
-        free(hexPtr, hexBytes.length, 1);
-        free(pPtr, pBytes.length, 1);
-      }
     }
   });
 }

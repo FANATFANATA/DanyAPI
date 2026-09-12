@@ -56,11 +56,6 @@ def build_solver() -> None:
             break
 
     if not chosen_compiler:
-        if not bin_path.exists() and not (ROOT / bin_name).exists():
-            print(
-                "Warning: no C compiler found in PATH to build pow_solver.",
-                file=sys.stderr,
-            )
         return
 
     success = False
@@ -105,16 +100,15 @@ def build_solver() -> None:
     if success:
         if not is_win:
             os.chmod(bin_path, 0o755)
-        root_bin = ROOT / bin_name
-        if bin_path.resolve() != root_bin.resolve():
-            shutil.copy2(bin_path, root_bin)
-            if not is_win:
-                os.chmod(root_bin, 0o755)
-        print(
-            f"Native pow_solver successfully compiled via {chosen_compiler} ({bin_name})"
-        )
-    elif not bin_path.exists() and not (ROOT / bin_name).exists():
-        print("Warning: failed to compile native pow_solver.", file=sys.stderr)
+        dest_dirs = [ROOT, ROOT / "danyapi", ROOT / "danyapi" / "solver"]
+        for d in dest_dirs:
+            if d.exists():
+                dst = d / bin_name
+                if dst.resolve() != bin_path.resolve():
+                    shutil.copy2(bin_path, dst)
+                    if not is_win:
+                        os.chmod(dst, 0o755)
+        print(f"Native pow_solver compiled via {chosen_compiler} ({bin_name})")
 
 
 def main() -> None:
