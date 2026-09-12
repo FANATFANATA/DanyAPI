@@ -56,6 +56,8 @@ class Settings:
         self.deepseek_tokens = tokens
         qwen_tokens = [t.strip() for t in os.environ.get("QWEN_TOKENS", "").split(",") if t.strip()]
         self.qwen_tokens = qwen_tokens
+        raw_byok = os.environ.get("BYOK") or os.environ.get("BYOK_MODE") or os.environ.get("DANYAPI_BYOK_MODE") or ""
+        self.byok = raw_byok.strip().lower() in ("1", "true", "yes", "on")
         self.timeout = _env_float("DANYAPI_TIMEOUT", 60.0)
         self.acquire_timeout = _env_float_opt("DANYAPI_ACQUIRE_TIMEOUT")
         self.session_cache_size = _env_int("DANYAPI_SESSION_CACHE_SIZE", 128)

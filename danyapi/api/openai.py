@@ -11,6 +11,7 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -223,6 +224,10 @@ def _token_stable_id(token: str) -> str:
 async def lifespan(app: FastAPI):
     accounts: list[DeepSeekAccount] = []
     qwen_accounts: list[QwenAccount] = []
+    byok_mode = settings.byok
+    app.state.byok = byok_mode
+    app.state.byok_pools = {"deepseek": {}, "qwen": {}}
+    app.state.byok_locks = {"deepseek": asyncio.Lock(), "qwen": asyncio.Lock()}
     cache_enabled = settings.cache_enabled
     deepseek_session_store = JsonStore("deepseek-sessions", "default" if cache_enabled else None)
     qwen_session_store = JsonStore("qwen-sessions", "default" if cache_enabled else None)
@@ -243,7 +248,7 @@ async def lifespan(app: FastAPI):
     else:
         app.state.usage = None
     try:
-        if settings.deepseek_tokens:
+        if not byok_mode and settings.deepseek_tokens:
             for i, token in enumerate(settings.deepseek_tokens):
                 ds_client = DeepSeekClient(token=token, timeout=settings.timeout)
                 if not await ds_client.check_auth():
@@ -261,7 +266,7 @@ async def lifespan(app: FastAPI):
                     )
                 )
             log.info("deepseek accounts ready: %d", len(accounts))
-        if settings.qwen_tokens:
+        if not byok_mode and settings.qwen_tokens:
             for i, token in enumerate(settings.qwen_tokens):
                 qw_client = QwenClient(token=token, timeout=settings.timeout)
                 if not await qw_client.check_auth():
@@ -302,7 +307,7 @@ async def lifespan(app: FastAPI):
         else:
             app.state.qwen_pool = None
             app.state.qwen_models = []
-        if not accounts and not qwen_accounts:
+        if not accounts and not qwen_accounts and not byok_mode:
             raise RuntimeError("no valid credentials: set DEEPSEEK_TOKENS or QWEN_TOKENS")
         yield
     finally:
@@ -310,6 +315,10 @@ async def lifespan(app: FastAPI):
         clients = [acct.client for acct in accounts] + [acct.client for acct in qwen_accounts]
         for pool_obj in (getattr(app.state, "pool", None), getattr(app.state, "qwen_pool", None)):
             if pool_obj is not None:
+                clients.extend(acct.client for acct in pool_obj.accounts)
+        byok_pools = getattr(app.state, "byok_pools", None)
+        if byok_pools is not None:
+            for pool_obj in list(byok_pools["deepseek"].values()) + list(byok_pools["qwen"].values()):
                 clients.extend(acct.client for acct in pool_obj.accounts)
         for client in clients:
             if id(client) in seen:
@@ -850,7 +859,7 @@ def _usage_summary() -> dict | None:
 async def health() -> dict:
     pool = getattr(app.state, "pool", None)
     qwen_pool = getattr(app.state, "qwen_pool", None)
-    return {
+    result = {
         "status": "ok",
         "deepseek": pool is not None,
         "qwen": qwen_pool is not None,
@@ -858,6 +867,14 @@ async def health() -> dict:
         "qwen_stats": _pool_stats(qwen_pool),
         "usage": _usage_summary(),
     }
+    if _byok_mode():
+        byok_pools = await _byok_pools_state()
+        result["byok"] = True
+        result["byok_pools"] = {
+            "deepseek": len(byok_pools["deepseek"]),
+            "qwen": len(byok_pools["qwen"]),
+        }
+    return result
 
 
 @app.get("/v1/usage")
@@ -937,9 +954,178 @@ def _resolve_provider(model: str) -> str:
     raise HTTPException(404, f"Unknown model: {model}")
 
 
+BYOK_POOL_LIMIT = 512
+
+
+def _byok_mode() -> bool:
+    return bool(getattr(app.state, "byok", False))
+
+
+async def _byok_pools_state() -> dict[str, dict[str, Any]]:
+    pools = getattr(app.state, "byok_pools", None)
+    if pools is None:
+        pools = {"deepseek": {}, "qwen": {}}
+        app.state.byok_pools = pools
+    return pools
+
+
+async def _byok_locks_state() -> dict[str, asyncio.Lock]:
+    locks = getattr(app.state, "byok_locks", None)
+    if locks is None:
+        locks = {"deepseek": asyncio.Lock(), "qwen": asyncio.Lock()}
+        app.state.byok_locks = locks
+    return locks
+
+
+async def _extract_request_api_key(request: Request) -> str | None:
+    auth = request.headers.get("authorization") or ""
+    if auth.lower().startswith("bearer "):
+        key = auth[7:].strip()
+        if key:
+            return key
+    key = (request.headers.get("x-api-key") or "").strip()
+    if key:
+        return key
+    content_type = request.headers.get("content-type") or ""
+    if not content_type.startswith("application/json"):
+        return None
+    try:
+        body = await request.body()
+    except Exception:
+        return None
+    if not body:
+        return None
+    try:
+        payload = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
+        return None
+    if isinstance(payload, dict):
+        api_key = payload.get("api_key")
+        if isinstance(api_key, str) and api_key.strip():
+            return api_key.strip()
+    return None
+
+
+async def _close_pool(pool: Any) -> None:
+    for acct in pool.accounts:
+        try:
+            acct.sessions.close_all()
+        except Exception as exc:
+            log.info("session cleanup failed for byok account %r: %s", getattr(acct, "label", acct), exc)
+        try:
+            await acct.client.aclose()
+        except Exception as exc:
+            log.info("client close failed for byok account %r: %s", getattr(acct, "label", acct), exc)
+
+
+async def _byok_pool(provider: str, tokens: list[str]) -> AccountPool:
+    if provider not in ("deepseek", "qwen"):
+        raise HTTPException(400, f"unknown provider: {provider}")
+    pools = await _byok_pools_state()
+    cache = pools[provider]
+    ids = tuple(_token_stable_id(token) for token in tokens)
+    cache_key = "|".join(ids)
+    pool = cache.get(cache_key)
+    if pool is not None and pool.healthy:
+        cache.pop(cache_key)
+        cache[cache_key] = pool
+        return pool
+    locks = await _byok_locks_state()
+    async with locks[provider]:
+        pool = cache.get(cache_key)
+        if pool is not None and pool.healthy:
+            return pool
+        if pool is not None:
+            cache.pop(cache_key, None)
+            await _close_pool(pool)
+        scope = ("byok-" + _token_stable_id(cache_key)) if settings.cache_enabled else None
+        if provider == "deepseek":
+            session_store = JsonStore("deepseek-sessions", scope) if settings.cache_enabled else None
+            context_store = JsonStore("deepseek-contexts", scope) if settings.cache_enabled else None
+            affinity_store = JsonStore("deepseek-affinities", scope) if settings.cache_enabled else None
+            accounts: list[DeepSeekAccount] = []
+            for i, token in enumerate(tokens):
+                ds_client = DeepSeekClient(token=token, timeout=settings.timeout)
+                if not await ds_client.check_auth():
+                    log.warning("byok deepseek token invalid/expired, skipping")
+                    await ds_client.aclose()
+                    continue
+                accounts.append(
+                    DeepSeekAccount(
+                        i,
+                        ds_client,
+                        session_cache_size=settings.session_cache_size,
+                        ttl=settings.session_ttl,
+                        store=session_store,
+                        stable_id=_token_stable_id(token),
+                    )
+                )
+            if not accounts:
+                raise HTTPException(401, "invalid deepseek api key")
+            pool = AccountPool(
+                accounts,
+                session_cache_size=settings.session_cache_size,
+                ttl=settings.session_ttl,
+                context_store=context_store,
+                affinity_store=affinity_store,
+            )
+        else:
+            session_store = JsonStore("qwen-sessions", scope) if settings.cache_enabled else None
+            context_store = JsonStore("qwen-contexts", scope) if settings.cache_enabled else None
+            affinity_store = JsonStore("qwen-affinities", scope) if settings.cache_enabled else None
+            qwen_accounts: list[QwenAccount] = []
+            for i, token in enumerate(tokens):
+                qw_client = QwenClient(token=token, timeout=settings.timeout)
+                if not await qw_client.check_auth():
+                    log.warning("byok qwen token invalid/expired, skipping")
+                    await qw_client.aclose()
+                    continue
+                qwen_accounts.append(
+                    QwenAccount(
+                        i,
+                        qw_client,
+                        session_cache_size=settings.session_cache_size,
+                        ttl=settings.session_ttl,
+                        store=session_store,
+                        stable_id=_token_stable_id(token),
+                    )
+                )
+            if not qwen_accounts:
+                raise HTTPException(401, "invalid qwen api key")
+            pool = AccountPool(
+                qwen_accounts,
+                label="qwen",
+                session_cache_size=settings.session_cache_size,
+                ttl=settings.session_ttl,
+                context_store=context_store,
+                affinity_store=affinity_store,
+            )
+            if not getattr(app.state, "qwen_models", None):
+                app.state.qwen_models = await _fetch_qwen_models(qwen_accounts[0].client)
+        cache[cache_key] = pool
+        while len(cache) > BYOK_POOL_LIMIT:
+            oldest_key, oldest_pool = next(iter(cache.items()))
+            cache.pop(oldest_key)
+            await _close_pool(oldest_pool)
+        return pool
+
+
+async def _byok_pool_for(provider: str, request: Request) -> AccountPool:
+    token = await _extract_request_api_key(request)
+    tokens = [t.strip() for t in (token or "").split(",") if t.strip()]
+    if not tokens:
+        raise HTTPException(401, f"missing api key for {provider} provider")
+    return await _byok_pool(provider, tokens)
+
+
 @app.post("/v1/chat/completions")
-async def chat_completions(req: ChatCompletionRequest) -> Any:
+async def chat_completions(req: ChatCompletionRequest, request: Request) -> Any:
     provider = _resolve_provider(req.model)
+    if _byok_mode():
+        pool = await _byok_pool_for(provider, request)
+        if provider == "qwen":
+            return await _chat_completions_qwen(req, pool=pool)
+        return await _chat_completions_deepseek(req, pool=pool)
     if provider == "qwen":
         return await _chat_completions_qwen(req)
     return await _chat_completions_deepseek(req)
@@ -971,8 +1157,16 @@ def _responses_chat_request(req: ResponsesRequest, provider_messages: list[dict]
 
 
 @app.post("/v1/responses")
-async def create_response(req: ResponsesRequest) -> Any:
-    provider_call = _responses_provider_call(req)
+async def create_response(req: ResponsesRequest, request: Request) -> Any:
+    if _byok_mode():
+        provider = _resolve_provider(req.model)
+        pool = await _byok_pool_for(provider, request)
+        if provider == "qwen":
+            provider_call = partial(_chat_completions_qwen, pool=pool)
+        else:
+            provider_call = partial(_chat_completions_deepseek, pool=pool)
+    else:
+        provider_call = _responses_provider_call(req)
     store = _responses_store()
     try:
         new_input = responses_api.normalize_input(req.input)
@@ -1061,8 +1255,20 @@ async def delete_response(response_id: str) -> dict:
 
 
 @app.post("/v1/images/generations")
-async def image_generations(req: ImageGenerationRequest) -> dict:
-    pool: AccountPool = app.state.qwen_pool
+async def image_generations(req: ImageGenerationRequest, request: Request) -> dict:
+    pool: AccountPool | None
+    if _byok_mode():
+        pool = await _byok_pool_for("qwen", request)
+    else:
+        pool = getattr(app.state, "qwen_pool", None)
+    if pool is None:
+        raise HTTPException(503, "qwen provider is not configured (required for image generation)")
+    return await _image_generations(req, pool)
+
+
+async def _image_generations(req: ImageGenerationRequest, pool: AccountPool | None = None) -> dict:
+    if pool is None:
+        pool = getattr(app.state, "qwen_pool", None)
     if pool is None:
         raise HTTPException(503, "qwen provider is not configured (required for image generation)")
 
@@ -1227,8 +1433,9 @@ async def _stream_guard(gen, model: str):
             yield line
 
 
-async def _chat_completions_deepseek(req: ChatCompletionRequest) -> Any:
-    pool: AccountPool = app.state.pool
+async def _chat_completions_deepseek(req: ChatCompletionRequest, pool: AccountPool | None = None) -> Any:
+    if pool is None:
+        pool = getattr(app.state, "pool", None)
     if pool is None:
         raise HTTPException(503, "deepseek provider is not configured")
 
@@ -1278,8 +1485,9 @@ async def _chat_completions_deepseek(req: ChatCompletionRequest) -> Any:
         raise HTTPException(429, "all accounts are busy, try again later") from None
 
 
-async def _chat_completions_qwen(req: ChatCompletionRequest) -> Any:
-    pool: AccountPool = app.state.qwen_pool
+async def _chat_completions_qwen(req: ChatCompletionRequest, pool: AccountPool | None = None) -> Any:
+    if pool is None:
+        pool = getattr(app.state, "qwen_pool", None)
     if pool is None:
         raise HTTPException(503, "qwen provider is not configured")
 

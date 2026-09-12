@@ -42,6 +42,25 @@ docker run -d -p 8000:8000 \
   ghcr.io/fanatfanata/danyapi:latest
 ```
 
+## BYOK mode (bring your own key)
+
+Set `BYOK=1` (or `BYOK_MODE=1`) in `.env` to switch from server-side `.env` tokens to per-request provider tokens. In this mode the client passes its own provider token(s) directly as the API key, and DanyAPI uses them for upstream requests instead of `DEEPSEEK_TOKENS`/`QWEN_TOKENS`:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="https://your-instance/v1/",
+    api_key="your-deepseek-or-qwen-token",   # sent upstream to the provider
+)
+```
+
+- The key is read from `Authorization: Bearer <key>`, `x-api-key` header, or the `api_key` body field (priority in that order).
+- Several keys can be supplied comma-separated (`api_key="tok1,tok2"`) - each valid key adds a parallel account, exactly like multiple `.env` tokens.
+- Models still select the provider: `deepseek-*` / listed DeepSeek models go to DeepSeek, `qwen*` / listed Qwen models go to Qwen with their corresponding key type.
+- Requests without a key (or with an invalid key for the selected provider) are rejected with `401`.
+- Qwen model list is fetched lazily from the first valid Qwen key used.
+
 ## Contacts
 
 [Creator](https://t.me/DanyaVoredom) · [Telegram channel](https://t.me/DanyAPIFree) · [Website](https://fanatfanata.github.io/DanyAPI/)

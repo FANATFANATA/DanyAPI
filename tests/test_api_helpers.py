@@ -2227,5 +2227,5 @@ async def test_image_generations_requires_qwen_pool():
     app.state.qwen_pool = None
     req = SimpleNamespace(size=None, session_id=None, prompt="x", model="q1")
     with pytest.raises(openai_mod.HTTPException) as excinfo:
-        await openai_mod.image_generations(req)
+        await openai_mod._image_generations(req)
     assert excinfo.value.status_code == 503
