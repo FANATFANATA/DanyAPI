@@ -161,7 +161,6 @@ static int to_digits(uint64_t v, char *buf)
   } while (v > 0);
   for (int i = 0; i < n; i++)
     buf[i] = tmp[n - 1 - i];
-  buf[n] = '\0';
   return n;
 }
 
@@ -181,7 +180,6 @@ static void inc_digits(char *buf, int *dlen)
     for (int j = 1; j <= *dlen; j++)
       buf[j] = '0';
     (*dlen)++;
-    buf[*dlen] = '\0';
   }
   else
   {
@@ -211,7 +209,6 @@ static int check_counter(const uint64_t base[25], size_t off0,
   if (off == RATE)
   {
     keccak_f(st);
-    off = 0;
   }
   st[16] ^= (uint64_t)0x80 << 56;
   keccak_f(st);
