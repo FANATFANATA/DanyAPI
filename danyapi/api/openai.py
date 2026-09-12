@@ -9,13 +9,13 @@ import random
 import re
 import time
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import Cookie, FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -1260,8 +1260,8 @@ async def _stream_guard(gen, model: str):
 
 async def _byok_deepseek(req: ChatCompletionRequest, request: Request | None) -> Any:
     from ..byok import get_manager as _get_byok_mgr
-    from ..sessions import SessionRegistry as DeepSeekSessionRegistry
     from ..pow import PowManager
+    from ..sessions import SessionRegistry as DeepSeekSessionRegistry
 
     session_key = None
     if request is not None:
@@ -1352,7 +1352,7 @@ async def _byok_deepseek(req: ChatCompletionRequest, request: Request | None) ->
                 nonlocal session_key
                 lock = asyncio.Lock()
                 async with lock:
-                    session, session_key = await sessions.obtain(existing_sid)
+                    _session, session_key = await sessions.obtain(existing_sid)
 
                 gen = _stream_openai(
                     account=common["account"],
@@ -1391,10 +1391,8 @@ async def _byok_deepseek(req: ChatCompletionRequest, request: Request | None) ->
                     yield tail
                     yield done
                 finally:
-                    try:
+                    with suppress(Exception):
                         await client.aclose()
-                    except Exception:
-                        pass
 
             return StreamingResponse(
                 _byok_stream(),
@@ -1405,7 +1403,7 @@ async def _byok_deepseek(req: ChatCompletionRequest, request: Request | None) ->
         # Non-stream path
         lock = asyncio.Lock()
         async with lock:
-            session, sid = await sessions.obtain(existing_sid)
+            _session, _sid = await sessions.obtain(existing_sid)
 
         try:
             result = await _collect_non_stream(
@@ -1441,18 +1439,14 @@ async def _byok_deepseek(req: ChatCompletionRequest, request: Request | None) ->
             log.error("deepseek byok completion failed: %s", exc)
             raise HTTPException(502, f"completion failed: {exc}") from exc
         finally:
-            try:
+            with suppress(Exception):
                 await client.aclose()
-            except Exception:
-                pass
 
     except HTTPException:
         raise
     except Exception as exc:
-        try:
+        with suppress(Exception):
             await client.aclose()
-        except Exception:
-            pass
         log.error("deepseek byok setup failed: %s", exc)
         raise HTTPException(502, str(exc)) from exc
 
@@ -1530,8 +1524,8 @@ async def _byok_qwen(req: ChatCompletionRequest, request: Request | None) -> Any
         }
 
         if req.stream:
-            created = int(time.time())
-            chunk_id = f"chatcmpl-{uuid.uuid4().hex}"
+            int(time.time())
+            f"chatcmpl-{uuid.uuid4().hex}"
 
             async def _byok_qwen_stream():
                 lock = asyncio.Lock()
@@ -1570,10 +1564,8 @@ async def _byok_qwen(req: ChatCompletionRequest, request: Request | None) -> Any
                     yield f"data: {err_data}\n\n"
                     yield "data: [DONE]\n\n"
                 finally:
-                    try:
+                    with suppress(Exception):
                         await client.aclose()
-                    except Exception:
-                        pass
 
             return StreamingResponse(
                 _byok_qwen_stream(),
@@ -1616,18 +1608,14 @@ async def _byok_qwen(req: ChatCompletionRequest, request: Request | None) -> Any
             log.error("qwen byok completion failed: %s", exc)
             raise HTTPException(502, f"completion failed: {exc}") from exc
         finally:
-            try:
+            with suppress(Exception):
                 await client.aclose()
-            except Exception:
-                pass
 
     except HTTPException:
         raise
     except Exception as exc:
-        try:
+        with suppress(Exception):
             await client.aclose()
-        except Exception:
-            pass
         log.error("qwen byok setup failed: %s", exc)
         raise HTTPException(502, str(exc)) from exc
 
