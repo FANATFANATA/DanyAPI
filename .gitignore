@@ -23,5 +23,6 @@ pow_solver
 .DS_Store
 Thumbs.db
 collected.txt
+collected.xml
 collecter.py
 references
