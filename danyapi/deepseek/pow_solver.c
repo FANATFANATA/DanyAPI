@@ -12,26 +12,45 @@
 
 #define RATE 136
 #define ROUNDS 23
-#define MAX_DIGITS 20
+#define MAX_DIGITS 32
 
 static const uint64_t RC[24] = {
-    0x0000000000000001ULL, 0x0000000000008082ULL, 0x800000000000808aULL,
-    0x8000000080008000ULL, 0x000000000000808bULL, 0x0000000080000001ULL,
-    0x8000000080008081ULL, 0x8000000000008009ULL, 0x000000000000008aULL,
-    0x0000000000000088ULL, 0x0000000080008009ULL, 0x000000008000000aULL,
-    0x000000008000808bULL, 0x800000000000008bULL, 0x8000000000008089ULL,
-    0x8000000000008003ULL, 0x8000000000008002ULL, 0x8000000000000080ULL,
-    0x000000000000800aULL, 0x800000008000000aULL, 0x8000000080008081ULL,
-    0x8000000000008080ULL, 0x0000000080000001ULL, 0x8000000080008008ULL,
+    0x0000000000000001ULL,
+    0x0000000000008082ULL,
+    0x800000000000808aULL,
+    0x8000000080008000ULL,
+    0x000000000000808bULL,
+    0x0000000080000001ULL,
+    0x8000000080008081ULL,
+    0x8000000000008009ULL,
+    0x000000000000008aULL,
+    0x0000000000000088ULL,
+    0x0000000080008009ULL,
+    0x000000008000000aULL,
+    0x000000008000808bULL,
+    0x800000000000008bULL,
+    0x8000000000008089ULL,
+    0x8000000000008003ULL,
+    0x8000000000008002ULL,
+    0x8000000000000080ULL,
+    0x000000000000800aULL,
+    0x800000008000000aULL,
+    0x8000000080008081ULL,
+    0x8000000000008080ULL,
+    0x0000000080000001ULL,
+    0x8000000080008008ULL,
 };
 
-static inline uint64_t rotl64(uint64_t x, int n) {
+static inline uint64_t rotl64(uint64_t x, int n)
+{
   return (x << n) | (x >> (64 - n));
 }
 
-static void keccak_f(uint64_t *s) {
+static void keccak_f(uint64_t *s)
+{
   uint64_t bc[5], t, p[25];
-  for (int r = 0; r < ROUNDS; r++) {
+  for (int r = 0; r < ROUNDS; r++)
+  {
     bc[0] = s[0] ^ s[5] ^ s[10] ^ s[15] ^ s[20];
     bc[1] = s[1] ^ s[6] ^ s[11] ^ s[16] ^ s[21];
     bc[2] = s[2] ^ s[7] ^ s[12] ^ s[17] ^ s[22];
@@ -95,7 +114,8 @@ static void keccak_f(uint64_t *s) {
     p[19] = rotl64(s[23], 56);
     p[4] = rotl64(s[24], 14);
 
-    for (int y = 0; y < 25; y += 5) {
+    for (int y = 0; y < 25; y += 5)
+    {
       uint64_t a0 = p[y], a1 = p[y + 1], a2 = p[y + 2], a3 = p[y + 3],
                a4 = p[y + 4];
       s[y] = a0 ^ ((~a1) & a2);
@@ -108,11 +128,14 @@ static void keccak_f(uint64_t *s) {
   }
 }
 
-static void absorb_prefix(uint64_t st[25], const uint8_t *prefix, size_t len) {
+static void absorb_prefix(uint64_t st[25], const uint8_t *prefix, size_t len)
+{
   memset(st, 0, 25 * sizeof(uint64_t));
   size_t off = 0;
-  while (len - off >= RATE) {
-    for (size_t i = 0; i < RATE; i += 8) {
+  while (len - off >= RATE)
+  {
+    for (size_t i = 0; i < RATE; i += 8)
+    {
       uint64_t w = 0;
       for (int b = 0; b < 8; b++)
         w |= (uint64_t)prefix[off + i + b] << (8 * b);
@@ -125,10 +148,12 @@ static void absorb_prefix(uint64_t st[25], const uint8_t *prefix, size_t len) {
     st[i / 8] ^= (uint64_t)prefix[off + i] << (8 * (i % 8));
 }
 
-static int to_digits(uint64_t v, char *buf) {
-  char tmp[MAX_DIGITS];
+static int to_digits(uint64_t v, char *buf)
+{
+  char tmp[MAX_DIGITS + 1];
   int n = 0;
-  do {
+  do
+  {
     if (n >= MAX_DIGITS)
       break;
     tmp[n++] = (char)('0' + (int)(v % 10));
@@ -139,41 +164,50 @@ static int to_digits(uint64_t v, char *buf) {
   return n;
 }
 
-static void inc_digits(char *buf, int *dlen) {
-  if (*dlen < 1 || *dlen > MAX_DIGITS)
+static void inc_digits(char *buf, int *dlen)
+{
+  if (*dlen < 1 || *dlen >= MAX_DIGITS)
     return;
   int i = *dlen - 1;
-  while (i >= 0 && buf[i] == '9') {
+  while (i >= 0 && buf[i] == '9')
+  {
     buf[i] = '0';
     i--;
   }
-  if (i < 0) {
+  if (i < 0)
+  {
     buf[0] = '1';
     for (int j = 1; j <= *dlen; j++)
       buf[j] = '0';
     (*dlen)++;
-  } else {
+  }
+  else
+  {
     buf[i]++;
   }
 }
 
 static int check_counter(const uint64_t base[25], size_t off0,
                          const char *digits, int dlen,
-                         const uint8_t target[32]) {
+                         const uint8_t target[32])
+{
   uint64_t st[25];
   memcpy(st, base, sizeof(st));
   size_t off = off0;
-  for (int i = 0; i < dlen; i++) {
+  for (int i = 0; i < dlen; i++)
+  {
     st[off >> 3] ^= (uint64_t)(uint8_t)digits[i] << (8 * (off & 7));
     off++;
-    if (off == RATE) {
+    if (off == RATE)
+    {
       keccak_f(st);
       off = 0;
     }
   }
   st[off >> 3] ^= (uint64_t)0x06 << (8 * (off & 7));
   off++;
-  if (off == RATE) {
+  if (off == RATE)
+  {
     keccak_f(st);
   }
   st[16] ^= (uint64_t)0x80 << 56;
@@ -181,7 +215,8 @@ static int check_counter(const uint64_t base[25], size_t off0,
   return memcmp(st, target, 32) == 0;
 }
 
-typedef struct {
+typedef struct
+{
   const uint64_t *base;
   size_t off0;
   const uint8_t *target;
@@ -190,14 +225,17 @@ typedef struct {
   uint64_t result;
 } WorkerArgs;
 
-static void run_worker(WorkerArgs *a) {
+static void run_worker(WorkerArgs *a)
+{
   a->result = UINT64_MAX;
   if (a->start >= a->end)
     return;
-  char digits[MAX_DIGITS];
+  char digits[MAX_DIGITS + 1];
   int dlen = to_digits(a->start, digits);
-  for (uint64_t c = a->start; c < a->end; c++) {
-    if (check_counter(a->base, a->off0, digits, dlen, a->target)) {
+  for (uint64_t c = a->start; c < a->end; c++)
+  {
+    if (check_counter(a->base, a->off0, digits, dlen, a->target))
+    {
       a->result = c;
       return;
     }
@@ -206,18 +244,21 @@ static void run_worker(WorkerArgs *a) {
 }
 
 #if defined(_WIN32)
-static DWORD WINAPI worker(LPVOID arg) {
+static DWORD WINAPI worker(LPVOID arg)
+{
   run_worker((WorkerArgs *)arg);
   return 0;
 }
 #else
-static void *worker(void *arg) {
+static void *worker(void *arg)
+{
   run_worker((WorkerArgs *)arg);
   return NULL;
 }
 #endif
 
-static int detect_threads(void) {
+static int detect_threads(void)
+{
 #if defined(_WIN32)
   SYSTEM_INFO si;
   GetSystemInfo(&si);
@@ -229,11 +270,13 @@ static int detect_threads(void) {
 #endif
 }
 
-static int hex_to_bytes(const char *hex, uint8_t *out) {
+static int hex_to_bytes(const char *hex, uint8_t *out)
+{
   size_t n = strlen(hex);
   if (n % 2)
     return -1;
-  for (size_t i = 0; i < n; i += 2) {
+  for (size_t i = 0; i < n; i += 2)
+  {
     int hi = hex[i], lo = hex[i + 1];
     int hv = (hi >= '0' && hi <= '9')   ? hi - '0'
              : (hi >= 'a' && hi <= 'f') ? hi - 'a' + 10
@@ -251,7 +294,8 @@ static int hex_to_bytes(const char *hex, uint8_t *out) {
 }
 
 static const char *find_json_str(const char *json, const char *key, char *buf,
-                                 size_t bufsz) {
+                                 size_t bufsz)
+{
   char pat[64];
   snprintf(pat, sizeof(pat), "\"%s\"", key);
   const char *p = strstr(json, pat);
@@ -273,7 +317,8 @@ static const char *find_json_str(const char *json, const char *key, char *buf,
   return buf;
 }
 
-static long long find_json_ll(const char *json, const char *key) {
+static long long find_json_ll(const char *json, const char *key)
+{
   char pat[64];
   snprintf(pat, sizeof(pat), "\"%s\"", key);
   const char *p = strstr(json, pat);
@@ -285,33 +330,38 @@ static long long find_json_ll(const char *json, const char *key) {
   return strtoll(p + 1, NULL, 10);
 }
 
-int main(void) {
+int main(void)
+{
   char input[8192];
   size_t n = fread(input, 1, sizeof(input) - 1, stdin);
   input[n] = '\0';
 
   char challenge[128] = {0}, salt[4096] = {0};
   if (!find_json_str(input, "challenge", challenge, sizeof(challenge)) ||
-      !find_json_str(input, "salt", salt, sizeof(salt))) {
+      !find_json_str(input, "salt", salt, sizeof(salt)))
+  {
     puts("{\"error\":\"missing challenge/salt\"}");
     return 1;
   }
   long long expire_at = find_json_ll(input, "expire_at");
   long long difficulty = find_json_ll(input, "difficulty");
-  if (expire_at < 0 || difficulty <= 0) {
+  if (expire_at < 0 || difficulty <= 0)
+  {
     puts("{\"error\":\"bad expire_at/difficulty\"}");
     return 1;
   }
 
   uint8_t target[32];
-  if (hex_to_bytes(challenge, target) != 32) {
+  if (hex_to_bytes(challenge, target) != 32)
+  {
     puts("{\"error\":\"bad challenge hex\"}");
     return 1;
   }
 
   char prefix[4120];
   int plen = snprintf(prefix, sizeof(prefix), "%s_%lld_", salt, expire_at);
-  if (plen < 0 || (size_t)plen >= sizeof(prefix)) {
+  if (plen < 0 || (size_t)plen >= sizeof(prefix))
+  {
     puts("{\"error\":\"salt too long\"}");
     return 1;
   }
@@ -322,14 +372,16 @@ int main(void) {
 
   uint64_t limit =
       difficulty < 2000000000LL ? (uint64_t)difficulty : 2000000000ULL;
-  if (limit == 0) {
+  if (limit == 0)
+  {
     puts("{\"error\":\"answer not found in range\"}");
     return 1;
   }
 
   int nthreads = detect_threads();
   const char *env = getenv("POW_SOLVER_THREADS");
-  if (env && env[0]) {
+  if (env && env[0])
+  {
     int v = atoi(env);
     if (v > 0)
       nthreads = v;
@@ -342,7 +394,8 @@ int main(void) {
     nthreads = (int)limit;
 
   WorkerArgs *args = (WorkerArgs *)calloc((size_t)nthreads, sizeof(WorkerArgs));
-  if (!args) {
+  if (!args)
+  {
     puts("{\"error\":\"out of memory\"}");
     return 1;
   }
@@ -351,14 +404,16 @@ int main(void) {
 #else
   pthread_t *threads = (pthread_t *)calloc((size_t)nthreads, sizeof(pthread_t));
 #endif
-  if (!threads) {
+  if (!threads)
+  {
     free(args);
     puts("{\"error\":\"out of memory\"}");
     return 1;
   }
 
   uint64_t chunk = (limit + (uint64_t)nthreads - 1) / (uint64_t)nthreads;
-  for (int i = 0; i < nthreads; i++) {
+  for (int i = 0; i < nthreads; i++)
+  {
     args[i].base = base;
     args[i].off0 = off0;
     args[i].target = target;
@@ -376,8 +431,10 @@ int main(void) {
   }
 
 #if defined(_WIN32)
-  for (int i = 0; i < nthreads; i++) {
-    if (threads[i]) {
+  for (int i = 0; i < nthreads; i++)
+  {
+    if (threads[i])
+    {
       WaitForSingleObject(threads[i], INFINITE);
       CloseHandle(threads[i]);
     }
@@ -395,7 +452,8 @@ int main(void) {
   free(threads);
   free(args);
 
-  if (best != UINT64_MAX) {
+  if (best != UINT64_MAX)
+  {
     printf("{\"answer\":%llu}\n", (unsigned long long)best);
     return 0;
   }
