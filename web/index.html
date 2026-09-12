@@ -1,964 +1,1104 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en" data-theme="black">
-<head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>DanyAPI</title>
-<meta name="description" content="DanyAPI free OpenAI-compatible API. Manage your tokens or register as a new user." />
-<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2040%2040'%3E%3Cdefs%3E%3ClinearGradient%20id='g'%20x1='0'%20y1='0'%20x2='1'%20y2='1'%3E%3Cstop%20offset='0'%20stop-color='%236c7bff'/%3E%3Cstop%20offset='1'%20stop-color='%2322d3ee'/%3E%3C/linearGradient%3E%3C/defs%3E%3Cpath%20d='M20%202.5L35%2011V29L20%2037.5L5%2029V11Z'%20fill='none'%20stroke='url(%23g)'%20stroke-width='2.6'%20stroke-linejoin='round'/%3E%3Cpath%20d='M20%2013.5L12.5%2026.5H27.5Z'%20fill='none'%20stroke='url(%23g)'%20stroke-width='1.8'%20stroke-linejoin='round'/%3E%3Ccircle%20cx='20'%20cy='13.5'%20r='3'%20fill='url(%23g)'/%3E%3Ccircle%20cx='12.5'%20cy='26.5'%20r='3'%20fill='url(%23g)'/%3E%3Ccircle%20cx='27.5'%20cy='26.5'%20r='3'%20fill='url(%23g)'/%3E%3C/svg%3E" />
-<link rel="preconnect" href="https://fonts.googleapis.com" />
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link href="https://fonts.googleapis.com/css2?family=Unbounded:wght@500;700;900&family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
-<style>
-*,
-*::before,
-*::after {
-    box-sizing: border-box;
-    margin: 0;
-    padding: 0;
-}
-
-:root {
-    --font-disp: "Unbounded", sans-serif;
-    --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-    --font-mono: "SF Mono", "Fira Code", "Cascadia Code", "JetBrains Mono", Consolas, monospace;
-    --accent: #6366f1;
-    --accent-strong: #818cf8;
-    --accent-soft: rgba(99, 102, 241, 0.14);
-    --bg-body: #0b0d12;
-    --bg-container: #11151d;
-    --bg-elevated: #161b26;
-    --shadow: rgba(0, 0, 0, 0.55);
-    --text: #e7e9ee;
-    --text-soft: #a7adbb;
-    --text-muted: #7d8494;
-    --text-faint: #5b6270;
-    --heading: #f4f6fa;
-    --link: #a5aaf5;
-    --link-hover: #c7cbfb;
-    --border: #1e2430;
-    --border-strong: #2a3141;
-    --l-bg: #06070c;
-    --l-surface: #0d1119;
-    --l-surface-2: #121726;
-    --l-border: rgba(255, 255, 255, 0.08);
-    --l-border-strong: rgba(255, 255, 255, 0.16);
-    --l-text: #e9edf5;
-    --l-muted: #9aa3b5;
-    --l-faint: #5d6577;
-    --l-accent: #6c7bff;
-    --l-accent-2: #22d3ee;
-    --l-grad: linear-gradient(120deg, #6c7bff 0%, #22d3ee 100%);
-    --l-green: #34d399;
-    --l-red: #ff5f56;
-    --l-amber: #f5b04c;
-}
-
-html {
-    scroll-behavior: smooth;
-    font-size: 15px;
-}
-
-body {
-    font-family: var(--font-body);
-    background: var(--bg-body);
-    color: var(--text);
-    line-height: 1.7;
-    -webkit-font-smoothing: antialiased;
-    text-rendering: optimizeLegibility;
-    min-height: 100vh;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 2rem 1rem;
-}
-
-body::before {
-    content: "";
-    position: fixed;
-    inset: 0;
-    z-index: -1;
-    pointer-events: none;
-    background:
-        radial-gradient(900px 520px at 85% -10%, var(--accent-soft), transparent 60%),
-        radial-gradient(760px 480px at -10% 105%, var(--accent-soft), transparent 60%);
-}
-
-.bg-grid {
-    position: fixed;
-    inset: 0;
-    z-index: -3;
-    pointer-events: none;
-    background-image:
-        linear-gradient(var(--l-border) 1px, transparent 1px),
-        linear-gradient(90deg, var(--l-border) 1px, transparent 1px);
-    background-size: 56px 56px;
-    opacity: 0.5;
-    -webkit-mask-image: radial-gradient(ellipse 100% 62% at 50% 0%, #000 0%, transparent 78%);
-    mask-image: radial-gradient(ellipse 100% 62% at 50% 0%, #000 0%, transparent 78%);
-}
-
-.bg-glow {
-    position: fixed;
-    z-index: -2;
-    pointer-events: none;
-    border-radius: 50%;
-    filter: blur(110px);
-    opacity: 0.5;
-}
-
-.bg-glow-a {
-    width: 640px;
-    height: 640px;
-    top: -220px;
-    left: 50%;
-    transform: translateX(-50%);
-    background: radial-gradient(circle, rgba(108, 123, 255, 0.55), transparent 65%);
-}
-
-.bg-glow-b {
-    width: 520px;
-    height: 520px;
-    bottom: -180px;
-    right: -140px;
-    background: radial-gradient(circle, rgba(34, 211, 238, 0.35), transparent 65%);
-}
-
-.noise {
-    position: fixed;
-    inset: 0;
-    z-index: 60;
-    pointer-events: none;
-    opacity: 0.035;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23n)'/%3E%3C/svg%3E");
-}
-
-.container {
-    position: relative;
-    z-index: 1;
-    background: var(--l-surface);
-    border: 1px solid var(--l-border-strong);
-    border-radius: 20px;
-    padding: 3rem 2.5rem;
-    max-width: 520px;
-    width: 100%;
-    box-shadow: 0 30px 80px -30px rgba(0, 0, 0, 0.7);
-}
-
-.brand {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.6rem;
-    text-decoration: none;
-    border-bottom: none;
-    transition: transform 0.2s ease;
-}
-
-.brand:hover {
-    transform: translateY(-1px);
-}
-
-.brand-logo {
-    width: 36px;
-    height: 36px;
-    display: block;
-    filter: drop-shadow(0 2px 10px rgba(108, 123, 255, 0.5));
-    transition: transform 0.5s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-.brand:hover .brand-logo {
-    animation: logo-spin 0.6s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-@keyframes logo-spin {
-    from { transform: rotate(0deg); }
-    to { transform: rotate(360deg); }
-}
-
-.brand-name {
-    font-family: var(--font-disp);
-    font-weight: 700;
-    font-size: 1.15rem;
-    letter-spacing: -0.02em;
-    color: var(--l-text);
-}
-
-.brand-accent {
-    background: var(--l-grad);
-    -webkit-background-clip: text;
-    background-clip: text;
-    -webkit-text-fill-color: transparent;
-    color: transparent;
-}
-
-.header {
-    text-align: center;
-    margin-bottom: 2.2rem;
-}
-
-.header h1 {
-    font-family: var(--font-disp);
-    font-weight: 700;
-    font-size: clamp(1.4rem, 3vw, 1.8rem);
-    line-height: 1.25;
-    letter-spacing: -0.02em;
-    margin-bottom: 0.6rem;
-    color: var(--l-text);
-}
-
-.header .grad-text {
-    background: var(--l-grad);
-    -webkit-background-clip: text;
-    background-clip: text;
-    -webkit-text-fill-color: transparent;
-    color: transparent;
-}
-
-.header p {
-    color: var(--l-muted);
-    font-size: 0.95rem;
-}
-
-.form-group {
-    margin-bottom: 1.3rem;
-}
-
-.form-group label {
-    display: block;
-    margin-bottom: 0.5rem;
-    color: var(--l-muted);
-    font-size: 0.85rem;
-    font-weight: 600;
-    font-family: var(--font-mono);
-    letter-spacing: 0.04em;
-}
-
-.form-group input {
-    width: 100%;
-    padding: 0.75rem 1rem;
-    background: rgba(255, 255, 255, 0.04);
-    border: 1px solid var(--l-border-strong);
-    border-radius: 11px;
-    color: var(--l-text);
-    font-size: 0.92rem;
-    font-family: var(--font-mono);
-    transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
-}
-
-.form-group input:focus {
-    outline: none;
-    border-color: var(--l-accent);
-    box-shadow: 0 0 0 3px rgba(108, 123, 255, 0.2);
-    background: rgba(255, 255, 255, 0.06);
-}
-
-.form-group input::placeholder {
-    color: var(--l-faint);
-}
-
-.info-box {
-    background: rgba(108, 123, 255, 0.06);
-    border-left: 3px solid var(--l-accent);
-    padding: 1rem 1.2rem;
-    margin: 1.4rem 0;
-    border-radius: 0 11px 11px 0;
-    font-size: 0.85rem;
-    color: var(--l-muted);
-    line-height: 1.6;
-}
-
-.info-box strong {
-    color: var(--l-text);
-}
-
-.status {
-    margin-top: 1.2rem;
-    padding: 0.75rem 1rem;
-    border-radius: 11px;
-    font-size: 0.88rem;
-    font-weight: 600;
-    display: none;
-    animation: slideIn 0.3s ease;
-}
-
-@keyframes slideIn {
-    from { opacity: 0; transform: translateY(-8px); }
-    to { opacity: 1; transform: translateY(0); }
-}
-
-.status.success {
-    background: rgba(52, 211, 153, 0.1);
-    border: 1px solid rgba(52, 211, 153, 0.3);
-    color: var(--l-green);
-    display: block;
-}
-
-.status.error {
-    background: rgba(255, 95, 86, 0.1);
-    border: 1px solid rgba(255, 95, 86, 0.3);
-    color: var(--l-red);
-    display: block;
-}
-
-.status.loading {
-    background: rgba(108, 123, 255, 0.1);
-    border: 1px solid rgba(108, 123, 255, 0.3);
-    color: var(--l-accent-2);
-    display: block;
-}
-
-.btn {
-    flex: 1;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 0.5rem;
-    padding: 0.85rem 1.5rem;
-    border-radius: 11px;
-    font-family: var(--font-body);
-    font-weight: 700;
-    font-size: 0.95rem;
-    border: 1px solid transparent;
-    cursor: pointer;
-    color: var(--l-text);
-    text-decoration: none;
-    transition: transform 0.18s ease, box-shadow 0.25s ease, background 0.25s, color 0.25s, border-color 0.25s;
-    white-space: nowrap;
-    position: relative;
-    overflow: hidden;
-    width: 100%;
-    margin-top: 1.6rem;
-}
-
-.btn:hover {
-    transform: translateY(-2px);
-}
-
-.btn:active {
-    transform: translateY(0);
-}
-
-.btn-primary {
-    background: var(--l-grad);
-    color: #fff;
-    box-shadow: 0 10px 30px -12px rgba(108, 123, 255, 0.7);
-}
-
-.btn-primary:hover {
-    box-shadow: 0 16px 40px -12px rgba(108, 123, 255, 0.85);
-}
-
-.btn-secondary {
-    background: rgba(255, 255, 255, 0.05);
-    border-color: var(--l-border-strong);
-    color: var(--l-muted);
-}
-
-.btn-secondary:hover {
-    background: rgba(255, 255, 255, 0.08);
-    color: var(--l-text);
-}
-
-.btn-sm {
-    padding: 0.5rem 1rem;
-    font-size: 0.82rem;
-    margin-top: 0;
-    width: auto;
-}
-
-.token-list {
-    margin-top: 1.2rem;
-}
-
-.token-item {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 0.6rem 0.8rem;
-    background: rgba(255, 255, 255, 0.03);
-    border: 1px solid var(--l-border);
-    border-radius: 8px;
-    margin-bottom: 0.5rem;
-    font-size: 0.85rem;
-}
-
-.token-item .provider-name {
-    font-family: var(--font-mono);
-    color: var(--l-accent-2);
-    font-weight: 600;
-}
-
-.token-item .token-token {
-    color: var(--l-muted);
-    font-family: var(--font-mono);
-    font-size: 0.78rem;
-    flex: 1;
-    margin: 0 0.8rem;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-
-.auth-section {
-    margin-top: 2.2rem;
-    padding-top: 1.6rem;
-    border-top: 1px solid var(--l-border);
-}
-
-.auth-toggle {
-    display: flex;
-    gap: 0.5rem;
-    margin-bottom: 1.2rem;
-}
-
-.auth-toggle button {
-    flex: 1;
-    padding: 0.55rem 1rem;
-    border: 1px solid var(--l-border-strong);
-    background: transparent;
-    color: var(--l-muted);
-    border-radius: 8px;
-    font-family: var(--font-mono);
-    font-size: 0.8rem;
-    font-weight: 600;
-    cursor: pointer;
-    transition: background 0.2s, color 0.2s;
-}
-
-.auth-toggle button.active {
-    background: var(--accent-soft);
-    color: var(--l-text);
-    border-color: var(--l-accent);
-}
-
-.hidden {
-    display: none !important;
-}
-
-.footer-link {
-    display: block;
-    text-align: center;
-    margin-top: 1.4rem;
-    font-size: 0.82rem;
-    color: var(--l-faint);
-}
-
-.usage-section {
-    margin-top: 2.2rem;
-    padding-top: 1.6rem;
-    border-top: 1px solid var(--l-border);
-}
-
-.usage-title {
-    font-family: var(--font-disp);
-    font-weight: 700;
-    font-size: 1rem;
-    letter-spacing: -0.01em;
-    color: var(--l-text);
-    margin-bottom: 1rem;
-}
-
-.usage-cards {
-    display: grid;
-    grid-template-columns: repeat(2, 1fr);
-    gap: 0.7rem;
-    margin-bottom: 1.2rem;
-}
-
-.usage-card {
-    background: rgba(255, 255, 255, 0.04);
-    border: 1px solid var(--l-border);
-    border-radius: 11px;
-    padding: 0.8rem 1rem;
-}
-
-.usage-num {
-    font-family: var(--font-mono);
-    font-weight: 700;
-    font-size: 1.15rem;
-    color: var(--l-accent-2);
-    word-break: break-all;
-}
-
-.usage-label {
-    font-size: 0.72rem;
-    color: var(--l-muted);
-    margin-top: 0.2rem;
-    letter-spacing: 0.03em;
-}
-
-.usage-models {
-    margin-top: 0.4rem;
-}
-
-.usage-models h3 {
-    font-size: 0.8rem;
-    font-weight: 700;
-    color: var(--l-muted);
-    margin-bottom: 0.5rem;
-    letter-spacing: 0.04em;
-}
-
-.usage-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 0.78rem;
-}
-
-.usage-table th,
-.usage-table td {
-    text-align: left;
-    padding: 0.4rem 0.5rem;
-    border-bottom: 1px solid var(--l-border);
-    color: var(--l-muted);
-}
-
-.usage-table th {
-    color: var(--l-faint);
-    font-weight: 600;
-    font-size: 0.7rem;
-    letter-spacing: 0.04em;
-}
-
-.usage-table td:first-child {
-    color: var(--l-text);
-    font-family: var(--font-mono);
-    word-break: break-all;
-}
-
-.usage-table td:last-child,
-.usage-table th:last-child {
-    text-align: right;
-}
-
-.usage-loading,
-.usage-error {
-    font-size: 0.85rem;
-    color: var(--l-muted);
-    padding: 0.4rem 0;
-}
-
-.usage-error {
-    color: var(--l-red);
-}
-
-.footer-link a {
-    color: var(--l-muted);
-    text-decoration: none;
-    border-bottom: 1px solid transparent;
-    transition: color 0.2s, border-color 0.2s;
-}
-
-.footer-link a:hover {
-    color: var(--l-accent-2);
-    border-bottom-color: var(--l-accent-2);
-}
-
-@media (max-width: 480px) {
-    body {
-        padding: 1rem 0.6rem;
-        align-items: flex-start;
-        padding-top: 2rem;
-    }
-
-    .container {
-        padding: 2rem 1.3rem;
-        border-radius: 16px;
-    }
-
-    .header h1 {
-        font-size: 1.3rem;
-    }
-}
-
-@media (prefers-reduced-motion: reduce) {
-    .brand-logo {
-        animation: none !important;
-    }
-
-    * {
-        transition-duration: 0.01ms !important;
-        animation-duration: 0.01ms !important;
-    }
-}
-
-:focus-visible {
-    outline: 2px solid var(--l-accent);
-    outline-offset: 2px;
-}
-
-::selection {
-    background: var(--accent-soft);
-    color: var(--heading);
-}
-</style>
-</head>
-<body>
-<div class="bg-grid" aria-hidden="true"></div>
-<div class="bg-glow bg-glow-a" aria-hidden="true"></div>
-<div class="bg-glow bg-glow-b" aria-hidden="true"></div>
-<div class="noise" aria-hidden="true"></div>
-
-<div class="container">
-    <div class="header">
-        <a class="brand" href="/" style="margin-bottom:1.4rem;display:inline-flex">
-            <svg class="brand-logo" viewBox="0 0 40 40" aria-hidden="true">
-                <defs>
-                    <linearGradient id="brand-grad" x1="0" y1="0" x2="1" y2="1">
-                        <stop offset="0" stop-color="#6c7bff"></stop>
-                        <stop offset="1" stop-color="#22d3ee"></stop>
-                    </linearGradient>
-                </defs>
-                <path d="M20 2.5 L35 11 V29 L20 37.5 L5 29 V11 Z" fill="none" stroke="url(#brand-grad)" stroke-width="2.6" stroke-linejoin="round"></path>
-                <path d="M20 13.5 L12.5 26.5 H27.5 Z" fill="none" stroke="url(#brand-grad)" stroke-width="1.8" stroke-linejoin="round"></path>
-                <circle cx="20" cy="13.5" r="3" fill="url(#brand-grad)"></circle>
-                <circle cx="12.5" cy="26.5" r="3" fill="url(#brand-grad)"></circle>
-                <circle cx="27.5" cy="26.5" r="3" fill="url(#brand-grad)"></circle>
-            </svg>
-            <span class="brand-name">Dany<span class="brand-accent">API</span></span>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DanyAPI</title>
+    <meta
+      name="description"
+      content="DanyAPI free OpenAI-compatible API. Manage your tokens or register as a new user."
+    />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2040%2040'%3E%3Cdefs%3E%3ClinearGradient%20id='g'%20x1='0'%20y1='0'%20x2='1'%20y2='1'%3E%3Cstop%20offset='0'%20stop-color='%236c7bff'/%3E%3Cstop%20offset='1'%20stop-color='%2322d3ee'/%3E%3C/linearGradient%3E%3C/defs%3E%3Cpath%20d='M20%202.5L35%2011V29L20%2037.5L5%2029V11Z'%20fill='none'%20stroke='url(%23g)'%20stroke-width='2.6'%20stroke-linejoin='round'/%3E%3Cpath%20d='M20%2013.5L12.5%2026.5H27.5Z'%20fill='none'%20stroke='url(%23g)'%20stroke-width='1.8'%20stroke-linejoin='round'/%3E%3Ccircle%20cx='20'%20cy='13.5'%20r='3'%20fill='url(%23g)'/%3E%3Ccircle%20cx='12.5'%20cy='26.5'%20r='3'%20fill='url(%23g)'/%3E%3Ccircle%20cx='27.5'%20cy='26.5'%20r='3'%20fill='url(%23g)'/%3E%3C/svg%3E"
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Unbounded:wght@500;700;900&family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+
+      :root {
+        --font-disp: "Unbounded", sans-serif;
+        --font-body:
+          -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+          "Helvetica Neue", Arial, sans-serif;
+        --font-mono:
+          "SF Mono", "Fira Code", "Cascadia Code", "JetBrains Mono", Consolas,
+          monospace;
+        --accent: #6366f1;
+        --accent-strong: #818cf8;
+        --accent-soft: rgba(99, 102, 241, 0.14);
+        --bg-body: #0b0d12;
+        --bg-container: #11151d;
+        --bg-elevated: #161b26;
+        --shadow: rgba(0, 0, 0, 0.55);
+        --text: #e7e9ee;
+        --text-soft: #a7adbb;
+        --text-muted: #7d8494;
+        --text-faint: #5b6270;
+        --heading: #f4f6fa;
+        --link: #a5aaf5;
+        --link-hover: #c7cbfb;
+        --border: #1e2430;
+        --border-strong: #2a3141;
+        --l-bg: #06070c;
+        --l-surface: #0d1119;
+        --l-surface-2: #121726;
+        --l-border: rgba(255, 255, 255, 0.08);
+        --l-border-strong: rgba(255, 255, 255, 0.16);
+        --l-text: #e9edf5;
+        --l-muted: #9aa3b5;
+        --l-faint: #5d6577;
+        --l-accent: #6c7bff;
+        --l-accent-2: #22d3ee;
+        --l-grad: linear-gradient(120deg, #6c7bff 0%, #22d3ee 100%);
+        --l-green: #34d399;
+        --l-red: #ff5f56;
+        --l-amber: #f5b04c;
+      }
+
+      html {
+        scroll-behavior: smooth;
+        font-size: 15px;
+      }
+
+      body {
+        font-family: var(--font-body);
+        background: var(--bg-body);
+        color: var(--text);
+        line-height: 1.7;
+        -webkit-font-smoothing: antialiased;
+        text-rendering: optimizeLegibility;
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 2rem 1rem;
+      }
+
+      body::before {
+        content: "";
+        position: fixed;
+        inset: 0;
+        z-index: -1;
+        pointer-events: none;
+        background:
+          radial-gradient(
+            900px 520px at 85% -10%,
+            var(--accent-soft),
+            transparent 60%
+          ),
+          radial-gradient(
+            760px 480px at -10% 105%,
+            var(--accent-soft),
+            transparent 60%
+          );
+      }
+
+      .bg-grid {
+        position: fixed;
+        inset: 0;
+        z-index: -3;
+        pointer-events: none;
+        background-image:
+          linear-gradient(var(--l-border) 1px, transparent 1px),
+          linear-gradient(90deg, var(--l-border) 1px, transparent 1px);
+        background-size: 56px 56px;
+        opacity: 0.5;
+        -webkit-mask-image: radial-gradient(
+          ellipse 100% 62% at 50% 0%,
+          #000 0%,
+          transparent 78%
+        );
+        mask-image: radial-gradient(
+          ellipse 100% 62% at 50% 0%,
+          #000 0%,
+          transparent 78%
+        );
+      }
+
+      .bg-glow {
+        position: fixed;
+        z-index: -2;
+        pointer-events: none;
+        border-radius: 50%;
+        filter: blur(110px);
+        opacity: 0.5;
+      }
+
+      .bg-glow-a {
+        width: 640px;
+        height: 640px;
+        top: -220px;
+        left: 50%;
+        transform: translateX(-50%);
+        background: radial-gradient(
+          circle,
+          rgba(108, 123, 255, 0.55),
+          transparent 65%
+        );
+      }
+
+      .bg-glow-b {
+        width: 520px;
+        height: 520px;
+        bottom: -180px;
+        right: -140px;
+        background: radial-gradient(
+          circle,
+          rgba(34, 211, 238, 0.35),
+          transparent 65%
+        );
+      }
+
+      .noise {
+        position: fixed;
+        inset: 0;
+        z-index: 60;
+        pointer-events: none;
+        opacity: 0.035;
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23n)'/%3E%3C/svg%3E");
+      }
+
+      .container {
+        position: relative;
+        z-index: 1;
+        background: var(--l-surface);
+        border: 1px solid var(--l-border-strong);
+        border-radius: 20px;
+        padding: 3rem 2.5rem;
+        max-width: 520px;
+        width: 100%;
+        box-shadow: 0 30px 80px -30px rgba(0, 0, 0, 0.7);
+      }
+
+      .brand {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.6rem;
+        text-decoration: none;
+        border-bottom: none;
+        transition: transform 0.2s ease;
+      }
+
+      .brand:hover {
+        transform: translateY(-1px);
+      }
+
+      .brand-logo {
+        width: 36px;
+        height: 36px;
+        display: block;
+        filter: drop-shadow(0 2px 10px rgba(108, 123, 255, 0.5));
+        transition: transform 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+      }
+
+      .brand:hover .brand-logo {
+        animation: logo-spin 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+      }
+
+      @keyframes logo-spin {
+        from {
+          transform: rotate(0deg);
+        }
+        to {
+          transform: rotate(360deg);
+        }
+      }
+
+      .brand-name {
+        font-family: var(--font-disp);
+        font-weight: 700;
+        font-size: 1.15rem;
+        letter-spacing: -0.02em;
+        color: var(--l-text);
+      }
+
+      .brand-accent {
+        background: var(--l-grad);
+        -webkit-background-clip: text;
+        background-clip: text;
+        -webkit-text-fill-color: transparent;
+        color: transparent;
+      }
+
+      .header {
+        text-align: center;
+        margin-bottom: 2.2rem;
+      }
+
+      .header h1 {
+        font-family: var(--font-disp);
+        font-weight: 700;
+        font-size: clamp(1.4rem, 3vw, 1.8rem);
+        line-height: 1.25;
+        letter-spacing: -0.02em;
+        margin-bottom: 0.6rem;
+        color: var(--l-text);
+      }
+
+      .header .grad-text {
+        background: var(--l-grad);
+        -webkit-background-clip: text;
+        background-clip: text;
+        -webkit-text-fill-color: transparent;
+        color: transparent;
+      }
+
+      .header p {
+        color: var(--l-muted);
+        font-size: 0.95rem;
+      }
+
+      .form-group {
+        margin-bottom: 1.3rem;
+      }
+
+      .form-group label {
+        display: block;
+        margin-bottom: 0.5rem;
+        color: var(--l-muted);
+        font-size: 0.85rem;
+        font-weight: 600;
+        font-family: var(--font-mono);
+        letter-spacing: 0.04em;
+      }
+
+      .form-group input {
+        width: 100%;
+        padding: 0.75rem 1rem;
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid var(--l-border-strong);
+        border-radius: 11px;
+        color: var(--l-text);
+        font-size: 0.92rem;
+        font-family: var(--font-mono);
+        transition:
+          border-color 0.2s,
+          box-shadow 0.2s,
+          background 0.2s;
+      }
+
+      .form-group input:focus {
+        outline: none;
+        border-color: var(--l-accent);
+        box-shadow: 0 0 0 3px rgba(108, 123, 255, 0.2);
+        background: rgba(255, 255, 255, 0.06);
+      }
+
+      .form-group input::placeholder {
+        color: var(--l-faint);
+      }
+
+      .info-box {
+        background: rgba(108, 123, 255, 0.06);
+        border-left: 3px solid var(--l-accent);
+        padding: 1rem 1.2rem;
+        margin: 1.4rem 0;
+        border-radius: 0 11px 11px 0;
+        font-size: 0.85rem;
+        color: var(--l-muted);
+        line-height: 1.6;
+      }
+
+      .info-box strong {
+        color: var(--l-text);
+      }
+
+      .status {
+        margin-top: 1.2rem;
+        padding: 0.75rem 1rem;
+        border-radius: 11px;
+        font-size: 0.88rem;
+        font-weight: 600;
+        display: none;
+        animation: slideIn 0.3s ease;
+      }
+
+      @keyframes slideIn {
+        from {
+          opacity: 0;
+          transform: translateY(-8px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+
+      .status.success {
+        background: rgba(52, 211, 153, 0.1);
+        border: 1px solid rgba(52, 211, 153, 0.3);
+        color: var(--l-green);
+        display: block;
+      }
+
+      .status.error {
+        background: rgba(255, 95, 86, 0.1);
+        border: 1px solid rgba(255, 95, 86, 0.3);
+        color: var(--l-red);
+        display: block;
+      }
+
+      .status.loading {
+        background: rgba(108, 123, 255, 0.1);
+        border: 1px solid rgba(108, 123, 255, 0.3);
+        color: var(--l-accent-2);
+        display: block;
+      }
+
+      .btn {
+        flex: 1;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 0.5rem;
+        padding: 0.85rem 1.5rem;
+        border-radius: 11px;
+        font-family: var(--font-body);
+        font-weight: 700;
+        font-size: 0.95rem;
+        border: 1px solid transparent;
+        cursor: pointer;
+        color: var(--l-text);
+        text-decoration: none;
+        transition:
+          transform 0.18s ease,
+          box-shadow 0.25s ease,
+          background 0.25s,
+          color 0.25s,
+          border-color 0.25s;
+        white-space: nowrap;
+        position: relative;
+        overflow: hidden;
+        width: 100%;
+        margin-top: 1.6rem;
+      }
+
+      .btn:hover {
+        transform: translateY(-2px);
+      }
+
+      .btn:active {
+        transform: translateY(0);
+      }
+
+      .btn-primary {
+        background: var(--l-grad);
+        color: #fff;
+        box-shadow: 0 10px 30px -12px rgba(108, 123, 255, 0.7);
+      }
+
+      .btn-primary:hover {
+        box-shadow: 0 16px 40px -12px rgba(108, 123, 255, 0.85);
+      }
+
+      .btn-secondary {
+        background: rgba(255, 255, 255, 0.05);
+        border-color: var(--l-border-strong);
+        color: var(--l-muted);
+      }
+
+      .btn-secondary:hover {
+        background: rgba(255, 255, 255, 0.08);
+        color: var(--l-text);
+      }
+
+      .btn-sm {
+        padding: 0.5rem 1rem;
+        font-size: 0.82rem;
+        margin-top: 0;
+        width: auto;
+      }
+
+      .token-list {
+        margin-top: 1.2rem;
+      }
+
+      .token-item {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0.6rem 0.8rem;
+        background: rgba(255, 255, 255, 0.03);
+        border: 1px solid var(--l-border);
+        border-radius: 8px;
+        margin-bottom: 0.5rem;
+        font-size: 0.85rem;
+      }
+
+      .token-item .provider-name {
+        font-family: var(--font-mono);
+        color: var(--l-accent-2);
+        font-weight: 600;
+      }
+
+      .token-item .token-token {
+        color: var(--l-muted);
+        font-family: var(--font-mono);
+        font-size: 0.78rem;
+        flex: 1;
+        margin: 0 0.8rem;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .auth-toggle {
+        display: flex;
+        gap: 0.5rem;
+        margin-bottom: 1.2rem;
+      }
+
+      .auth-toggle button {
+        flex: 1;
+        padding: 0.55rem 1rem;
+        border: 1px solid var(--l-border-strong);
+        background: transparent;
+        color: var(--l-muted);
+        border-radius: 8px;
+        font-family: var(--font-mono);
+        font-size: 0.8rem;
+        font-weight: 600;
+        cursor: pointer;
+        transition:
+          background 0.2s,
+          color 0.2s;
+      }
+
+      .auth-toggle button.active {
+        background: var(--accent-soft);
+        color: var(--l-text);
+        border-color: var(--l-accent);
+      }
+
+      .hidden {
+        display: none !important;
+      }
+
+      .footer-link {
+        display: block;
+        text-align: center;
+        margin-top: 1.4rem;
+        font-size: 0.82rem;
+        color: var(--l-faint);
+      }
+
+      .footer-link a {
+        color: var(--l-muted);
+        text-decoration: none;
+        border-bottom: 1px solid transparent;
+        transition:
+          color 0.2s,
+          border-color 0.2s;
+      }
+
+      .footer-link a:hover {
+        color: var(--l-accent-2);
+        border-bottom-color: var(--l-accent-2);
+      }
+
+      @media (max-width: 480px) {
+        body {
+          padding: 1rem 0.6rem;
+          align-items: flex-start;
+          padding-top: 2rem;
+        }
+
+        .container {
+          padding: 2rem 1.3rem;
+          border-radius: 16px;
+        }
+
+        .header h1 {
+          font-size: 1.3rem;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .brand-logo {
+          animation: none !important;
+        }
+
+        * {
+          transition-duration: 0.01ms !important;
+          animation-duration: 0.01ms !important;
+        }
+      }
+
+      :focus-visible {
+        outline: 2px solid var(--l-accent);
+        outline-offset: 2px;
+      }
+
+      ::selection {
+        background: var(--accent-soft);
+        color: var(--heading);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="bg-grid" aria-hidden="true"></div>
+    <div class="bg-glow bg-glow-a" aria-hidden="true"></div>
+    <div class="bg-glow bg-glow-b" aria-hidden="true"></div>
+    <div class="noise" aria-hidden="true"></div>
+
+    <div class="container">
+      <div class="header">
+        <a
+          class="brand"
+          href="/"
+          style="margin-bottom: 1.4rem; display: inline-flex"
+        >
+          <svg class="brand-logo" viewBox="0 0 40 40" aria-hidden="true">
+            <defs>
+              <linearGradient id="brand-grad" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0" stop-color="#6c7bff"></stop>
+                <stop offset="1" stop-color="#22d3ee"></stop>
+              </linearGradient>
+            </defs>
+            <path
+              d="M20 2.5 L35 11 V29 L20 37.5 L5 29 V11 Z"
+              fill="none"
+              stroke="url(#brand-grad)"
+              stroke-width="2.6"
+              stroke-linejoin="round"
+            ></path>
+            <path
+              d="M20 13.5 L12.5 26.5 H27.5 Z"
+              fill="none"
+              stroke="url(#brand-grad)"
+              stroke-width="1.8"
+              stroke-linejoin="round"
+            ></path>
+            <circle cx="20" cy="13.5" r="3" fill="url(#brand-grad)"></circle>
+            <circle cx="12.5" cy="26.5" r="3" fill="url(#brand-grad)"></circle>
+            <circle cx="27.5" cy="26.5" r="3" fill="url(#brand-grad)"></circle>
+          </svg>
+          <span class="brand-name"
+            >Dany<span class="brand-accent">API</span></span
+          >
         </a>
         <h1><span class="grad-text">Token Manager</span></h1>
         <p>Manage your provider tokens or server admin tokens</p>
-    </div>
+      </div>
 
-    <div id="auth-panel">
+      <div id="auth-panel">
         <div class="auth-toggle">
-            <button type="button" id="tab-login" class="active" data-tab="login">Login / Register</button>
-            <button type="button" id="tab-server" data-tab="server">Admin Tokens</button>
+          <button type="button" id="tab-login" class="active" data-tab="login">
+            Login / Register
+          </button>
+          <button type="button" id="tab-server" data-tab="server">
+            Admin Tokens
+          </button>
         </div>
-        <div id="byok-banner" style="display:none;background:rgba(34,211,153,0.08);border:1px solid rgba(34,211,153,0.25);border-radius:11px;padding:0.7rem 1rem;margin-bottom:1.2rem;font-size:0.82rem;color:var(--l-green);">BYOK mode active — using your personal tokens only</div>
+        <div
+          id="byok-banner"
+          style="
+            display: none;
+            background: rgba(34, 211, 153, 0.08);
+            border: 1px solid rgba(34, 211, 153, 0.25);
+            border-radius: 11px;
+            padding: 0.7rem 1rem;
+            margin-bottom: 1.2rem;
+            font-size: 0.82rem;
+            color: var(--l-green);
+          "
+        >
+          BYOK mode active — using your personal tokens only
+        </div>
 
         <div id="panel-login">
-            <div class="form-group">
-                <label for="byok-user">Username</label>
-                <input type="text" id="byok-user" placeholder="your_username" autocomplete="username" spellcheck="false" />
-            </div>
-            <div class="form-group">
-                <label for="byok-pass">Password</label>
-                <input type="password" id="byok-pass" placeholder="••••••••" autocomplete="new-password" />
-            </div>
-            <button class="btn btn-primary" type="button" id="btn-login">Login</button>
-            <button class="btn btn-secondary" type="button" id="btn-register" style="margin-top:0.5rem;">Register new account</button>
+          <div class="form-group">
+            <label for="byok-user">Username</label>
+            <input
+              type="text"
+              id="byok-user"
+              placeholder="your_username"
+              autocomplete="username"
+              spellcheck="false"
+            />
+          </div>
+          <div class="form-group">
+            <label for="byok-pass">Password</label>
+            <input
+              type="password"
+              id="byok-pass"
+              placeholder="••••••••"
+              autocomplete="new-password"
+            />
+          </div>
+          <button class="btn btn-primary" type="button" id="btn-login">
+            Login
+          </button>
+          <button
+            class="btn btn-secondary"
+            type="button"
+            id="btn-register"
+            style="margin-top: 0.5rem"
+          >
+            Register new account
+          </button>
         </div>
 
         <div id="panel-server" class="hidden">
-            <div class="form-group">
-                <label for="deepseek-tokens">DeepSeek Tokens</label>
-                <input type="text" id="deepseek-tokens"
-                       placeholder="token1, token2, token3..." value="" autocomplete="off" spellcheck="false" />
-            </div>
+          <div class="form-group">
+            <label for="deepseek-tokens">DeepSeek Tokens</label>
+            <input
+              type="text"
+              id="deepseek-tokens"
+              placeholder="token1, token2, token3..."
+              value=""
+              autocomplete="off"
+              spellcheck="false"
+            />
+          </div>
 
-            <div class="form-group">
-                <label for="qwen-tokens">Qwen Tokens</label>
-                <input type="text" id="qwen-tokens"
-                       placeholder="token1, token2, token3..." value="" autocomplete="off" spellcheck="false" />
-            </div>
-            <button class="btn btn-primary" type="button" id="btn-save">Add Tokens</button>
+          <div class="form-group">
+            <label for="qwen-tokens">Qwen Tokens</label>
+            <input
+              type="text"
+              id="qwen-tokens"
+              placeholder="token1, token2, token3..."
+              value=""
+              autocomplete="off"
+              spellcheck="false"
+            />
+          </div>
+          <button class="btn btn-primary" type="button" id="btn-save">
+            Add Tokens
+          </button>
         </div>
-    </div>
+      </div>
 
-    <div id="user-panel" class="hidden">
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem;">
-            <span style="font-family:var(--font-mono);font-size:0.85rem;color:var(--l-text);" id="user-display"></span>
-            <button class="btn btn-sm btn-secondary" type="button" id="btn-logout">Logout</button>
+      <div id="user-panel" class="hidden">
+        <div
+          style="
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 1rem;
+          "
+        >
+          <span
+            style="
+              font-family: var(--font-mono);
+              font-size: 0.85rem;
+              color: var(--l-text);
+            "
+            id="user-display"
+          ></span>
+          <button
+            class="btn btn-sm btn-secondary"
+            type="button"
+            id="btn-logout"
+          >
+            Logout
+          </button>
         </div>
 
         <div class="form-group">
-            <label for="add-provider">Provider</label>
-            <select id="add-provider" style="width:100%;padding:0.75rem 1rem;background:rgba(255,255,255,0.04);border:1px solid var(--l-border-strong);border-radius:11px;color:var(--l-text);font-size:0.92rem;font-family:var(--font-mono);transition:border-color 0.2s,box-shadow 0.2s;">
-                <option value="deepseek">deepseek</option>
-                <option value="qwen">qwen</option>
-            </select>
+          <label for="add-provider">Provider</label>
+          <select
+            id="add-provider"
+            style="
+              width: 100%;
+              padding: 0.75rem 1rem;
+              background: rgba(255, 255, 255, 0.04);
+              border: 1px solid var(--l-border-strong);
+              border-radius: 11px;
+              color: var(--l-text);
+              font-size: 0.92rem;
+              font-family: var(--font-mono);
+              transition:
+                border-color 0.2s,
+                box-shadow 0.2s;
+            "
+          >
+            <option value="deepseek">deepseek</option>
+            <option value="qwen">qwen</option>
+          </select>
         </div>
         <div class="form-group">
-            <label for="add-token">Provider Token</label>
-            <input type="text" id="add-token" placeholder="sk-..." autocomplete="off" spellcheck="false" />
+          <label for="add-token">Provider Token</label>
+          <input
+            type="text"
+            id="add-token"
+            placeholder="sk-..."
+            autocomplete="off"
+            spellcheck="false"
+          />
         </div>
-        <button class="btn btn-primary" type="button" id="btn-add-token">Add Token</button>
+        <button class="btn btn-primary" type="button" id="btn-add-token">
+          Add Token
+        </button>
 
         <div class="token-list" id="token-list"></div>
-    </div>
+      </div>
 
-    <div class="info-box">
-        <strong>No limits.</strong> Your tokens are used exclusively by you. Each token adds parallel generation capacity for your account.
-    </div>
+      <div class="info-box">
+        <strong>No limits.</strong> Your tokens are used exclusively by you.
+        Each token adds parallel generation capacity for your account.
+      </div>
 
-    <div id="status" class="status"></div>
+      <div id="status" class="status"></div>
 
-    <div class="footer-link">
+      <div class="footer-link">
         <a href="/health" target="_blank">Health</a> &middot;
         <a href="/v1/models" target="_blank">Models</a> &middot;
         <a href="/docs/" target="_blank">Docs</a> &middot;
-        <a href="https://github.com/FANATFANATA/DanyAPI" target="_blank" rel="noopener">GitHub</a>
+        <a
+          href="https://github.com/FANATFANATA/DanyAPI"
+          target="_blank"
+          rel="noopener"
+          >GitHub</a
+        >
+      </div>
     </div>
-</div>
 
-<script>
-(function () {
-    "use strict";
+    <script>
+      (function () {
+        "use strict";
 
-    var BASE = window.location.origin;
-    var statusEl = document.getElementById("status");
-    var authPanel = document.getElementById("auth-panel");
-    var userPanel = document.getElementById("user-panel");
-    var userDisplay = document.getElementById("user-display");
-    var dsInput = document.getElementById("deepseek-tokens");
-    var qwInput = document.getElementById("qwen-tokens");
-    var tokenListEl = document.getElementById("token-list");
-    var isByok = false;
-    var currentUserId = null;
-    var byokModeEnabled = false;
+        var BASE = window.location.origin;
+        var statusEl = document.getElementById("status");
+        var authPanel = document.getElementById("auth-panel");
+        var userPanel = document.getElementById("user-panel");
+        var userDisplay = document.getElementById("user-display");
+        var dsInput = document.getElementById("deepseek-tokens");
+        var qwInput = document.getElementById("qwen-tokens");
+        var tokenListEl = document.getElementById("token-list");
+        var isByok = false;
+        var currentUserId = null;
+        var byokModeEnabled = false;
 
-    function fmt(n) {
-        return (n || 0).toLocaleString("en-US");
-    }
+        function showStatus(msg, type) {
+          statusEl.textContent = msg;
+          statusEl.className = "status " + type;
+        }
 
-    function showStatus(msg, type) {
-        statusEl.textContent = msg;
-        statusEl.className = "status " + type;
-    }
-
-    function initByokMode() {
-        fetch(BASE + "/byok/status")
+        function initByokMode() {
+          fetch(BASE + "/byok/status")
             .then(function (r) {
-                if (!r.ok) throw new Error("not available");
-                return r.json();
+              if (!r.ok) throw new Error("not available");
+              return r.json();
             })
             .then(function (data) {
-                byokModeEnabled = data.enabled === true;
-                if (byokModeEnabled) {
-                    document.getElementById("tab-server").style.display = "none";
-                    document.getElementById("panel-server").classList.add("hidden");
-                    document.getElementById("byok-banner").style.display = "block";
-                    document.querySelector(".header p").textContent = "Manage your provider tokens or login to use your own keys";
-                }
-                checkAuth();
+              byokModeEnabled = data.enabled === true;
+              if (byokModeEnabled) {
+                document.getElementById("tab-server").style.display = "none";
+                document.getElementById("panel-server").classList.add("hidden");
+                document.getElementById("byok-banner").style.display = "block";
+                document.querySelector(".header p").textContent =
+                  "Manage your provider tokens or login to use your own keys";
+              }
+              checkAuth();
             })
             .catch(function () {
-                checkAuth();
+              checkAuth();
             });
-    }
+        }
 
-    function checkAuth() {
-        fetch(BASE + "/byok/me")
+        function checkAuth() {
+          fetch(BASE + "/byok/me")
             .then(function (r) {
-                if (!r.ok) throw new Error("not authenticated");
-                return r.json();
+              if (!r.ok) throw new Error("not authenticated");
+              return r.json();
             })
             .then(function (data) {
-                if (data.authenticated) {
-                    isByok = true;
-                    currentUserId = data.user_id;
-                    userDisplay.textContent = "Logged in as " + (data.username || "");
-                    authPanel.classList.add("hidden");
-                    userPanel.classList.remove("hidden");
-                    loadUserTokens();
-                } else {
-                    authPanel.classList.remove("hidden");
-                    userPanel.classList.add("hidden");
-                }
-            })
-            .catch(function () {
+              if (data.authenticated) {
+                isByok = true;
+                currentUserId = data.user_id;
+                userDisplay.textContent =
+                  "Logged in as " + (data.username || "");
+                authPanel.classList.add("hidden");
+                userPanel.classList.remove("hidden");
+                loadUserTokens();
+              } else {
                 authPanel.classList.remove("hidden");
                 userPanel.classList.add("hidden");
+              }
+            })
+            .catch(function () {
+              authPanel.classList.remove("hidden");
+              userPanel.classList.add("hidden");
             });
-    }
+        }
 
-    function loadUserTokens() {
-        fetch(BASE + "/byok/tokens")
+        function loadUserTokens() {
+          fetch(BASE + "/byok/tokens")
             .then(function (r) {
-                if (!r.ok) throw new Error("HTTP " + r.status);
-                return r.json();
+              if (!r.ok) throw new Error("HTTP " + r.status);
+              return r.json();
             })
             .then(function (data) {
-                var tokens = data.tokens || [];
-                var html = "";
-                for (var i = 0; i < tokens.length; i++) {
-                    html += '<div class="token-item">';
-                    html += '<span class="provider-name">' + tokens[i].provider + '</span>';
-                    html += '<span class="token-token">●●●●●●●●</span>';
-                    html += '<button class="btn btn-sm btn-secondary" type="button" data-del="' + tokens[i].provider + '">Remove</button>';
-                    html += '</div>';
-                }
-                if (!tokens.length) {
-                    html = '<div style="color:var(--l-muted);font-size:0.82rem;padding:0.5rem 0;">No tokens added yet</div>';
-                }
-                tokenListEl.innerHTML = html;
-                tokenListEl.querySelectorAll("[data-del]").forEach(function (btn) {
-                    btn.addEventListener("click", function () {
-                        var prov = btn.getAttribute("data-del");
-                        fetch(BASE + "/byok/token/" + prov, { method: "DELETE" })
-                            .then(function (r) { return r.json(); })
-                            .then(function (data) {
-                                if (data.removed) {
-                                    showStatus("Token removed", "success");
-                                    loadUserTokens();
-                                } else {
-                                    showStatus("Failed to remove token", "error");
-                                }
-                            })
-                            .catch(function () { showStatus("Connection error", "error"); });
-                    });
+              var tokens = data.tokens || [];
+              var html = "";
+              for (var i = 0; i < tokens.length; i++) {
+                html += '<div class="token-item">';
+                html +=
+                  '<span class="provider-name">' +
+                  tokens[i].provider +
+                  "</span>";
+                html += '<span class="token-token">●●●●●●●●</span>';
+                html +=
+                  '<button class="btn btn-sm btn-secondary" type="button" data-del="' +
+                  tokens[i].provider +
+                  '">Remove</button>';
+                html += "</div>";
+              }
+              if (!tokens.length) {
+                html =
+                  '<div style="color:var(--l-muted);font-size:0.82rem;padding:0.5rem 0;">No tokens added yet</div>';
+              }
+              tokenListEl.innerHTML = html;
+              tokenListEl
+                .querySelectorAll("[data-del]")
+                .forEach(function (btn) {
+                  btn.addEventListener("click", function () {
+                    var prov = btn.getAttribute("data-del");
+                    fetch(BASE + "/byok/token/" + prov, { method: "DELETE" })
+                      .then(function (r) {
+                        return r.json();
+                      })
+                      .then(function (data) {
+                        if (data.removed) {
+                          showStatus("Token removed", "success");
+                          loadUserTokens();
+                        } else {
+                          showStatus("Failed to remove token", "error");
+                        }
+                      })
+                      .catch(function () {
+                        showStatus("Connection error", "error");
+                      });
+                  });
                 });
             })
             .catch(function (e) {
-                tokenListEl.innerHTML = '<div class="usage-error">Failed to load tokens: ' + e.message + '</div>';
+              tokenListEl.innerHTML =
+                '<div class="usage-error">Failed to load tokens: ' +
+                e.message +
+                "</div>";
             });
-    }
-
-    document.getElementById("tab-login").addEventListener("click", function () {
-        setTab(this, "login");
-    });
-    document.getElementById("tab-server").addEventListener("click", function () {
-        setTab(this, "server");
-    });
-
-    function setTab(btn, tabName) {
-        document.getElementById("tab-login").classList.toggle("active", tabName === "login");
-        document.getElementById("tab-server").classList.toggle("active", tabName === "server");
-        document.getElementById("panel-login").classList.toggle("hidden", tabName !== "login");
-        document.getElementById("panel-server").classList.toggle("hidden", tabName !== "server");
-    }
-
-    document.getElementById("btn-login").addEventListener("click", function () {
-        var username = document.getElementById("byok-user").value.trim();
-        var password = document.getElementById("byok-pass").value;
-        if (!username || !password) {
-            showStatus("Enter username and password", "error");
-            return;
         }
-        showStatus("Logging in\u2026", "loading");
-        fetch(BASE + "/byok/login", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ username: username, password: password })
-        })
-            .then(function (r) { return r.json(); })
-            .then(function (data) {
+
+        document
+          .getElementById("tab-login")
+          .addEventListener("click", function () {
+            setTab(this, "login");
+          });
+        document
+          .getElementById("tab-server")
+          .addEventListener("click", function () {
+            setTab(this, "server");
+          });
+
+        function setTab(btn, tabName) {
+          document
+            .getElementById("tab-login")
+            .classList.toggle("active", tabName === "login");
+          document
+            .getElementById("tab-server")
+            .classList.toggle("active", tabName === "server");
+          document
+            .getElementById("panel-login")
+            .classList.toggle("hidden", tabName !== "login");
+          document
+            .getElementById("panel-server")
+            .classList.toggle("hidden", tabName !== "server");
+        }
+
+        document
+          .getElementById("btn-login")
+          .addEventListener("click", function () {
+            var username = document.getElementById("byok-user").value.trim();
+            var password = document.getElementById("byok-pass").value;
+            if (!username || !password) {
+              showStatus("Enter username and password", "error");
+              return;
+            }
+            showStatus("Logging in…", "loading");
+            fetch(BASE + "/byok/login", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ username: username, password: password }),
+            })
+              .then(function (r) {
+                return r.json();
+              })
+              .then(function (data) {
                 if (data.session_key) {
-                    showStatus("Logged in successfully!", "success");
-    initByokMode();
-                    document.getElementById("byok-user").value = "";
-                    document.getElementById("byok-pass").value = "";
+                  showStatus("Logged in successfully!", "success");
+                  initByokMode();
+                  document.getElementById("byok-user").value = "";
+                  document.getElementById("byok-pass").value = "";
                 } else {
-                    showStatus("Invalid credentials", "error");
+                  showStatus("Invalid credentials", "error");
                 }
-            })
-            .catch(function (e) {
+              })
+              .catch(function (e) {
                 showStatus("Connection error: " + e.message, "error");
-            });
-    });
+              });
+          });
 
-    document.getElementById("btn-register").addEventListener("click", function () {
-        var username = document.getElementById("byok-user").value.trim();
-        var password = document.getElementById("byok-pass").value;
-        if (!username || !password) {
-            showStatus("Enter username and password", "error");
-            return;
-        }
-        showStatus("Registering\u2026", "loading");
-        fetch(BASE + "/byok/register", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ username: username, password: password })
-        })
-            .then(function (r) { return r.json(); })
-            .then(function (data) {
+        document
+          .getElementById("btn-register")
+          .addEventListener("click", function () {
+            var username = document.getElementById("byok-user").value.trim();
+            var password = document.getElementById("byok-pass").value;
+            if (!username || !password) {
+              showStatus("Enter username and password", "error");
+              return;
+            }
+            showStatus("Registering…", "loading");
+            fetch(BASE + "/byok/register", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ username: username, password: password }),
+            })
+              .then(function (r) {
+                return r.json();
+              })
+              .then(function (data) {
                 if (data.registered) {
-                    showStatus("Account created! You can now log in.", "success");
+                  showStatus("Account created! You can now log in.", "success");
                 } else {
-                    showStatus(data.error || "Registration failed", "error");
+                  showStatus(data.error || "Registration failed", "error");
                 }
-            })
-            .catch(function (e) {
+              })
+              .catch(function (e) {
                 showStatus("Connection error: " + e.message, "error");
-            });
-    });
+              });
+          });
 
-    document.getElementById("btn-logout").addEventListener("click", function () {
-        fetch(BASE + "/byok/logout", { method: "GET" })
-            .then(function () {
+        document
+          .getElementById("btn-logout")
+          .addEventListener("click", function () {
+            fetch(BASE + "/byok/logout", { method: "GET" })
+              .then(function () {
                 checkAuth();
                 showStatus("Logged out", "success");
-            })
-            .catch(function () { showStatus("Logout failed", "error"); });
-    });
+              })
+              .catch(function () {
+                showStatus("Logout failed", "error");
+              });
+          });
 
-    document.getElementById("btn-add-token").addEventListener("click", function () {
-        var provider = document.getElementById("add-provider").value.trim().toLowerCase();
-        var tokenStr = document.getElementById("add-token").value.trim();
-        if (!provider || !tokenStr) {
-            showStatus("Enter provider and token", "error");
-            return;
-        }
-        if (provider !== "deepseek" && provider !== "qwen") {
-            showStatus("Provider must be 'deepseek' or 'qwen'", "error");
-            return;
-        }
-        showStatus("Adding token\u2026", "loading");
-        fetch(BASE + "/byok/token", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ provider: provider, token: tokenStr })
-        })
-            .then(function (r) { return r.json(); })
-            .then(function (data) {
+        document
+          .getElementById("btn-add-token")
+          .addEventListener("click", function () {
+            var provider = document
+              .getElementById("add-provider")
+              .value.trim()
+              .toLowerCase();
+            var tokenStr = document.getElementById("add-token").value.trim();
+            if (!provider || !tokenStr) {
+              showStatus("Enter provider and token", "error");
+              return;
+            }
+            if (provider !== "deepseek" && provider !== "qwen") {
+              showStatus("Provider must be 'deepseek' or 'qwen'", "error");
+              return;
+            }
+            showStatus("Adding token…", "loading");
+            fetch(BASE + "/byok/token", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ provider: provider, token: tokenStr }),
+            })
+              .then(function (r) {
+                return r.json();
+              })
+              .then(function (data) {
                 showStatus("Token added for " + provider, "success");
                 document.getElementById("add-provider").value = "";
                 document.getElementById("add-token").value = "";
                 loadUserTokens();
-            })
-            .catch(function (e) {
+              })
+              .catch(function (e) {
                 showStatus("Connection error: " + e.message, "error");
-            });
-    });
+              });
+          });
 
-    document.getElementById("btn-save").addEventListener("click", function () {
-        var dsRaw = dsInput.value.trim();
-        var qwRaw = qwInput.value.trim();
+        document
+          .getElementById("btn-save")
+          .addEventListener("click", function () {
+            var dsRaw = dsInput.value.trim();
+            var qwRaw = qwInput.value.trim();
 
-        if (!dsRaw && !qwRaw) {
-            showStatus("Enter at least one token", "error");
-            return;
-        }
+            if (!dsRaw && !qwRaw) {
+              showStatus("Enter at least one token", "error");
+              return;
+            }
 
-        var payload = {
-            deepseek_tokens: dsRaw ? dsRaw.split(",").map(function (s) { return s.trim(); }).filter(Boolean) : [],
-            qwen_tokens: qwRaw ? qwRaw.split(",").map(function (s) { return s.trim(); }).filter(Boolean) : []
-        };
+            var payload = {
+              deepseek_tokens: dsRaw
+                ? dsRaw
+                    .split(",")
+                    .map(function (s) {
+                      return s.trim();
+                    })
+                    .filter(Boolean)
+                : [],
+              qwen_tokens: qwRaw
+                ? qwRaw
+                    .split(",")
+                    .map(function (s) {
+                      return s.trim();
+                    })
+                    .filter(Boolean)
+                : [],
+            };
 
-        showStatus("Adding\u2026", "loading");
+            showStatus("Adding…", "loading");
 
-        fetch(BASE + "/v1/tokens", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload)
-        })
-            .then(function (r) { return r.json(); })
-            .then(function (data) {
+            fetch(BASE + "/v1/tokens", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(payload),
+            })
+              .then(function (r) {
+                return r.json();
+              })
+              .then(function (data) {
                 if (data.success) {
-                    var added = data.added || {};
-                    var skipped = data.skipped || {};
-                    var parts = [];
-                    if (added.deepseek) parts.push("DeepSeek: +" + added.deepseek);
-                    if (added.qwen) parts.push("Qwen: +" + added.qwen);
-                    if (skipped.deepseek) parts.push("DeepSeek invalid: " + skipped.deepseek);
-                    if (skipped.qwen) parts.push("Qwen invalid: " + skipped.qwen);
-                    var detail = parts.length ? " (" + parts.join(", ") + ")" : "";
-                    showStatus("Tokens added and activated." + detail, "success");
-                    dsInput.value = "";
-                    qwInput.value = "";
+                  var added = data.added || {};
+                  var skipped = data.skipped || {};
+                  var parts = [];
+                  if (added.deepseek)
+                    parts.push("DeepSeek: +" + added.deepseek);
+                  if (added.qwen) parts.push("Qwen: +" + added.qwen);
+                  if (skipped.deepseek)
+                    parts.push("DeepSeek invalid: " + skipped.deepseek);
+                  if (skipped.qwen) parts.push("Qwen invalid: " + skipped.qwen);
+                  var detail = parts.length
+                    ? " (" + parts.join(", ") + ")"
+                    : "";
+                  showStatus("Tokens added and activated." + detail, "success");
+                  dsInput.value = "";
+                  qwInput.value = "";
                 } else {
-                    showStatus(data.error || "Failed to save", "error");
+                  showStatus(data.error || "Failed to save", "error");
                 }
-            })
-            .catch(function (e) {
+              })
+              .catch(function (e) {
                 showStatus("Connection error: " + e.message, "error");
-            });
-    });
+              });
+          });
 
-    checkAuth();
-})();
-</script>
-</body>
+        initByokMode();
+      })();
+    </script>
+  </body>
 </html>

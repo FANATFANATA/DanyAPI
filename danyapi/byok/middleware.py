@@ -6,7 +6,6 @@ from fastapi import Cookie, HTTPException, Request
 
 log = logging.getLogger("danyapi.byok.middleware")
 
-
 BYOK_SESSION_COOKIE = "byok_session"
 
 
@@ -16,7 +15,9 @@ class ByokAuth:
         self.authenticated: bool = user_id is not None
 
 
-async def byok_dependency(request: Request, session_key: str | None = Cookie(None)) -> ByokAuth:
+async def byok_dependency(
+    request: Request, session_key: str | None = Cookie(None)
+) -> ByokAuth:
     from . import get_manager
 
     if session_key is None:

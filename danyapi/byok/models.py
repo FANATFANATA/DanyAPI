@@ -15,11 +15,19 @@ class ByokUser:
         self.password_hash = password_hash
 
     def to_dict(self) -> dict[str, Any]:
-        return {"id": self.id, "username": self.username, "password_hash": self.password_hash}
+        return {
+            "id": self.id,
+            "username": self.username,
+            "password_hash": self.password_hash,
+        }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ByokUser:
-        return cls(id=data["id"], username=data["username"], password_hash=data["password_hash"])
+        return cls(
+            id=data["id"],
+            username=data["username"],
+            password_hash=data["password_hash"],
+        )
 
 
 class ByokAccount:

@@ -3,7 +3,9 @@ from __future__ import annotations
 import re
 from typing import Any
 
-_CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3040-\u30ff\uac00-\ud7af]")
+_CJK_RE = re.compile(
+    r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3040-\u30ff\uac00-\ud7af]"
+)
 _IMAGE_TOKEN_COST = 85
 
 
@@ -22,10 +24,15 @@ def estimate_tokens(text: str | None) -> int:
 
 
 def count_message_tokens(message: Any) -> int:
-    if not isinstance(message, dict):
+    if isinstance(message, dict):
+        content = message.get("content")
+        tool_calls = message.get("tool_calls")
+    elif hasattr(message, "content"):
+        content = getattr(message, "content", None)
+        tool_calls = getattr(message, "tool_calls", None)
+    else:
         return 0
     tokens = 3
-    content = message.get("content")
     if isinstance(content, str):
         tokens += estimate_tokens(content)
     elif isinstance(content, list):
@@ -38,7 +45,6 @@ def count_message_tokens(message: Any) -> int:
                     tokens += _IMAGE_TOKEN_COST
             elif isinstance(item, str):
                 tokens += estimate_tokens(item)
-    tool_calls = message.get("tool_calls")
     if isinstance(tool_calls, list):
         for call in tool_calls:
             if not isinstance(call, dict):

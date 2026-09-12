@@ -65,7 +65,7 @@ Enable in .env:
 
 ```env
 BYOK_MODE=1
-BYOK_SALT=       # auto generated if empty keep persistent across
+BYOK_SALT=
 ```
 
 ## Contacts
