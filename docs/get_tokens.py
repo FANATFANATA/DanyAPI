@@ -945,13 +945,13 @@ def _apply_texts(template: str, extra: dict[str, str] | None = None) -> str:
     return out
 
 
-def render_setup_page() -> str:
+def render_setup_page(port: int = RESULT_PORT) -> str:
     texts_json = json.dumps(TEXTS, ensure_ascii=False)
     return (
         _apply_texts(
             SETUP_PAGE,
             {
-                "BOOKMARKLET": html_escape(build_bookmarklet(RESULT_PORT)),
+                "BOOKMARKLET": html_escape(build_bookmarklet(port)),
                 "DEEPSEEK_URL": DEEPSEEK_URL,
                 "QWEN_URL": QWEN_URL,
                 "HAS_DEEPSEEK": "true" if STATE["deepseek"] else "false",
@@ -1024,6 +1024,10 @@ def register_token(provider: str, token: str) -> bool:
 
 
 class Handler(BaseHTTPRequestHandler):
+    # Port the setup page's bookmarklet should call back to. Kept as a class
+    # attribute (set by serve()) so the handler needs no module-global state.
+    serve_port: int = RESULT_PORT
+
     def _send(self, body: bytes, status: int = 200, ctype: str = "text/html; charset=utf-8") -> None:
         self.send_response(status)
         self.send_header("Content-Type", ctype)
@@ -1070,7 +1074,7 @@ class Handler(BaseHTTPRequestHandler):
                 # the wizard itself shows the red "no token" hint via /status.
                 self._send(SUCCESS_PAGE.encode())
         else:  # "/" and anything else -> setup page
-            self._send(render_setup_page().encode())
+            self._send(render_setup_page(port=self.serve_port).encode())
 
     def do_POST(self) -> None:
         if self.path.split("?")[0] != "/collect":
@@ -1092,13 +1096,15 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
-def serve() -> None:
-    server = ThreadingHTTPServer(("127.0.0.1", RESULT_PORT), Handler)
-    url = f"http://127.0.0.1:{RESULT_PORT}"
+def serve(port: int = RESULT_PORT, open_browser: bool = True) -> None:
+    Handler.serve_port = port
+    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    url = f"http://127.0.0.1:{port}"
     print(f"  Local page: {url}")
     print("  (Ctrl+C in this window to stop when you're done.)\n")
-    print("  Opening your default browser…")
-    webbrowser.open_new_tab(url)
+    if open_browser:
+        print("  Opening your default browser…")
+        webbrowser.open_new_tab(url)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -1113,12 +1119,10 @@ def serve() -> None:
 
 
 def main() -> None:
-    global RESULT_PORT
     parser = argparse.ArgumentParser(description="Extract DeepSeek & Qwen tokens for DanyAPI (uses your default browser)")
     parser.add_argument("--port", type=int, default=RESULT_PORT, help=f"local server port (default {RESULT_PORT})")
     parser.add_argument("--no-browser", action="store_true", help="don't auto-open the browser")
     args = parser.parse_args()
-    RESULT_PORT = args.port
 
     print("=" * 60)
     print(" DanyAPI token extractor")
@@ -1128,7 +1132,7 @@ def main() -> None:
     print(" 2. DeepSeek: log in, click the grabber bookmark - page auto-advances")
     print(" 3. Qwen: same again - then both tokens are shown automatically\n")
 
-    serve()
+    serve(port=args.port, open_browser=not args.no_browser)
 
 
 if __name__ == "__main__":
