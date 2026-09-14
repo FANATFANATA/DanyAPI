@@ -52,20 +52,25 @@ TEXTS: dict[str, str] = {
     # --- Wizard page -----------------------------------------------------
     "page_title": "DanyAPI - Token Utils",
     "header_title": "Token Utilities",
-    "header_sub": "DanyAPI uses the internal APIs of DeepSeek and Qwen's free web clients, so it needs your auth tokens.<br>This tool simply helps you to retrieve them.",
+    "header_sub": "DanyAPI uses the internal APIs of DeepSeek and Qwen's free web clients, so it needs your auth tokens."
+    "<br>This tool simply helps you to retrieve them.",
     # Step 0 - bookmarklet
     "step0_heading": "One-time: add the token utility bookmarklet",
     "step0_intro": "<b>Drag</b> this button onto your browser's <b>bookmarks bar</b>,<br>(press Ctrl+Shift+B if you don't see the bar):",
     "bookmarklet_label": "🔍 Run DanyAPI token utility",
     "bookmarklet_aria": "DanyAPI token utility - drag this button onto your bookmarks bar",
-    "step0_fineprint": "Why is this necessary? We know this looks <i>weird and unfamiliar</i>, but while other methods for extracting tokens exist, they are <b>not browser-agnostic</b>. This bookmarklet will execute JavaScript in the context of the provider's page (<i>deepseek.com</i> or <i>qwen.ai</i>), extract your token, and send it to this page.",
+    "step0_fineprint": "Why is this necessary? We know this looks <i>weird and unfamiliar</i>, but while other methods for"
+    " extracting tokens exist, they are <b>not browser-agnostic</b>. This bookmarklet will execute JavaScript in the"
+    " context of the provider's page (<i>deepseek.com</i> or <i>qwen.ai</i>), extract your token, and send it to this page.",
     "step0_next": "I added the bookmarklet - Next →",
     # Step 1 - DeepSeek
     "step1_heading": "DeepSeek token",
     "step1_p1": "<b>1.</b> Open DeepSeek by clicking the button below.",
     "step1_p2": "<b>2.</b> Sign in to your account if needed.",
     "step1_p3": "<b>3.</b> On the DeepSeek page, click your <b>“🔍 Run DanyAPI token utility”</b> bookmark.",
-    "step1_fineprint": "The tab closes automatically after the token is sent. If the token is valid, a green checkmark will appear on this page and you will be guided to the next step within a few seconds. Overwise a red cross will appear, and you can click the button below to try again.",
+    "step1_fineprint": "The tab closes automatically after the token is sent. If the token is valid, a green checkmark"
+    " will appear on this page and you will be guided to the next step within a few seconds. Overwise a red cross will"
+    " appear, and you can click the button below to try again.",
     "step1_button": "Open DeepSeek →",
     "step1_waiting": "Waiting for the DeepSeek token…",
     # Step 2 - Qwen
@@ -73,7 +78,9 @@ TEXTS: dict[str, str] = {
     "step2_p1": "<b>1.</b> Open Qwen by clicking the button below.",
     "step2_p2": "<b>2.</b> Sign in to your account if needed.",
     "step2_p3": "<b>3.</b> On the Qwen page, click the <b>“🔍 Run DanyAPI token utility”</b> bookmark.",
-    "step2_fineprint": "The tab closes automatically after the token is sent. If the token is valid, a green checkmark will appear on this page and you will be guided to the next step within a few seconds. Overwise a red cross will appear, and you can click the button below to try again.",
+    "step2_fineprint": "The tab closes automatically after the token is sent. If the token is valid, a green checkmark"
+    " will appear on this page and you will be guided to the next step within a few seconds. Overwise a red cross will"
+    " appear, and you can click the button below to try again.",
     "step2_button": "Open Qwen →",
     "step2_waiting": "Waiting for the Qwen token…",
     # Step 3 - done
@@ -99,7 +106,9 @@ TEXTS: dict[str, str] = {
     # --- Results page ----------------------------------------------------
     "results_page_title": "DanyAPI - Your tokens",
     "results_title": "Your Tokens",
-    "results_sub": "Tokens for DeepSeek &amp; Qwen were successfully extracted. Use them in your <code>.env</code> when running the API locally.<br><br>To support us, you can also add them to the public API instance: <a href=\"{public_url}\" target=\"_blank\" rel=\"noopener\">{public_url}</a>",
+    "results_sub": "Tokens for DeepSeek &amp; Qwen were successfully extracted. Use them in your <code>.env</code> when"
+    " running the API locally.<br><br>To support us, you can also add them to the public API instance:"
+    " <a href=\"{public_url}\" target=\"_blank\" rel=\"noopener\">{public_url}</a>",
     "results_public_instance": "Public instance",
     "results_pane_ds": "DeepSeek token",
     "results_pane_qw": "Qwen token",
@@ -124,6 +133,47 @@ STATE: dict[str, Any] = {
     "deepseek_failed": False,
     "qwen_failed": False,
 }
+
+# ----------------------------------------------------------------------------
+# Shared HTML assets
+#
+# The setup page and the results page are visually identical shells, so these
+# assets are defined once and injected through the same __key__ placeholder
+# machinery used for TEXTS (see _apply_texts). All three are plain URL/URI
+# strings; the setup/results templates embed them verbatim.
+# ----------------------------------------------------------------------------
+
+# Inline SVG favicon (DanyAPI hexagon logo) as a data: URI, URL-encoded.
+FAVICON_DATA_URI = (
+    "data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2040%2040'%3E"
+    "%3Cdefs%3E%3ClinearGradient%20id='g'%20x1='0'%20y1='0'%20x2='1'%20y2='1'%3E"
+    "%3Cstop%20offset='0'%20stop-color='%236c7bff'/%3E%3Cstop%20offset='1'%20stop-color='%2322d3ee'/%3E"
+    "%3C/linearGradient%3E%3C/defs%3E"
+    "%3Cpath%20d='M20%202.5L35%2011V29L20%2037.5L5%2029V11Z'%20fill='none'%20stroke='url(%23g)'"
+    "%20stroke-width='2.6'%20stroke-linejoin='round'/%3E"
+    "%3Cpath%20d='M20%2013.5L12.5%2026.5H27.5Z'%20fill='none'%20stroke='url(%23g)'"
+    "%20stroke-width='1.8'%20stroke-linejoin='round'/%3E"
+    "%3Ccircle%20cx='20'%20cy='13.5'%20r='3'%20fill='url(%23g)'/%3E"
+    "%3Ccircle%20cx='12.5'%20cy='26.5'%20r='3'%20fill='url(%23g)'/%3E"
+    "%3Ccircle%20cx='27.5'%20cy='26.5'%20r='3'%20fill='url(%23g)'/%3E%3C/svg%3E"
+)
+
+# Single Google Fonts request covering all families/weights used by both pages.
+FONTS_CSS_URL = (
+    "https://fonts.googleapis.com/css2?"
+    "family=Unbounded:wght@500;700;900"
+    "&family=Manrope:wght@400;500;600;700;800"
+    "&family=JetBrains+Mono:wght@400;500;600;700"
+    "&display=swap"
+)
+
+# Inline SVG feTurbulence noise overlay as a data: URI, URL-encoded.
+NOISE_DATA_URI = (
+    "url(\"data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='120'%20height='120'%3E"
+    "%3Cfilter%20id='n'%3E%3CfeTurbulence%20type='fractalNoise'%20baseFrequency='0.9'%20numOctaves='2'/%3E"
+    "%3C/filter%3E%3Crect%20width='120'%20height='120'%20filter='url(%23n)'/%3E%3C/svg%3E"
+    '\")'
+)
 
 # ----------------------------------------------------------------------------
 # Bookmarklet (runs on chat.deepseek.com / chat.qwen.ai, sends token to us)
@@ -257,10 +307,10 @@ SETUP_PAGE = r"""<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>__page_title__</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2040%2040'%3E%3Cdefs%3E%3ClinearGradient%20id='g'%20x1='0'%20y1='0'%20x2='1'%20y2='1'%3E%3Cstop%20offset='0'%20stop-color='%236c7bff'/%3E%3Cstop%20offset='1'%20stop-color='%2322d3ee'/%3E%3C/linearGradient%3E%3C/defs%3E%3Cpath%20d='M20%202.5L35%2011V29L20%2037.5L5%2029V11Z'%20fill='none'%20stroke='url(%23g)'%20stroke-width='2.6'%20stroke-linejoin='round'/%3E%3Cpath%20d='M20%2013.5L12.5%2026.5H27.5Z'%20fill='none'%20stroke='url(%23g)'%20stroke-width='1.8'%20stroke-linejoin='round'/%3E%3Ccircle%20cx='20'%20cy='13.5'%20r='3'%20fill='url(%23g)'/%3E%3Ccircle%20cx='12.5'%20cy='26.5'%20r='3'%20fill='url(%23g)'/%3E%3Ccircle%20cx='27.5'%20cy='26.5'%20r='3'%20fill='url(%23g)'/%3E%3C/svg%3E" />
+<link rel="icon" href="__FAVICON_DATA_URI__" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link href="https://fonts.googleapis.com/css2?family=Unbounded:wght@500;700;900&family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<link href="__FONTS_CSS_URL__" rel="stylesheet" />
 <style>
   :root {
     --font-disp: "Unbounded", sans-serif;
@@ -310,11 +360,13 @@ SETUP_PAGE = r"""<!DOCTYPE html>
     mask-image: radial-gradient(ellipse 100% 62% at 50% 0%, #000 0%, transparent 78%);
   }
   .bg-glow { position: fixed; z-index: -2; pointer-events: none; border-radius: 50%; filter: blur(110px); opacity: 0.5; }
-  .bg-glow-a { width: 640px; height: 640px; top: -220px; left: 50%; transform: translateX(-50%); background: radial-gradient(circle, rgba(108, 123, 255, 0.55), transparent 65%); }
-  .bg-glow-b { width: 520px; height: 520px; bottom: -180px; right: -140px; background: radial-gradient(circle, rgba(34, 211, 238, 0.35), transparent 65%); }
+  .bg-glow-a { width: 640px; height: 640px; top: -220px; left: 50%; transform: translateX(-50%);
+    background: radial-gradient(circle, rgba(108, 123, 255, 0.55), transparent 65%); }
+  .bg-glow-b { width: 520px; height: 520px; bottom: -180px; right: -140px;
+    background: radial-gradient(circle, rgba(34, 211, 238, 0.35), transparent 65%); }
   .noise {
     position: fixed; inset: 0; z-index: 60; pointer-events: none; opacity: 0.035;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23n)'/%3E%3C/svg%3E");
+    background-image: __NOISE_DATA_URI__;
   }
   .wrap {
     position: relative; z-index: 1;
@@ -327,13 +379,16 @@ SETUP_PAGE = r"""<!DOCTYPE html>
   }
   .brand { display: inline-flex; align-items: center; gap: 0.6rem; text-decoration: none; transition: transform 0.2s ease; }
   .brand:hover { transform: translateY(-1px); }
-  .brand-logo { width: 36px; height: 36px; display: block; filter: drop-shadow(0 2px 10px rgba(108, 123, 255, 0.5)); transition: transform 0.5s cubic-bezier(0.4, 0, 0.2, 1); }
+  .brand-logo { width: 36px; height: 36px; display: block;
+    filter: drop-shadow(0 2px 10px rgba(108, 123, 255, 0.5));
+    transition: transform 0.5s cubic-bezier(0.4, 0, 0.2, 1); }
   .brand:hover .brand-logo { animation: logo-spin 0.6s cubic-bezier(0.4, 0, 0.2, 1); }
   @keyframes logo-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
   .brand-name { font-family: var(--font-disp); font-weight: 700; font-size: 1.15rem; letter-spacing: -0.02em; color: var(--l-text); }
   .brand-accent { background: var(--l-grad); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; color: transparent; }
   .header { text-align: center; margin-bottom: 2.2rem; }
-  h1 { font-family: var(--font-disp); font-weight: 700; font-size: clamp(1.4rem, 3vw, 1.8rem); line-height: 1.25; letter-spacing: -0.02em; margin-bottom: 0.6rem; color: var(--l-text); }
+  h1 { font-family: var(--font-disp); font-weight: 700; font-size: clamp(1.4rem, 3vw, 1.8rem);
+    line-height: 1.25; letter-spacing: -0.02em; margin-bottom: 0.6rem; color: var(--l-text); }
   .grad-text { background: var(--l-grad); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; color: transparent; }
   .sub { color: var(--l-muted); font-size: 0.95rem; }
   .progress { height: 4px; border-radius: 2px; background: var(--l-border); margin-bottom: 2.2rem; overflow: hidden; }
@@ -451,7 +506,9 @@ SETUP_PAGE = r"""<!DOCTYPE html>
     <h2><span class="badge">0</span> __step0_heading__</h2>
     <p>__step0_intro__</p>
     <p>
-      <a class="bm" href="__BOOKMARKLET__" aria-label="__bookmarklet_aria__"><span class="bm-title">__bookmarklet_label__</span><canvas class="bm-label" width="214" height="24" aria-hidden="true"></canvas><span class="bm-shield" aria-hidden="true"></span></a>
+      <a class="bm" href="__BOOKMARKLET__" aria-label="__bookmarklet_aria__"><span class="bm-title">__bookmarklet_label__</span><canvas
+        class="bm-label" width="214" height="24" aria-hidden="true"></canvas><!--
+      --><span class="bm-shield" aria-hidden="true"></span></a>
     </p>
     <p class="fineprint">__step0_fineprint__</p>
     <div class="next">
@@ -466,7 +523,8 @@ SETUP_PAGE = r"""<!DOCTYPE html>
     <p>__step1_p2__</p>
     <p>__step1_p3__</p>
     <p class="fineprint">__step1_fineprint__</p>
-    <a class="btn btn-primary" id="btn-open-deepseek" style="width:100%" href="javascript:void(0)" onclick="openProvider('__DEEPSEEK_URL__', 'deepseek'); return false;">__step1_button__</a>
+    <a class="btn btn-primary" id="btn-open-deepseek" style="width:100%" href="javascript:void(0)"
+      onclick="openProvider('__DEEPSEEK_URL__', 'deepseek'); return false;">__step1_button__</a>
     <div class="next">
       <span class="waiting" id="wait1"><span class="spin"></span>__step1_waiting__</span>
     </div>
@@ -479,7 +537,8 @@ SETUP_PAGE = r"""<!DOCTYPE html>
     <p>__step2_p2__</p>
     <p>__step2_p3__</p>
     <p class="fineprint">__step2_fineprint__</p>
-    <a class="btn btn-primary" id="btn-open-qwen" style="width:100%" href="javascript:void(0)" onclick="openProvider('__QWEN_URL__', 'qwen'); return false;">__step2_button__</a>
+    <a class="btn btn-primary" id="btn-open-qwen" style="width:100%" href="javascript:void(0)"
+      onclick="openProvider('__QWEN_URL__', 'qwen'); return false;">__step2_button__</a>
     <div class="next">
       <span class="waiting" id="wait2"><span class="spin"></span>__step2_waiting__</span>
     </div>
@@ -655,10 +714,10 @@ RESULTS_PAGE = r"""<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>__results_page_title__</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2040%2040'%3E%3Cdefs%3E%3ClinearGradient%20id='g'%20x1='0'%20y1='0'%20x2='1'%20y2='1'%3E%3Cstop%20offset='0'%20stop-color='%236c7bff'/%3E%3Cstop%20offset='1'%20stop-color='%2322d3ee'/%3E%3C/linearGradient%3E%3C/defs%3E%3Cpath%20d='M20%202.5L35%2011V29L20%2037.5L5%2029V11Z'%20fill='none'%20stroke='url(%23g)'%20stroke-width='2.6'%20stroke-linejoin='round'/%3E%3Cpath%20d='M20%2013.5L12.5%2026.5H27.5Z'%20fill='none'%20stroke='url(%23g)'%20stroke-width='1.8'%20stroke-linejoin='round'/%3E%3Ccircle%20cx='20'%20cy='13.5'%20r='3'%20fill='url(%23g)'/%3E%3Ccircle%20cx='12.5'%20cy='26.5'%20r='3'%20fill='url(%23g)'/%3E%3Ccircle%20cx='27.5'%20cy='26.5'%20r='3'%20fill='url(%23g)'/%3E%3C/svg%3E" />
+<link rel="icon" href="__FAVICON_DATA_URI__" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link href="https://fonts.googleapis.com/css2?family=Unbounded:wght@500;700;900&family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<link href="__FONTS_CSS_URL__" rel="stylesheet" />
 <style>
   :root {
     --font-disp: "Unbounded", sans-serif;
@@ -708,11 +767,13 @@ RESULTS_PAGE = r"""<!DOCTYPE html>
     mask-image: radial-gradient(ellipse 100% 62% at 50% 0%, #000 0%, transparent 78%);
   }
   .bg-glow { position: fixed; z-index: -2; pointer-events: none; border-radius: 50%; filter: blur(110px); opacity: 0.5; }
-  .bg-glow-a { width: 640px; height: 640px; top: -220px; left: 50%; transform: translateX(-50%); background: radial-gradient(circle, rgba(108, 123, 255, 0.55), transparent 65%); }
-  .bg-glow-b { width: 520px; height: 520px; bottom: -180px; right: -140px; background: radial-gradient(circle, rgba(34, 211, 238, 0.35), transparent 65%); }
+  .bg-glow-a { width: 640px; height: 640px; top: -220px; left: 50%; transform: translateX(-50%);
+    background: radial-gradient(circle, rgba(108, 123, 255, 0.55), transparent 65%); }
+  .bg-glow-b { width: 520px; height: 520px; bottom: -180px; right: -140px;
+    background: radial-gradient(circle, rgba(34, 211, 238, 0.35), transparent 65%); }
   .noise {
     position: fixed; inset: 0; z-index: 60; pointer-events: none; opacity: 0.035;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23n)'/%3E%3C/svg%3E");
+    background-image: __NOISE_DATA_URI__;
   }
   .wrap {
     position: relative; z-index: 1;
@@ -725,13 +786,16 @@ RESULTS_PAGE = r"""<!DOCTYPE html>
   }
   .brand { display: inline-flex; align-items: center; gap: 0.6rem; text-decoration: none; transition: transform 0.2s ease; }
   .brand:hover { transform: translateY(-1px); }
-  .brand-logo { width: 36px; height: 36px; display: block; filter: drop-shadow(0 2px 10px rgba(108, 123, 255, 0.5)); transition: transform 0.5s cubic-bezier(0.4, 0, 0.2, 1); }
+  .brand-logo { width: 36px; height: 36px; display: block;
+    filter: drop-shadow(0 2px 10px rgba(108, 123, 255, 0.5));
+    transition: transform 0.5s cubic-bezier(0.4, 0, 0.2, 1); }
   .brand:hover .brand-logo { animation: logo-spin 0.6s cubic-bezier(0.4, 0, 0.2, 1); }
   @keyframes logo-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
   .brand-name { font-family: var(--font-disp); font-weight: 700; font-size: 1.15rem; letter-spacing: -0.02em; color: var(--l-text); }
   .brand-accent { background: var(--l-grad); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; color: transparent; }
   .header { text-align: center; margin-bottom: 2.2rem; }
-  h1 { font-family: var(--font-disp); font-weight: 700; font-size: clamp(1.4rem, 3vw, 1.8rem); line-height: 1.25; letter-spacing: -0.02em; margin-bottom: 0.6rem; color: var(--l-text); }
+  h1 { font-family: var(--font-disp); font-weight: 700; font-size: clamp(1.4rem, 3vw, 1.8rem);
+    line-height: 1.25; letter-spacing: -0.02em; margin-bottom: 0.6rem; color: var(--l-text); }
   .grad-text { background: var(--l-grad); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; color: transparent; }
   .sub { color: var(--l-muted); font-size: 0.95rem; margin-bottom: 2rem; }
   .sub a { color: var(--l-accent-2); text-decoration: none; border-bottom: 1px solid transparent; transition: color 0.2s, border-color 0.2s; }
@@ -871,6 +935,10 @@ def _apply_texts(template: str, extra: dict[str, str] | None = None) -> str:
     out = template
     for key, value in TEXTS.items():
         out = out.replace(f"__{key}__", value)
+    # Shared HTML assets (identical markup on both pages).
+    out = out.replace("__FAVICON_DATA_URI__", FAVICON_DATA_URI)
+    out = out.replace("__FONTS_CSS_URL__", FONTS_CSS_URL)
+    out = out.replace("__NOISE_DATA_URI__", NOISE_DATA_URI)
     if extra:
         for key, value in extra.items():
             out = out.replace(f"__{key}__", value)
