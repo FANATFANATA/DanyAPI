@@ -108,7 +108,7 @@ TEXTS: dict[str, str] = {
     "results_title": "Your Tokens",
     "results_sub": "Tokens for DeepSeek &amp; Qwen were successfully extracted. Use them in your <code>.env</code> when"
     " running the API locally.<br><br>To support us, you can also add them to the public API instance:"
-    " <a href=\"{public_url}\" target=\"_blank\" rel=\"noopener\">{public_url}</a>",
+    ' <a href="{public_url}" target="_blank" rel="noopener">{public_url}</a>',
     "results_public_instance": "Public instance",
     "results_pane_ds": "DeepSeek token",
     "results_pane_qw": "Qwen token",
@@ -172,7 +172,7 @@ NOISE_DATA_URI = (
     "url(\"data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='120'%20height='120'%3E"
     "%3Cfilter%20id='n'%3E%3CfeTurbulence%20type='fractalNoise'%20baseFrequency='0.9'%20numOctaves='2'/%3E"
     "%3C/filter%3E%3Crect%20width='120'%20height='120'%20filter='url(%23n)'/%3E%3C/svg%3E"
-    '\")'
+    '")'
 )
 
 # ----------------------------------------------------------------------------
@@ -183,7 +183,7 @@ NOISE_DATA_URI = (
 # (automatic-semicolon-insertion disappears when newlines are removed).
 # ----------------------------------------------------------------------------
 
-BOOKMARKLET_SOURCE = r'''
+BOOKMARKLET_SOURCE = r"""
 (function () {
   var host = location.hostname.toLowerCase();
   var isDeepSeek = host === "chat.deepseek.com" || host.endsWith(".deepseek.com");
@@ -276,7 +276,7 @@ BOOKMARKLET_SOURCE = r'''
   location.href = "http://127.0.0.1:__PORT__/collect?p=" + encodeURIComponent(p) +
     "&t=" + encodeURIComponent(token || "");
 })()
-'''
+"""
 
 
 def build_bookmarklet(port: int) -> str:
@@ -288,8 +288,7 @@ def build_bookmarklet(port: int) -> str:
     # Safety net: a stray '//' would comment out everything after it once the
     # code is on a single line ("http://" is the only legitimate use).
     assert "http://" in one_line
-    assert "//" not in one_line.replace("http://", ""), \
-        "bookmarklet source contains a // comment - it would break on one line"
+    assert "//" not in one_line.replace("http://", ""), "bookmarklet source contains a // comment - it would break on one line"
     return one_line
 
 
@@ -947,18 +946,16 @@ def _apply_texts(template: str, extra: dict[str, str] | None = None) -> str:
 
 def render_setup_page(port: int = RESULT_PORT) -> str:
     texts_json = json.dumps(TEXTS, ensure_ascii=False)
-    return (
-        _apply_texts(
-            SETUP_PAGE,
-            {
-                "BOOKMARKLET": html_escape(build_bookmarklet(port)),
-                "DEEPSEEK_URL": DEEPSEEK_URL,
-                "QWEN_URL": QWEN_URL,
-                "HAS_DEEPSEEK": "true" if STATE["deepseek"] else "false",
-                "HAS_QWEN": "true" if STATE["qwen"] else "false",
-                "TEXTS_JSON": texts_json,
-            },
-        )
+    return _apply_texts(
+        SETUP_PAGE,
+        {
+            "BOOKMARKLET": html_escape(build_bookmarklet(port)),
+            "DEEPSEEK_URL": DEEPSEEK_URL,
+            "QWEN_URL": QWEN_URL,
+            "HAS_DEEPSEEK": "true" if STATE["deepseek"] else "false",
+            "HAS_QWEN": "true" if STATE["qwen"] else "false",
+            "TEXTS_JSON": texts_json,
+        },
     )
 
 
@@ -1056,6 +1053,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         from urllib.parse import parse_qs, urlsplit
+
         parts = urlsplit(self.path)
         path = parts.path
         if path == "/status":
