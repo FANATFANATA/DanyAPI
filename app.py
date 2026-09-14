@@ -70,7 +70,7 @@ def build_solver() -> None:
             str(src_path),
             f"/Fe:{bin_path}",
         ]
-        res = subprocess.run(cmd, capture_output=True, text=True)
+        res = subprocess.run(cmd, capture_output=True, text=True, check=False)
         success = res.returncode == 0
     else:
         cmd_fast = [
@@ -82,7 +82,7 @@ def build_solver() -> None:
             "-o",
             str(bin_path),
         ]
-        res = subprocess.run(cmd_fast, capture_output=True, text=True)
+        res = subprocess.run(cmd_fast, capture_output=True, text=True, check=False)
         if res.returncode == 0:
             success = True
         else:
@@ -94,7 +94,7 @@ def build_solver() -> None:
                 "-o",
                 str(bin_path),
             ]
-            res2 = subprocess.run(cmd_compat, capture_output=True, text=True)
+            res2 = subprocess.run(cmd_compat, capture_output=True, text=True, check=False)
             success = res2.returncode == 0
 
     if success:
