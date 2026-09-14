@@ -1,6 +1,6 @@
 @echo off
 setlocal
-title DanyAPI Token Extractor
+title DanyAPI Token Utility
 cd /d "%~dp0"
 
 rem Locate a Python interpreter (any version 3.6+, 32 or 64-bit - no deps needed)
@@ -26,7 +26,7 @@ if not defined PY (
 echo Using interpreter: %PY%
 echo.
 
-%PY% get_tokens.py %*
+%PY% token_utility.py %*
 if errorlevel 1 (
     echo.
     echo [ERROR] Script exited with an error.

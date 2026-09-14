@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-get_tokens.py - Extract DeepSeek & Qwen tokens for DanyAPI.
+token_utility.py - Extract DeepSeek & Qwen tokens for DanyAPI.
 
 Uses your DEFAULT browser (no automation, no dependencies).
 
-    python get_tokens.py
+    python token_utility.py
 
 Flow:
   1. A tiny local server starts (127.0.0.1:8765) and a page opens in your
@@ -561,7 +561,7 @@ SETUP_PAGE = r"""<!DOCTYPE html>
 </div>
 
 <script>
-// Visible strings, injected from the TEXTS config at the top of get_tokens.py.
+// Visible strings, injected from the TEXTS config at the top of token_utility.py.
 const T = __TEXTS_JSON__;
 function tfmt(key, provider) {
   return T[key].replace("{provider}", provider.charAt(0).toUpperCase() + provider.slice(1));
