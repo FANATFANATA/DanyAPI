@@ -28,7 +28,6 @@ import json
 import re
 import sys
 import webbrowser
-from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
