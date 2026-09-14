@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-get_tokens.py — Extract DeepSeek & Qwen tokens for DanyAPI.
+get_tokens.py - Extract DeepSeek & Qwen tokens for DanyAPI.
 
 Uses your DEFAULT browser (no automation, no dependencies).
 
@@ -14,7 +14,7 @@ Flow:
   3. The page guides you to DeepSeek: log in, click the grabber bookmark
      there. The token is sent silently, the DeepSeek tab closes itself,
      the wizard shows a success flash and automatically moves on to Qwen.
-  4. Same for Qwen — and when both tokens are in, you land on a results
+  4. Same for Qwen - and when both tokens are in, you land on a results
      screen with your tokens ready to copy.
 
 Everything stays local: the server binds to 127.0.0.1 only.
@@ -240,7 +240,7 @@ def build_bookmarklet(port: int) -> str:
     # code is on a single line ("http://" is the only legitimate use).
     assert "http://" in one_line
     assert "//" not in one_line.replace("http://", ""), \
-        "bookmarklet source contains a // comment — it would break on one line"
+        "bookmarklet source contains a // comment - it would break on one line"
     return one_line
 
 
@@ -558,7 +558,7 @@ function tfmt(key, provider) {
 function showToken(n, provider) {
   const wait = document.getElementById("wait" + n);
   if (!wait) return;
-  // Grey out the provider button — no need to open the tab again.
+  // Grey out the provider button - no need to open the tab again.
   const btn = document.getElementById("btn-open-" + provider);
   if (btn) { btn.classList.add("disabled"); btn.removeAttribute("onclick"); }
   // Green validation message also tells the user what happens next.
@@ -918,7 +918,7 @@ def render_results_page() -> str:
 SUCCESS_PAGE = r"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>__popup_title__</title></head>
 <body style="background:#06070c;color:#9aa3b5;font-family:-apple-system,'Segoe UI',Roboto,sans-serif;margin:0;padding:24px;font-size:13px">
-<!-- Close instantly — this tab was opened by the wizard, so window.close()
+<!-- Close instantly - this tab was opened by the wizard, so window.close()
      is allowed. The wizard's poll shows the green checkmark instead. -->
 <script>try { window.close(); } catch (e) {}</script>
 <span id="fb" style="display:none">__popup_message__</span>
@@ -999,7 +999,7 @@ class Handler(BaseHTTPRequestHandler):
             if register_token(provider, token):
                 self._send(SUCCESS_PAGE.encode())
             else:
-                # Invalid/missing token: still close the tab like a success —
+                # Invalid/missing token: still close the tab like a success -
                 # the wizard itself shows the red "no token" hint via /status.
                 self._send(SUCCESS_PAGE.encode())
         else:  # "/" and anything else -> setup page
@@ -1058,8 +1058,8 @@ def main() -> None:
     print(" DeepSeek + Qwen → DEEPSEEK_TOKENS / QWEN_TOKENS")
     print("=" * 60)
     print(" 1. Drag the grabber button to your bookmarks bar (once), click Next")
-    print(" 2. DeepSeek: log in, click the grabber bookmark — page auto-advances")
-    print(" 3. Qwen: same again — then both tokens are shown automatically\n")
+    print(" 2. DeepSeek: log in, click the grabber bookmark - page auto-advances")
+    print(" 3. Qwen: same again - then both tokens are shown automatically\n")
 
     serve()
 
