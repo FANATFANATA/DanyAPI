@@ -32,7 +32,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 # Windows consoles often default to cp1252 which can't render emoji/box glyphs.
-if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
+# getattr() + str() instead of direct attribute access: pylint cannot infer
+# members on the sys.stdout TextIO wrapper (E1101 false positive), and a
+# missing/None/empty encoding must skip the re-wrap, exactly as before.
+stdout_encoding = str(getattr(sys.stdout, "encoding", "") or "")
+if stdout_encoding and stdout_encoding.lower() not in ("utf-8", "utf8"):
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
