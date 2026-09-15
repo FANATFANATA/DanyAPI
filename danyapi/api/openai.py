@@ -235,7 +235,7 @@ async def lifespan(app: FastAPI):
     qwen_context_store = JsonStore("qwen-contexts", "default" if cache_enabled else None)
     deepseek_affinity_store = JsonStore("deepseek-affinities", "default" if cache_enabled else None)
     qwen_affinity_store = JsonStore("qwen-affinities", "default" if cache_enabled else None)
-    responses_store = JsonStore("responses", "default" if cache_enabled else None)
+    responses_store = JsonStore("responses", "default" if cache_enabled else None, maxsize=settings.responses_max_records)
     app.state.responses_store = responses_store
     app.state.deepseek_session_store = deepseek_session_store
     app.state.qwen_session_store = qwen_session_store
@@ -366,10 +366,11 @@ async def _fetch_qwen_models(client: QwenClient) -> list[dict]:
 
 app = FastAPI(title="DanyAPI", lifespan=lifespan)
 
+cors_origins = settings.cors_origins or ["*"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=cors_origins,
+    allow_credentials=bool(settings.cors_origins),
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -453,16 +454,16 @@ def _env_token_list(value: Any, field: str) -> list[str]:
     return result
 
 
-def _shared_store(attr: str, name: str) -> JsonStore:
+def _shared_store(attr: str, name: str, *, maxsize: int = 0) -> JsonStore:
     store = getattr(app.state, attr, None)
     if store is None:
-        store = JsonStore(name, "default" if settings.cache_enabled else None)
+        store = JsonStore(name, "default" if settings.cache_enabled else None, maxsize=maxsize)
         setattr(app.state, attr, store)
     return store
 
 
 def _responses_store() -> JsonStore:
-    return _shared_store("responses_store", "responses")
+    return _shared_store("responses_store", "responses", maxsize=settings.responses_max_records)
 
 
 def _pool_account_by_stable(pool: AccountPool | None, stable_id: str) -> Any | None:
@@ -681,30 +682,8 @@ async def _read_request_body(request: Request, limit: int) -> bytes:
     return body
 
 
-async def _extract_request_body(request: Request) -> dict[str, Any]:
-    content_length = request.headers.get("content-length")
-    if content_length:
-        try:
-            raw_length = int(content_length)
-            if raw_length <= 0:
-                return {}
-            if raw_length > MAX_REQUEST_BODY:
-                raise HTTPException(413, "request body too large")
-            if raw_length > MAX_LOGGED_BODY:
-                return {}
-        except ValueError:
-            return {}
-    if getattr(request, "method", None) in ("GET", "DELETE", "HEAD", "OPTIONS"):
-        return {}
-    try:
-        body = await _read_request_body(request, MAX_REQUEST_BODY)
-    except HTTPException:
-        raise
-    except Exception:
-        return {}
-    if not body:
-        return {}
-    if len(body) > MAX_LOGGED_BODY:
+def _parse_logged_body(body: bytes) -> dict[str, Any]:
+    if not body or len(body) > MAX_LOGGED_BODY:
         return {}
     try:
         payload = json.loads(body)
@@ -713,6 +692,33 @@ async def _extract_request_body(request: Request) -> dict[str, Any]:
     if isinstance(payload, dict):
         return payload
     return {}
+
+
+async def _extract_request_body(request: Request) -> dict[str, Any]:
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            raw_length = int(content_length)
+            if raw_length <= 0:
+                return {}
+            if raw_length > MAX_LOGGED_BODY:
+                return {}
+        except ValueError:
+            return {}
+    if getattr(request, "method", None) in ("GET", "DELETE", "HEAD", "OPTIONS"):
+        return {}
+    cached = getattr(request, "_body", b"")
+    if cached:
+        return _parse_logged_body(cached)
+    if content_length is None:
+        return {}
+    try:
+        body = await _read_request_body(request, MAX_REQUEST_BODY)
+    except HTTPException:
+        raise
+    except Exception:
+        return {}
+    return _parse_logged_body(body)
 
 
 def _request_client_ip(request: Request) -> str:
@@ -1133,6 +1139,9 @@ async def _extract_request_api_key(request: Request) -> str | None:
     return None
 
 
+_deferred_close_tasks: set[asyncio.Task] = set()
+
+
 async def _close_pool(pool: Any) -> None:
     for acct in pool.accounts:
         try:
@@ -1141,12 +1150,32 @@ async def _close_pool(pool: Any) -> None:
             log.info("session cleanup failed for byok account %r: %s", getattr(acct, "label", acct), exc)
         sem = getattr(acct, "sem", None)
         if sem is not None and sem.locked():
-            log.info("skip client close for busy byok account %r", getattr(acct, "label", acct))
+            log.info("schedule deferred client close for busy byok account %r", getattr(acct, "label", acct))
+            task = asyncio.create_task(_close_busy_client(acct, sem))
+            _deferred_close_tasks.add(task)
+            task.add_done_callback(_deferred_close_tasks.discard)
             continue
         try:
             await acct.client.aclose()
         except Exception as exc:
             log.info("client close failed for byok account %r: %s", getattr(acct, "label", acct), exc)
+
+
+async def _close_busy_client(account: Any, sem: asyncio.Semaphore) -> None:
+    acquired = False
+    try:
+        await asyncio.wait_for(sem.acquire(), timeout=300)
+        acquired = True
+    except (TimeoutError, asyncio.TimeoutError, asyncio.CancelledError):
+        log.info("give up deferred client close for busy byok account %r", getattr(account, "label", account))
+        return
+    try:
+        await account.client.aclose()
+    except Exception as exc:
+        log.info("client close failed for byok account %r: %s", getattr(account, "label", account), exc)
+    finally:
+        if acquired:
+            sem.release()
 
 
 async def _byok_pool(provider: str, tokens: list[str]) -> AccountPool:
@@ -1409,48 +1438,46 @@ async def _image_generations(req: ImageGenerationRequest, pool: AccountPool | No
     account, existing_sid = await _acquire_account(pool, req.session_id)
 
     want_b64 = req.response_format == "b64_json"
+    use_http = want_b64 or dims
     data: list[dict] = []
     usage = None
     result_sid = existing_sid
-    revised_prompt = ""
     try:
-        for _ in range(count):
-            result = await qwen_api.collect_image(
-                account=account,
-                pool=pool,
-                existing_sid=result_sid,
-                lock=account.sem,
-                prompt=req.prompt,
-                model=req.model,
-                model_id=req.model,
-                user=req.user,
-            )
-            result_sid = result.get("session_id") or result_sid
-            if result.get("usage"):
-                usage = result.get("usage")
-            if result.get("revised_prompt"):
-                revised_prompt = result["revised_prompt"]
-            for url in result["image_urls"]:
-                if not (want_b64 or dims):
-                    data.append({"url": url})
-                    continue
-                try:
-                    async with httpx.AsyncClient(follow_redirects=True, timeout=30) as hc:
-                        img_resp = await hc.get(url)
-                    if img_resp.status_code != 200:
-                        log.warning("image download failed (%s) for %s, returning url", img_resp.status_code, url)
+        async with httpx.AsyncClient(follow_redirects=True, timeout=30) as hc:
+            for _ in range(count):
+                result = await qwen_api.collect_image(
+                    account=account,
+                    pool=pool,
+                    existing_sid=result_sid,
+                    lock=account.sem,
+                    prompt=req.prompt,
+                    model=req.model,
+                    model_id=req.model,
+                    user=req.user,
+                )
+                result_sid = result.get("session_id") or result_sid
+                if result.get("usage"):
+                    usage = result.get("usage")
+                for url in result["image_urls"]:
+                    if not use_http:
                         data.append({"url": url})
                         continue
-                    payload_bytes = _resize_image_bytes(img_resp.content, dims)
-                    data.append({"b64_json": base64.b64encode(payload_bytes).decode()})
-                except Exception as exc:
-                    log.warning("image fetch failed for %s, returning url: %s", url, exc)
-                    data.append({"url": url})
+                    try:
+                        img_resp = await hc.get(url)
+                        if img_resp.status_code != 200:
+                            log.warning("image download failed (%s) for %s, returning url", img_resp.status_code, url)
+                            data.append({"url": url})
+                            continue
+                        payload_bytes = _resize_image_bytes(img_resp.content, dims)
+                        data.append({"b64_json": base64.b64encode(payload_bytes).decode()})
+                    except Exception as exc:
+                        log.warning("image fetch failed for %s, returning url: %s", url, exc)
+                        data.append({"url": url})
     except AccountPoolBusy:
         raise HTTPException(429, "all accounts are busy, try again later") from None
 
     if not data:
-        data.append({"url": "", "revised_prompt": revised_prompt})
+        raise HTTPException(502, "image generation returned no data")
 
     return {
         "created": int(time.time()),
@@ -1586,9 +1613,6 @@ async def _chat_completions_deepseek(req: ChatCompletionRequest, pool: AccountPo
 
     attachments = _collect_attachments(req)
     _validate_attachments(attachments)
-    ref_file_ids = None
-    if attachments:
-        ref_file_ids = await _upload_attachments(account, attachments, model_type, thinking)
 
     common = {
         "account": account,
@@ -1599,7 +1623,7 @@ async def _chat_completions_deepseek(req: ChatCompletionRequest, pool: AccountPo
         "model_type": model_type,
         "thinking": thinking,
         "search": search,
-        "ref_file_ids": ref_file_ids,
+        "attachments": attachments,
         "tool_schemas": toolemu.tool_schema_map(getattr(req, "tools", None)),
         "tool_mode": tool_mode,
         "include_usage": _include_usage(req),
@@ -2110,7 +2134,7 @@ async def _collect_reduced(
     ref_file_ids=None,
 ):
     await _human_delay()
-    for prompt, _tool_mode, _tool_schemas in reduced_prompts:
+    for prompt, variant_tool_mode, variant_tool_schemas in reduced_prompts:
         session_key = None
         try:
             session, session_key, parent_message_id = await _prepare_session(account, pool, None, None)
@@ -2129,7 +2153,7 @@ async def _collect_reduced(
                 _drop_session(pool, account, session_key)
             continue
         if (rec.content or rec.reasoning) and not _is_input_exceeds_limit(rec):
-            return rec, session, session_key
+            return rec, session, session_key, variant_tool_mode, variant_tool_schemas
         if session_key is not None:
             _drop_session(pool, account, session_key)
     return None
@@ -2146,6 +2170,7 @@ async def _collect_non_stream(
     thinking,
     search,
     ref_file_ids=None,
+    attachments=None,
     tool_mode=False,
     tool_schemas=None,
     context_seq: tuple[str, ...] | None = None,
@@ -2158,6 +2183,8 @@ async def _collect_non_stream(
 ):
     await _human_delay()
     async with account_lock(lock, settings.acquire_timeout):
+        if attachments:
+            ref_file_ids = await _upload_attachments(account, attachments, model_type, thinking)
         session, session_key, parent_message_id = await _prepare_session(account, pool, existing_sid, context_seq)
         if session_key != existing_sid and messages is not None:
             try:
@@ -2270,7 +2297,10 @@ async def _collect_non_stream(
                     _drop_session(pool, account, session_key)
                     reduced = await _collect_reduced(account, pool, reduced_prompts, model_type, thinking, search, ref_file_ids)
                     if reduced is not None:
-                        rec, session, session_key = reduced
+                        rec, session, session_key, variant_tool_mode, variant_tool_schemas = reduced
+                        if variant_tool_mode:
+                            tool_mode = variant_tool_mode
+                            tool_schemas = variant_tool_schemas
                         response_message_id = rec.id or response_message_id
                         stop_message_id = response_message_id
                         reduced_notice = REDUCED_CONTEXT_MESSAGE
@@ -2319,6 +2349,7 @@ async def _stream_openai(
     thinking,
     search,
     ref_file_ids=None,
+    attachments=None,
     tool_mode=False,
     tool_schemas=None,
     include_usage=False,
@@ -2335,6 +2366,8 @@ async def _stream_openai(
 
     await _human_delay()
     async with account_lock(lock, settings.acquire_timeout):
+        if attachments:
+            ref_file_ids = await _upload_attachments(account, attachments, model_type, thinking)
         try:
             session, session_key, parent_message_id = await _prepare_session(account, pool, existing_sid, context_seq)
         except HTTPException as exc:
@@ -2698,7 +2731,10 @@ async def _stream_openai(
                     _drop_session(pool, account, session_key)
                     reduced = await _collect_reduced(account, pool, reduced_prompts, model_type, thinking, search, ref_file_ids)
                     if reduced is not None:
-                        rec, session, session_key = reduced
+                        rec, session, session_key, variant_tool_mode, variant_tool_schemas = reduced
+                        if variant_tool_mode:
+                            tool_mode = variant_tool_mode
+                            tool_schemas = variant_tool_schemas
                         response_message_id = rec.id or response_message_id
                         stop_message_id = response_message_id
                         reduced_notice = REDUCED_CONTEXT_MESSAGE

@@ -105,6 +105,7 @@ class SessionRegistry:
         while len(self._sessions) > self._maxsize:
             oldest, _ = self._sessions.popitem(last=False)
             self._store.discard(self._session_key(oldest))
+            self._session_locks.pop(oldest, None)
 
     async def _create(self, **kwargs: Any) -> Any:
         return await self._client.create_session(**kwargs)
@@ -133,6 +134,7 @@ class SessionRegistry:
                 self._sessions.pop(session_id, None)
                 if self._store is not None:
                     self._store.discard(self._session_key(session_id))
+                self._session_locks.pop(session_id, None)
                 return None
             session = entry[0]
             self._sessions.move_to_end(session_id)
@@ -179,6 +181,7 @@ class SessionRegistry:
                 self._sessions.pop(oldest, None)
                 if self._store is not None:
                     self._store.discard(self._session_key(oldest))
+                self._session_locks.pop(oldest, None)
             if self._store is not None:
                 self._store.set(self._session_key(new_id), self._serialize(session))
                 if bind_key != new_id:

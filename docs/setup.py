@@ -372,6 +372,9 @@ def check_qwen_token(token):
         return False, f"unexpected response: {body[:200]}"
     if payload.get("success") is True or payload.get("id"):
         return True, ""
+    data = payload.get("data")
+    if isinstance(data, dict) and data.get("id"):
+        return True, ""
     return False, "server rejected the token"
 
 

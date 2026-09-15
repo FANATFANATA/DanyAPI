@@ -73,6 +73,8 @@ class Settings:
         self.usage_enabled = os.environ.get("DANYAPI_USAGE_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off")
         self.usage_max_records = _env_int("DANYAPI_USAGE_MAX_RECORDS", 1000)
         self.auto_update = os.environ.get("DANYAPI_AUTO_UPDATE", "1").strip().lower() not in ("0", "false", "no", "off")
+        self.cors_origins = [o.strip() for o in os.environ.get("DANYAPI_CORS_ORIGINS", "").split(",") if o.strip()]
+        self.responses_max_records = _env_int("DANYAPI_RESPONSES_MAX_RECORDS", 1024)
 
 
 settings = Settings()

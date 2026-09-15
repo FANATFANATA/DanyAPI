@@ -1,20 +1,20 @@
-FROM python:3.14-slim
+FROM python:3.12-slim
 
 WORKDIR /app
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends gcc libc6-dev nodejs \
+    && pip install --no-cache-dir -r requirements.txt \
+    && apt-get purge -y gcc libc6-dev \
+    && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY danyapi ./danyapi
 COPY web ./web
 COPY docs ./docs
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends gcc libc6-dev nodejs \
-    && gcc -O3 -pthread -funroll-loops -flto -fomit-frame-pointer -o danyapi/deepseek/pow_solver danyapi/deepseek/pow_solver.c \
-    && apt-get purge -y gcc libc6-dev \
-    && apt-get autoremove -y \
-    && rm -rf /var/lib/apt/lists/*
+RUN gcc -O3 -pthread -funroll-loops -flto -fomit-frame-pointer -o danyapi/deepseek/pow_solver danyapi/deepseek/pow_solver.c
 
 ENV DANYAPI_HOST=0.0.0.0
 ENV DANYAPI_PORT=8000

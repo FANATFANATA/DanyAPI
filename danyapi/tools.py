@@ -1232,10 +1232,7 @@ def _xml_value(raw: str, json_type: Any) -> Any:
         nested = _xml_invoke_arguments(stripped, None, False)
         if nested is not None:
             return nested
-    value = _coerce_scalar(_unescape_xml(stripped), json_type)
-    if json_type == "string" and not isinstance(value, str):
-        value = json.dumps(value, ensure_ascii=False)
-    return value
+    return _coerce_scalar(_unescape_xml(stripped), json_type)
 
 
 def _xml_invoke_arguments(body: str, param_types: dict[str, Any] | None = None, allow_content: bool = True) -> dict[str, Any] | None:

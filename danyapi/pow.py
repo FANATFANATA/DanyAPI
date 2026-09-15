@@ -205,6 +205,7 @@ class PowManager:
         self._lock = asyncio.Lock()
         self._header: dict | None = None
         self._refill: asyncio.Task | None = None
+        self._building: asyncio.Task | None = None
 
     async def _build(self, fetch) -> dict:
         challenge = await fetch()
@@ -236,11 +237,23 @@ class PowManager:
         raw = json.dumps(payload, separators=(",", ":")).encode()
         return {"X-DS-PoW-Response": base64.b64encode(raw).decode()}
 
+    async def _ensure_build(self, fetch) -> dict:
+        current = self._building
+        if current is None or current.done():
+            self._building = asyncio.create_task(self._build(fetch))
+            current = self._building
+        try:
+            return await asyncio.shield(current)
+        except Exception:
+            if current is self._building and current.done():
+                self._building = None
+            raise
+
     async def _refill_if_empty(self, fetch) -> None:
         try:
             async with self._lock:
                 if self._header is None:
-                    self._header = await self._build(fetch)
+                    self._header = await self._ensure_build(fetch)
         except Exception as exc:
             log.warning("pow prefetch failed: %s", exc)
         finally:
@@ -260,6 +273,6 @@ class PowManager:
         if header is not None:
             self._kick_refill(fetch)
             return header
-        header = await self._build(fetch)
+        header = await self._ensure_build(fetch)
         self._kick_refill(fetch)
         return header
