@@ -4,6 +4,7 @@ import asyncio
 import logging
 import threading
 import time
+from collections.abc import Sequence
 from contextlib import asynccontextmanager
 from typing import Any, Generic, Protocol, TypeVar
 
@@ -197,7 +198,9 @@ class _PoolAccount(Protocol):
     broken: bool
     broken_at: float | None
     sem: asyncio.Semaphore
-    label: str
+
+    @property
+    def label(self) -> str: ...
 
 
 AccountT = TypeVar("AccountT", bound=_PoolAccount)
@@ -208,14 +211,14 @@ class AccountPool(Generic[AccountT]):
 
     def __init__(
         self,
-        accounts: list[AccountT],
+        accounts: Sequence[AccountT],
         label: str = "deepseek",
         session_cache_size: int = 128,
         ttl: float = 0.0,
         context_store: JsonStore | None = None,
         affinity_store: JsonStore | None = None,
     ) -> None:
-        self.accounts = accounts
+        self.accounts = list(accounts)
         self.label = label
         self._by_session: dict[str, tuple[int, float]] = {}
         self._stable_to_idx: dict[str, int] = {}
