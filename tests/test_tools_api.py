@@ -1,6 +1,7 @@
 import asyncio
 import json
-from unittest.mock import AsyncMock, MagicMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -229,3 +230,75 @@ async def test_qwen_stream_emits_tool_call_deltas():
     assert '"tool_calls"' in joined
     assert '"finish_reason": "tool_calls"' in joined
     assert joined.rstrip().endswith("data: [DONE]")
+
+
+async def test_stream_tool_mode_does_not_leak_json_as_content():
+    acct = FakeAccount([DS_TOOL_SSE])
+    gen = openai_mod._stream_openai(**_deepseek_args(acct))
+    lines = await collect_stream(gen)
+    for line in lines:
+        if not line.startswith("data: ") or line.startswith("data: [DONE]"):
+            continue
+        payload = json.loads(line[6:])
+        for chunk in payload.get("choices") or []:
+            content = (chunk.get("delta") or {}).get("content")
+            if content:
+                assert '{"tool_calls"' not in content
+                assert "<tool_calls" not in content
+
+
+async def test_stream_tool_mode_emits_role_and_finish_with_session_id():
+    acct = FakeAccount([DS_TOOL_SSE])
+    gen = openai_mod._stream_openai(**_deepseek_args(acct))
+    lines = await collect_stream(gen)
+    role_seen = False
+    finish_payload = None
+    for line in lines:
+        if not line.startswith("data: ") or line.startswith("data: [DONE]"):
+            continue
+        payload = json.loads(line[6:])
+        for chunk in payload.get("choices") or []:
+            delta = chunk.get("delta") or {}
+            if delta.get("role") == "assistant":
+                role_seen = True
+            if chunk.get("finish_reason") == "tool_calls":
+                finish_payload = payload
+    assert role_seen
+    assert finish_payload is not None
+    assert finish_payload.get("session_id")
+
+
+async def test_stream_has_no_standalone_empty_choices_chunk():
+    acct = FakeAccount([DS_PLAIN_SSE])
+    gen = openai_mod._stream_openai(**_deepseek_args(acct))
+    lines = await collect_stream(gen)
+    for line in lines:
+        if not line.startswith("data: ") or line.startswith("data: [DONE]"):
+            continue
+        payload = json.loads(line[6:])
+        assert payload.get("choices") != []
+
+
+async def test_image_generations_n_returns_multiple():
+    pool = MagicMock()
+    acct = MagicMock()
+    acct.sem = asyncio.Semaphore(1)
+    pool.acquire = AsyncMock(return_value=(acct, None))
+    results = [
+        {"image_urls": ["u1"], "usage": None, "session_id": None, "revised_prompt": "p1"},
+        {"image_urls": ["u2"], "usage": None, "session_id": None, "revised_prompt": "p2"},
+    ]
+    with patch.object(openai_mod.qwen_api, "collect_image", AsyncMock(side_effect=results)) as ci:
+        req = SimpleNamespace(
+            model="qwen-image-gen",
+            prompt="dog",
+            size=None,
+            n=2,
+            response_format="url",
+            session_id=None,
+            user=None,
+        )
+        out = await openai_mod._image_generations(req, pool=pool)
+    assert ci.await_count == 2
+    assert ci.await_args.kwargs["existing_sid"] is None
+    assert [item["url"] for item in out["data"]] == ["u1", "u2"]

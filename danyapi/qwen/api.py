@@ -71,6 +71,43 @@ CONTEXT_LIMIT_MARKERS = (
     "tokenlimit",
 )
 
+_TOOL_MARKERS = ('{"tool_calls"', "<tool_calls>")
+
+
+def _tool_marker_pos(text: str) -> int:
+    found = -1
+    for marker in _TOOL_MARKERS:
+        pos = text.find(marker)
+        if pos != -1 and (found == -1 or pos < found):
+            found = pos
+    return found
+
+
+def _append_image_markdown(prompt: str, messages: list[Any] | None) -> str:
+    if not messages:
+        return prompt
+    appended: list[str] = []
+    for message in messages:
+        content = getattr(message, "content", None)
+        if not isinstance(content, list):
+            continue
+        for item in content:
+            if not isinstance(item, dict) or item.get("type") != "image_url":
+                continue
+            image_url = item.get("image_url")
+            if isinstance(image_url, str):
+                uri = image_url
+            elif isinstance(image_url, dict) and isinstance(image_url.get("url"), str):
+                uri = image_url["url"]
+            else:
+                continue
+            if uri.startswith("http") or uri.startswith("data:"):
+                appended.append(f"![image]({uri})")
+    if not appended:
+        return prompt
+    extra = "\n".join(appended)
+    return f"{prompt}\n\n{extra}" if prompt else extra
+
 
 class ContextLimitError(Exception):
     pass
@@ -286,17 +323,19 @@ async def _human_delay() -> None:
 
 def _accumulate_usage(session, rec: QwenStreamReconstructor) -> dict:
     current = rec.usage_tokens
-    prompt_tokens = current["prompt_tokens"]
-    completion_tokens = current["completion_tokens"]
-    total_tokens = current["total_tokens"] or prompt_tokens + completion_tokens
+    current_input = current["prompt_tokens"]
+    current_output = current["completion_tokens"]
+    current_total = current["total_tokens"] or current_input + current_output
     prev_input = int(getattr(session, "accumulated_input_tokens", 0) or 0)
     prev_output = int(getattr(session, "accumulated_output_tokens", 0) or 0)
-    session.accumulated_input_tokens = prev_input + prompt_tokens
-    session.accumulated_output_tokens = prev_output + completion_tokens
+    prompt_tokens = max(0, current_input - prev_input)
+    completion_tokens = max(0, current_output - prev_output)
+    session.accumulated_input_tokens = current_input
+    session.accumulated_output_tokens = current_output
     return {
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
-        "total_tokens": total_tokens,
+        "total_tokens": current_total or prompt_tokens + completion_tokens,
     }
 
 
@@ -330,7 +369,7 @@ async def _collect_response(
                 resp = await _send_completion(
                     account.client,
                     session,
-                    prompt,
+                    _append_image_markdown(prompt, messages),
                     model_id,
                     thinking,
                     search,
@@ -562,13 +601,16 @@ async def stream_openai(
 
         rec: QwenStreamReconstructor | None = None
         content_buf = ""
+        content_shown_len = 0
+        tool_marker_pos = -1
+        role_sent = False
         stop_response_id: str | None = None
         had_cached_session = bool(existing_sid) and account.sessions.get(existing_sid) is not None
         stale_rebuilt = False
         attempt = 0
         while True:
             try:
-                resp = await _send_completion(account.client, session, prompt, model_id, thinking, search)
+                resp = await _send_completion(account.client, session, _append_image_markdown(prompt, messages), model_id, thinking, search)
             except ContextLimitError:
                 _drop_session(pool, account, session_key)
                 for line in _stream_context_limit_lines(chunk_id, created, model, session_key):
@@ -621,74 +663,21 @@ async def stream_openai(
             rec = QwenStreamReconstructor()
             incremental = IncrementalSSE()
             got_content = False
-            pending: list[str] = []
             role_sent = False
+            content_shown_len = 0
+            tool_marker_pos = -1
             stopped = False
             try:
                 async for chunk in resp.aiter_bytes():
                     for event in incremental.feed(chunk):
                         rec.handle(event)
                         c_diff, r_diff = rec.take_diffs()
-                        if c_diff or r_diff:
-                            got_content = True
+                        if not (c_diff or r_diff):
+                            continue
+                        got_content = True
                         if not role_sent:
                             role_sent = True
-                            pending.append(
-                                _sse(
-                                    {
-                                        "id": chunk_id,
-                                        "object": "chat.completion.chunk",
-                                        "created": created,
-                                        "model": model,
-                                        "choices": [
-                                            {
-                                                "index": 0,
-                                                "delta": {"role": "assistant"},
-                                                "finish_reason": None,
-                                            }
-                                        ],
-                                    }
-                                )
-                            )
-                        delta: dict = {}
-                        if c_diff:
-                            if tool_mode:
-                                content_buf += c_diff
-                            else:
-                                delta["content"] = c_diff
-                        if r_diff:
-                            delta["reasoning_content"] = r_diff
-                        if delta:
-                            pending.append(
-                                _sse(
-                                    {
-                                        "id": chunk_id,
-                                        "object": "chat.completion.chunk",
-                                        "created": created,
-                                        "model": model,
-                                        "choices": [
-                                            {
-                                                "index": 0,
-                                                "delta": delta,
-                                                "finish_reason": None,
-                                            }
-                                        ],
-                                    }
-                                )
-                            )
-                        if got_content:
-                            for line in pending:
-                                yield line
-                            pending.clear()
-                for event in incremental.finish():
-                    rec.handle(event)
-                    c_diff, r_diff = rec.take_diffs()
-                    if c_diff or r_diff:
-                        got_content = True
-                    if not role_sent:
-                        role_sent = True
-                        pending.append(
-                            _sse(
+                            yield _sse(
                                 {
                                     "id": chunk_id,
                                     "object": "chat.completion.chunk",
@@ -703,18 +692,25 @@ async def stream_openai(
                                     ],
                                 }
                             )
-                        )
-                    delta2: dict = {}
-                    if c_diff:
-                        if tool_mode:
-                            content_buf += c_diff
-                        else:
-                            delta2["content"] = c_diff
-                    if r_diff:
-                        delta2["reasoning_content"] = r_diff
-                    if delta2:
-                        pending.append(
-                            _sse(
+                        delta: dict = {}
+                        if c_diff:
+                            if tool_mode:
+                                content_buf += c_diff
+                                if tool_marker_pos == -1:
+                                    tool_marker_pos = _tool_marker_pos(content_buf)
+                                if tool_marker_pos == -1:
+                                    shown = content_buf[content_shown_len:]
+                                else:
+                                    shown = content_buf[content_shown_len:tool_marker_pos]
+                                if shown:
+                                    delta["content"] = shown
+                                    content_shown_len += len(shown)
+                            else:
+                                delta["content"] = c_diff
+                        if r_diff:
+                            delta["reasoning_content"] = r_diff
+                        if delta:
+                            yield _sse(
                                 {
                                     "id": chunk_id,
                                     "object": "chat.completion.chunk",
@@ -723,17 +719,68 @@ async def stream_openai(
                                     "choices": [
                                         {
                                             "index": 0,
-                                            "delta": delta2,
+                                            "delta": delta,
                                             "finish_reason": None,
                                         }
                                     ],
                                 }
                             )
+                for event in incremental.finish():
+                    rec.handle(event)
+                    c_diff, r_diff = rec.take_diffs()
+                    if not (c_diff or r_diff):
+                        continue
+                    got_content = True
+                    if not role_sent:
+                        role_sent = True
+                        yield _sse(
+                            {
+                                "id": chunk_id,
+                                "object": "chat.completion.chunk",
+                                "created": created,
+                                "model": model,
+                                "choices": [
+                                    {
+                                        "index": 0,
+                                        "delta": {"role": "assistant"},
+                                        "finish_reason": None,
+                                    }
+                                ],
+                            }
                         )
-                    if got_content:
-                        for line in pending:
-                            yield line
-                        pending.clear()
+                    delta2: dict = {}
+                    if c_diff:
+                        if tool_mode:
+                            content_buf += c_diff
+                            if tool_marker_pos == -1:
+                                tool_marker_pos = _tool_marker_pos(content_buf)
+                            if tool_marker_pos == -1:
+                                shown = content_buf[content_shown_len:]
+                            else:
+                                shown = content_buf[content_shown_len:tool_marker_pos]
+                            if shown:
+                                delta2["content"] = shown
+                                content_shown_len += len(shown)
+                        else:
+                            delta2["content"] = c_diff
+                    if r_diff:
+                        delta2["reasoning_content"] = r_diff
+                    if delta2:
+                        yield _sse(
+                            {
+                                "id": chunk_id,
+                                "object": "chat.completion.chunk",
+                                "created": created,
+                                "model": model,
+                                "choices": [
+                                    {
+                                        "index": 0,
+                                        "delta": delta2,
+                                        "finish_reason": None,
+                                    }
+                                ],
+                            }
+                        )
             except BaseException:
                 stopped = True
                 if rec.response_id:
@@ -802,9 +849,9 @@ async def stream_openai(
         if tool_mode:
             parsed = toolemu.parse_tool_calls(content_buf, tool_schemas)
             if parsed is not None:
-                tool_calls, tool_text = parsed
+                tool_calls, _ = parsed
                 if tool_calls:
-                    for delta in toolemu.tool_call_deltas(tool_calls, tool_text):
+                    for delta in toolemu.tool_call_deltas(tool_calls):
                         yield _sse(
                             {
                                 "id": chunk_id,
@@ -816,24 +863,27 @@ async def stream_openai(
                         )
                     finish = "tool_calls"
                 else:
-                    yield _sse(
-                        {
-                            "id": chunk_id,
-                            "object": "chat.completion.chunk",
-                            "created": created,
-                            "model": model,
-                            "choices": [
-                                {
-                                    "index": 0,
-                                    "delta": {"content": content_buf},
-                                    "finish_reason": None,
-                                }
-                            ],
-                        }
-                    )
+                    remainder = content_buf[content_shown_len:]
+                    if remainder:
+                        yield _sse(
+                            {
+                                "id": chunk_id,
+                                "object": "chat.completion.chunk",
+                                "created": created,
+                                "model": model,
+                                "choices": [
+                                    {
+                                        "index": 0,
+                                        "delta": {"content": remainder},
+                                        "finish_reason": None,
+                                    }
+                                ],
+                            }
+                        )
                     finish = "stop"
             else:
-                if content_buf:
+                remainder = content_buf[content_shown_len:]
+                if remainder:
                     yield _sse(
                         {
                             "id": chunk_id,
@@ -843,7 +893,7 @@ async def stream_openai(
                             "choices": [
                                 {
                                     "index": 0,
-                                    "delta": {"content": content_buf},
+                                    "delta": {"content": remainder},
                                     "finish_reason": None,
                                 }
                             ],
@@ -852,6 +902,24 @@ async def stream_openai(
                 finish = "stop"
         else:
             finish = "stop"
+
+        if not role_sent:
+            role_sent = True
+            yield _sse(
+                {
+                    "id": chunk_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"role": "assistant"},
+                            "finish_reason": None,
+                        }
+                    ],
+                }
+            )
 
         yield _sse(
             {

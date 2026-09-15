@@ -14,6 +14,14 @@
 #define ROUNDS 23
 #define MAX_DIGITS 32
 
+#if defined(_MSC_VER)
+#define POW_MEMORY_BARRIER() MemoryBarrier()
+#else
+#define POW_MEMORY_BARRIER() __sync_synchronize()
+#endif
+
+static volatile int g_found = 0;
+
 static const uint64_t RC[24] = {
     0x0000000000000001ULL,
     0x0000000000008082ULL,
@@ -215,7 +223,13 @@ static int check_counter(const uint64_t base[25], size_t off0,
   }
   st[16] ^= (uint64_t)0x80 << 56;
   keccak_f(st);
-  return memcmp(st, target, 32) == 0;
+  for (int i = 0; i < 32; i++)
+  {
+    uint64_t lane = st[i >> 3];
+    if ((uint8_t)((lane >> (8 * (i & 7))) & 0xffu) != target[i])
+      return 0;
+  }
+  return 1;
 }
 
 typedef struct
@@ -237,9 +251,13 @@ static void run_worker(WorkerArgs *a)
   int dlen = to_digits(a->start, digits);
   for (uint64_t c = a->start; c < a->end; c++)
   {
+    if (g_found)
+      return;
     if (check_counter(a->base, a->off0, digits, dlen, a->target))
     {
       a->result = c;
+      POW_MEMORY_BARRIER();
+      g_found = 1;
       return;
     }
     inc_digits(digits, &dlen);
@@ -276,7 +294,7 @@ static int detect_threads(void)
 static int hex_to_bytes(const char *hex, uint8_t *out)
 {
   size_t n = strlen(hex);
-  if (n % 2)
+  if (n % 2 || n > 64)
     return -1;
   for (size_t i = 0; i < n; i += 2)
   {
@@ -330,7 +348,12 @@ static long long find_json_ll(const char *json, const char *key)
   p = strchr(p + strlen(pat), ':');
   if (!p)
     return -1;
-  return strtoll(p + 1, NULL, 10);
+  p++;
+  while (*p == ' ' || *p == '\t')
+    p++;
+  if (*p == '"')
+    p++;
+  return strtoll(p, NULL, 10);
 }
 
 int main(void)
@@ -415,6 +438,7 @@ int main(void)
   }
 
   uint64_t chunk = (limit + (uint64_t)nthreads - 1) / (uint64_t)nthreads;
+  g_found = 0;
   for (int i = 0; i < nthreads; i++)
   {
     args[i].base = base;

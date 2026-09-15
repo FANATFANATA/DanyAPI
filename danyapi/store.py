@@ -14,6 +14,8 @@ log = logging.getLogger("danyapi.store")
 
 DEFAULT_CACHE_SUBDIR = "danyapi"
 
+_MAX_AFFINITY = 8192
+
 
 def cache_root() -> Path:
     override = settings.cache_dir

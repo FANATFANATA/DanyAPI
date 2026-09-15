@@ -1799,8 +1799,7 @@ def test_parse_xml_wrapper_element_overlap_mismatched_close():
     assert parsed is not None
     calls, _ = parsed
     assert calls is not None
-    assert calls[0].name == "a"
-    assert json.loads(calls[0].arguments) == {"x": "1"}
+    assert not any(call.name == "a" for call in calls)
 
 
 def test_parse_xml_wrapper_element_basic():

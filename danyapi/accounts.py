@@ -10,7 +10,7 @@ from typing import Any, Generic, Protocol, TypeVar
 from .deepseek.client import DeepSeekClient
 from .pow import PowManager
 from .sessions import SessionRegistry
-from .store import JsonStore
+from .store import _MAX_AFFINITY, JsonStore
 
 log = logging.getLogger("danyapi.accounts")
 
@@ -161,7 +161,7 @@ class ContextIndex:
 
 
 class DeepSeekAccount:
-    __slots__ = ("broken", "client", "index", "pow", "pow_upload", "sem", "sessions", "stable_id")
+    __slots__ = ("broken", "broken_at", "client", "index", "pow", "pow_upload", "sem", "sessions", "stable_id")
 
     def __init__(
         self,
@@ -180,10 +180,12 @@ class DeepSeekAccount:
         self.sessions = SessionRegistry(client, session_cache_size, ttl, store=store, key_prefix=f"{index}:")
         self.stable_id = stable_id
         self.broken = False
+        self.broken_at: float | None = None
 
     def mark_broken(self) -> None:
         if not self.broken:
             self.broken = True
+            self.broken_at = time.monotonic()
             log.warning("account #%d marked broken (invalid/expired token)", self.index)
 
     @property
@@ -193,13 +195,17 @@ class DeepSeekAccount:
 
 class _PoolAccount(Protocol):
     broken: bool
+    broken_at: float | None
     sem: asyncio.Semaphore
+    label: str
 
 
 AccountT = TypeVar("AccountT", bound=_PoolAccount)
 
 
 class AccountPool(Generic[AccountT]):
+    _REVIVE_COOLDOWN = 300.0
+
     def __init__(
         self,
         accounts: list[AccountT],
@@ -220,6 +226,7 @@ class AccountPool(Generic[AccountT]):
         self._rr = 0
         self._ttl = max(0.0, ttl)
         self._affinity_store = affinity_store
+        self._affinity_lock = threading.Lock()
         self._contexts = ContextIndex(session_cache_size, ttl, store=context_store)
         self._restore_affinities()
 
@@ -259,18 +266,27 @@ class AccountPool(Generic[AccountT]):
 
     def register(self, account_index: int, session_id: str) -> None:
         now = time.monotonic()
-        self._by_session[session_id] = (account_index, now)
-        if self._affinity_store is not None:
-            self._affinity_store.set(session_id, self._affinity_record(account_index))
-        if self._ttl > 0 and len(self._by_session) > max(4096, len(self.accounts) * 1024):
-            stale = [sid for sid, (_, ts) in self._by_session.items() if now - ts > self._ttl]
-            for sid in stale:
-                self._by_session.pop(sid, None)
+        record = self._affinity_record(account_index)
+        with self._affinity_lock:
+            self._by_session[session_id] = (account_index, now)
+            if self._affinity_store is not None:
+                if self._affinity_store.get(session_id) != record:
+                    self._affinity_store.set(session_id, record)
+            while len(self._by_session) > _MAX_AFFINITY:
+                oldest = next(iter(self._by_session))
+                self._by_session.pop(oldest, None)
                 if self._affinity_store is not None:
-                    self._affinity_store.discard(sid)
+                    self._affinity_store.discard(oldest)
+            if self._ttl > 0 and len(self._by_session) > max(4096, len(self.accounts) * 1024):
+                stale = [sid for sid, (_, ts) in self._by_session.items() if now - ts > self._ttl]
+                for sid in stale:
+                    self._by_session.pop(sid, None)
+                    if self._affinity_store is not None:
+                        self._affinity_store.discard(sid)
 
     def forget(self, session_id: str) -> None:
-        self._by_session.pop(session_id, None)
+        with self._affinity_lock:
+            self._by_session.pop(session_id, None)
         if self._affinity_store is not None:
             self._affinity_store.discard(session_id)
 
@@ -284,35 +300,38 @@ class AccountPool(Generic[AccountT]):
         self._contexts.forget(session_id)
 
     def account_for_session(self, session_id: str) -> AccountT | None:
-        entry = self._by_session.get(session_id)
-        if entry is None:
-            return None
-        idx, ts = entry
-        now = time.monotonic()
-        if self._ttl > 0 and now - ts > self._ttl:
-            self._by_session.pop(session_id, None)
-            self._contexts.forget(session_id)
-            if self._affinity_store is not None:
-                self._affinity_store.discard(session_id)
-            return None
-        acct = self.accounts[idx]
-        if acct is None or acct.broken:
-            self._by_session.pop(session_id, None)
-            self._contexts.forget(session_id)
-            if self._affinity_store is not None:
-                self._affinity_store.discard(session_id)
-            return None
-        if self._ttl > 0 and now != ts:
-            self._by_session[session_id] = (idx, now)
-        return acct
+        with self._affinity_lock:
+            entry = self._by_session.get(session_id)
+            if entry is None:
+                return None
+            idx, ts = entry
+            now = time.monotonic()
+            if self._ttl > 0 and now - ts > self._ttl:
+                self._by_session.pop(session_id, None)
+                self._contexts.forget(session_id)
+                if self._affinity_store is not None:
+                    self._affinity_store.discard(session_id)
+                return None
+            acct = self.accounts[idx]
+            if acct is None or acct.broken:
+                self._by_session.pop(session_id, None)
+                self._contexts.forget(session_id)
+                if self._affinity_store is not None:
+                    self._affinity_store.discard(session_id)
+                return None
+            if self._ttl > 0 and now != ts:
+                self._by_session[session_id] = (idx, now)
+            return acct
 
     def stats(self) -> dict[str, Any]:
+        with self._affinity_lock:
+            affinities = len(self._by_session)
         return {
             "label": self.label,
             "accounts": len(self.accounts),
             "healthy": len(self.healthy),
             "broken": len(self.accounts) - len(self.healthy),
-            "session_affinities": len(self._by_session),
+            "session_affinities": affinities,
             "context_entries": self._contexts.size,
             "context_hits": self._contexts.hits,
             "context_misses": self._contexts.misses,
@@ -323,6 +342,11 @@ class AccountPool(Generic[AccountT]):
     async def acquire(self, session_id: str | None, max_wait: float | None = None) -> tuple[AccountT, str | None]:
         healthy = self.healthy
         if not healthy:
+            revived = await self.revive_broken()
+            if revived is not None:
+                healthy = [revived]
+            elif any(getattr(acct, "broken_at", None) is not None for acct in self.accounts):
+                raise AccountPoolBusy()
             raise RuntimeError(f"all {self.label} accounts are unavailable")
         if session_id:
             acct = self.account_for_session(session_id)
@@ -366,6 +390,30 @@ class AccountPool(Generic[AccountT]):
             if time.monotonic() >= deadline:
                 raise AccountPoolBusy()
             await asyncio.sleep(0.05)
+
+    async def revive_broken(self) -> AccountT | None:
+        now = time.monotonic()
+        candidates: list[AccountT] = []
+        for acct in self.accounts:
+            if not acct.broken:
+                continue
+            broken_at = getattr(acct, "broken_at", None)
+            if broken_at is not None and now - broken_at >= self._REVIVE_COOLDOWN:
+                candidates.append(acct)
+        for acct in candidates:
+            client = getattr(acct, "client", None)
+            if client is None:
+                continue
+            try:
+                ok = await client.check_auth()
+            except Exception:
+                ok = False
+            if ok:
+                acct.broken = False
+                acct.broken_at = None
+                log.info("%s revived after auth recheck", acct.label)
+                return acct
+        return None
 
     def add_account(self, account: AccountT) -> None:
         idx = len(self.accounts)

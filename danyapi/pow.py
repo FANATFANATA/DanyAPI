@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 import logging
+import math
 import struct
 import subprocess
 from pathlib import Path
@@ -52,6 +53,29 @@ _ROUNDS = 23
 _ROUND_CONSTANTS = _RC[1:24]
 
 _PYTHON_SOLVE_LIMIT = 2_000_000
+
+
+def _parse_number(value):
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            return int(text)
+        except ValueError:
+            pass
+        try:
+            number = float(text)
+        except ValueError:
+            return None
+        return number if math.isfinite(number) else None
+    return None
 
 
 def _rol(x: int, n: int) -> int:
@@ -187,11 +211,11 @@ class PowManager:
         missing = [k for k in ("challenge", "salt", "algorithm", "signature", "target_path") if not challenge.get(k)]
         if missing:
             raise RuntimeError(f"pow challenge missing fields: {', '.join(missing)}")
-        expire_at = challenge.get("expire_at")
-        difficulty = challenge.get("difficulty")
-        if isinstance(expire_at, bool) or not isinstance(expire_at, (int, float)):
+        expire_at = _parse_number(challenge.get("expire_at"))
+        difficulty = _parse_number(challenge.get("difficulty"))
+        if expire_at is None or expire_at < 0:
             raise RuntimeError("pow challenge has invalid expire_at")
-        if isinstance(difficulty, bool) or not isinstance(difficulty, (int, float)) or difficulty <= 0:
+        if difficulty is None or difficulty <= 0:
             raise RuntimeError("pow challenge has invalid difficulty")
         answer = await solve_challenge(
             challenge["challenge"],

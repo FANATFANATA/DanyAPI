@@ -63,7 +63,7 @@ class DeepSeekClient:
         self.http = httpx.AsyncClient(
             base_url=BASE_URL,
             headers=headers,
-            timeout=httpx.Timeout(timeout),
+            timeout=httpx.Timeout(timeout, read=max(float(timeout) * 5, 300.0)),
             follow_redirects=True,
         )
 
@@ -105,9 +105,15 @@ class DeepSeekClient:
                 "/api/v0/client/settings",
                 params={"did": self.device_id, "scope": "main"},
             )
-            return resp.json().get("code") == 0
-        except (httpx.HTTPError, ValueError):
+        except httpx.HTTPError:
             return False
+        if resp.status_code != 200:
+            return False
+        try:
+            payload = resp.json()
+        except ValueError:
+            return False
+        return payload.get("code") == 0
 
     async def get_user(self) -> dict:
         resp = await self._post("/api/v0/users", None)

@@ -166,7 +166,7 @@ def _apply_delta(message: dict, op: str, path: str, value: Any) -> None:
                 idx = int(key)
             except ValueError:
                 return
-            if idx >= len(node) or idx < 0:
+            if idx < -len(node) or idx >= len(node):
                 return
             cur = node[idx]
             if isinstance(cur, str) and isinstance(value, str):

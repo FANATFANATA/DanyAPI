@@ -283,12 +283,41 @@ def test_usage_tokens_defaults():
     assert rec.usage_tokens == {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
 
+def test_usage_tokens_parses_string_numbers():
+    rec = QwenStreamReconstructor()
+    rec.usage = {"input_tokens": "1234", "output_tokens": "56.0", "total_tokens": "1290.5"}
+    assert rec.usage_tokens == {"prompt_tokens": 1234, "completion_tokens": 56, "total_tokens": 1290}
+
+
+def test_usage_tokens_booleans_zero():
+    rec = QwenStreamReconstructor()
+    rec.usage = {"input_tokens": True, "output_tokens": False, "total_tokens": True}
+    assert rec.usage_tokens == {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+
 def test_usage_tokens_ignores_invalid_values():
     rec = QwenStreamReconstructor()
     rec.usage = {"input_tokens": None, "output_tokens": "5", "total_tokens": [15]}
-    assert rec.usage_tokens == {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    assert rec.usage_tokens == {"prompt_tokens": 0, "completion_tokens": 5, "total_tokens": 0}
     rec.usage = {"input_tokens": 10.0, "output_tokens": 5.0, "total_tokens": 15.0}
     assert rec.usage_tokens == {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+
+
+def test_image_url_split_across_answer_chunks():
+    rec = QwenStreamReconstructor()
+    rec.handle(SSEEvent(None, {"choices": [{"delta": {"content": "see ![cat](https://cdn.qwenlm.ai/", "phase": "answer"}}]}))
+    assert rec.image_urls == []
+    rec.handle(SSEEvent(None, {"choices": [{"delta": {"content": "cat.png) here", "phase": "answer"}}]}))
+    assert rec.image_urls == ["https://cdn.qwenlm.ai/cat.png"]
+    assert rec.content == "see ![cat](https://cdn.qwenlm.ai/cat.png) here"
+
+
+def test_image_phase_url_split_across_chunks():
+    rec = QwenStreamReconstructor()
+    rec.handle(SSEEvent(None, {"choices": [{"delta": {"content": "![img](https://cdn.qwenlm.ai/", "phase": "image"}}]}))
+    rec.handle(SSEEvent(None, {"choices": [{"delta": {"content": "img.webp)", "phase": "image"}}]}))
+    assert rec.image_urls == ["https://cdn.qwenlm.ai/img.webp"]
+    assert rec.content == "![img](https://cdn.qwenlm.ai/img.webp)"
 
 
 def test_has_content_false_initially():

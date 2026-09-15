@@ -232,7 +232,7 @@ _PYTHON_CALL_RE = re.compile(r"\s*([A-Za-z_][A-Za-z0-9_-]*)\s*\(")
 _XML_WRAPPER_CLOSE_RE = re.compile(r"</(?:tool_calls|tool_call|function_calls|function_call|tools|calls|_calls)\s*>", re.IGNORECASE)
 _XML_TOOL_NAMES = r"invoke|toolinvoke|tool_invoke|use_tool|tool_use|call|function|tool"
 _XML_TOOL_ELEMENT_RE = re.compile(
-    rf"<(?:{_XML_TOOL_NAMES})\b([^>]*)>(.*?)</(?:{_XML_TOOL_NAMES})\s*>",
+    rf"<((?:{_XML_TOOL_NAMES}))\b([^>]*)>(.*?)</\1\s*>",
     re.DOTALL | re.IGNORECASE,
 )
 _XML_TOOL_SELFCLOSE_RE = re.compile(
@@ -414,14 +414,20 @@ def _content_text(content: Any, *, with_images: bool = False, separator: str = "
     return ""
 
 
+def _msg_field(msg: Any, key: str, default: Any = None) -> Any:
+    if isinstance(msg, dict):
+        return msg.get(key, default)
+    return getattr(msg, key, default)
+
+
 def context_sequence(messages: list[Any], user: str | None = None) -> tuple[str, ...]:
     sequence: list[str] = []
     scope = f"\0{user or ''}"
     for msg in messages:
-        role = getattr(msg, "role", "user")
+        role = _msg_field(msg, "role", "user")
         if role not in ("system", "user"):
             continue
-        content = _content_text(getattr(msg, "content", ""), with_images=True, separator="\n")
+        content = _content_text(_msg_field(msg, "content", ""), with_images=True, separator="\n")
         if not content.strip():
             continue
         digest = hashlib.sha256(f"{role}\0{content}{scope}".encode()).hexdigest()
@@ -445,30 +451,30 @@ def _render_tool_call_mention(call: Any) -> str:
 
 
 def render_message(msg: Any) -> str:
-    role = getattr(msg, "role", "user")
-    text = _strip_dsml(_content_text(getattr(msg, "content", "")))
+    role = _msg_field(msg, "role", "user")
+    text = _strip_dsml(_content_text(_msg_field(msg, "content", "")))
     if role in ("user", "system"):
         return text
     if role == "assistant":
         parts = []
         if text:
             parts.append(text)
-        for call in getattr(msg, "tool_calls", None) or []:
+        for call in _msg_field(msg, "tool_calls", None) or []:
             mention = _render_tool_call_mention(call)
             if mention:
                 parts.append(mention)
-        content = getattr(msg, "content", None)
+        content = _msg_field(msg, "content", None)
         if isinstance(content, list):
             for item in content:
                 if isinstance(item, dict) and item.get("type") == "tool_call":
                     parts.append(_render_tool_call_mention(item))
         return "; ".join(parts)
     if role == "tool":
-        tool_call_id = getattr(msg, "tool_call_id", None) or ""
+        tool_call_id = _msg_field(msg, "tool_call_id", None) or ""
         prefix = f"Tool result ({tool_call_id})" if tool_call_id else "Tool result"
         return f"{prefix}: {text}"
     if role == "function":
-        name = getattr(msg, "name", None) or ""
+        name = _msg_field(msg, "name", None) or ""
         return f"Function {name} returned: {text}"
     return text
 
@@ -478,7 +484,7 @@ def _render_history(messages: list[Any]) -> str:
     for msg in messages:
         text = render_message(msg)
         if text:
-            role = getattr(msg, "role", "user")
+            role = _msg_field(msg, "role", "user")
             parts.append(f"{role.capitalize()}: {text}")
     return "\n".join(parts)
 
@@ -486,7 +492,7 @@ def _render_history(messages: list[Any]) -> str:
 def _render_tool_tail(messages: list[Any]) -> str:
     parts = []
     for msg in messages:
-        role = getattr(msg, "role", None)
+        role = _msg_field(msg, "role", None)
         if role in ("tool", "function"):
             parts.append(render_message(msg))
     parts.append(TOOL_TAIL_REMINDER)
@@ -497,37 +503,41 @@ def extract_last_user(messages: list[Any]) -> str:
     if not messages:
         raise ValueError("messages is required")
     for msg in reversed(messages):
-        if getattr(msg, "role", None) in ("user", "system"):
-            content = getattr(msg, "content", "")
-            if isinstance(content, str):
-                return _strip_dsml(content)
-            if isinstance(content, list):
-                parts = []
-                for item in content:
-                    if isinstance(item, str):
-                        parts.append(item)
-                    elif isinstance(item, dict):
-                        if item.get("type") == "text" and isinstance(item.get("text"), str):
-                            parts.append(item["text"])
-                        elif item.get("type") == "image_url":
-                            continue
-                text = _strip_dsml("".join(parts)).strip()
-                if text:
-                    return text
-                continue
-            raise ValueError("unsupported message content")
+        if _msg_field(msg, "role", None) != "user":
+            continue
+        content = _msg_field(msg, "content", None)
+        if content is None:
+            continue
+        if isinstance(content, str):
+            return _strip_dsml(content)
+        if isinstance(content, list):
+            parts = []
+            for item in content:
+                if isinstance(item, str):
+                    parts.append(item)
+                elif isinstance(item, dict):
+                    if item.get("type") == "text" and isinstance(item.get("text"), str):
+                        parts.append(item["text"])
+                    elif item.get("type") == "image_url":
+                        continue
+            text = _strip_dsml("".join(parts)).strip()
+            if text:
+                return text
+            continue
+        raise ValueError("unsupported message content")
     raise ValueError("no user message found")
 
 
 def is_tool_round(messages: list[Any]) -> bool:
     for msg in messages:
-        role = getattr(msg, "role", None)
+        role = _msg_field(msg, "role", None)
         if role in ("tool", "function"):
             return True
-        if role == "assistant" and getattr(msg, "tool_calls", None):
+        if role == "assistant" and _msg_field(msg, "tool_calls", None):
             return True
-        if role == "assistant" and isinstance(getattr(msg, "content", None), list):
-            for item in msg.content:
+        content = _msg_field(msg, "content", None)
+        if role == "assistant" and isinstance(content, list):
+            for item in content:
                 if isinstance(item, dict) and item.get("type") == "tool_call":
                     return True
     return False
@@ -536,12 +546,12 @@ def is_tool_round(messages: list[Any]) -> bool:
 def _has_history(messages: list[Any]) -> bool:
     user_count = 0
     for msg in messages:
-        role = getattr(msg, "role", None)
+        role = _msg_field(msg, "role", None)
         if role == "user":
             user_count += 1
             continue
-        text = _content_text(getattr(msg, "content", ""))
-        if role == "assistant" and (text or getattr(msg, "tool_calls", None)):
+        text = _content_text(_msg_field(msg, "content", ""))
+        if role == "assistant" and (text or _msg_field(msg, "tool_calls", None)):
             return True
         if role in ("tool", "function") and text:
             return True
@@ -551,7 +561,7 @@ def _has_history(messages: list[Any]) -> bool:
 def _tail_after_last_user(messages: list[Any]) -> list[Any]:
     index = -1
     for i, msg in enumerate(messages):
-        if getattr(msg, "role", None) in ("user", "system"):
+        if _msg_field(msg, "role", None) in ("user", "system"):
             index = i
     if index < 0:
         return list(messages)
@@ -561,8 +571,8 @@ def _tail_after_last_user(messages: list[Any]) -> list[Any]:
 def extract_system(messages: list[Any]) -> str:
     parts = []
     for msg in messages:
-        if getattr(msg, "role", None) == "system":
-            text = _strip_dsml(_content_text(getattr(msg, "content", ""))).strip()
+        if _msg_field(msg, "role", None) == "system":
+            text = _strip_dsml(_content_text(_msg_field(msg, "content", ""))).strip()
             if text:
                 parts.append(text)
     return "\n".join(parts)
@@ -609,6 +619,9 @@ def build_prompt(
         blocks = []
         if json_block:
             blocks.append(json_block)
+        choice = _choice_name(tool_choice)
+        if schema and choice is not None and choice not in ("auto", "none"):
+            blocks.append(schema)
         blocks.append(base)
         return "\n\n".join(blocks), tools_present
 
@@ -736,6 +749,32 @@ def _is_bare_literal(token: str) -> bool:
     return _NUMBER_RE.fullmatch(token) is not None
 
 
+_URL_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*://")
+
+
+def _url_like_after(text: str, i: int) -> bool:
+    fragment = text[i : i + 32]
+    if not fragment:
+        return False
+    if fragment.startswith("://"):
+        return True
+    if _URL_SCHEME_RE.match(fragment):
+        return True
+    if fragment[0] == ":":
+        rest = fragment[1:]
+        for k, ch in enumerate(rest):
+            if k >= 16:
+                break
+            if ch in "{}[],\"'\\ \t\r\n":
+                if ch in "[],":
+                    return False
+                break
+        else:
+            return True
+        return False
+    return False
+
+
 def _normalize_bare_json(text: str) -> str | None:
     out: list[str] = []
     i = 0
@@ -802,7 +841,7 @@ def _normalize_bare_json(text: str) -> str | None:
             i = j
             changed = True
             continue
-        if prev == ":" and not _is_bare_literal(token):
+        if prev == ":" and not _is_bare_literal(token) and not _url_like_after(text, i):
             out.append('"')
             out.append(token)
             out.append('"')
@@ -1030,8 +1069,12 @@ def _extract_calls(obj: dict) -> list[ToolCall] | None:
     return None
 
 
+_XML_ENTITY_RE = re.compile(r"&(amp|lt|gt|quot|apos);")
+_XML_ENTITY_MAP = {"lt": "<", "gt": ">", "quot": '"', "apos": "'", "amp": "&"}
+
+
 def _unescape_xml(text: str) -> str:
-    return text.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", '"').replace("&apos;", "'").replace("&amp;", "&")
+    return _XML_ENTITY_RE.sub(lambda m: _XML_ENTITY_MAP.get(m.group(1), m.group(0)), text)
 
 
 def _coerce_scalar(value: str, json_type: Any) -> Any:
@@ -1219,7 +1262,7 @@ def _xml_invoke_arguments(body: str, param_types: dict[str, Any] | None = None, 
     if params:
         if len(params) == 1:
             for key in _ARGS_ALIASES:
-                if key in params and isinstance(params[key], dict):
+                if key in params and isinstance(params[key], dict) and (param_types is None or key not in param_types):
                     return params[key]
         return params
     if not allow_content:
@@ -1275,8 +1318,8 @@ def _parse_xml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | N
 
     for match in _XML_TOOL_ELEMENT_RE.finditer(text):
         start, end = match.span()
-        attrs_text = match.group(1)
-        body = match.group(2)
+        attrs_text = match.group(2)
+        body = match.group(3)
         name_match = _XML_NAME_ATTR_RE.search(attrs_text)
         tool_name = name_match.group(2) if name_match else None
         if not tool_name:
@@ -1501,7 +1544,6 @@ def _iter_json_objects(text: str) -> Iterator[tuple[dict, int, int]]:
         in_string = False
         escaped = False
         end = start
-        parsed = False
         closed = False
         while end < length:
             ch = text[end]
@@ -1520,18 +1562,19 @@ def _iter_json_objects(text: str) -> Iterator[tuple[dict, int, int]]:
                 depth -= 1
                 if depth == 0:
                     closed = True
-                    candidate = text[start : end + 1]
-                    try:
-                        obj = _loads_lenient(candidate)
-                        yield obj, start, end
-                        parsed = True
-                    except ValueError:
-                        pass
                     break
             end += 1
         scanned += end - start + 1
         attempts += 1
-        i = (end + 1) if (parsed or not closed) else (start + 1)
+        if not closed:
+            return
+        candidate = text[start : end + 1]
+        try:
+            obj = _loads_lenient(candidate)
+            yield obj, start, end
+        except ValueError:
+            pass
+        i = end + 1
 
 
 def _split_top_level(text: str, delimiter: str = ",") -> list[str]:
