@@ -680,6 +680,60 @@ async def stream_openai(
                             for line in pending:
                                 yield line
                             pending.clear()
+                for event in incremental.finish():
+                    rec.handle(event)
+                    c_diff, r_diff = rec.take_diffs()
+                    if c_diff or r_diff:
+                        got_content = True
+                    if not role_sent:
+                        role_sent = True
+                        pending.append(
+                            _sse(
+                                {
+                                    "id": chunk_id,
+                                    "object": "chat.completion.chunk",
+                                    "created": created,
+                                    "model": model,
+                                    "choices": [
+                                        {
+                                            "index": 0,
+                                            "delta": {"role": "assistant"},
+                                            "finish_reason": None,
+                                        }
+                                    ],
+                                }
+                            )
+                        )
+                    delta2: dict = {}
+                    if c_diff:
+                        if tool_mode:
+                            content_buf += c_diff
+                        else:
+                            delta2["content"] = c_diff
+                    if r_diff:
+                        delta2["reasoning_content"] = r_diff
+                    if delta2:
+                        pending.append(
+                            _sse(
+                                {
+                                    "id": chunk_id,
+                                    "object": "chat.completion.chunk",
+                                    "created": created,
+                                    "model": model,
+                                    "choices": [
+                                        {
+                                            "index": 0,
+                                            "delta": delta2,
+                                            "finish_reason": None,
+                                        }
+                                    ],
+                                }
+                            )
+                        )
+                    if got_content:
+                        for line in pending:
+                            yield line
+                        pending.clear()
             except BaseException:
                 stopped = True
                 if rec.response_id:
