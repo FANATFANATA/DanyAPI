@@ -1,6 +1,6 @@
 # DanyAPI
 
-OpenAI-compatible HTTP API built on Python + FastAPI. Instead of the paid APIs it talks to the internal APIs of the free web clients [chat.deepseek.com](https://chat.deepseek.com) and [chat.qwen.ai](https://chat.qwen.ai) using server-side accounts created from your own free provider tokens (`DEEPSEEK_TOKENS` / `QWEN_TOKENS`). API consumers need no keys - all upstream requests are made by the configured server tokens.
+OpenAI compatible HTTP API built on Python + FastAPI. Instead of the paid APIs it talks to the internal APIs of the free web clients.
 
 [![CI](https://img.shields.io/github/actions/workflow/status/FANATFANATA/DanyAPI/ci.yml?branch=prod)](https://github.com/FANATFANATA/DanyAPI/actions)
 [![GitHub Release](https://img.shields.io/github/v/release/FANATFANATA/DanyAPI?sort=semver)](https://github.com/FANATFANATA/DanyAPI/releases)
@@ -8,18 +8,31 @@ OpenAI-compatible HTTP API built on Python + FastAPI. Instead of the paid APIs i
 [![Docker](https://img.shields.io/badge/GHCR-ghcr.io%2Ffanatfanata%2Fdanyapi-blue)](https://github.com/FANATFANATA/DanyAPI/pkgs/container/danyapi)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/FANATFANATA/DanyAPI/blob/prod/LICENSE)
 
-## Public hosted instance (full free)
+## Public hosted instance
 
-Don't want to self-host? A public, fully free instance is already running in production - no signup, no keys, no limits on your side:
+A public instance is already running in production (BYOK_MODE=1):
 
 - API base URL: `https://danyapi.cloudpub.ru/v1/`
-- Landing page: `https://danyapi.cloudpub.ru/`
 
-Point any OpenAI-compatible client at `https://danyapi.cloudpub.ru/v1/` with a dummy `api_key` and it just works. The instance is backed by the same free provider tokens described below; treat it as best-effort.
+Point any OpenAI compatible client at API base URL with a valid tokens, unauthenticated requests are rejected with 401. The API key should be the raw token (e.g. "token1,token2", same in .env).
+
+### Example request
+
+```bash
+curl -X POST https://danyapi.cloudpub.ru/v1/chat/completions \
+  -H "Authorization: Bearer token1,token2,token3" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "deepseek-v4.1-flash-thinking",
+    "messages": [
+      {"role": "user", "content": "Hi from example request!"}
+    ]
+  }'
+```
 
 ## Install & Upgrade
 
-Requires Python 3.10+ (CI tests 3.10-3.14).
+Requires Python 3.10+.
 
 Windows (PowerShell):
 
@@ -41,25 +54,6 @@ docker run -d -p 8000:8000 \
   -e QWEN_TOKENS="token3" \
   ghcr.io/fanatfanata/danyapi:latest
 ```
-
-## BYOK mode (bring your own key)
-
-Set `BYOK=1` (or `BYOK_MODE=1`) in `.env` to switch from server-side `.env` tokens to per-request provider tokens. In this mode the client passes its own provider token(s) directly as the API key, and DanyAPI uses them for upstream requests instead of `DEEPSEEK_TOKENS`/`QWEN_TOKENS`:
-
-```python
-from openai import OpenAI
-
-client = OpenAI(
-    base_url="https://your-instance/v1/",
-    api_key="your-deepseek-or-qwen-token",   # sent upstream to the provider
-)
-```
-
-- The key is read from `Authorization: Bearer <key>`, `x-api-key` header, or the `api_key` body field (priority in that order).
-- Several keys can be supplied comma-separated (`api_key="tok1,tok2"`) - each valid key adds a parallel account, exactly like multiple `.env` tokens.
-- Models still select the provider: `deepseek-*` / listed DeepSeek models go to DeepSeek, `qwen*` / listed Qwen models go to Qwen with their corresponding key type.
-- Requests without a key (or with an invalid key for the selected provider) are rejected with `401`.
-- Qwen model list is fetched lazily from the first valid Qwen key used.
 
 ## Contacts
 

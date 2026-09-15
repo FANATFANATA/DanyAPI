@@ -2321,6 +2321,57 @@ async def _stream_openai(
                                     ],
                                 }
                             )
+                for event in incremental.finish():
+                    if event.event == "ready" and isinstance(event.data, dict):
+                        response_message_id = event.data.get("response_message_id")
+                        if response_message_id:
+                            stop_message_id = response_message_id
+                    rec.handle(event)
+                    c_diff, r_diff = rec.take_diffs()
+                    if not (c_diff or r_diff):
+                        continue
+                    got_content = True
+                    if not role_sent:
+                        role_sent = True
+                        yield _sse(
+                            {
+                                "id": chunk_id,
+                                "object": "chat.completion.chunk",
+                                "created": created,
+                                "model": model,
+                                "choices": [
+                                    {
+                                        "index": 0,
+                                        "delta": {"role": "assistant"},
+                                        "finish_reason": None,
+                                    }
+                                ],
+                            }
+                        )
+                    delta2: dict = {}
+                    if c_diff:
+                        if tool_mode:
+                            content_buf += c_diff
+                        else:
+                            delta2["content"] = c_diff
+                    if r_diff:
+                        delta2["reasoning_content"] = r_diff
+                    if delta2:
+                        yield _sse(
+                            {
+                                "id": chunk_id,
+                                "object": "chat.completion.chunk",
+                                "created": created,
+                                "model": model,
+                                "choices": [
+                                    {
+                                        "index": 0,
+                                        "delta": delta2,
+                                        "finish_reason": None,
+                                    }
+                                ],
+                            }
+                        )
             except BaseException:
                 stopped = True
                 if rec.id:
