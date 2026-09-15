@@ -15,7 +15,7 @@ Don't want to self-host? A public, fully free instance is already running in pro
 - API base URL: `https://danyapi.cloudpub.ru/v1/`
 - Landing page: `https://danyapi.cloudpub.ru/`
 
-Point any OpenAI-compatible client at `https://danyapi.cloudpub.ru/v1/` with a valid API key from your account - unauthenticated requests are rejected with `401`. The API key should be the raw token (e.g. `sk-xxx`) or multiple tokens comma-separated in `.env` format (e.g. `sk-xxx,sk-yyy`). The instance is backed by the same free provider tokens described below; treat it as best-effort.
+Point any OpenAI-compatible client at `https://danyapi.cloudpub.ru/v1/` with a valid API key from your account - unauthenticated requests are rejected with 401. The API key should be the raw token (e.g. "token1,token2" same in .env).
 
 ## Install & Upgrade
 
