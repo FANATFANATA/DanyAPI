@@ -71,17 +71,6 @@ CONTEXT_LIMIT_MARKERS = (
     "tokenlimit",
 )
 
-_TOOL_MARKERS = ('{"tool_calls"', "<tool_calls>")
-
-
-def _tool_marker_pos(text: str) -> int:
-    found = -1
-    for marker in _TOOL_MARKERS:
-        pos = text.find(marker)
-        if pos != -1 and (found == -1 or pos < found):
-            found = pos
-    return found
-
 
 def _append_image_markdown(prompt: str, messages: list[Any] | None) -> str:
     if not messages:
@@ -597,7 +586,7 @@ async def stream_openai(
         rec: QwenStreamReconstructor | None = None
         content_buf = ""
         content_shown_len = 0
-        tool_marker_pos = -1
+        tool_hidden = False
         role_sent = False
         stop_response_id: str | None = None
         had_cached_session = bool(existing_sid) and account.sessions.get(existing_sid) is not None
@@ -660,7 +649,7 @@ async def stream_openai(
             got_content = False
             role_sent = False
             content_shown_len = 0
-            tool_marker_pos = -1
+            tool_hidden = False
             stopped = False
             try:
                 async for chunk in resp.aiter_bytes():
@@ -691,15 +680,9 @@ async def stream_openai(
                         if c_diff:
                             if tool_mode:
                                 content_buf += c_diff
-                                if tool_marker_pos == -1:
-                                    tool_marker_pos = _tool_marker_pos(content_buf)
-                                if tool_marker_pos == -1:
-                                    shown = content_buf[content_shown_len:]
-                                else:
-                                    shown = content_buf[content_shown_len:tool_marker_pos]
+                                shown, content_shown_len, tool_hidden = toolemu.tool_visible(content_buf, content_shown_len, tool_hidden, tool_schemas)
                                 if shown:
                                     delta["content"] = shown
-                                    content_shown_len += len(shown)
                             else:
                                 delta["content"] = c_diff
                         if r_diff:
@@ -747,15 +730,9 @@ async def stream_openai(
                     if c_diff:
                         if tool_mode:
                             content_buf += c_diff
-                            if tool_marker_pos == -1:
-                                tool_marker_pos = _tool_marker_pos(content_buf)
-                            if tool_marker_pos == -1:
-                                shown = content_buf[content_shown_len:]
-                            else:
-                                shown = content_buf[content_shown_len:tool_marker_pos]
+                            shown, content_shown_len, tool_hidden = toolemu.tool_visible(content_buf, content_shown_len, tool_hidden, tool_schemas)
                             if shown:
                                 delta2["content"] = shown
-                                content_shown_len += len(shown)
                         else:
                             delta2["content"] = c_diff
                     if r_diff:
