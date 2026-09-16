@@ -49,7 +49,7 @@ def build_solver() -> None:
     bin_name = "pow_solver.exe" if is_win else "pow_solver"
     bin_path = src_path.parent / bin_name
 
-    compilers = ["clang", "gcc", "cl"] if is_win else ["clang", "gcc", "cc"]
+    compilers = ["gcc", "clang", "cl"] if is_win else ["gcc", "clang", "cc"]
     chosen_compiler: str | None = None
     for comp in compilers:
         if shutil.which(comp):
