@@ -2963,6 +2963,7 @@ async def _stream_openai(
                     "model": model,
                     "session_id": session_key,
                     "usage": usage,
+                    "choices": [],
                 }
             )
         yield "data: [DONE]\n\n"
