@@ -60,7 +60,6 @@ class Message:
 def test_render_tool_schema_basic():
     schema = render_tool_schema([WEATHER_TOOL])
     assert schema is not None
-    assert schema is not None
     assert "get_weather" in schema
     assert '"city"' in schema
     assert "<tool_calls>" in schema
@@ -80,13 +79,11 @@ def test_render_tool_schema_tool_choice_none():
 def test_render_tool_schema_tool_choice_required():
     schema = render_tool_schema([WEATHER_TOOL], "required")
     assert schema is not None
-    assert schema is not None
     assert "MUST call" in schema
 
 
 def test_render_tool_schema_tool_choice_function_dict():
     schema = render_tool_schema([WEATHER_TOOL], {"type": "function", "function": {"name": "get_weather"}})
-    assert schema is not None
     assert schema is not None
     assert "get_weather" in schema
 
@@ -98,13 +95,11 @@ def test_render_tool_schema_strict_flag_skipped():
     }
     schema = render_tool_schema([tool])
     assert schema is not None
-    assert schema is not None
     assert "strict" not in schema
 
 
 def test_render_tool_schema_compact_parameters_json():
     schema = render_tool_schema([WEATHER_TOOL])
-    assert schema is not None
     assert schema is not None
     assert '{"type":"object"' in schema
 
@@ -166,7 +161,6 @@ def test_parse_tool_calls_pure_json():
     text = '{"tool_calls": [{"name": "get_weather", "arguments": {"city": "Moscow"}}]}'
     parsed = parse_tool_calls(text)
     assert parsed is not None
-    assert parsed is not None
     calls, wrapper = parsed
     assert calls is not None
     assert len(calls) == 1
@@ -180,7 +174,6 @@ def test_parse_tool_calls_markdown_fences():
     text = '```json\n{"tool_calls": [{"name": "get_weather", "arguments": {"city": "London"}}]}\n```'
     parsed = parse_tool_calls(text)
     assert parsed is not None
-    assert parsed is not None
     calls, _ = parsed
     assert calls is not None
     assert calls[0].name == "get_weather"
@@ -189,7 +182,6 @@ def test_parse_tool_calls_markdown_fences():
 def test_parse_tool_calls_prose_around():
     text = 'I will help you.\n\n{"tool_calls": [{"name": "get_weather", "arguments": {"city": "Rome"}}]}\nHope that helps.'
     parsed = parse_tool_calls(text)
-    assert parsed is not None
     assert parsed is not None
     calls, wrapper = parsed
     assert calls is not None
@@ -201,7 +193,6 @@ def test_parse_tool_calls_legacy_function_call():
     text = '{"function_call": {"name": "get_weather", "arguments": {"city": "Paris"}}}'
     parsed = parse_tool_calls(text)
     assert parsed is not None
-    assert parsed is not None
     calls, _ = parsed
     assert calls is not None
     assert calls[0].name == "get_weather"
@@ -210,7 +201,6 @@ def test_parse_tool_calls_legacy_function_call():
 def test_parse_tool_calls_multiple_calls():
     text = '{"tool_calls": [{"name": "a", "arguments": {"x": 1}}, {"name": "b", "arguments": {"y": 2}}]}'
     parsed = parse_tool_calls(text)
-    assert parsed is not None
     assert parsed is not None
     calls, _ = parsed
     assert calls is not None
@@ -221,7 +211,6 @@ def test_parse_tool_calls_content_with_calls():
     text = '{"content": "checking", "tool_calls": [{"name": "get_weather", "arguments": {"city": "Kyiv"}}]}'
     parsed = parse_tool_calls(text)
     assert parsed is not None
-    assert parsed is not None
     calls, wrapper = parsed
     assert calls is not None
     assert wrapper == "checking"
@@ -230,7 +219,6 @@ def test_parse_tool_calls_content_with_calls():
 def test_parse_tool_calls_arguments_as_string():
     text = '{"tool_calls": [{"name": "get_weather", "arguments": "{\\"city\\": \\"Oslo\\"}"}]}'
     parsed = parse_tool_calls(text)
-    assert parsed is not None
     assert parsed is not None
     calls, _ = parsed
     assert calls is not None
@@ -248,7 +236,6 @@ def test_parse_tool_calls_trailing_comma():
     text = '{"tool_calls": [{"name": "f", "arguments": {"x": 1},}]}'
     parsed = parse_tool_calls(text)
     assert parsed is not None
-    assert parsed is not None
     calls, _ = parsed
     assert calls is not None
     assert calls[0].name == "f"
@@ -258,7 +245,6 @@ def test_parse_tool_calls_trailing_comma():
 def test_parse_tool_calls_single_quotes():
     text = '{"tool_calls": [{"name": "f", "arguments": {"x": "it\'s"}}]}'
     parsed = parse_tool_calls(text)
-    assert parsed is not None
     assert parsed is not None
     calls, _ = parsed
     assert calls is not None
@@ -270,7 +256,6 @@ def test_parse_tool_calls_single_quotes_with_double_quotes_inside():
     text = "{'tool_calls': [{'name': 'f', 'arguments': {'x': 'say \"hi\"'}}]}"
     parsed = parse_tool_calls(text)
     assert parsed is not None
-    assert parsed is not None
     calls, _ = parsed
     assert calls is not None
     assert json.loads(calls[0].arguments) == {"x": 'say "hi"'}
@@ -279,7 +264,6 @@ def test_parse_tool_calls_single_quotes_with_double_quotes_inside():
 def test_parse_tool_calls_single_quotes_with_backslashes_inside():
     text = r"{'tool_calls': [{'name': 'f', 'arguments': {'path': 'C:\\Windows'}}]}"
     parsed = parse_tool_calls(text)
-    assert parsed is not None
     assert parsed is not None
     calls, _ = parsed
     assert calls is not None
@@ -302,7 +286,6 @@ def test_parse_tool_calls_bare_dict_trailing_comma():
     text = '{"name": "f", "arguments": {"x": 1,}}'
     parsed = parse_tool_calls(text)
     assert parsed is not None
-    assert parsed is not None
     calls, _ = parsed
     assert calls is not None
     assert json.loads(calls[0].arguments) == {"x": 1}
@@ -311,7 +294,6 @@ def test_parse_tool_calls_bare_dict_trailing_comma():
 def test_parse_xml_tool_calls_bash_invoke():
     text = '<tool_calls>\n<invoke name="bash">\n<command>Get-ChildItem -Name</command>\n</invoke>\n</tool_calls>'
     parsed = parse_tool_calls(text)
-    assert parsed is not None
     assert parsed is not None
     calls, wrapper = parsed
     assert calls is not None
@@ -536,7 +518,6 @@ def test_render_json_mode_none():
 def test_render_json_mode_string():
     block = render_json_mode("json_object")
     assert block is not None
-    assert block is not None
     assert "valid JSON object" in block
 
 
@@ -547,7 +528,6 @@ def test_render_json_mode_unknown_type():
 
 def test_render_json_mode_schema():
     block = render_json_mode({"type": "json_schema", "json_schema": {"schema": {"type": "object"}}})
-    assert block is not None
     assert block is not None
     assert "JSON Schema" in block
     assert '"type": "object"' in block
@@ -710,7 +690,6 @@ def test_fix_unbalanced_json_unterminated_string_closed():
 
 def test_fix_unbalanced_json_escaped_backslash_at_end_closed():
     fixed = _fix_unbalanced_json('[{"a": "x\\')
-    assert fixed is not None
     assert fixed is not None
     assert fixed == '[{"a": "x\\\\"}]'
     assert json.loads(fixed) == [{"a": "x\\"}]
@@ -1061,7 +1040,6 @@ def test_render_tool_schema_string_params():
     tool = {"function": {"name": "f", "parameters": '{"type":"object"}'}}
     schema = render_tool_schema([tool])
     assert schema is not None
-    assert schema is not None
     assert '{"type":"object"}' in schema
 
 
@@ -1151,7 +1129,6 @@ def test_extract_one_call_variants():
 
 def test_extract_calls_bare_dict():
     calls = _extract_calls({"name": "f", "arguments": {"x": 1}})
-    assert calls is not None
     assert calls is not None
     assert calls[0].name == "f"
 

@@ -430,9 +430,12 @@ int main(void)
 #else
   pthread_t *threads = (pthread_t *)calloc((size_t)nthreads, sizeof(pthread_t));
 #endif
-  if (!threads)
+  unsigned char *created = (unsigned char *)calloc((size_t)nthreads, 1);
+  if (!threads || !created)
   {
     free(args);
+    free(threads);
+    free(created);
     puts("{\"error\":\"out of memory\"}");
     return 1;
   }
@@ -448,28 +451,32 @@ int main(void)
     uint64_t end = args[i].start + chunk;
     args[i].end = end > limit ? limit : end;
     args[i].result = UINT64_MAX;
+    created[i] = 0;
 #if defined(_WIN32)
     threads[i] = CreateThread(NULL, 0, worker, &args[i], 0, NULL);
-    if (!threads[i])
+    if (threads[i])
+      created[i] = 1;
+    else
       run_worker(&args[i]);
 #else
-    pthread_create(&threads[i], NULL, worker, &args[i]);
+    if (!pthread_create(&threads[i], NULL, worker, &args[i]))
+      created[i] = 1;
+    else
+      run_worker(&args[i]);
 #endif
   }
 
-#if defined(_WIN32)
   for (int i = 0; i < nthreads; i++)
   {
-    if (threads[i])
-    {
-      WaitForSingleObject(threads[i], INFINITE);
-      CloseHandle(threads[i]);
-    }
-  }
+    if (!created[i])
+      continue;
+#if defined(_WIN32)
+    WaitForSingleObject(threads[i], INFINITE);
+    CloseHandle(threads[i]);
 #else
-  for (int i = 0; i < nthreads; i++)
     pthread_join(threads[i], NULL);
 #endif
+  }
 
   uint64_t best = UINT64_MAX;
   for (int i = 0; i < nthreads; i++)
@@ -477,6 +484,7 @@ int main(void)
       best = args[i].result;
 
   free(threads);
+  free(created);
   free(args);
 
   if (best != UINT64_MAX)

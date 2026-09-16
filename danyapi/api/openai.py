@@ -397,6 +397,12 @@ def _env_path() -> Path:
     return Path(__file__).resolve().parents[2] / ".env"
 
 
+def _unquote_env_value(value: str) -> str:
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+        return value[1:-1]
+    return value
+
+
 def _read_env_tokens() -> tuple[list[str], list[str]]:
     env_file = _env_path()
     if not env_file.exists():
@@ -406,9 +412,9 @@ def _read_env_tokens() -> tuple[list[str], list[str]]:
     for line in env_file.read_text(encoding="utf-8").splitlines():
         stripped = line.strip()
         if stripped.startswith("DEEPSEEK_TOKENS="):
-            ds_tokens = stripped.split("=", 1)[1].strip()
+            ds_tokens = _unquote_env_value(stripped.split("=", 1)[1].strip())
         elif stripped.startswith("QWEN_TOKENS="):
-            qw_tokens = stripped.split("=", 1)[1].strip()
+            qw_tokens = _unquote_env_value(stripped.split("=", 1)[1].strip())
     ds_list = [t.strip() for t in ds_tokens.split(",") if t.strip()] if ds_tokens else []
     qw_list = [t.strip() for t in qw_tokens.split(",") if t.strip()] if qw_tokens else []
     return ds_list, qw_list

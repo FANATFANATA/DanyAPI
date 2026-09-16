@@ -273,6 +273,6 @@ class PowManager:
         if header is not None:
             self._kick_refill(fetch)
             return header
-        header = await self._ensure_build(fetch)
+        header = await self._build(fetch)
         self._kick_refill(fetch)
         return header

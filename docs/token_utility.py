@@ -612,10 +612,6 @@ function openProvider(url, p) {
   }
 }
 
-function tfmt(key, provider) {
-  return T[key].replace("{provider}", provider.charAt(0).toUpperCase() + provider.slice(1));
-}
-
 function showToken(n, provider) {
   const wait = document.getElementById("wait" + n);
   if (!wait) return;
@@ -1094,8 +1090,8 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             self._send(b'{"ok":false}', 400, ctype="application/json")
 
-    def log_message(self, *args: Any) -> None:
-        pass
+    def log_message(self, format: str, *args: Any) -> None:
+        del format, args
 
 
 def serve(port: int = RESULT_PORT, open_browser: bool = True) -> None:

@@ -273,24 +273,17 @@ def _stream_error_lines(
     error: dict = {"message": message}
     if code:
         error["code"] = code
-    yield _sse(
-        {
-            "id": chunk_id,
-            "object": "chat.completion.chunk",
-            "created": created,
-            "model": model,
-            "error": error,
-            "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
-        }
-    )
-    yield _sse(
-        {
-            "id": chunk_id,
-            "session_id": session_key,
-            "object": "chat.completion.chunk",
-            "choices": [],
-        }
-    )
+    payload = {
+        "id": chunk_id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model,
+        "error": error,
+        "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
+    }
+    if session_key:
+        payload["session_id"] = session_key
+    yield _sse(payload)
     yield "data: [DONE]\n\n"
 
 
@@ -921,34 +914,28 @@ async def stream_openai(
                 }
             )
 
-        yield _sse(
-            {
+        finish_payload = {
+            "id": chunk_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model,
+            "choices": [{"index": 0, "delta": {}, "finish_reason": finish}],
+        }
+        if session_key:
+            finish_payload["session_id"] = session_key
+        yield _sse(finish_payload)
+        if include_usage:
+            usage_payload = {
                 "id": chunk_id,
                 "object": "chat.completion.chunk",
                 "created": created,
                 "model": model,
+                "usage": usage,
                 "choices": [{"index": 0, "delta": {}, "finish_reason": finish}],
             }
-        )
-        if include_usage:
-            yield _sse(
-                {
-                    "id": chunk_id,
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": model,
-                    "choices": [],
-                    "usage": usage,
-                }
-            )
-        yield _sse(
-            {
-                "id": chunk_id,
-                "session_id": session_key,
-                "object": "chat.completion.chunk",
-                "choices": [],
-            }
-        )
+            if session_key:
+                usage_payload["session_id"] = session_key
+            yield _sse(usage_payload)
         yield "data: [DONE]\n\n"
 
 
