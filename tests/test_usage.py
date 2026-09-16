@@ -108,3 +108,27 @@ def test_record_usage_no_tracker():
     reset_tracker()
     record_usage("deepseek", "m", 1, 1, 2)
     assert get_tracker() is None
+
+
+def test_recent_persists_across_reload(cache_dir):
+    store = JsonStore("usage-recent", "default")
+    tracker = UsageTracker(store=store)
+    tracker.record("deepseek", "m", 10, 20, 30, user="bob", session_id="s1")
+    restored = UsageTracker(store=JsonStore("usage-recent", "default"))
+    snap = restored.snapshot()
+    assert len(snap["recent"]) == 1
+    entry = snap["recent"][0]
+    assert entry["model"] == "m"
+    assert entry["provider"] == "deepseek"
+    assert entry["user"] == "bob"
+    assert entry["session_id"] == "s1"
+    assert entry["total_tokens"] == 30
+
+
+def test_reset_clears_persisted_recent(cache_dir):
+    store = JsonStore("usage-recent-reset", "default")
+    tracker = UsageTracker(store=store)
+    tracker.record("deepseek", "m", 1, 1, 2)
+    tracker.reset()
+    restored = UsageTracker(store=JsonStore("usage-recent-reset", "default"))
+    assert restored.snapshot()["recent"] == []

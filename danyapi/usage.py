@@ -44,6 +44,8 @@ def record_usage(
 
 
 class UsageTracker:
+    _RECENT_PERSIST_INTERVAL = 5.0
+
     def __init__(self, store: JsonStore | None = None, max_records: int = 1000) -> None:
         self._store = store
         self._max_records = max(1, max_records)
@@ -53,6 +55,7 @@ class UsageTracker:
         self._by_provider: dict[str, dict[str, int]] = {}
         self._by_user: dict[str, dict[str, int]] = {}
         self._recent: list[dict[str, Any]] = []
+        self._last_recent_persist = 0.0
         self._restore()
 
     def _restore(self) -> None:
@@ -81,6 +84,10 @@ class UsageTracker:
                         restored[name] = row
                 self._evict_overflow(restored)
                 setattr(self, attr, restored)
+        recent = self._store.get("usage_recent")
+        if isinstance(recent, list):
+            restored_recent = [entry for entry in recent if isinstance(entry, dict)]
+            self._recent = restored_recent[-self._max_records :]
 
     def _serialize(self) -> dict[str, Any]:
         return {
@@ -149,6 +156,10 @@ class UsageTracker:
             if self._store is not None:
                 try:
                     self._store.set("usage", self._serialize())
+                    now = time.time()
+                    if now - self._last_recent_persist >= self._RECENT_PERSIST_INTERVAL:
+                        self._last_recent_persist = now
+                        self._store.set("usage_recent", list(self._recent))
                 except Exception as exc:
                     log.debug("usage store write failed: %s", exc)
 
@@ -169,8 +180,10 @@ class UsageTracker:
             self._by_provider.clear()
             self._by_user.clear()
             self._recent.clear()
+            self._last_recent_persist = 0.0
             if self._store is not None:
                 try:
                     self._store.discard("usage")
+                    self._store.discard("usage_recent")
                 except Exception as exc:
                     log.debug("usage store clear failed: %s", exc)
