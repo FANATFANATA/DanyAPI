@@ -6,6 +6,8 @@ from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
+from danyapi.tokens import estimate_tokens
+
 
 class ResponsesInputError(ValueError):
     pass
@@ -240,17 +242,46 @@ class RequestInfo:
     extras: dict[str, Any] = field(default_factory=dict)
 
 
-def _usage_to_responses(usage: Any) -> dict | None:
+def _reasoning_text_from_output(output: Any) -> str:
+    parts: list[str] = []
+    if not isinstance(output, list):
+        return ""
+    for item in output:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") not in ("reasoning", "reasoning_summary", "summary_text"):
+            continue
+        text = item.get("text")
+        if isinstance(text, str) and text:
+            parts.append(text)
+            continue
+        for key in ("summary", "content"):
+            content = item.get(key)
+            if not isinstance(content, list):
+                continue
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                part_text = part.get("text")
+                if isinstance(part_text, str) and part_text:
+                    parts.append(part_text)
+    return "".join(parts)
+
+
+def _usage_to_responses(usage: Any, output: Any = None) -> dict | None:
     if not isinstance(usage, dict):
         return None
     input_tokens = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
     output_tokens = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
     total_tokens = int(usage.get("total_tokens") or (input_tokens + output_tokens))
+    reasoning_tokens = int(usage.get("reasoning_tokens") or 0)
+    if not reasoning_tokens:
+        reasoning_tokens = estimate_tokens(_reasoning_text_from_output(output))
     return {
         "input_tokens": input_tokens,
         "input_tokens_details": {"cached_tokens": int(usage.get("cached_tokens") or 0)},
         "output_tokens": output_tokens,
-        "output_tokens_details": {"reasoning_tokens": int(usage.get("reasoning_tokens") or 0)},
+        "output_tokens_details": {"reasoning_tokens": reasoning_tokens},
         "total_tokens": total_tokens,
     }
 
@@ -286,7 +317,7 @@ def build_response_object(
         "tools": info.tools or [],
         "top_p": info.top_p,
         "truncation": info.truncation,
-        "usage": _usage_to_responses(usage),
+        "usage": _usage_to_responses(usage, output),
         "user": info.user,
         "metadata": info.metadata if isinstance(info.metadata, dict) else {},
     }
@@ -568,13 +599,29 @@ class _StreamState:
                 entry = {
                     "id": f"fc_{uuid.uuid4().hex}",
                     "call_id": call.get("id") or f"call_{uuid.uuid4().hex[:12]}",
-                    "name": function.get("name") or "",
+                    "name": "",
                     "arguments": "",
                     "output_index": self.output_index,
                     "open": True,
+                    "added": False,
+                    "buffered_args": [],
                 }
                 self.output_index += 1
                 self.tool_items[index] = entry
+            name = function.get("name")
+            if isinstance(name, str) and name and not entry["name"]:
+                entry["name"] = name
+            arguments = function.get("arguments")
+            if isinstance(arguments, str) and arguments:
+                entry["arguments"] += arguments
+                if entry["added"]:
+                    yield self.emit(
+                        "response.function_call_arguments.delta",
+                        {"item_id": entry["id"], "output_index": entry["output_index"], "delta": arguments},
+                    )
+                else:
+                    entry["buffered_args"].append(arguments)
+            if entry["name"] and not entry["added"]:
                 item = {
                     "id": entry["id"],
                     "type": "function_call",
@@ -584,15 +631,14 @@ class _StreamState:
                     "status": "in_progress",
                 }
                 yield self.emit("response.output_item.added", {"output_index": entry["output_index"], "item": item})
-            if function.get("name") and not entry["name"]:
-                entry["name"] = function["name"]
-            arguments = function.get("arguments")
-            if isinstance(arguments, str) and arguments:
-                entry["arguments"] += arguments
-                yield self.emit(
-                    "response.function_call_arguments.delta",
-                    {"item_id": entry["id"], "output_index": entry["output_index"], "delta": arguments},
-                )
+                entry["added"] = True
+                if entry["buffered_args"]:
+                    for buffered in entry["buffered_args"]:
+                        yield self.emit(
+                            "response.function_call_arguments.delta",
+                            {"item_id": entry["id"], "output_index": entry["output_index"], "delta": buffered},
+                        )
+                    entry["buffered_args"] = []
 
     def close_tools(self) -> Iterator[str]:
         for index in sorted(self.tool_items):
@@ -600,6 +646,24 @@ class _StreamState:
             if not entry.get("open"):
                 continue
             entry["open"] = False
+            if not entry["added"]:
+                item = {
+                    "id": entry["id"],
+                    "type": "function_call",
+                    "call_id": entry["call_id"],
+                    "name": entry["name"],
+                    "arguments": "",
+                    "status": "in_progress",
+                }
+                yield self.emit("response.output_item.added", {"output_index": entry["output_index"], "item": item})
+                entry["added"] = True
+                if entry["buffered_args"]:
+                    for buffered in entry["buffered_args"]:
+                        yield self.emit(
+                            "response.function_call_arguments.delta",
+                            {"item_id": entry["id"], "output_index": entry["output_index"], "delta": buffered},
+                        )
+                    entry["buffered_args"] = []
             yield self.emit(
                 "response.function_call_arguments.done",
                 {"item_id": entry["id"], "output_index": entry["output_index"], "arguments": entry["arguments"]},

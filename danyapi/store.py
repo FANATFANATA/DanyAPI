@@ -14,6 +14,8 @@ log = logging.getLogger("danyapi.store")
 
 DEFAULT_CACHE_SUBDIR = "danyapi"
 
+_MAX_AFFINITY = 8192
+
 
 def cache_root() -> Path:
     override = settings.cache_dir
@@ -29,8 +31,9 @@ def cache_root() -> Path:
 
 
 class JsonStore:
-    def __init__(self, name: str, scope: str | None = None) -> None:
+    def __init__(self, name: str, scope: str | None = None, maxsize: int = 0) -> None:
         self._scope = scope
+        self._maxsize = max(0, int(maxsize))
         self._data: dict[str, Any] = {}
         self._lock = threading.Lock()
         self._path: Path | None = None
@@ -56,6 +59,11 @@ class JsonStore:
             return
         if isinstance(data, dict):
             self._data = data
+            self._evict()
+
+    def _evict(self) -> None:
+        while self._maxsize > 0 and len(self._data) > self._maxsize:
+            self._data.pop(next(iter(self._data)))
 
     def _write(self) -> None:
         if self._path is None:
@@ -79,7 +87,9 @@ class JsonStore:
         with self._lock:
             if key in self._data and self._data[key] == value:
                 return
+            self._data.pop(key, None)
             self._data[key] = value
+            self._evict()
             self._write()
 
     def pop(self, key: str, default: Any = None) -> Any:

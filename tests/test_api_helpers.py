@@ -152,9 +152,9 @@ def test_finish_reason():
     assert openai_mod._finish_reason("FINISHED") == "stop"
     assert openai_mod._finish_reason("CONTEXT_LENGTH_EXCEEDED") == "length"
     assert openai_mod._finish_reason("CONTENT_FILTER") == "content_filter"
-    assert openai_mod._finish_reason("INCOMPLETE") == "stop"
-    assert openai_mod._finish_reason("WIP") == "stop"
-    assert openai_mod._finish_reason("TIMEOUT") == "stop"
+    assert openai_mod._finish_reason("INCOMPLETE") == "length"
+    assert openai_mod._finish_reason("WIP") == "length"
+    assert openai_mod._finish_reason("TIMEOUT") == "length"
     assert openai_mod._finish_reason("WEIRD") == "stop"
     assert openai_mod._finish_reason(None) == "stop"
     assert openai_mod._finish_reason(42) == "stop"
@@ -2229,3 +2229,56 @@ async def test_image_generations_requires_qwen_pool():
     with pytest.raises(openai_mod.HTTPException) as excinfo:
         await openai_mod._image_generations(req)
     assert excinfo.value.status_code == 503
+
+
+def test_stream_error_sse_shape():
+    first, done = openai_mod._stream_error_sse("c1", 123, "m1", "boom", session_key="s1", error_finish="length")
+    assert done == "data: [DONE]\n\n"
+    payload = json.loads(first[6:])
+    assert payload["id"] == "c1"
+    assert payload["session_id"] == "s1"
+    assert payload["error"]["message"] == "boom"
+    assert payload["error"]["finish_reason"] == "length"
+    assert payload["choices"][0]["delta"] == {}
+    assert payload["choices"][0]["finish_reason"] == "length"
+
+
+def test_collect_attachments_image_total_cap_413():
+    big = b64.b64encode(b"x" * (openai_mod.MAX_ATTACHMENT_TOTAL_SIZE + 1)).decode()
+    req = SimpleNamespace(
+        messages=[
+            openai_mod.ChatMessage(
+                role="user",
+                content=[{"type": "image_url", "image_url": f"data:image/png;base64,{big}"}],
+            )
+        ],
+        files=[],
+    )
+    with pytest.raises(openai_mod.HTTPException) as excinfo:
+        openai_mod._collect_attachments(req)
+    assert excinfo.value.status_code == 413
+
+
+async def test_add_tokens_reactivates_broken_account(monkeypatch, tmp_path):
+    from danyapi import store as store_mod
+    from danyapi.accounts import AccountPool, DeepSeekAccount
+
+    token = "tok1"
+    monkeypatch.setattr(store_mod.settings, "cache_dir", str(tmp_path))
+    env_file = tmp_path / ".env"
+    env_file.write_text(f"DEEPSEEK_TOKENS={token}\nQWEN_TOKENS=\n", encoding="utf-8")
+    monkeypatch.setattr(openai_mod, "_env_path", lambda: env_file)
+    client = MagicMock()
+    client.check_auth = AsyncMock(return_value=True)
+    client.aclose = AsyncMock()
+    acct = DeepSeekAccount(0, client, stable_id=openai_mod._token_stable_id(token))
+    acct.mark_broken()
+    app.state.pool = AccountPool([acct])
+    result = await openai_mod.add_tokens({"deepseek_tokens": [token]})
+    assert result["success"] is True
+    assert result["message"] == "Tokens reactivated."
+    assert result["reactivated"]["deepseek"] == 1
+    assert result["added"]["deepseek"] == 0
+    assert acct.broken is False
+    assert acct.broken_at is None
+    assert env_file.read_text(encoding="utf-8").count(token) == 1

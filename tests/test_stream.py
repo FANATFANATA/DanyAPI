@@ -340,7 +340,7 @@ def test_append_list_negative_index():
     rec = MessageReconstructor()
     rec.message = {"items": ["a", "b"]}
     rec.handle(SSEEvent(None, {"p": "response/items/-1", "o": "APPEND", "v": "X"}))
-    assert rec.message["items"] == ["a", "b"]
+    assert rec.message["items"] == ["a", "bX"]
 
 
 def test_init_message_non_dict():

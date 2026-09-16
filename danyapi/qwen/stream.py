@@ -90,8 +90,8 @@ class QwenStreamReconstructor:
         if phase in IMAGE_PHASES:
             text = _delta_text(delta, "content")
             if text:
-                self._collect_image_urls(text)
                 self.content += text
+                self._collect_image_urls(self.content)
             image_field = delta.get("image_url") or delta.get("image")
             if isinstance(image_field, str) and image_field.startswith("http"):
                 if image_field not in self._seen_image_urls:
@@ -126,7 +126,7 @@ class QwenStreamReconstructor:
             text = _delta_text(delta, "content")
             if text:
                 self.content += text
-                self._collect_image_urls(text)
+                self._collect_image_urls(self.content)
         elif phase in THINK_PHASES:
             text = _delta_text(delta, "content")
             if text:
@@ -156,7 +156,22 @@ class QwenStreamReconstructor:
     @property
     def usage_tokens(self) -> dict:
         def _int(value: Any) -> int:
-            return int(value) if isinstance(value, (int, float)) else 0
+            if isinstance(value, bool):
+                return 0
+            if isinstance(value, int):
+                return value
+            if isinstance(value, float):
+                return int(value)
+            if not isinstance(value, str):
+                return 0
+            try:
+                return int(value.strip())
+            except (TypeError, ValueError):
+                pass
+            try:
+                return int(float(value.strip()))
+            except (TypeError, ValueError):
+                return 0
 
         return {
             "prompt_tokens": _int(self.usage.get("input_tokens")),

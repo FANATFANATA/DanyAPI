@@ -29,6 +29,7 @@ def build_solver() -> None:
         ROOT / "pow_solver.c",
         ROOT / "danyapi" / "pow_solver.c",
         ROOT / "danyapi" / "solver" / "pow_solver.c",
+        ROOT / "danyapi" / "deepseek" / "pow_solver.c",
     ]
     src_path: Path | None = None
     for candidate in src_candidates:
@@ -100,7 +101,7 @@ def build_solver() -> None:
     if success:
         if not is_win:
             os.chmod(bin_path, 0o755)
-        dest_dirs = [ROOT, ROOT / "danyapi", ROOT / "danyapi" / "solver"]
+        dest_dirs = [ROOT, ROOT / "danyapi", ROOT / "danyapi" / "solver", ROOT / "danyapi" / "deepseek"]
         for d in dest_dirs:
             if d.exists():
                 dst = d / bin_name
@@ -108,6 +109,13 @@ def build_solver() -> None:
                     shutil.copy2(bin_path, dst)
                     if not is_win:
                         os.chmod(dst, 0o755)
+        for d in [ROOT, src_path.parent, bin_path.parent]:
+            obj = d / "pow_solver.obj"
+            if obj.exists():
+                try:
+                    obj.unlink()
+                except OSError:
+                    pass
         print(f"Native pow_solver compiled via {chosen_compiler} ({bin_name})")
 
 

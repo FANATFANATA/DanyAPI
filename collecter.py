@@ -9,6 +9,7 @@ IGNORE_PATTERNS = {
     ".hypothesis",
     ".coverage",
     "egg-info",
+    ".env",
 }
 
 EXCLUDE_EXTS = {".pyc", ".db", ".cache", ".wasm", ".exe", ".dll", ".so"}

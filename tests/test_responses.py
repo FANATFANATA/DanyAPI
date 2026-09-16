@@ -255,6 +255,27 @@ def test_response_from_chat_incomplete_length():
     assert obj["incomplete_details"] == {"reason": "max_output_tokens"}
 
 
+def test_response_from_chat_reasoning_tokens():
+    info = resp.RequestInfo(model="m")
+    chat = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "Hi",
+                    "reasoning_content": "Let me think about this carefully first",
+                },
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
+    }
+    obj = resp.response_from_chat(chat, info, "resp_1", 1)
+    details = obj["usage"]["output_tokens_details"]
+    assert details["reasoning_tokens"] > 0
+    assert details["reasoning_tokens"] == 9
+
+
 async def test_translate_stream_text():
     info = resp.RequestInfo(model="m")
     chat_stream = _agen(
@@ -290,6 +311,42 @@ async def test_translate_stream_tools():
     assert "event: response.function_call_arguments.delta" in joined
     assert "response.function_call_arguments.done" in joined
     assert '"name": "f"' in joined
+
+
+async def test_translate_stream_tool_name_after_args():
+    info = resp.RequestInfo(model="m")
+    chat_stream = _agen(
+        [
+            'data: {"id":"x","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function",'
+            '"function":{"arguments":"{\\"a\\":1}"}}]},"finish_reason":null}]}\n\n',
+            'data: {"id":"x","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"f","arguments":""}}]},"finish_reason":null}]}\n\n',
+            'data: {"id":"x","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}\n\n',
+        ]
+    )
+    joined = "".join(await _collect(resp.translate_stream(chat_stream, info, "resp_1", 1)))
+    added_at = joined.index("response.output_item.added")
+    delta_at = joined.index("response.function_call_arguments.delta")
+    done_at = joined.index("response.function_call_arguments.done")
+    assert added_at < delta_at < done_at
+    assert '"name": "f"' in joined
+    assert '"delta": "{\\"a\\":1}"' in joined
+
+
+async def test_translate_stream_interrupted_tool_call_closed():
+    info = resp.RequestInfo(model="m")
+    chat_stream = _agen(
+        [
+            'data: {"id":"x","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function",'
+            '"function":{"arguments":"{\\"a\\":"}}]},"finish_reason":null}]}\n\n',
+        ]
+    )
+    joined = "".join(await _collect(resp.translate_stream(chat_stream, info, "resp_1", 1)))
+    added_at = joined.index("response.output_item.added")
+    delta_at = joined.index("response.function_call_arguments.delta")
+    done_at = joined.index("response.function_call_arguments.done")
+    item_done_at = joined.index("event: response.output_item.done")
+    assert added_at < delta_at < done_at < item_done_at
+    assert '"arguments": "{\\"a\\":"}' in joined
 
 
 async def test_translate_stream_error():

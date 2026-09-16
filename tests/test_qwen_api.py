@@ -455,15 +455,15 @@ def test_accumulate_usage():
     usage = qwen_api._accumulate_usage(session, rec)
     assert usage == {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
     usage2 = qwen_api._accumulate_usage(session, rec)
-    assert usage2 == {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
-    assert session.accumulated_input_tokens == 20
-    assert session.accumulated_output_tokens == 10
+    assert usage2 == {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 15}
+    assert session.accumulated_input_tokens == 10
+    assert session.accumulated_output_tokens == 5
     rec2 = QwenStreamReconstructor()
-    rec2.usage = {"input_tokens": 3, "output_tokens": 4}
+    rec2.usage = {"input_tokens": 13, "output_tokens": 8}
     usage3 = qwen_api._accumulate_usage(session, rec2)
-    assert usage3 == {"prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7}
-    assert session.accumulated_input_tokens == 23
-    assert session.accumulated_output_tokens == 14
+    assert usage3 == {"prompt_tokens": 3, "completion_tokens": 3, "total_tokens": 21}
+    assert session.accumulated_input_tokens == 13
+    assert session.accumulated_output_tokens == 8
 
 
 def test_drop_session():
@@ -636,7 +636,65 @@ async def test_stream_tool_mode_falls_back_to_content():
     lines = await _collect(gen)
     joined = "".join(lines)
     assert '"tool_calls"' not in joined
-    assert '"content": "Hello world"' in joined
+    assert '"content": "Hello"' in joined
+    assert '"content": " world"' in joined
+    assert joined.rstrip().endswith("data: [DONE]")
+
+
+async def test_stream_tool_mode_streams_prefix_then_tool_deltas():
+    sse = (
+        'data: {"response.created":{"chat_id":"c1","parent_id":"p0","response_id":"r1","response_index":"0"}} \n'
+        "\n"
+        'data: {"choices": [{"delta": {"content": "Sure, here: ", "phase": "answer", "status": "typing"}}], "response_id": "r1"}\n'
+        "\n"
+        f'data: {{"choices": [{{"delta": {{"content": {json.dumps(TOOL_JSON)}, "phase": "answer", "status": "typing"}}}}], "response_id": "r1"}}\n'
+        "\n"
+        'data: {"choices": [{"delta": {"content": "", "role": "assistant", "status": "finished", "phase": "answer"}}], "response_id": "r1"}\n'
+        "\n"
+    )
+    acct = FakeAccount([sse])
+    args = _args(acct, tool_mode=True)
+    gen = qwen_api.stream_openai(**args)
+    joined = "".join(await _collect(gen))
+    assert '"content": "Sure, here: "' in joined
+    assert '"tool_calls"' in joined
+    assert json.dumps(TOOL_JSON) not in joined
+    assert '"finish_reason": "tool_calls"' in joined
+    assert joined.rstrip().endswith("data: [DONE]")
+
+
+class _ImgMsg:
+    def __init__(self, content):
+        self.content = content
+
+
+def test_append_image_markdown():
+    messages = [
+        _ImgMsg("plain"),
+        _ImgMsg([{"type": "image_url", "image_url": {"url": "https://x/y.png"}}]),
+        _ImgMsg([{"type": "image_url", "image_url": "data:image/png;base64,AAAA"}]),
+        _ImgMsg([{"type": "image_url", "image_url": 42}]),
+    ]
+    prompt = qwen_api._append_image_markdown("hello", messages)
+    assert prompt.startswith("hello")
+    assert "![image](https://x/y.png)" in prompt
+    assert "![image](data:image/png;base64,AAAA)" in prompt
+    assert qwen_api._append_image_markdown("hello", None) == "hello"
+    assert qwen_api._append_image_markdown("hello", [_ImgMsg("nope")]) == "hello"
+
+
+async def test_stream_empty_response_sends_role_delta():
+    sse = (
+        'data: {"response.created":{"chat_id":"c1","parent_id":"p0","response_id":"r1"}} \n'
+        "\n"
+        'data: {"choices": [{"delta": {"content": "", "role": "assistant", "status": "finished", "phase": "answer"}}], "response_id": "r1"}\n'
+        "\n"
+    )
+    acct = FakeAccount([sse])
+    gen = qwen_api.stream_openai(**_args(acct))
+    joined = "".join(await _collect(gen))
+    assert '"role": "assistant"' in joined
+    assert '"finish_reason": "stop"' in joined
     assert joined.rstrip().endswith("data: [DONE]")
 
 

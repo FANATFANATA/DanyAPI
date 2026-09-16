@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any
 
-from ..sessions import SessionRegistry
+from ..sessions import SessionRegistry, _as_int
 from ..store import JsonStore
 from .client import QwenClient, QwenSession
 
@@ -42,8 +43,8 @@ class QwenSessionRegistry(SessionRegistry):
             title=record.get("title") or "",
             last_response_id=record.get("last_response_id"),
             model=record.get("model"),
-            accumulated_input_tokens=int(input_tokens) if isinstance(input_tokens, (int, float)) else 0,
-            accumulated_output_tokens=int(output_tokens) if isinstance(output_tokens, (int, float)) else 0,
+            accumulated_input_tokens=_as_int(input_tokens),
+            accumulated_output_tokens=_as_int(output_tokens),
         )
 
     async def _create(self, **kwargs) -> QwenSession:
@@ -66,7 +67,7 @@ class QwenSessionRegistry(SessionRegistry):
 
 
 class QwenAccount:
-    __slots__ = ("broken", "client", "index", "sem", "sessions", "stable_id")
+    __slots__ = ("broken", "broken_at", "client", "index", "sem", "sessions", "stable_id")
 
     def __init__(
         self,
@@ -83,10 +84,12 @@ class QwenAccount:
         self.sessions = QwenSessionRegistry(client, session_cache_size, ttl, store=store, key_prefix=f"{index}:")
         self.stable_id = stable_id
         self.broken = False
+        self.broken_at: float | None = None
 
     def mark_broken(self) -> None:
         if not self.broken:
             self.broken = True
+            self.broken_at = time.monotonic()
             log.warning("qwen account #%d marked broken (invalid/expired token)", self.index)
 
     @property

@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 import logging
+import math
 import struct
 import subprocess
 from pathlib import Path
@@ -52,6 +53,29 @@ _ROUNDS = 23
 _ROUND_CONSTANTS = _RC[1:24]
 
 _PYTHON_SOLVE_LIMIT = 2_000_000
+
+
+def _parse_number(value):
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            return int(text)
+        except ValueError:
+            pass
+        try:
+            number = float(text)
+        except ValueError:
+            return None
+        return number if math.isfinite(number) else None
+    return None
 
 
 def _rol(x: int, n: int) -> int:
@@ -181,17 +205,18 @@ class PowManager:
         self._lock = asyncio.Lock()
         self._header: dict | None = None
         self._refill: asyncio.Task | None = None
+        self._building: asyncio.Task | None = None
 
     async def _build(self, fetch) -> dict:
         challenge = await fetch()
         missing = [k for k in ("challenge", "salt", "algorithm", "signature", "target_path") if not challenge.get(k)]
         if missing:
             raise RuntimeError(f"pow challenge missing fields: {', '.join(missing)}")
-        expire_at = challenge.get("expire_at")
-        difficulty = challenge.get("difficulty")
-        if isinstance(expire_at, bool) or not isinstance(expire_at, (int, float)):
+        expire_at = _parse_number(challenge.get("expire_at"))
+        difficulty = _parse_number(challenge.get("difficulty"))
+        if expire_at is None or expire_at < 0:
             raise RuntimeError("pow challenge has invalid expire_at")
-        if isinstance(difficulty, bool) or not isinstance(difficulty, (int, float)) or difficulty <= 0:
+        if difficulty is None or difficulty <= 0:
             raise RuntimeError("pow challenge has invalid difficulty")
         answer = await solve_challenge(
             challenge["challenge"],
@@ -212,11 +237,23 @@ class PowManager:
         raw = json.dumps(payload, separators=(",", ":")).encode()
         return {"X-DS-PoW-Response": base64.b64encode(raw).decode()}
 
+    async def _ensure_build(self, fetch) -> dict:
+        current = self._building
+        if current is None or current.done():
+            self._building = asyncio.create_task(self._build(fetch))
+            current = self._building
+        try:
+            return await asyncio.shield(current)
+        except Exception:
+            if current is self._building and current.done():
+                self._building = None
+            raise
+
     async def _refill_if_empty(self, fetch) -> None:
         try:
             async with self._lock:
                 if self._header is None:
-                    self._header = await self._build(fetch)
+                    self._header = await self._ensure_build(fetch)
         except Exception as exc:
             log.warning("pow prefetch failed: %s", exc)
         finally:

@@ -132,11 +132,27 @@ async def test_check_auth_bad_code():
     assert not await client.check_auth()
 
 
+async def test_check_auth_non_200():
+    client = make_client()
+    resp = make_resp({"code": 0}, status=503)
+    client.http.get = AsyncMock(return_value=resp)
+
+    assert not await client.check_auth()
+
+
 async def test_check_auth_exception():
     client = make_client()
     client.http.get = AsyncMock(side_effect=httpx.ConnectError("boom"))
 
     assert not await client.check_auth()
+
+
+def test_client_timeout_read_extended():
+    client = DeepSeekClient(token="tok", timeout=10.0)
+    assert client.http.timeout.read == 300.0
+    assert client.http.timeout.connect == 10.0
+    assert client.http.timeout.write == 10.0
+    assert client.http.timeout.pool == 10.0
 
 
 async def test_get_user():

@@ -3,6 +3,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -70,6 +71,18 @@ def git_update(tag):
     return True
 
 
+def _move_retry(src, dst, attempts=4):
+    for i in range(attempts):
+        try:
+            shutil.move(src, dst)
+            return True
+        except OSError:
+            if i == attempts - 1:
+                return False
+            time.sleep(0.6 * (i + 1))
+    return False
+
+
 def zip_update(tag):
     parent = ROOT.parent
     tmp_zip = parent / "danyapi-update.zip"
@@ -106,15 +119,35 @@ def zip_update(tag):
     tmp_dir_str = str(tmp_dir)
     root_str = str(ROOT)
     old_dir_str = str(old_dir)
+    if not _move_retry(root_str, old_dir_str):
+        merged = False
+        for item in tmp_dir.rglob("*"):
+            rel = item.relative_to(tmp_dir)
+            target = ROOT / rel
+            if item.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(str(item), str(target))
+                merged = True
+            except Exception as exc:
+                print(f"DanyAPI: warning, could not replace {rel}: {exc}")
+        if not merged:
+            print("DanyAPI: could not replace installation: directory is locked")
+            tmp_zip.unlink(missing_ok=True)
+            return False
+        shutil.rmtree(str(tmp_dir), ignore_errors=True)
+        tmp_zip.unlink(missing_ok=True)
+        return True
     try:
-        shutil.move(root_str, old_dir_str)
+        if not _move_retry(tmp_dir_str, root_str):
+            _move_retry(old_dir_str, root_str)
+            shutil.rmtree(tmp_dir_str, ignore_errors=True)
+            print("DanyAPI: could not replace installation: directory is locked")
+            return False
     except Exception as exc:
-        print(f"DanyAPI: could not replace installation: {exc}")
-        return False
-    try:
-        shutil.move(tmp_dir_str, root_str)
-    except Exception as exc:
-        shutil.move(old_dir_str, root_str)
+        _move_retry(old_dir_str, root_str)
         shutil.rmtree(tmp_dir_str, ignore_errors=True)
         print(f"DanyAPI: could not replace installation: {exc}")
         return False

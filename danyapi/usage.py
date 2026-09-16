@@ -79,6 +79,7 @@ class UsageTracker:
                             if field in row and isinstance(value, (int, float)):
                                 row[field] = int(value)
                         restored[name] = row
+                self._evict_overflow(restored)
                 setattr(self, attr, restored)
 
     def _serialize(self) -> dict[str, Any]:
@@ -91,11 +92,18 @@ class UsageTracker:
 
     @staticmethod
     def _add(bucket: dict[str, dict[str, int]], key: str, prompt_tokens: int, completion_tokens: int, total_tokens: int) -> None:
-        entry = bucket.setdefault(key, {"requests": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
+        entry = bucket.pop(key, None)
+        if entry is None:
+            entry = {"requests": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         entry["requests"] += 1
         entry["prompt_tokens"] += prompt_tokens
         entry["completion_tokens"] += completion_tokens
         entry["total_tokens"] += total_tokens
+        bucket[key] = entry
+
+    def _evict_overflow(self, bucket: dict[str, dict[str, int]]) -> None:
+        while len(bucket) > self._max_records:
+            bucket.pop(next(iter(bucket)))
 
     def record(
         self,
@@ -118,9 +126,12 @@ class UsageTracker:
             self._totals["completion_tokens"] += completion_tokens
             self._totals["total_tokens"] += total_tokens
             self._add(self._by_model, model or "unknown", prompt_tokens, completion_tokens, total_tokens)
+            self._evict_overflow(self._by_model)
             self._add(self._by_provider, provider or "unknown", prompt_tokens, completion_tokens, total_tokens)
+            self._evict_overflow(self._by_provider)
             if user:
                 self._add(self._by_user, user, prompt_tokens, completion_tokens, total_tokens)
+                self._evict_overflow(self._by_user)
             self._recent.append(
                 {
                     "ts": time.time(),

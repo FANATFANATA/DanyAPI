@@ -68,9 +68,9 @@ STATUS_TO_FINISH_REASON = {
     "FINISHED": "stop",
     "CONTEXT_LENGTH_EXCEEDED": "length",
     "CONTENT_FILTER": "content_filter",
-    "INCOMPLETE": "stop",
-    "WIP": "stop",
-    "TIMEOUT": "stop",
+    "INCOMPLETE": "length",
+    "WIP": "length",
+    "TIMEOUT": "length",
 }
 
 CONTEXT_LENGTH_STATUS = "CONTEXT_LENGTH_EXCEEDED"
@@ -178,6 +178,16 @@ class ResponsesRequest(BaseModel):
     search: bool | None = None
 
 
+def _find_tool_marker(text: str, start: int = 0) -> int:
+    markers = ('{"tool_calls"', "<tool_calls", "<calls", "<_calls", "<invoke", "tool_calls:")
+    best = -1
+    for m in markers:
+        pos = text.find(m, start)
+        if pos != -1 and (best == -1 or pos < best):
+            best = pos
+    return best
+
+
 IMAGE_SIZE_RE = re.compile(r"^(\d{2,5})\s*[*x\u00d7,]\s*(\d{2,5})$", re.IGNORECASE)
 MIN_IMAGE_DIM = 16
 MAX_IMAGE_DIM = 8192
@@ -235,7 +245,7 @@ async def lifespan(app: FastAPI):
     qwen_context_store = JsonStore("qwen-contexts", "default" if cache_enabled else None)
     deepseek_affinity_store = JsonStore("deepseek-affinities", "default" if cache_enabled else None)
     qwen_affinity_store = JsonStore("qwen-affinities", "default" if cache_enabled else None)
-    responses_store = JsonStore("responses", "default" if cache_enabled else None)
+    responses_store = JsonStore("responses", "default" if cache_enabled else None, maxsize=settings.responses_max_records)
     app.state.responses_store = responses_store
     app.state.deepseek_session_store = deepseek_session_store
     app.state.qwen_session_store = qwen_session_store
@@ -366,10 +376,11 @@ async def _fetch_qwen_models(client: QwenClient) -> list[dict]:
 
 app = FastAPI(title="DanyAPI", lifespan=lifespan)
 
+cors_origins = settings.cors_origins or ["*"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
+    allow_origins=cors_origins,
+    allow_credentials=bool(settings.cors_origins),
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -396,6 +407,12 @@ def _env_path() -> Path:
     return Path(__file__).resolve().parents[2] / ".env"
 
 
+def _unquote_env_value(value: str) -> str:
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+        return value[1:-1]
+    return value
+
+
 def _read_env_tokens() -> tuple[list[str], list[str]]:
     env_file = _env_path()
     if not env_file.exists():
@@ -405,9 +422,9 @@ def _read_env_tokens() -> tuple[list[str], list[str]]:
     for line in env_file.read_text(encoding="utf-8").splitlines():
         stripped = line.strip()
         if stripped.startswith("DEEPSEEK_TOKENS="):
-            ds_tokens = stripped.split("=", 1)[1].strip()
+            ds_tokens = _unquote_env_value(stripped.split("=", 1)[1].strip())
         elif stripped.startswith("QWEN_TOKENS="):
-            qw_tokens = stripped.split("=", 1)[1].strip()
+            qw_tokens = _unquote_env_value(stripped.split("=", 1)[1].strip())
     ds_list = [t.strip() for t in ds_tokens.split(",") if t.strip()] if ds_tokens else []
     qw_list = [t.strip() for t in qw_tokens.split(",") if t.strip()] if qw_tokens else []
     return ds_list, qw_list
@@ -453,16 +470,25 @@ def _env_token_list(value: Any, field: str) -> list[str]:
     return result
 
 
-def _shared_store(attr: str, name: str) -> JsonStore:
+def _shared_store(attr: str, name: str, *, maxsize: int = 0) -> JsonStore:
     store = getattr(app.state, attr, None)
     if store is None:
-        store = JsonStore(name, "default" if settings.cache_enabled else None)
+        store = JsonStore(name, "default" if settings.cache_enabled else None, maxsize=maxsize)
         setattr(app.state, attr, store)
     return store
 
 
 def _responses_store() -> JsonStore:
-    return _shared_store("responses_store", "responses")
+    return _shared_store("responses_store", "responses", maxsize=settings.responses_max_records)
+
+
+def _pool_account_by_stable(pool: AccountPool | None, stable_id: str) -> Any | None:
+    if pool is None:
+        return None
+    for acct in pool.accounts:
+        if getattr(acct, "stable_id", None) == stable_id:
+            return acct
+    return None
 
 
 @app.post("/v1/tokens")
@@ -477,7 +503,55 @@ async def add_tokens(tokens: dict) -> dict:
         ds_candidates = [t for t in dict.fromkeys(new_ds) if t not in existing_ds]
         qw_candidates = [t for t in dict.fromkeys(new_qw) if t not in existing_qw]
 
+        pool: AccountPool | None = getattr(app.state, "pool", None)
+        qwen_pool: AccountPool | None = getattr(app.state, "qwen_pool", None)
+
+        activated_ds = 0
+        activated_qw = 0
+
+        for token in dict.fromkeys(new_ds):
+            if token in existing_ds:
+                acct = _pool_account_by_stable(pool, _token_stable_id(token))
+                if acct is None or not acct.broken:
+                    continue
+                try:
+                    valid_auth = await acct.client.check_auth()
+                except Exception as exc:
+                    log.warning("reactivation check failed for existing deepseek token: %s", exc)
+                    continue
+                if not valid_auth:
+                    continue
+                acct.broken = False
+                acct.broken_at = None
+                activated_ds += 1
+                log.info("reactivated deepseek token (total accounts: %d)", len(pool.accounts) if pool else 0)
+
+        for token in dict.fromkeys(new_qw):
+            if token in existing_qw:
+                acct = _pool_account_by_stable(qwen_pool, _token_stable_id(token))
+                if acct is None or not acct.broken:
+                    continue
+                try:
+                    valid_auth = await acct.client.check_auth()
+                except Exception as exc:
+                    log.warning("reactivation check failed for existing qwen token: %s", exc)
+                    continue
+                if not valid_auth:
+                    continue
+                acct.broken = False
+                acct.broken_at = None
+                activated_qw += 1
+                log.info("reactivated qwen token (total accounts: %d)", len(qwen_pool.accounts) if qwen_pool else 0)
+
         if not ds_candidates and not qw_candidates:
+            if activated_ds or activated_qw:
+                return {
+                    "success": True,
+                    "message": "Tokens reactivated.",
+                    "added": {"deepseek": 0, "qwen": 0},
+                    "skipped": {"deepseek": 0, "qwen": 0},
+                    "reactivated": {"deepseek": activated_ds, "qwen": activated_qw},
+                }
             raise HTTPException(400, "all provided tokens already exist")
 
         added_ds = 0
@@ -492,8 +566,6 @@ async def add_tokens(tokens: dict) -> dict:
         ds_affinity_store = _shared_store("deepseek_affinity_store", "deepseek-affinities")
         qw_affinity_store = _shared_store("qwen_affinity_store", "qwen-affinities")
 
-        pool: AccountPool | None = getattr(app.state, "pool", None)
-        qwen_pool: AccountPool | None = getattr(app.state, "qwen_pool", None)
         accepted_ds: list[str] = []
         accepted_qw: list[str] = []
 
@@ -585,24 +657,48 @@ async def add_tokens(tokens: dict) -> dict:
             "message": "Tokens added and activated." if (added_ds or added_qw) else "No valid tokens to add.",
             "added": {"deepseek": added_ds, "qwen": added_qw},
             "skipped": {"deepseek": skipped_ds, "qwen": skipped_qw},
+            "reactivated": {"deepseek": activated_ds, "qwen": activated_qw},
         }
 
 
 MAX_LOGGED_BODY = 256 * 1024
+MAX_REQUEST_BODY = 100 * 1024 * 1024
 
 
-async def _extract_request_body(request: Request) -> dict[str, Any]:
+async def _read_request_body(request: Request, limit: int) -> bytes:
+    raw_length = -1
     content_length = request.headers.get("content-length")
     if content_length:
         try:
-            if int(content_length) > MAX_LOGGED_BODY:
-                return {}
+            raw_length = int(content_length)
         except ValueError:
-            return {}
-    try:
+            raw_length = -1
+    if raw_length > 0:
+        if raw_length > limit:
+            raise HTTPException(413, "request body too large")
         body = await request.body()
-    except Exception:
-        return {}
+        if len(body) > limit:
+            raise HTTPException(413, "request body too large")
+        request._body = body
+        return body
+    cached = getattr(request, "_body", None)
+    if cached:
+        if len(cached) > limit:
+            raise HTTPException(413, "request body too large")
+        return cached
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > limit:
+            raise HTTPException(413, "request body too large")
+        chunks.append(chunk)
+    body = b"".join(chunks)
+    request._body = body
+    return body
+
+
+def _parse_logged_body(body: bytes) -> dict[str, Any]:
     if not body or len(body) > MAX_LOGGED_BODY:
         return {}
     try:
@@ -612,6 +708,33 @@ async def _extract_request_body(request: Request) -> dict[str, Any]:
     if isinstance(payload, dict):
         return payload
     return {}
+
+
+async def _extract_request_body(request: Request) -> dict[str, Any]:
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            raw_length = int(content_length)
+            if raw_length <= 0:
+                return {}
+            if raw_length > MAX_LOGGED_BODY:
+                return {}
+        except ValueError:
+            return {}
+    if getattr(request, "method", None) in ("GET", "DELETE", "HEAD", "OPTIONS"):
+        return {}
+    cached = getattr(request, "_body", b"")
+    if cached:
+        return _parse_logged_body(cached)
+    if content_length is None:
+        return {}
+    try:
+        body = await _read_request_body(request, MAX_REQUEST_BODY)
+    except HTTPException:
+        raise
+    except Exception:
+        return {}
+    return _parse_logged_body(body)
 
 
 def _request_client_ip(request: Request) -> str:
@@ -716,6 +839,23 @@ async def _log_requests(request: Request, call_next):
 
 MAX_FILES_PER_REQUEST = 50
 MAX_FILE_SIZE = 100 * 1024 * 1024
+MAX_ATTACHMENT_TOTAL_SIZE = 10 * 1024 * 1024
+
+
+def _raw_data_uri_length(uri: str) -> int:
+    if not uri.startswith("data:"):
+        raise HTTPException(400, "image_url must be a data URI (data:<mime>;base64,...)")
+    _, _, payload = uri[5:].partition(",")
+    if not payload:
+        raise HTTPException(400, "invalid data URI: missing base64 payload")
+    compact = "".join(payload.split()).rstrip("=")
+    units, remainder = divmod(len(compact), 4)
+    decoded = units * 3
+    if remainder == 2:
+        decoded += 1
+    elif remainder == 3:
+        decoded += 2
+    return decoded
 
 
 @dataclass
@@ -743,6 +883,7 @@ def _split_data_uri(uri: str) -> tuple[str, bytes]:
 
 def _collect_attachments(req: ChatCompletionRequest) -> list[Attachment]:
     attachments: list[Attachment] = []
+    raw_total = 0
     for msg in req.messages:
         if not isinstance(msg.content, list):
             continue
@@ -757,6 +898,9 @@ def _collect_attachments(req: ChatCompletionRequest) -> list[Attachment]:
                     uri = image_url["url"]
                 else:
                     raise HTTPException(400, "invalid image_url value")
+                raw_total += _raw_data_uri_length(uri)
+                if raw_total > MAX_ATTACHMENT_TOTAL_SIZE:
+                    raise HTTPException(413, "attachments too large")
                 content_type, data = _split_data_uri(uri)
                 name = f"image_{len(attachments)}.{content_type.split('/')[-1] or 'bin'}"
                 attachments.append(Attachment(data, name, content_type, True))
@@ -791,8 +935,11 @@ async def _fresh_pow_upload_headers(account) -> dict:
 
 async def _upload_attachments(account, attachments: list[Attachment], model_type: str, thinking: bool) -> list[str]:
     file_ids: list[str] = []
-    for att in attachments:
-        pow_headers = await _fresh_pow_upload_headers(account)
+    if attachments:
+        pow_headers_list = await asyncio.gather(*(_fresh_pow_upload_headers(account) for _ in attachments))
+    else:
+        pow_headers_list = []
+    for att, pow_headers in zip(attachments, pow_headers_list, strict=True):
         try:
             info = await account.client.upload_file(
                 att.data,
@@ -990,7 +1137,9 @@ async def _extract_request_api_key(request: Request) -> str | None:
     if not content_type.startswith("application/json"):
         return None
     try:
-        body = await request.body()
+        body = await _read_request_body(request, MAX_REQUEST_BODY)
+    except HTTPException:
+        raise
     except Exception:
         return None
     if not body:
@@ -1006,16 +1155,43 @@ async def _extract_request_api_key(request: Request) -> str | None:
     return None
 
 
+_deferred_close_tasks: set[asyncio.Task] = set()
+
+
 async def _close_pool(pool: Any) -> None:
     for acct in pool.accounts:
         try:
             acct.sessions.close_all()
         except Exception as exc:
             log.info("session cleanup failed for byok account %r: %s", getattr(acct, "label", acct), exc)
+        sem = getattr(acct, "sem", None)
+        if sem is not None and sem.locked():
+            log.info("schedule deferred client close for busy byok account %r", getattr(acct, "label", acct))
+            task = asyncio.create_task(_close_busy_client(acct, sem))
+            _deferred_close_tasks.add(task)
+            task.add_done_callback(_deferred_close_tasks.discard)
+            continue
         try:
             await acct.client.aclose()
         except Exception as exc:
             log.info("client close failed for byok account %r: %s", getattr(acct, "label", acct), exc)
+
+
+async def _close_busy_client(account: Any, sem: asyncio.Semaphore) -> None:
+    acquired = False
+    try:
+        await asyncio.wait_for(sem.acquire(), timeout=300)
+        acquired = True
+    except (TimeoutError, asyncio.TimeoutError, asyncio.CancelledError):
+        log.info("give up deferred client close for busy byok account %r", getattr(account, "label", account))
+        return
+    try:
+        await account.client.aclose()
+    except Exception as exc:
+        log.info("client close failed for byok account %r: %s", getattr(account, "label", account), exc)
+    finally:
+        if acquired:
+            sem.release()
 
 
 async def _byok_pool(provider: str, tokens: list[str]) -> AccountPool:
@@ -1273,50 +1449,57 @@ async def _image_generations(req: ImageGenerationRequest, pool: AccountPool | No
         raise HTTPException(503, "qwen provider is not configured (required for image generation)")
 
     dims = _parse_image_size(req.size)
+    count = max(1, int(getattr(req, "n", 1) or 1))
 
     account, existing_sid = await _acquire_account(pool, req.session_id)
 
+    want_b64 = req.response_format == "b64_json"
+    use_http = want_b64 or dims
+    data: list[dict] = []
+    usage = None
+    result_sid = existing_sid
     try:
-        result = await qwen_api.collect_image(
-            account=account,
-            pool=pool,
-            existing_sid=existing_sid,
-            lock=account.sem,
-            prompt=req.prompt,
-            model=req.model,
-            model_id=req.model,
-            user=req.user,
-        )
+        async with httpx.AsyncClient(follow_redirects=True, timeout=30) as hc:
+            for _ in range(count):
+                result = await qwen_api.collect_image(
+                    account=account,
+                    pool=pool,
+                    existing_sid=result_sid,
+                    lock=account.sem,
+                    prompt=req.prompt,
+                    model=req.model,
+                    model_id=req.model,
+                    user=req.user,
+                )
+                result_sid = result.get("session_id") or result_sid
+                if result.get("usage"):
+                    usage = result.get("usage")
+                for url in result["image_urls"]:
+                    if not use_http:
+                        data.append({"url": url})
+                        continue
+                    try:
+                        img_resp = await hc.get(url)
+                        if img_resp.status_code != 200:
+                            log.warning("image download failed (%s) for %s, returning url", img_resp.status_code, url)
+                            data.append({"url": url})
+                            continue
+                        payload_bytes = _resize_image_bytes(img_resp.content, dims)
+                        data.append({"b64_json": base64.b64encode(payload_bytes).decode()})
+                    except Exception as exc:
+                        log.warning("image fetch failed for %s, returning url: %s", url, exc)
+                        data.append({"url": url})
     except AccountPoolBusy:
         raise HTTPException(429, "all accounts are busy, try again later") from None
 
-    want_b64 = req.response_format == "b64_json"
-    data: list[dict] = []
-    for url in result["image_urls"]:
-        if not (want_b64 or dims):
-            data.append({"url": url})
-            continue
-        try:
-            async with httpx.AsyncClient(follow_redirects=True, timeout=30) as hc:
-                img_resp = await hc.get(url)
-            if img_resp.status_code != 200:
-                log.warning("image download failed (%s) for %s, returning url", img_resp.status_code, url)
-                data.append({"url": url})
-                continue
-            payload_bytes = _resize_image_bytes(img_resp.content, dims)
-            data.append({"b64_json": base64.b64encode(payload_bytes).decode()})
-        except Exception as exc:
-            log.warning("image fetch failed for %s, returning url: %s", url, exc)
-            data.append({"url": url})
-
     if not data:
-        data.append({"url": "", "revised_prompt": result.get("revised_prompt", "")})
+        raise HTTPException(502, "image generation returned no data")
 
     return {
         "created": int(time.time()),
         "data": data,
-        "usage": result.get("usage"),
-        "session_id": result.get("session_id"),
+        "usage": usage,
+        "session_id": result_sid,
     }
 
 
@@ -1367,9 +1550,15 @@ def _include_usage(req: ChatCompletionRequest) -> bool:
     return bool(opts.get("include_usage"))
 
 
-def _deepseek_usage(total: int, prompt: str = "") -> dict:
+def _deepseek_usage(total: int, prompt: str = "", provider_usage: dict | None = None) -> dict:
     value = max(0, int(total or 0))
-    prompt_tokens = estimate_tokens(prompt)
+    prompt_tokens = 0
+    if isinstance(provider_usage, dict):
+        p_tokens = provider_usage.get("prompt_tokens")
+        if isinstance(p_tokens, int) and p_tokens > 0:
+            prompt_tokens = p_tokens
+    if not prompt_tokens:
+        prompt_tokens = estimate_tokens(prompt)
     return {"prompt_tokens": prompt_tokens, "completion_tokens": value, "total_tokens": prompt_tokens + value}
 
 
@@ -1392,7 +1581,7 @@ def _stream_error_sse(
     session_key: str | None = None,
     error_finish: str | None = None,
     choice_finish: str | None = None,
-) -> tuple[str, str, str]:
+) -> tuple[str, str]:
     error: dict = {"message": message}
     if error_finish is not None:
         error["finish_reason"] = error_finish
@@ -1402,19 +1591,12 @@ def _stream_error_sse(
             "object": "chat.completion.chunk",
             "created": created,
             "model": model,
+            "session_id": session_key,
             "error": error,
             "choices": [{"index": 0, "delta": {}, "finish_reason": choice_finish or error_finish or "error"}],
         }
     )
-    tail_chunk = _sse(
-        {
-            "id": chunk_id,
-            "session_id": session_key,
-            "object": "chat.completion.chunk",
-            "choices": [],
-        }
-    )
-    return error_chunk, tail_chunk, "data: [DONE]\n\n"
+    return error_chunk, "data: [DONE]\n\n"
 
 
 async def _stream_guard(gen, model: str):
@@ -1447,9 +1629,6 @@ async def _chat_completions_deepseek(req: ChatCompletionRequest, pool: AccountPo
 
     attachments = _collect_attachments(req)
     _validate_attachments(attachments)
-    ref_file_ids = None
-    if attachments:
-        ref_file_ids = await _upload_attachments(account, attachments, model_type, thinking)
 
     common = {
         "account": account,
@@ -1460,7 +1639,7 @@ async def _chat_completions_deepseek(req: ChatCompletionRequest, pool: AccountPo
         "model_type": model_type,
         "thinking": thinking,
         "search": search,
-        "ref_file_ids": ref_file_ids,
+        "attachments": attachments,
         "tool_schemas": toolemu.tool_schema_map(getattr(req, "tools", None)),
         "tool_mode": tool_mode,
         "include_usage": _include_usage(req),
@@ -1495,6 +1674,14 @@ async def _chat_completions_qwen(req: ChatCompletionRequest, pool: AccountPool |
     search = bool(req.search)
 
     account, existing_sid, context_seq, prompt, tool_mode = await _acquire_and_build(pool, req, {"model": req.model})
+
+    attachments = _collect_attachments(req)
+    if attachments:
+        _validate_attachments(attachments)
+        for att in attachments:
+            if not att.is_image:
+                raise HTTPException(400, "qwen only supports image attachments, use deepseek for files")
+            prompt = f"{prompt}\n![image](data:{att.content_type};base64,{base64.b64encode(att.data).decode('ascii')})"
 
     common = {
         "account": account,
@@ -1575,6 +1762,9 @@ async def _send_completion(
         raise HTTPException(exc.response.status_code, exc.response.text[:500]) from exc
     except httpx.HTTPError as exc:
         raise HTTPException(502, f"DeepSeek request failed: {exc}") from exc
+
+    if resp is None or not hasattr(resp, "status_code"):
+        raise HTTPException(502, "unexpected provider response")
 
     if resp.status_code != 200:
         body = await resp.aread()
@@ -1960,7 +2150,7 @@ async def _collect_reduced(
     ref_file_ids=None,
 ):
     await _human_delay()
-    for prompt, _tool_mode, _tool_schemas in reduced_prompts:
+    for prompt, variant_tool_mode, variant_tool_schemas in reduced_prompts:
         session_key = None
         try:
             session, session_key, parent_message_id = await _prepare_session(account, pool, None, None)
@@ -1979,7 +2169,7 @@ async def _collect_reduced(
                 _drop_session(pool, account, session_key)
             continue
         if (rec.content or rec.reasoning) and not _is_input_exceeds_limit(rec):
-            return rec, session, session_key
+            return rec, session, session_key, variant_tool_mode, variant_tool_schemas
         if session_key is not None:
             _drop_session(pool, account, session_key)
     return None
@@ -1996,6 +2186,7 @@ async def _collect_non_stream(
     thinking,
     search,
     ref_file_ids=None,
+    attachments=None,
     tool_mode=False,
     tool_schemas=None,
     context_seq: tuple[str, ...] | None = None,
@@ -2008,6 +2199,8 @@ async def _collect_non_stream(
 ):
     await _human_delay()
     async with account_lock(lock, settings.acquire_timeout):
+        if attachments:
+            ref_file_ids = await _upload_attachments(account, attachments, model_type, thinking)
         session, session_key, parent_message_id = await _prepare_session(account, pool, existing_sid, context_seq)
         if session_key != existing_sid and messages is not None:
             try:
@@ -2120,7 +2313,10 @@ async def _collect_non_stream(
                     _drop_session(pool, account, session_key)
                     reduced = await _collect_reduced(account, pool, reduced_prompts, model_type, thinking, search, ref_file_ids)
                     if reduced is not None:
-                        rec, session, session_key = reduced
+                        rec, session, session_key, variant_tool_mode, variant_tool_schemas = reduced
+                        if variant_tool_mode:
+                            tool_mode = variant_tool_mode
+                            tool_schemas = variant_tool_schemas
                         response_message_id = rec.id or response_message_id
                         stop_message_id = response_message_id
                         reduced_notice = REDUCED_CONTEXT_MESSAGE
@@ -2135,7 +2331,7 @@ async def _collect_non_stream(
                 raise HTTPException(502, _fake_context_error_body())
             raise HTTPException(429, _busy_error_body(rec))
         request_tokens = _advance_session_usage(session, rec.accumulated_tokens)
-        usage = _deepseek_usage(request_tokens, prompt)
+        usage = _deepseek_usage(request_tokens, prompt, rec.usage)
         account.sessions.touch_last_message(session_key, rec.id or response_message_id)
         record_usage(
             "deepseek",
@@ -2169,6 +2365,7 @@ async def _stream_openai(
     thinking,
     search,
     ref_file_ids=None,
+    attachments=None,
     tool_mode=False,
     tool_schemas=None,
     include_usage=False,
@@ -2185,6 +2382,8 @@ async def _stream_openai(
 
     await _human_delay()
     async with account_lock(lock, settings.acquire_timeout):
+        if attachments:
+            ref_file_ids = await _upload_attachments(account, attachments, model_type, thinking)
         try:
             session, session_key, parent_message_id = await _prepare_session(account, pool, existing_sid, context_seq)
         except HTTPException as exc:
@@ -2204,6 +2403,8 @@ async def _stream_openai(
         response_message_id = None
         stop_message_id: str | None = None
         content_buf = ""
+        content_shown_len = 0
+        tool_hidden = False
         role_sent = False
         started = time.monotonic()
         had_cached_session = bool(existing_sid) and account.sessions.get(existing_sid) is not None
@@ -2301,6 +2502,17 @@ async def _stream_openai(
                         if c_diff:
                             if tool_mode:
                                 content_buf += c_diff
+                                if not tool_hidden:
+                                    search_from = content_shown_len
+                                    marker_pos = _find_tool_marker(content_buf, search_from)
+                                    if marker_pos < 0:
+                                        delta["content"] = content_buf[search_from:]
+                                        content_shown_len = len(content_buf)
+                                    else:
+                                        if marker_pos > search_from:
+                                            delta["content"] = content_buf[search_from:marker_pos]
+                                        content_shown_len = marker_pos
+                                        tool_hidden = True
                             else:
                                 delta["content"] = c_diff
                         if r_diff:
@@ -2352,6 +2564,17 @@ async def _stream_openai(
                     if c_diff:
                         if tool_mode:
                             content_buf += c_diff
+                            if not tool_hidden:
+                                search_from = content_shown_len
+                                marker_pos = _find_tool_marker(content_buf, search_from)
+                                if marker_pos < 0:
+                                    delta2["content"] = content_buf[search_from:]
+                                    content_shown_len = len(content_buf)
+                                else:
+                                    if marker_pos > search_from:
+                                        delta2["content"] = content_buf[search_from:marker_pos]
+                                    content_shown_len = marker_pos
+                                    tool_hidden = True
                         else:
                             delta2["content"] = c_diff
                     if r_diff:
@@ -2448,6 +2671,26 @@ async def _stream_openai(
                         )
                     if tool_mode:
                         content_buf += cont_rec.content
+                        if not tool_hidden:
+                            search_from = content_shown_len
+                            marker_pos = _find_tool_marker(content_buf, search_from)
+                            if marker_pos < 0:
+                                c_visible = cont_rec.content
+                                content_shown_len = len(content_buf)
+                            else:
+                                c_visible = content_buf[search_from:marker_pos]
+                                content_shown_len = marker_pos
+                                tool_hidden = True
+                            if c_visible:
+                                yield _sse(
+                                    {
+                                        "id": chunk_id,
+                                        "object": "chat.completion.chunk",
+                                        "created": created,
+                                        "model": model,
+                                        "choices": [{"index": 0, "delta": {"content": c_visible}, "finish_reason": None}],
+                                    }
+                                )
                     else:
                         yield _sse(
                             {
@@ -2498,7 +2741,10 @@ async def _stream_openai(
                     _drop_session(pool, account, session_key)
                     reduced = await _collect_reduced(account, pool, reduced_prompts, model_type, thinking, search, ref_file_ids)
                     if reduced is not None:
-                        rec, session, session_key = reduced
+                        rec, session, session_key, variant_tool_mode, variant_tool_schemas = reduced
+                        if variant_tool_mode:
+                            tool_mode = variant_tool_mode
+                            tool_schemas = variant_tool_schemas
                         response_message_id = rec.id or response_message_id
                         stop_message_id = response_message_id
                         reduced_notice = REDUCED_CONTEXT_MESSAGE
@@ -2522,6 +2768,26 @@ async def _stream_openai(
                                 )
                             if tool_mode:
                                 content_buf += rec.content
+                                if not tool_hidden:
+                                    search_from = content_shown_len
+                                    marker_pos = _find_tool_marker(content_buf, search_from)
+                                    if marker_pos < 0:
+                                        r_visible = rec.content
+                                        content_shown_len = len(content_buf)
+                                    else:
+                                        r_visible = content_buf[search_from:marker_pos]
+                                        content_shown_len = marker_pos
+                                        tool_hidden = True
+                                    if r_visible:
+                                        yield _sse(
+                                            {
+                                                "id": chunk_id,
+                                                "object": "chat.completion.chunk",
+                                                "created": created,
+                                                "model": model,
+                                                "choices": [{"index": 0, "delta": {"content": r_visible}, "finish_reason": None}],
+                                            }
+                                        )
                             else:
                                 yield _sse(
                                     {
@@ -2583,7 +2849,7 @@ async def _stream_openai(
             return
 
         request_tokens = _advance_session_usage(session, rec.accumulated_tokens)
-        usage = _deepseek_usage(request_tokens, prompt)
+        usage = _deepseek_usage(request_tokens, prompt, rec.usage)
         account.sessions.touch_last_message(session_key, rec.id or response_message_id)
         record_usage(
             "deepseek",
@@ -2599,9 +2865,9 @@ async def _stream_openai(
         if tool_mode:
             parsed = toolemu.parse_tool_calls(content_buf or rec.content, tool_schemas)
             if parsed is not None:
-                tool_calls, tool_text = parsed
+                tool_calls, _ = parsed
                 if tool_calls:
-                    for delta in toolemu.tool_call_deltas(tool_calls, tool_text):
+                    for delta in toolemu.tool_call_deltas(tool_calls):
                         yield _sse(
                             {
                                 "id": chunk_id,
@@ -2613,7 +2879,8 @@ async def _stream_openai(
                         )
                     finish = "tool_calls"
                 else:
-                    if content_buf:
+                    tail_text = (content_buf or rec.content)[content_shown_len:] if (content_buf or rec.content) else ""
+                    if tail_text:
                         yield _sse(
                             {
                                 "id": chunk_id,
@@ -2623,7 +2890,7 @@ async def _stream_openai(
                                 "choices": [
                                     {
                                         "index": 0,
-                                        "delta": {"content": content_buf},
+                                        "delta": {"content": tail_text},
                                         "finish_reason": None,
                                     }
                                 ],
@@ -2631,7 +2898,8 @@ async def _stream_openai(
                         )
                     finish = _finish_reason(rec.status)
             else:
-                if content_buf:
+                tail_text = (content_buf or rec.content)[content_shown_len:] if (content_buf or rec.content) else ""
+                if tail_text:
                     yield _sse(
                         {
                             "id": chunk_id,
@@ -2641,7 +2909,7 @@ async def _stream_openai(
                             "choices": [
                                 {
                                     "index": 0,
-                                    "delta": {"content": content_buf},
+                                    "delta": {"content": tail_text},
                                     "finish_reason": None,
                                 }
                             ],
@@ -2651,6 +2919,18 @@ async def _stream_openai(
         else:
             finish = _finish_reason(rec.status)
 
+        if not role_sent:
+            role_sent = True
+            yield _sse(
+                {
+                    "id": chunk_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model,
+                    "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
+                }
+            )
+
         if reduced_notice is not None:
             yield _sse(
                 {
@@ -2658,6 +2938,7 @@ async def _stream_openai(
                     "object": "chat.completion.chunk",
                     "created": created,
                     "model": model,
+                    "session_id": session_key,
                     "error": {"message": reduced_notice, "finish_reason": RESPONSE_INCOMPLETE},
                     "choices": [{"index": 0, "delta": {}, "finish_reason": RESPONSE_INCOMPLETE}],
                 }
@@ -2669,6 +2950,7 @@ async def _stream_openai(
                     "object": "chat.completion.chunk",
                     "created": created,
                     "model": model,
+                    "session_id": session_key,
                     "choices": [{"index": 0, "delta": {}, "finish_reason": finish}],
                 }
             )
@@ -2679,16 +2961,8 @@ async def _stream_openai(
                     "object": "chat.completion.chunk",
                     "created": created,
                     "model": model,
-                    "choices": [],
+                    "session_id": session_key,
                     "usage": usage,
                 }
             )
-        yield _sse(
-            {
-                "id": chunk_id,
-                "session_id": session_key,
-                "object": "chat.completion.chunk",
-                "choices": [],
-            }
-        )
         yield "data: [DONE]\n\n"
