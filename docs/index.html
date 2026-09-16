@@ -108,7 +108,7 @@
                     <button class="copy-btn" data-copy="https://danyapi.cloudpub.ru/" data-i18n="copy">Copy</button>
                 </div>
                 <pre><code>https://danyapi.cloudpub.ru/</code></pre>
-                <p class="pane-note" data-i18n="hosted_note">Use any OpenAI-compatible client with a dummy <code>api_key</code>. The instance runs on the same free provider tokens - best-effort, but zero cost for you.</p>
+                <p class="pane-note" data-i18n="hosted_note">Use any OpenAI-compatible client with your DeepSeek or Qwen token as the API key (BYOK mode). The instance runs on your provider tokens with zero middleman fees.</p>
             </div>
         </div>
     </section>
@@ -254,7 +254,7 @@
             </details>
             <details class="faq">
                 <summary data-i18n="q2">Do my users need an API key?</summary>
-                <p data-i18n="a2">No. The OpenAI SDK requires the <code>api_key</code> field, but DanyAPI never checks it - pass any dummy value. All upstream requests are made by the server accounts you configure.</p>
+                <p data-i18n="a2">When running DanyAPI locally or in private hosting, no API key is required (pass any dummy value). When using the public hosted instance (BYOK mode), provide your DeepSeek or Qwen token as the Bearer token.</p>
             </details>
             <details class="faq">
                 <summary data-i18n="q3">Which providers and models?</summary>

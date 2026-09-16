@@ -126,7 +126,7 @@
             q1: "Это правда бесплатно?",
             a1: "Да. DanyAPI использует внутренние API бесплатных веб-клиентов через аккаунты из ваших бесплатных токенов. Никаких тарифов и лимитов.",
             q2: "Нужен ли пользователям API-ключ?",
-            a2: "Нет. SDK требует <code>api_key</code>, но DanyAPI его не проверяет - передайте любое значение. Все запросы делают ваши серверные аккаунты.",
+            a2: "При локальном запуске или личном сервере API-ключ не требуется (передайте любое значение). На публичном инстансе (режим BYOK) передайте ваш токен DeepSeek или Qwen как Bearer-токен.",
             q3: "Какие провайдеры и модели?",
             a3: "DeepSeek (<code>deepseek-v4.1-flash</code>, <code>deepseek-v4.1-flash-thinking</code>) и Qwen (<code>qwen3.8-max</code>, <code>qwen3.7-plus</code>, … - подтягиваются из аккаунта). Маршрутизация по имени модели; оба работают одновременно.",
             q7: "Есть ли лимиты или забанят токен?",
@@ -146,7 +146,7 @@
             hosted_sub: "Публичный, полностью бесплатный инстанс DanyAPI уже работает в продакшене. Без регистрации, ключей и настройки - просто направьте на него свой клиент.",
             hosted_pane_api: "Базовый URL API",
             hosted_pane_site: "Лендинг",
-            hosted_note: "Используйте любой OpenAI-совместимый клиент с фейковым <code>api_key</code>. Инстанс работает на тех же бесплатных токенах провайдеров - best-effort, но ноль затрат для вас.",
+            hosted_note: "Используйте любой OpenAI-совместимый клиент с вашим токеном DeepSeek или Qwen в качестве API-ключа (режим BYOK). Инстанс работает на ваших токенах без комиссий и посредников.",
             meta_title: "DanyAPI Документация",
             lang_en: "Английский",
             lang_ru: "Русский"
@@ -160,7 +160,7 @@
             hosted_sub: "A public, fully free DanyAPI instance is already live in production. No signup, no keys, no setup - just point your client at it.",
             hosted_pane_api: "API base URL",
             hosted_pane_site: "Landing page",
-            hosted_note: "Use any OpenAI-compatible client with a dummy <code>api_key</code>. The instance runs on the same free provider tokens - best-effort, but zero cost for you."
+            hosted_note: "Use any OpenAI-compatible client with your DeepSeek or Qwen token as the API key (BYOK mode). The instance runs on your provider tokens with zero middleman fees."
         }
     };
 

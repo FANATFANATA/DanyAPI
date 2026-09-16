@@ -178,6 +178,16 @@ class ResponsesRequest(BaseModel):
     search: bool | None = None
 
 
+def _find_tool_marker(text: str, start: int = 0) -> int:
+    markers = ('{"tool_calls"', "<tool_calls", "<calls", "<_calls", "<invoke", "tool_calls:")
+    best = -1
+    for m in markers:
+        pos = text.find(m, start)
+        if pos != -1 and (best == -1 or pos < best):
+            best = pos
+    return best
+
+
 IMAGE_SIZE_RE = re.compile(r"^(\d{2,5})\s*[*x\u00d7,]\s*(\d{2,5})$", re.IGNORECASE)
 MIN_IMAGE_DIM = 16
 MAX_IMAGE_DIM = 8192
@@ -2494,9 +2504,7 @@ async def _stream_openai(
                                 content_buf += c_diff
                                 if not tool_hidden:
                                     search_from = content_shown_len
-                                    marker_pos = content_buf.find('{"tool_calls"', search_from)
-                                    if marker_pos < 0:
-                                        marker_pos = content_buf.find("<tool_calls", search_from)
+                                    marker_pos = _find_tool_marker(content_buf, search_from)
                                     if marker_pos < 0:
                                         delta["content"] = content_buf[search_from:]
                                         content_shown_len = len(content_buf)
@@ -2558,9 +2566,7 @@ async def _stream_openai(
                             content_buf += c_diff
                             if not tool_hidden:
                                 search_from = content_shown_len
-                                marker_pos = content_buf.find('{"tool_calls"', search_from)
-                                if marker_pos < 0:
-                                    marker_pos = content_buf.find("<tool_calls", search_from)
+                                marker_pos = _find_tool_marker(content_buf, search_from)
                                 if marker_pos < 0:
                                     delta2["content"] = content_buf[search_from:]
                                     content_shown_len = len(content_buf)
@@ -2667,9 +2673,7 @@ async def _stream_openai(
                         content_buf += cont_rec.content
                         if not tool_hidden:
                             search_from = content_shown_len
-                            marker_pos = content_buf.find('{"tool_calls"', search_from)
-                            if marker_pos < 0:
-                                marker_pos = content_buf.find("<tool_calls", search_from)
+                            marker_pos = _find_tool_marker(content_buf, search_from)
                             if marker_pos < 0:
                                 c_visible = cont_rec.content
                                 content_shown_len = len(content_buf)
@@ -2766,9 +2770,7 @@ async def _stream_openai(
                                 content_buf += rec.content
                                 if not tool_hidden:
                                     search_from = content_shown_len
-                                    marker_pos = content_buf.find('{"tool_calls"', search_from)
-                                    if marker_pos < 0:
-                                        marker_pos = content_buf.find("<tool_calls", search_from)
+                                    marker_pos = _find_tool_marker(content_buf, search_from)
                                     if marker_pos < 0:
                                         r_visible = rec.content
                                         content_shown_len = len(content_buf)

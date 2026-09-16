@@ -109,6 +109,13 @@ def build_solver() -> None:
                     shutil.copy2(bin_path, dst)
                     if not is_win:
                         os.chmod(dst, 0o755)
+        for d in [ROOT, src_path.parent, bin_path.parent]:
+            obj = d / "pow_solver.obj"
+            if obj.exists():
+                try:
+                    obj.unlink()
+                except OSError:
+                    pass
         print(f"Native pow_solver compiled via {chosen_compiler} ({bin_name})")
 
 

@@ -102,7 +102,9 @@ def _append_image_markdown(prompt: str, messages: list[Any] | None) -> str:
             else:
                 continue
             if uri.startswith("http") or uri.startswith("data:"):
-                appended.append(f"![image]({uri})")
+                tag = f"![image]({uri})"
+                if tag not in prompt and tag not in appended:
+                    appended.append(tag)
     if not appended:
         return prompt
     extra = "\n".join(appended)
@@ -931,7 +933,7 @@ async def stream_openai(
                 "created": created,
                 "model": model,
                 "usage": usage,
-                "choices": [{"index": 0, "delta": {}, "finish_reason": finish}],
+                "choices": [],
             }
             if session_key:
                 usage_payload["session_id"] = session_key

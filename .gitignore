@@ -15,6 +15,7 @@ venv/
 coverage.xml
 htmlcov/
 *.exe
+*.obj
 pow_solver
 .playwright-mcp/
 .idea/
