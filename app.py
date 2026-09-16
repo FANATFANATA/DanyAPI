@@ -148,6 +148,8 @@ def main() -> None:
         host=settings.host,
         port=settings.port,
         log_config=uvicorn_log_config(),
+        timeout_keep_alive=60,
+        backlog=1024,
     )
 
 

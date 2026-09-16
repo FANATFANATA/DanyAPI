@@ -80,6 +80,7 @@ class QwenClient:
             headers=headers,
             timeout=httpx.Timeout(timeout),
             follow_redirects=True,
+            limits=httpx.Limits(max_keepalive_connections=20, keepalive_expiry=30.0),
         )
         if token:
             self.http.cookies.set("token", token, domain="chat.qwen.ai", path="/")

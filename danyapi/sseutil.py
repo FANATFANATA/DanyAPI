@@ -47,9 +47,11 @@ THINK_TYPES = ("THINK",)
 
 class IncrementalSSE:
     def __init__(self) -> None:
-        self._buffer = b""
+        self._buffer = bytearray()
 
     def feed(self, chunk: bytes) -> Iterator[SSEEvent]:
+        if not isinstance(self._buffer, bytearray):
+            self._buffer = bytearray(self._buffer)
         self._buffer += chunk
         while True:
             idx = self._buffer.find(b"\n\n")
@@ -58,16 +60,16 @@ class IncrementalSSE:
                 if idx == -1:
                     break
                 block = self._buffer[:idx].decode("utf-8", errors="replace")
-                self._buffer = self._buffer[idx + 4 :]
+                self._buffer[: idx + 4] = b""
             else:
                 block = self._buffer[:idx].decode("utf-8", errors="replace")
-                self._buffer = self._buffer[idx + 2 :]
+                self._buffer[: idx + 2] = b""
             yield from parse_sse(block)
 
     def finish(self) -> Iterator[SSEEvent]:
         if self._buffer.strip():
             yield from parse_sse(self._buffer.decode("utf-8", errors="replace"))
-        self._buffer = b""
+        self._buffer = bytearray()
 
 
 def _normalise_key(key: str) -> str:

@@ -65,6 +65,7 @@ class DeepSeekClient:
             headers=headers,
             timeout=httpx.Timeout(timeout, read=max(float(timeout) * 5, 300.0)),
             follow_redirects=True,
+            limits=httpx.Limits(max_keepalive_connections=20, keepalive_expiry=30.0),
         )
 
     async def aclose(self) -> None:

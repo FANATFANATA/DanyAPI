@@ -7,14 +7,10 @@ _CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3040-\u30ff\uac
 _IMAGE_TOKEN_COST = 85
 
 
-def _is_cjk(ch: str) -> bool:
-    return _CJK_RE.match(ch) is not None
-
-
 def estimate_tokens(text: str | None) -> int:
     if not text:
         return 0
-    cjk = sum(1 for ch in text if _is_cjk(ch))
+    cjk = len(_CJK_RE.findall(text))
     other = len(text) - cjk
     if other == 0:
         return cjk
