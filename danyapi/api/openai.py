@@ -178,16 +178,6 @@ class ResponsesRequest(BaseModel):
     search: bool | None = None
 
 
-def _find_tool_marker(text: str, start: int = 0) -> int:
-    markers = ('{"tool_calls"', "<tool_calls", "<calls", "<_calls", "<invoke", "tool_calls:")
-    best = -1
-    for m in markers:
-        pos = text.find(m, start)
-        if pos != -1 and (best == -1 or pos < best):
-            best = pos
-    return best
-
-
 IMAGE_SIZE_RE = re.compile(r"^(\d{2,5})\s*[*x\u00d7,]\s*(\d{2,5})$", re.IGNORECASE)
 MIN_IMAGE_DIM = 16
 MAX_IMAGE_DIM = 8192
@@ -2502,17 +2492,9 @@ async def _stream_openai(
                         if c_diff:
                             if tool_mode:
                                 content_buf += c_diff
-                                if not tool_hidden:
-                                    search_from = content_shown_len
-                                    marker_pos = _find_tool_marker(content_buf, search_from)
-                                    if marker_pos < 0:
-                                        delta["content"] = content_buf[search_from:]
-                                        content_shown_len = len(content_buf)
-                                    else:
-                                        if marker_pos > search_from:
-                                            delta["content"] = content_buf[search_from:marker_pos]
-                                        content_shown_len = marker_pos
-                                        tool_hidden = True
+                                visible, content_shown_len, tool_hidden = toolemu.tool_visible(content_buf, content_shown_len, tool_hidden, tool_schemas)
+                                if visible:
+                                    delta["content"] = visible
                             else:
                                 delta["content"] = c_diff
                         if r_diff:
@@ -2564,17 +2546,9 @@ async def _stream_openai(
                     if c_diff:
                         if tool_mode:
                             content_buf += c_diff
-                            if not tool_hidden:
-                                search_from = content_shown_len
-                                marker_pos = _find_tool_marker(content_buf, search_from)
-                                if marker_pos < 0:
-                                    delta2["content"] = content_buf[search_from:]
-                                    content_shown_len = len(content_buf)
-                                else:
-                                    if marker_pos > search_from:
-                                        delta2["content"] = content_buf[search_from:marker_pos]
-                                    content_shown_len = marker_pos
-                                    tool_hidden = True
+                            visible, content_shown_len, tool_hidden = toolemu.tool_visible(content_buf, content_shown_len, tool_hidden, tool_schemas)
+                            if visible:
+                                delta2["content"] = visible
                         else:
                             delta2["content"] = c_diff
                     if r_diff:
@@ -2671,26 +2645,17 @@ async def _stream_openai(
                         )
                     if tool_mode:
                         content_buf += cont_rec.content
-                        if not tool_hidden:
-                            search_from = content_shown_len
-                            marker_pos = _find_tool_marker(content_buf, search_from)
-                            if marker_pos < 0:
-                                c_visible = cont_rec.content
-                                content_shown_len = len(content_buf)
-                            else:
-                                c_visible = content_buf[search_from:marker_pos]
-                                content_shown_len = marker_pos
-                                tool_hidden = True
-                            if c_visible:
-                                yield _sse(
-                                    {
-                                        "id": chunk_id,
-                                        "object": "chat.completion.chunk",
-                                        "created": created,
-                                        "model": model,
-                                        "choices": [{"index": 0, "delta": {"content": c_visible}, "finish_reason": None}],
-                                    }
-                                )
+                        c_visible, content_shown_len, tool_hidden = toolemu.tool_visible(content_buf, content_shown_len, tool_hidden, tool_schemas)
+                        if c_visible:
+                            yield _sse(
+                                {
+                                    "id": chunk_id,
+                                    "object": "chat.completion.chunk",
+                                    "created": created,
+                                    "model": model,
+                                    "choices": [{"index": 0, "delta": {"content": c_visible}, "finish_reason": None}],
+                                }
+                            )
                     else:
                         yield _sse(
                             {
@@ -2768,26 +2733,17 @@ async def _stream_openai(
                                 )
                             if tool_mode:
                                 content_buf += rec.content
-                                if not tool_hidden:
-                                    search_from = content_shown_len
-                                    marker_pos = _find_tool_marker(content_buf, search_from)
-                                    if marker_pos < 0:
-                                        r_visible = rec.content
-                                        content_shown_len = len(content_buf)
-                                    else:
-                                        r_visible = content_buf[search_from:marker_pos]
-                                        content_shown_len = marker_pos
-                                        tool_hidden = True
-                                    if r_visible:
-                                        yield _sse(
-                                            {
-                                                "id": chunk_id,
-                                                "object": "chat.completion.chunk",
-                                                "created": created,
-                                                "model": model,
-                                                "choices": [{"index": 0, "delta": {"content": r_visible}, "finish_reason": None}],
-                                            }
-                                        )
+                                r_visible, content_shown_len, tool_hidden = toolemu.tool_visible(content_buf, content_shown_len, tool_hidden, tool_schemas)
+                                if r_visible:
+                                    yield _sse(
+                                        {
+                                            "id": chunk_id,
+                                            "object": "chat.completion.chunk",
+                                            "created": created,
+                                            "model": model,
+                                            "choices": [{"index": 0, "delta": {"content": r_visible}, "finish_reason": None}],
+                                        }
+                                    )
                             else:
                                 yield _sse(
                                     {

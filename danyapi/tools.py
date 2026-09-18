@@ -7,6 +7,7 @@ import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass
 from difflib import get_close_matches
+from functools import lru_cache
 from typing import Any
 
 _DSML_PIPE = r"|\u00a6\u01c0\u01c1\u05c0\u2016\u2223\u2502\u2551\u2758\ufe31\uff5c"
@@ -273,6 +274,220 @@ def _strip_dsml(text: str) -> str:
     result = _DSML_XML_NORMALIZE.sub(r"<\1\2>", result)
     result = _DSML_TAG.sub(_replace_dsml_tag, result)
     return _DSML_NAKED.sub(" ", result)
+
+
+TOOL_STREAM_TAGS = (
+    "tool_calls",
+    "tool_call",
+    "function_calls",
+    "function_call",
+    "functions",
+    "function",
+    "tools",
+    "calls",
+    "_calls",
+    "toolinvoke",
+    "tool_invoke",
+    "use_tool",
+    "tool_use",
+    "invoke",
+    "call",
+    "action",
+    "run",
+)
+
+TOOL_STREAM_JSON_KEYS = (
+    "tool_calls",
+    "calls",
+    "_calls",
+    "function_call",
+    "tool_name",
+    "name",
+    "tool",
+    "action",
+    "call",
+)
+
+TOOL_STREAM_MARKERS = tuple([f'{{"{key}"' for key in TOOL_STREAM_JSON_KEYS] + [f"<{tag}" for tag in TOOL_STREAM_TAGS] + ["tool_calls:", "[{"])
+
+TOOL_STREAM_MARKER_MAX = max(len(marker) for marker in TOOL_STREAM_MARKERS)
+
+_TOOL_STREAM_TAG_RE = re.compile(
+    r"<\s*/?\s*(?:" + "|".join(TOOL_STREAM_TAGS) + r")\b[^<>]*>",
+    re.IGNORECASE,
+)
+_TOOL_STREAM_JSON_RE = re.compile(r"\{\s*['\"]?(?:" + "|".join(TOOL_STREAM_JSON_KEYS) + r")['\"]?\s*:")
+_TOOL_STREAM_ARRAY_RE = re.compile(r"\[\s*\{")
+_TOOL_STREAM_YAML_RE = re.compile(r"(?m)^[ \t]*tool_calls\s*:")
+_TOOL_STREAM_NAME_ATTR_RE = re.compile(
+    r"<\s*/?\s*(?!(?:" + "|".join(sorted(_XML_HTML_TAGS)) + r")\b)[A-Za-z_][A-Za-z0-9_.-]*[^<>]*\bname\s*=",
+    re.IGNORECASE,
+)
+_DSML_STREAM_START = re.compile(
+    r"<\s*/?\s*(?:[|]|[^\x00-\x7f]){1,8}\s*DSML\s*(?:[|]|[^\x00-\x7f]){1,8}",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+@lru_cache(maxsize=64)
+def _stream_patterns(names: tuple[str, ...]) -> tuple[re.Pattern[str], ...]:
+    patterns = [
+        _TOOL_STREAM_TAG_RE,
+        _TOOL_STREAM_JSON_RE,
+        _TOOL_STREAM_ARRAY_RE,
+        _TOOL_STREAM_YAML_RE,
+        _TOOL_STREAM_NAME_ATTR_RE,
+        _DSML_STREAM_START,
+    ]
+    if names:
+        escaped = "|".join(re.escape(name) for name in names)
+        patterns.append(re.compile(rf"<\s*/?\s*(?:{escaped})\b", re.IGNORECASE))
+        patterns.append(re.compile(rf"(?m)^[ \t]*(?:{escaped})[ \t]*\(", re.IGNORECASE))
+    return tuple(patterns)
+
+
+def _stream_names(tool_schemas: dict[str, dict[str, Any]] | None) -> tuple[str, ...]:
+    if not tool_schemas:
+        return ()
+    return tuple(sorted(name.lower() for name in tool_schemas if isinstance(name, str) and name))
+
+
+def _literal_hold(text: str, start: int) -> int:
+    tail_from = max(start, len(text) - TOOL_STREAM_MARKER_MAX + 1)
+    for index in range(tail_from, len(text)):
+        suffix = text[index:]
+        if any(marker.startswith(suffix) for marker in TOOL_STREAM_MARKERS):
+            return index
+    return -1
+
+
+def _json_hold(text: str, start: int) -> int:
+    brace = text.rfind("{")
+    if brace < start or "}" in text[brace:]:
+        return -1
+    body = text[brace + 1 :].lstrip()
+    if not body:
+        return brace
+    if body[0] in "'\"":
+        body = body[1:]
+    key = body.lower()
+    if any(candidate.startswith(key) for candidate in TOOL_STREAM_JSON_KEYS):
+        return brace
+    return -1
+
+
+def _tag_hold(text: str, start: int, names: tuple[str, ...]) -> int:
+    lt = text.rfind("<")
+    if lt < start:
+        return -1
+    tail = text[lt:]
+    if ">" in tail:
+        return -1
+    body = tail[1:].lstrip()
+    if body.startswith("/"):
+        body = body[1:].lstrip()
+    if not body:
+        return lt
+    first = body[0]
+    if first == "|" or ord(first) > 127:
+        return lt
+    chars: list[str] = []
+    for char in body:
+        if char.isascii() and (char.isalnum() or char in "_-."):
+            chars.append(char)
+        else:
+            break
+    name = "".join(chars).lower()
+    if not name:
+        return -1
+    if name in _XML_HTML_TAGS:
+        return -1
+    for candidate in TOOL_STREAM_TAGS:
+        if candidate.startswith(name):
+            return lt
+    for candidate in names:
+        if candidate.startswith(name):
+            return lt
+    lowered = body.lower()
+    for suffix in ("name", "nam", "na", "n"):
+        if lowered.endswith(suffix):
+            before = lowered[: len(lowered) - len(suffix)]
+            if not before or before[-1] in " \t_-\"'=<>":
+                return lt
+    if "name" in lowered:
+        return lt
+    return -1
+
+
+def _array_hold(text: str, start: int) -> int:
+    bracket = text.rfind("[")
+    if bracket < start or "]" in text[bracket:]:
+        return -1
+    if not text[bracket + 1 :].strip():
+        return bracket
+    return -1
+
+
+def _python_hold(text: str, start: int, names: tuple[str, ...]) -> int:
+    if not names:
+        return -1
+    line_start = text.rfind("\n") + 1
+    if line_start < start:
+        return -1
+    line = text[line_start:].lstrip().lower()
+    if not line:
+        return -1
+    for name in names:
+        if (name + "(").startswith(line):
+            return line_start
+    return -1
+
+
+def tool_call_boundary(
+    text: str,
+    start: int = 0,
+    tool_schemas: dict[str, dict[str, Any]] | None = None,
+) -> tuple[int, bool]:
+    names = _stream_names(tool_schemas)
+    best = -1
+    complete = False
+    for pattern in _stream_patterns(names):
+        match = pattern.search(text, start)
+        if match is not None and (best == -1 or match.start() < best):
+            best = match.start()
+            complete = True
+    for marker in TOOL_STREAM_MARKERS:
+        pos = text.find(marker, start)
+        if pos != -1 and (best == -1 or pos < best):
+            best = pos
+            complete = True
+    hold = -1
+    for candidate in (
+        _literal_hold(text, start),
+        _json_hold(text, start),
+        _tag_hold(text, start, names),
+        _array_hold(text, start),
+        _python_hold(text, start, names),
+    ):
+        if candidate != -1 and (hold == -1 or candidate < hold):
+            hold = candidate
+    if hold != -1 and (best == -1 or hold < best):
+        return hold, False
+    return best, complete
+
+
+def tool_visible(
+    content_buf: str,
+    shown: int,
+    hidden: bool,
+    tool_schemas: dict[str, dict[str, Any]] | None = None,
+) -> tuple[str, int, bool]:
+    if hidden:
+        return "", shown, True
+    boundary, complete = tool_call_boundary(content_buf, shown, tool_schemas)
+    if boundary < 0:
+        return content_buf[shown:], len(content_buf), False
+    return content_buf[shown:boundary], boundary, complete
 
 
 TOOL_CALL_INSTRUCTION = (
