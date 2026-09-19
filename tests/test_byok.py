@@ -228,6 +228,18 @@ def test_health_reports_byok_mode():
     assert payload["byok_pools"]["qwen"] == 0
 
 
+def test_list_models_byok_without_env_tokens_lists_qwen_defaults():
+    app.state.byok = True
+    app.state.qwen_models = []
+    client = TestClient(app)
+    data = client.get("/v1/models").json()
+    client.close()
+    ids = [m["id"] for m in data["data"]]
+    assert "deepseek-v4.1-flash" in ids
+    for model in openai_mod.QWEN_DEFAULT_MODELS:
+        assert model["id"] in ids
+
+
 def test_health_no_byok_key_when_disabled():
     app.state.byok = False
     client = TestClient(app)
