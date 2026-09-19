@@ -228,6 +228,7 @@ async def lifespan(app: FastAPI):
     app.state.byok = byok_mode
     app.state.byok_pools = {"deepseek": {}, "qwen": {}}
     app.state.byok_locks = {"deepseek": asyncio.Lock(), "qwen": asyncio.Lock()}
+    app.state.byok_auth = {"deepseek": {}, "qwen": {}}
     cache_enabled = settings.cache_enabled
     deepseek_session_store = JsonStore("deepseek-sessions", "default" if cache_enabled else None)
     qwen_session_store = JsonStore("qwen-sessions", "default" if cache_enabled else None)
@@ -1094,6 +1095,7 @@ def _resolve_provider(model: str) -> str:
 
 
 BYOK_POOL_LIMIT = 512
+BYOK_AUTH_LIMIT = 4096
 
 
 def _byok_mode() -> bool:
@@ -1114,6 +1116,34 @@ async def _byok_locks_state() -> dict[str, asyncio.Lock]:
         locks = {"deepseek": asyncio.Lock(), "qwen": asyncio.Lock()}
         app.state.byok_locks = locks
     return locks
+
+
+async def _byok_auth_state() -> dict[str, dict[str, Any]]:
+    auth = getattr(app.state, "byok_auth", None)
+    if auth is None:
+        auth = {"deepseek": {}, "qwen": {}}
+        app.state.byok_auth = auth
+    return auth
+
+
+def _cached_auth(store: dict[str, Any], stable: str, ttl: float, now: float) -> bool | None:
+    if ttl <= 0:
+        return None
+    record = store.get(stable)
+    if not isinstance(record, (list, tuple)) or len(record) != 2:
+        return None
+    try:
+        ts = float(record[1])
+    except (TypeError, ValueError):
+        return None
+    if now - ts > ttl:
+        return None
+    return bool(record[0])
+
+
+def _evict_auth(store: dict[str, Any]) -> None:
+    while len(store) > BYOK_AUTH_LIMIT:
+        store.pop(next(iter(store)), None)
 
 
 async def _extract_request_api_key(request: Request) -> str | None:
@@ -1186,13 +1216,39 @@ async def _close_busy_client(account: Any, sem: asyncio.Semaphore) -> None:
             sem.release()
 
 
+async def _byok_validate(
+    provider: str,
+    token: str,
+    client: Any,
+) -> bool:
+    auth = await _byok_auth_state()
+    store = auth[provider]
+    stable = _token_stable_id(token)
+    ttl = settings.byok_auth_ttl
+    cached = _cached_auth(store, stable, ttl, time.monotonic())
+    if cached is not None:
+        return cached
+    try:
+        ok = bool(await client.check_auth())
+    except Exception:
+        ok = False
+    store.pop(stable, None)
+    store[stable] = [ok, time.monotonic()]
+    _evict_auth(store)
+    return ok
+
+
+def _byok_cache_key(tokens: list[str]) -> str:
+    return "|".join(sorted(_token_stable_id(token) for token in tokens))
+
+
 async def _byok_pool(provider: str, tokens: list[str]) -> AccountPool:
     if provider not in ("deepseek", "qwen"):
         raise HTTPException(400, f"unknown provider: {provider}")
+    tokens = list(dict.fromkeys(tokens))
     pools = await _byok_pools_state()
     cache = pools[provider]
-    ids = tuple(_token_stable_id(token) for token in tokens)
-    cache_key = "|".join(ids)
+    cache_key = _byok_cache_key(tokens)
     pool = cache.get(cache_key)
     if pool is not None and pool.healthy:
         cache.pop(cache_key)
@@ -1202,6 +1258,8 @@ async def _byok_pool(provider: str, tokens: list[str]) -> AccountPool:
     async with locks[provider]:
         pool = cache.get(cache_key)
         if pool is not None and pool.healthy:
+            cache.pop(cache_key)
+            cache[cache_key] = pool
             return pool
         if pool is not None:
             cache.pop(cache_key, None)
@@ -1214,7 +1272,7 @@ async def _byok_pool(provider: str, tokens: list[str]) -> AccountPool:
             accounts: list[DeepSeekAccount] = []
             for i, token in enumerate(tokens):
                 ds_client = DeepSeekClient(token=token, timeout=settings.timeout)
-                if not await ds_client.check_auth():
+                if not await _byok_validate("deepseek", token, ds_client):
                     log.warning("byok deepseek token invalid/expired, skipping")
                     await ds_client.aclose()
                     continue
@@ -1244,7 +1302,7 @@ async def _byok_pool(provider: str, tokens: list[str]) -> AccountPool:
             qwen_accounts: list[QwenAccount] = []
             for i, token in enumerate(tokens):
                 qw_client = QwenClient(token=token, timeout=settings.timeout)
-                if not await qw_client.check_auth():
+                if not await _byok_validate("qwen", token, qw_client):
                     log.warning("byok qwen token invalid/expired, skipping")
                     await qw_client.aclose()
                     continue
