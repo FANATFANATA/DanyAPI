@@ -1046,6 +1046,8 @@ async def list_models() -> dict:
                 }
             )
     qwen_models: list[dict] = getattr(app.state, "qwen_models", [])
+    if not qwen_models and _byok_mode():
+        qwen_models = QWEN_DEFAULT_MODELS
     for model in qwen_models:
         models.append(
             {
