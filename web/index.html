@@ -196,158 +196,6 @@ body::before {
     margin-bottom: 2.2rem;
 }
 
-.header h1 {
-    font-family: var(--font-disp);
-    font-weight: 700;
-    font-size: clamp(1.4rem, 3vw, 1.8rem);
-    line-height: 1.25;
-    letter-spacing: -0.02em;
-    margin-bottom: 0.6rem;
-    color: var(--l-text);
-}
-
-.header .grad-text {
-    background: var(--l-grad);
-    -webkit-background-clip: text;
-    background-clip: text;
-    -webkit-text-fill-color: transparent;
-    color: transparent;
-}
-
-.header p {
-    color: var(--l-muted);
-    font-size: 0.95rem;
-}
-
-.form-group {
-    margin-bottom: 1.3rem;
-}
-
-.form-group label {
-    display: block;
-    margin-bottom: 0.5rem;
-    color: var(--l-muted);
-    font-size: 0.85rem;
-    font-weight: 600;
-    font-family: var(--font-mono);
-    letter-spacing: 0.04em;
-}
-
-.form-group input {
-    width: 100%;
-    padding: 0.75rem 1rem;
-    background: rgba(255, 255, 255, 0.04);
-    border: 1px solid var(--l-border-strong);
-    border-radius: 11px;
-    color: var(--l-text);
-    font-size: 0.92rem;
-    font-family: var(--font-mono);
-    transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
-}
-
-.form-group input:focus {
-    outline: none;
-    border-color: var(--l-accent);
-    box-shadow: 0 0 0 3px rgba(108, 123, 255, 0.2);
-    background: rgba(255, 255, 255, 0.06);
-}
-
-.form-group input::placeholder {
-    color: var(--l-faint);
-}
-
-.info-box {
-    background: rgba(108, 123, 255, 0.06);
-    border-left: 3px solid var(--l-accent);
-    padding: 1rem 1.2rem;
-    margin: 1.4rem 0;
-    border-radius: 0 11px 11px 0;
-    font-size: 0.85rem;
-    color: var(--l-muted);
-    line-height: 1.6;
-}
-
-.info-box strong {
-    color: var(--l-text);
-}
-
-.status {
-    margin-top: 1.2rem;
-    padding: 0.75rem 1rem;
-    border-radius: 11px;
-    font-size: 0.88rem;
-    font-weight: 600;
-    display: none;
-    animation: slideIn 0.3s ease;
-}
-
-@keyframes slideIn {
-    from { opacity: 0; transform: translateY(-8px); }
-    to { opacity: 1; transform: translateY(0); }
-}
-
-.status.success {
-    background: rgba(52, 211, 153, 0.1);
-    border: 1px solid rgba(52, 211, 153, 0.3);
-    color: var(--l-green);
-    display: block;
-}
-
-.status.error {
-    background: rgba(255, 95, 86, 0.1);
-    border: 1px solid rgba(255, 95, 86, 0.3);
-    color: var(--l-red);
-    display: block;
-}
-
-.status.loading {
-    background: rgba(108, 123, 255, 0.1);
-    border: 1px solid rgba(108, 123, 255, 0.3);
-    color: var(--l-accent-2);
-    display: block;
-}
-
-.btn {
-    flex: 1;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 0.5rem;
-    padding: 0.85rem 1.5rem;
-    border-radius: 11px;
-    font-family: var(--font-body);
-    font-weight: 700;
-    font-size: 0.95rem;
-    border: 1px solid transparent;
-    cursor: pointer;
-    color: var(--l-text);
-    text-decoration: none;
-    transition: transform 0.18s ease, box-shadow 0.25s ease, background 0.25s, color 0.25s, border-color 0.25s;
-    white-space: nowrap;
-    position: relative;
-    overflow: hidden;
-    width: 100%;
-    margin-top: 1.6rem;
-}
-
-.btn:hover {
-    transform: translateY(-2px);
-}
-
-.btn:active {
-    transform: translateY(0);
-}
-
-.btn-primary {
-    background: var(--l-grad);
-    color: #fff;
-    box-shadow: 0 10px 30px -12px rgba(108, 123, 255, 0.7);
-}
-
-.btn-primary:hover {
-    box-shadow: 0 16px 40px -12px rgba(108, 123, 255, 0.85);
-}
-
 .footer-link {
     display: block;
     text-align: center;
@@ -359,7 +207,6 @@ body::before {
 .usage-section {
     margin-top: 2.2rem;
     padding-top: 1.6rem;
-    border-top: 1px solid var(--l-border);
 }
 
 .usage-title {
@@ -478,10 +325,6 @@ body::before {
         padding: 2rem 1.3rem;
         border-radius: 16px;
     }
-
-    .header h1 {
-        font-size: 1.3rem;
-    }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -530,33 +373,7 @@ body::before {
             </svg>
             <span class="brand-name">Dany<span class="brand-accent">API</span></span>
         </a>
-        <div id="token-heading">
-            <h1><span class="grad-text">Token Manager</span></h1>
-            <p>Support the project add your free provider tokens</p>
-        </div>
     </div>
-
-    <section class="token-manager" id="token-manager">
-        <div class="form-group">
-            <label for="deepseek-tokens">DeepSeek Tokens</label>
-            <input type="text" id="deepseek-tokens"
-                   placeholder="token1, token2, token3..." value="" autocomplete="off" spellcheck="false" />
-        </div>
-
-        <div class="form-group">
-            <label for="qwen-tokens">Qwen Tokens</label>
-            <input type="text" id="qwen-tokens"
-                   placeholder="token1, token2, token3..." value="" autocomplete="off" spellcheck="false" />
-        </div>
-
-        <div class="info-box">
-            <strong>No limits.</strong> Tokens are used server-side. Your consumers just point their OpenAI client at this instance no keys needed on their side. Each token adds parallel generation capacity.
-        </div>
-
-        <div id="status" class="status"></div>
-
-        <button class="btn btn-primary" type="button" id="btn-save">Add Tokens</button>
-    </section>
 
     <div class="usage-section">
         <h2 class="usage-title">Usage</h2>
@@ -576,9 +393,6 @@ body::before {
     "use strict";
 
     var BASE = window.location.origin;
-    var statusEl = document.getElementById("status");
-    var dsInput = document.getElementById("deepseek-tokens");
-    var qwInput = document.getElementById("qwen-tokens");
     var usageEl = document.getElementById("usage-stats");
 
     function fmt(n) {
@@ -621,74 +435,7 @@ body::before {
             });
     }
 
-    function initMode() {
-        fetch(BASE + "/health")
-            .then(function (r) {
-                if (!r.ok) throw new Error("HTTP " + r.status);
-                return r.json();
-            })
-            .then(function (data) {
-                if (data.byok) {
-                    var heading = document.getElementById("token-heading");
-                    if (heading) heading.style.display = "none";
-                    var manager = document.getElementById("token-manager");
-                    if (manager) manager.style.display = "none";
-                }
-            })
-            .catch(function () {});
-    }
-
-    initMode();
     loadUsage();
-
-    function showStatus(msg, type) {
-        statusEl.textContent = msg;
-        statusEl.className = "status " + type;
-    }
-
-    document.getElementById("btn-save").addEventListener("click", function () {
-        var dsRaw = dsInput.value.trim();
-        var qwRaw = qwInput.value.trim();
-
-        if (!dsRaw && !qwRaw) {
-            showStatus("Enter at least one token", "error");
-            return;
-        }
-
-        var payload = {
-            deepseek_tokens: dsRaw ? dsRaw.split(",").map(function (s) { return s.trim(); }).filter(Boolean) : [],
-            qwen_tokens: qwRaw ? qwRaw.split(",").map(function (s) { return s.trim(); }).filter(Boolean) : []
-        };
-
-        showStatus("Adding\u2026", "loading");
-
-        fetch(BASE + "/v1/tokens", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload)
-        })
-            .then(function (r) { return r.json(); })
-            .then(function (data) {
-                if (data.success) {
-                    var added = data.added || {};
-                    var skipped = data.skipped || {};
-                    var parts = [];
-                    if (added.deepseek) parts.push("DeepSeek: +" + added.deepseek);
-                    if (added.qwen) parts.push("Qwen: +" + added.qwen);
-                    if (skipped.deepseek) parts.push("DeepSeek invalid: " + skipped.deepseek);
-                    if (skipped.qwen) parts.push("Qwen invalid: " + skipped.qwen);
-                    var detail = parts.length ? " (" + parts.join(", ") + ")" : "";
-                    showStatus("Tokens added and activated." + detail, "success");
-                    dsInput.value = "";
-                    qwInput.value = "";
-                } else {
-                    showStatus(data.error || "Failed to save", "error");
-                }
-            })
-            .catch(function (e) {
-                showStatus("Connection error: " + e.message, "error");
-            });
-    });
 })();
 </script>
 </body>
