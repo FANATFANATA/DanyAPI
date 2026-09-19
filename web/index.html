@@ -530,29 +530,33 @@ body::before {
             </svg>
             <span class="brand-name">Dany<span class="brand-accent">API</span></span>
         </a>
-        <h1><span class="grad-text">Token Manager</span></h1>
-        <p>Support the project add your free provider tokens</p>
+        <div id="token-heading">
+            <h1><span class="grad-text">Token Manager</span></h1>
+            <p>Support the project add your free provider tokens</p>
+        </div>
     </div>
 
-    <div class="form-group">
-        <label for="deepseek-tokens">DeepSeek Tokens</label>
-        <input type="text" id="deepseek-tokens"
-               placeholder="token1, token2, token3..." value="" autocomplete="off" spellcheck="false" />
-    </div>
+    <section class="token-manager" id="token-manager">
+        <div class="form-group">
+            <label for="deepseek-tokens">DeepSeek Tokens</label>
+            <input type="text" id="deepseek-tokens"
+                   placeholder="token1, token2, token3..." value="" autocomplete="off" spellcheck="false" />
+        </div>
 
-    <div class="form-group">
-        <label for="qwen-tokens">Qwen Tokens</label>
-        <input type="text" id="qwen-tokens"
-               placeholder="token1, token2, token3..." value="" autocomplete="off" spellcheck="false" />
-    </div>
+        <div class="form-group">
+            <label for="qwen-tokens">Qwen Tokens</label>
+            <input type="text" id="qwen-tokens"
+                   placeholder="token1, token2, token3..." value="" autocomplete="off" spellcheck="false" />
+        </div>
 
-    <div class="info-box">
-        <strong>No limits.</strong> Tokens are used server-side. Your consumers just point their OpenAI client at this instance no keys needed on their side. Each token adds parallel generation capacity.
-    </div>
+        <div class="info-box">
+            <strong>No limits.</strong> Tokens are used server-side. Your consumers just point their OpenAI client at this instance no keys needed on their side. Each token adds parallel generation capacity.
+        </div>
 
-    <div id="status" class="status"></div>
+        <div id="status" class="status"></div>
 
-    <button class="btn btn-primary" type="button" id="btn-save">Add Tokens</button>
+        <button class="btn btn-primary" type="button" id="btn-save">Add Tokens</button>
+    </section>
 
     <div class="usage-section">
         <h2 class="usage-title">Usage</h2>
@@ -617,6 +621,24 @@ body::before {
             });
     }
 
+    function initMode() {
+        fetch(BASE + "/health")
+            .then(function (r) {
+                if (!r.ok) throw new Error("HTTP " + r.status);
+                return r.json();
+            })
+            .then(function (data) {
+                if (data.byok) {
+                    var heading = document.getElementById("token-heading");
+                    if (heading) heading.style.display = "none";
+                    var manager = document.getElementById("token-manager");
+                    if (manager) manager.style.display = "none";
+                }
+            })
+            .catch(function () {});
+    }
+
+    initMode();
     loadUsage();
 
     function showStatus(msg, type) {
