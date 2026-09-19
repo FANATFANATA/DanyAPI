@@ -15,7 +15,6 @@ Brief description of changes.
 
 - [ ] Tests pass locally
 - [ ] PoW solvers tested (C + JS)
-- [ ] Live tests if applicable
 
 ## Checklist
 
