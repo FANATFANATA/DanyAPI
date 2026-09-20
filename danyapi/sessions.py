@@ -183,9 +183,10 @@ class SessionRegistry:
                     self._store.discard(self._session_key(oldest))
                 self._session_locks.pop(oldest, None)
             if self._store is not None:
-                self._store.set(self._session_key(new_id), self._serialize(session))
+                record = self._serialize(session)
+                self._store.set(self._session_key(new_id), record)
                 if bind_key != new_id:
-                    self._store.set(self._session_key(bind_key), self._serialize(session))
+                    self._store.set(self._session_key(bind_key), record)
         return session, bind_key
 
     def touch_last_message(self, session_id: str, message_id: str | None) -> None:
@@ -193,9 +194,10 @@ class SessionRegistry:
         if session is not None and message_id:
             self._update_last(session, message_id)
             if self._store is not None:
-                self._store.set(self._session_key(session_id), self._serialize(session))
+                record = self._serialize(session)
+                self._store.set(self._session_key(session_id), record)
                 if session_id != session.id:
-                    self._store.set(self._session_key(session.id), self._serialize(session))
+                    self._store.set(self._session_key(session.id), record)
 
     def forget(self, session_id: str) -> None:
         with self._lock:
@@ -213,3 +215,7 @@ class SessionRegistry:
             for key, _ in self._store.items():
                 if key.startswith(prefix):
                     self._store.discard(key)
+
+    def flush(self) -> None:
+        if self._store is not None:
+            self._store.flush()

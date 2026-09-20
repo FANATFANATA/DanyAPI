@@ -4,6 +4,7 @@ import asyncio
 import logging
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import Sequence
 from contextlib import asynccontextmanager
 from typing import Any, Generic, Protocol, TypeVar
@@ -44,7 +45,7 @@ class ContextIndex:
         store: JsonStore | None = None,
     ) -> None:
         self._seqs: dict[str, tuple[str, ...]] = {}
-        self._recency: dict[str, int] = {}
+        self._recency: OrderedDict[str, int] = OrderedDict()
         self._ts: dict[str, float] = {}
         self._lock = threading.Lock()
         self._maxsize = max(1, maxsize)
@@ -71,7 +72,7 @@ class ContextIndex:
             self._seqs[session_id] = sequence
             self._touch(session_id, now)
         while len(self._seqs) > self._maxsize:
-            oldest = min(self._recency, key=lambda sid: self._recency[sid])
+            oldest = next(iter(self._recency))
             self._seqs.pop(oldest, None)
             self._recency.pop(oldest, None)
             self._ts.pop(oldest, None)
@@ -138,7 +139,7 @@ class ContextIndex:
             self._seqs[session_id] = sequence
             self._touch(session_id, now)
             while len(self._seqs) > self._maxsize:
-                oldest = min(self._recency, key=lambda sid: self._recency[sid])
+                oldest = next(iter(self._recency))
                 self._seqs.pop(oldest, None)
                 self._recency.pop(oldest, None)
                 self._ts.pop(oldest, None)
@@ -156,6 +157,7 @@ class ContextIndex:
             self._store.discard(session_id)
 
     def _touch(self, session_id: str, now: float) -> None:
+        self._recency.pop(session_id, None)
         self._recency[session_id] = self._tick
         self._tick += 1
         self._ts[session_id] = now
@@ -329,11 +331,12 @@ class AccountPool(Generic[AccountT]):
     def stats(self) -> dict[str, Any]:
         with self._affinity_lock:
             affinities = len(self._by_session)
+        healthy = [a for a in self.accounts if not a.broken]
         return {
             "label": self.label,
             "accounts": len(self.accounts),
-            "healthy": len(self.healthy),
-            "broken": len(self.accounts) - len(self.healthy),
+            "healthy": len(healthy),
+            "broken": len(self.accounts) - len(healthy),
             "session_affinities": affinities,
             "context_entries": self._contexts.size,
             "context_hits": self._contexts.hits,
@@ -343,8 +346,7 @@ class AccountPool(Generic[AccountT]):
         }
 
     async def acquire(self, session_id: str | None, max_wait: float | None = None) -> tuple[AccountT, str | None]:
-        healthy = self.healthy
-        if not healthy:
+        if not any(not a.broken for a in self.accounts):
             revived = await self.revive_broken()
             if revived is not None:
                 healthy = [revived]
@@ -357,6 +359,7 @@ class AccountPool(Generic[AccountT]):
                 if acct.sem.locked() and max_wait is not None:
                     return await self._wait_free(acct, max_wait, session_id)
                 return acct, session_id
+        healthy = [a for a in self.accounts if not a.broken]
         n = len(healthy)
         start = self._rr % n
         for i in range(n):
@@ -396,14 +399,12 @@ class AccountPool(Generic[AccountT]):
 
     async def revive_broken(self) -> AccountT | None:
         now = time.monotonic()
-        candidates: list[AccountT] = []
         for acct in self.accounts:
             if not acct.broken:
                 continue
             broken_at = getattr(acct, "broken_at", None)
-            if broken_at is not None and now - broken_at >= self._REVIVE_COOLDOWN:
-                candidates.append(acct)
-        for acct in candidates:
+            if broken_at is None or now - broken_at < self._REVIVE_COOLDOWN:
+                continue
             client = getattr(acct, "client", None)
             if client is None:
                 continue

@@ -263,14 +263,17 @@ def _strip_dsml(text: str) -> str:
     if not text:
         return text
     result = text
-    for _ in range(10):
-        updated = _DSML_BLOCK.sub(" ", result)
-        updated = _DSML_WRAP.sub(" ", updated)
-        updated = _DSML_HIDDEN.sub(" ", updated)
-        updated = _DSML_HIDDEN_NAKED.sub(" ", updated)
-        if updated == result:
-            break
-        result = updated
+    if "dsml" in result.casefold():
+        for _ in range(10):
+            updated = _DSML_BLOCK.sub(" ", result)
+            updated = _DSML_WRAP.sub(" ", updated)
+            updated = _DSML_HIDDEN.sub(" ", updated)
+            updated = _DSML_HIDDEN_NAKED.sub(" ", updated)
+            if updated == result:
+                break
+            result = updated
+            if "dsml" not in result.casefold():
+                break
     result = _DSML_XML_NORMALIZE.sub(r"<\1\2>", result)
     result = _DSML_TAG.sub(_replace_dsml_tag, result)
     return _DSML_NAKED.sub(" ", result)
@@ -349,7 +352,12 @@ def _stream_patterns(names: tuple[str, ...]) -> tuple[re.Pattern[str], ...]:
 def _stream_names(tool_schemas: dict[str, dict[str, Any]] | None) -> tuple[str, ...]:
     if not tool_schemas:
         return ()
-    return tuple(sorted(name.lower() for name in tool_schemas if isinstance(name, str) and name))
+    return _stream_names_keys(tuple(tool_schemas))
+
+
+@lru_cache(maxsize=64)
+def _stream_names_keys(keys: tuple[Any, ...]) -> tuple[str, ...]:
+    return tuple(sorted(name.lower() for name in keys if isinstance(name, str) and name))
 
 
 def _literal_hold(text: str, start: int) -> int:
@@ -1316,6 +1324,35 @@ def _coerce_scalar(value: str, json_type: Any) -> Any:
     return value
 
 
+@lru_cache(maxsize=8192)
+def _casefold(text: str) -> str:
+    return text.casefold()
+
+
+@lru_cache(maxsize=8192)
+def _name_key(name: str) -> str:
+    return re.sub(r"[^0-9a-z]+", "", _casefold(name))
+
+
+@lru_cache(maxsize=256)
+def _folded_keys(keys: tuple[Any, ...]) -> dict[str, str]:
+    folded: dict[str, str] = {}
+    for key in keys:
+        if isinstance(key, str):
+            folded.setdefault(_casefold(key), key)
+    return folded
+
+
+@lru_cache(maxsize=256)
+def _folded_names(keys: tuple[Any, ...]) -> dict[str, str]:
+    return {_casefold(key): key for key in keys}
+
+
+@lru_cache(maxsize=256)
+def _compact_names(keys: tuple[Any, ...]) -> dict[str, str]:
+    return {_name_key(key): key for key in keys}
+
+
 def _schema_for_name(tool_schemas: dict[str, dict[str, Any]] | None, name: str) -> dict[str, Any] | None:
     if not tool_schemas or not name:
         return None
@@ -1324,9 +1361,10 @@ def _schema_for_name(tool_schemas: dict[str, dict[str, Any]] | None, name: str) 
     if name in tool_schemas:
         spec = tool_schemas[name]
         return spec if isinstance(spec, dict) else None
-    for known, spec in tool_schemas.items():
-        if isinstance(known, str) and known.casefold() == name.casefold():
-            return spec if isinstance(spec, dict) else None
+    key = _folded_keys(tuple(tool_schemas)).get(_casefold(name))
+    if key is not None:
+        spec = tool_schemas[key]
+        return spec if isinstance(spec, dict) else None
     resolved = _resolve_alias(name, tool_schemas)
     if resolved is not None and resolved in tool_schemas:
         spec = tool_schemas[resolved]
@@ -1334,21 +1372,17 @@ def _schema_for_name(tool_schemas: dict[str, dict[str, Any]] | None, name: str) 
     return None
 
 
-def _name_key(name: str) -> str:
-    return re.sub(r"[^0-9a-z]+", "", name.casefold())
-
-
 def _resolve_alias(name: str, tool_schemas: dict[str, dict[str, Any]] | None) -> str | None:
     if not tool_schemas:
         return None
-    folded = name.casefold()
+    folded = _casefold(name)
     key = _name_key(name)
     if not key:
         return None
     for known, spec in tool_schemas.items():
         aliases = (spec or {}).get("_aliases") or []
         for alias in aliases:
-            if isinstance(alias, str) and (_name_key(alias) == key or alias.casefold() == folded):
+            if isinstance(alias, str) and (_name_key(alias) == key or _casefold(alias) == folded):
                 return known
     return None
 
@@ -1369,21 +1403,29 @@ def _fuzzy_known_name(name: str, tool_schemas: dict[str, dict[str, Any]]) -> str
 def _normalize_call_name(name: str, tool_schemas: dict[str, dict[str, Any]] | None) -> str:
     if not tool_schemas or name in tool_schemas:
         return name
-    folded = {known.casefold(): known for known in tool_schemas}
-    hit = folded.get(name.casefold())
+    keys = tuple(tool_schemas)
+    hit = _folded_names(keys).get(_casefold(name))
     if hit is not None:
         return hit
-    compact = {_name_key(known): known for known in tool_schemas}
-    hit = compact.get(_name_key(name))
+    hit = _compact_names(keys).get(_name_key(name))
     if hit is not None:
         return hit
     return _resolve_alias(name, tool_schemas) or _fuzzy_known_name(name, tool_schemas) or name
 
 
+_tool_schema_map_cache: dict[int, tuple[tuple[int, ...], dict[str, dict[str, Any]]]] = {}
+_TOOL_SCHEMA_MAP_CACHE_MAX = 256
+
+
 def tool_schema_map(tools: list[Any] | None) -> dict[str, dict[str, Any]]:
-    result: dict[str, dict[str, Any]] = {}
     if not tools or not isinstance(tools, list):
-        return result
+        return {}
+    key = id(tools)
+    fingerprint = tuple(id(item) for item in tools)
+    cached = _tool_schema_map_cache.get(key)
+    if cached is not None and cached[0] == fingerprint:
+        return cached[1]
+    result: dict[str, dict[str, Any]] = {}
     for tool in tools:
         if not isinstance(tool, dict):
             continue
@@ -1420,6 +1462,9 @@ def tool_schema_map(tools: list[Any] | None) -> dict[str, dict[str, Any]]:
             if cleaned:
                 prop_types["_aliases"] = cleaned
         result[name] = prop_types
+    if len(_tool_schema_map_cache) >= _TOOL_SCHEMA_MAP_CACHE_MAX:
+        _tool_schema_map_cache.clear()
+    _tool_schema_map_cache[key] = (fingerprint, result)
     return result
 
 
@@ -1518,6 +1563,15 @@ def _iter_xml_call_wrappers(text: str) -> Iterator[tuple[int, int, int, str]]:
         end = length if close is None else content_start + close.start()
         yield match.start(), content_start, end, text[content_start:end]
         pos = max(match.end(), end)
+
+
+@lru_cache(maxsize=512)
+def _schema_xml_patterns(tool_name: str) -> tuple[re.Pattern[str], re.Pattern[str]]:
+    escaped = re.escape(tool_name)
+    return (
+        re.compile(rf"<{escaped}(?=[\s/>])([^>]*?)>(.*?)</{escaped}>", re.DOTALL | re.IGNORECASE),
+        re.compile(rf"<{escaped}(?=[\s/>])([^>]*?)/>", re.DOTALL | re.IGNORECASE),
+    )
 
 
 def _parse_xml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | None = None) -> tuple[list[ToolCall] | None, str]:
@@ -1651,12 +1705,7 @@ def _parse_xml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | N
             blank(start, end)
             consumed.append((start, end))
     for tool_name, param_types in (tool_schemas or {}).items():
-        escaped = re.escape(tool_name)
-        open_pattern = re.compile(
-            rf"<{escaped}(?=[\s/>])([^>]*?)>(.*?)</{escaped}>",
-            re.DOTALL | re.IGNORECASE,
-        )
-        selfclose_pattern = re.compile(rf"<{escaped}(?=[\s/>])([^>]*?)/>", re.DOTALL | re.IGNORECASE)
+        open_pattern, selfclose_pattern = _schema_xml_patterns(tool_name)
         for match in open_pattern.finditer(text):
             start, end = match.span()
             if any(s <= start and end <= e for s, e in consumed):
@@ -1955,8 +2004,12 @@ def _parse_python_calls(text: str) -> tuple[list[ToolCall], str] | None:
     return calls, " ".join(lines[:first])
 
 
+_YAML_KEY_VALUE_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(.*)$")
+_YAML_TOOL_CALLS_RE = re.compile(r"^tool_calls\s*:?\s*(.*)$", re.IGNORECASE)
+
+
 def _yaml_key_value(line: str) -> tuple[str | None, str]:
-    match = re.match(r"([A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(.*)$", line)
+    match = _YAML_KEY_VALUE_RE.match(line)
     if match is None:
         return None, ""
     return match.group(1), match.group(2).strip()
@@ -2012,7 +2065,7 @@ def _parse_yaml_calls(text: str) -> list[ToolCall] | None:
     if not lines:
         return None
     root = lines[0].strip()
-    root_match = re.match(r"^tool_calls\s*:?\s*(.*)$", root, re.IGNORECASE)
+    root_match = _YAML_TOOL_CALLS_RE.match(root)
     if root_match is None:
         return None
     inline = root_match.group(1).strip()

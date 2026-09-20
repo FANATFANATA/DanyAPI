@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -36,6 +37,11 @@ class JsonStore:
         self._maxsize = max(0, int(maxsize))
         self._data: dict[str, Any] = {}
         self._lock = threading.Lock()
+        self._write_lock = threading.Lock()
+        self._pending = False
+        self._dirty = False
+        self._idle = threading.Event()
+        self._idle.set()
         self._path: Path | None = None
         if scope:
             safe = "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in f"{name}-{scope}")
@@ -65,19 +71,61 @@ class JsonStore:
         while self._maxsize > 0 and len(self._data) > self._maxsize:
             self._data.pop(next(iter(self._data)))
 
-    def _write(self) -> None:
+    def _commit(self, data: Any) -> None:
         if self._path is None:
             return
         tmp = self._path.with_name(self._path.name + ".tmp")
         try:
-            tmp.write_text(json.dumps(self._data, ensure_ascii=False), encoding="utf-8")
-            os.replace(tmp, self._path)
+            with self._write_lock:
+                tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+                os.replace(tmp, self._path)
         except (OSError, TypeError, ValueError) as exc:
             log.warning("cache write failed for %s: %s", self._path, exc)
             try:
                 tmp.unlink(missing_ok=True)
             except OSError:
                 pass
+
+    def _write(self) -> None:
+        if self._path is None:
+            return
+        self._commit(self._data)
+
+    def _flush_background(self) -> None:
+        while True:
+            with self._lock:
+                if not self._dirty:
+                    self._pending = False
+                    self._idle.set()
+                    return
+                self._dirty = False
+                snapshot = dict(self._data)
+            self._commit(snapshot)
+
+    def _note_changed(self) -> None:
+        if self._path is None:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._write()
+            return
+        self._dirty = True
+        if self._pending:
+            return
+        self._pending = True
+        self._idle.clear()
+        try:
+            loop.run_in_executor(None, self._flush_background)
+        except RuntimeError:
+            self._dirty = False
+            self._pending = False
+            self._idle.set()
+            self._write()
+
+    def flush(self) -> None:
+        while self._pending:
+            self._idle.wait(0.1)
 
     def get(self, key: str, default: Any = None) -> Any:
         with self._lock:
@@ -90,28 +138,28 @@ class JsonStore:
             self._data.pop(key, None)
             self._data[key] = value
             self._evict()
-            self._write()
+            self._note_changed()
 
     def pop(self, key: str, default: Any = None) -> Any:
         with self._lock:
             if key not in self._data:
                 return default
             value = self._data.pop(key)
-            self._write()
+            self._note_changed()
             return value
 
     def discard(self, key: str) -> None:
         with self._lock:
             if key in self._data:
                 self._data.pop(key)
-                self._write()
+                self._note_changed()
 
     def clear(self) -> None:
         with self._lock:
             if not self._data:
                 return
             self._data.clear()
-            self._write()
+            self._note_changed()
 
     def items(self) -> list[tuple[str, Any]]:
         with self._lock:

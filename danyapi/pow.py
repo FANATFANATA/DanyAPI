@@ -109,9 +109,8 @@ def deepseek_hash_v1(data: bytes, output_bytes: int = 32) -> bytes:
     block += bytes(padlen)
     block[-1] |= 0x80
     for off in range(0, len(block), rate):
-        chunk = block[off : off + rate]
         for i in range(0, rate, 8):
-            state[i // 8] ^= struct.unpack_from("<Q", chunk, i)[0]
+            state[i // 8] ^= struct.unpack_from("<Q", block, off + i)[0]
         _keccak_f(state)
     out = bytearray()
     while len(out) < output_bytes:
@@ -141,10 +140,10 @@ def _find_native_solver() -> Path | None:
 
 def solve_python(challenge_hex: str, salt: str, expire_at: int, difficulty: int) -> int | None:
     prefix = f"{salt}_{expire_at}_".encode()
-    target = challenge_hex
+    target = bytes.fromhex(challenge_hex)
     limit = max(0, min(int(difficulty), _PYTHON_SOLVE_LIMIT))
     for c in range(limit):
-        if deepseek_hash_v1_hex(prefix + str(c).encode()) == target:
+        if deepseek_hash_v1(prefix + str(c).encode()) == target:
             return c
     return None
 

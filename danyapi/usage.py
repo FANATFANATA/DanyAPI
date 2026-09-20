@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections import deque
 from typing import Any
 
 from .store import JsonStore
@@ -54,7 +55,7 @@ class UsageTracker:
         self._by_model: dict[str, dict[str, int]] = {}
         self._by_provider: dict[str, dict[str, int]] = {}
         self._by_user: dict[str, dict[str, int]] = {}
-        self._recent: list[dict[str, Any]] = []
+        self._recent: deque[dict[str, Any]] = deque(maxlen=max_records)
         self._last_recent_persist = 0.0
         self._restore()
 
@@ -87,7 +88,7 @@ class UsageTracker:
         recent = self._store.get("usage_recent")
         if isinstance(recent, list):
             restored_recent = [entry for entry in recent if isinstance(entry, dict)]
-            self._recent = restored_recent[-self._max_records :]
+            self._recent = deque(restored_recent[-self._max_records :], maxlen=self._max_records)
 
     def _serialize(self) -> dict[str, Any]:
         return {
@@ -151,8 +152,6 @@ class UsageTracker:
                     "session_id": session_id,
                 }
             )
-            if len(self._recent) > self._max_records:
-                del self._recent[: len(self._recent) - self._max_records]
             if self._store is not None:
                 try:
                     self._store.set("usage", self._serialize())
