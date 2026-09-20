@@ -1,16 +1,23 @@
 from __future__ import annotations
 
 import re
+from functools import lru_cache
 from typing import Any
 
 _CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3040-\u30ff\uac00-\ud7af]")
 _IMAGE_TOKEN_COST = 85
 
 
+@lru_cache(maxsize=4096)
+def _cjk_count(text: str) -> int:
+    return sum(1 for _ in _CJK_RE.finditer(text))
+
+
+@lru_cache(maxsize=4096)
 def estimate_tokens(text: str | None) -> int:
     if not text:
         return 0
-    cjk = len(_CJK_RE.findall(text))
+    cjk = _cjk_count(text)
     other = len(text) - cjk
     if other == 0:
         return cjk

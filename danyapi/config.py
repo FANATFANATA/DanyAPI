@@ -68,6 +68,7 @@ class Settings:
         self.log_backup_count = _env_int("DANYAPI_LOG_BACKUP_COUNT", 3)
         self.cache_dir = _env_str("DANYAPI_CACHE_DIR")
         self.cache_enabled = os.environ.get("DANYAPI_CACHE_DISABLED", "").strip().lower() not in ("1", "true", "yes", "on")
+        self.byok_auth_ttl = _env_float("DANYAPI_BYOK_AUTH_TTL_SECONDS", 300.0)
         self.human_delay_min = _env_float("DANYAPI_HUMAN_DELAY_MIN", 0.5)
         self.human_delay_max = _env_float("DANYAPI_HUMAN_DELAY_MAX", 3.0)
         self.usage_enabled = os.environ.get("DANYAPI_USAGE_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off")

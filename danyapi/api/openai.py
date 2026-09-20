@@ -228,6 +228,7 @@ async def lifespan(app: FastAPI):
     app.state.byok = byok_mode
     app.state.byok_pools = {"deepseek": {}, "qwen": {}}
     app.state.byok_locks = {"deepseek": asyncio.Lock(), "qwen": asyncio.Lock()}
+    app.state.byok_auth = {"deepseek": {}, "qwen": {}}
     cache_enabled = settings.cache_enabled
     deepseek_session_store = JsonStore("deepseek-sessions", "default" if cache_enabled else None)
     qwen_session_store = JsonStore("qwen-sessions", "default" if cache_enabled else None)
@@ -248,42 +249,52 @@ async def lifespan(app: FastAPI):
     else:
         app.state.usage = None
     try:
-        if not byok_mode and settings.deepseek_tokens:
-            for i, token in enumerate(settings.deepseek_tokens):
-                ds_client = DeepSeekClient(token=token, timeout=settings.timeout)
-                if not await ds_client.check_auth():
-                    log.warning("deepseek token #%d invalid/expired, skipping", i)
-                    await ds_client.aclose()
-                    continue
-                accounts.append(
-                    DeepSeekAccount(
-                        len(accounts),
-                        ds_client,
-                        session_cache_size=settings.session_cache_size,
-                        ttl=settings.session_ttl,
-                        store=deepseek_session_store,
-                        stable_id=_token_stable_id(token),
+        if not byok_mode:
+            ds_clients = [DeepSeekClient(token=token, timeout=settings.timeout) for token in settings.deepseek_tokens] if settings.deepseek_tokens else []
+            qw_clients = [QwenClient(token=token, timeout=settings.timeout) for token in settings.qwen_tokens] if settings.qwen_tokens else []
+            ds_checks = [client.check_auth() for client in ds_clients]
+            qw_checks = [client.check_auth() for client in qw_clients]
+            if ds_checks or qw_checks:
+                auth_results = await asyncio.gather(*(ds_checks + qw_checks))
+                ds_auth = auth_results[: len(ds_checks)]
+                qw_auth = auth_results[len(ds_checks) :]
+            else:
+                ds_auth = []
+                qw_auth = []
+            if settings.deepseek_tokens:
+                for i, (token, ds_client, ok) in enumerate(zip(settings.deepseek_tokens, ds_clients, ds_auth, strict=True)):
+                    if not ok:
+                        log.warning("deepseek token #%d invalid/expired, skipping", i)
+                        await ds_client.aclose()
+                        continue
+                    accounts.append(
+                        DeepSeekAccount(
+                            len(accounts),
+                            ds_client,
+                            session_cache_size=settings.session_cache_size,
+                            ttl=settings.session_ttl,
+                            store=deepseek_session_store,
+                            stable_id=_token_stable_id(token),
+                        )
                     )
-                )
-            log.info("deepseek accounts ready: %d", len(accounts))
-        if not byok_mode and settings.qwen_tokens:
-            for i, token in enumerate(settings.qwen_tokens):
-                qw_client = QwenClient(token=token, timeout=settings.timeout)
-                if not await qw_client.check_auth():
-                    log.warning("qwen token #%d invalid/expired, skipping", i)
-                    await qw_client.aclose()
-                    continue
-                qwen_accounts.append(
-                    QwenAccount(
-                        len(qwen_accounts),
-                        qw_client,
-                        session_cache_size=settings.session_cache_size,
-                        ttl=settings.session_ttl,
-                        store=qwen_session_store,
-                        stable_id=_token_stable_id(token),
+                log.info("deepseek accounts ready: %d", len(accounts))
+            if settings.qwen_tokens:
+                for i, (token, qw_client, ok) in enumerate(zip(settings.qwen_tokens, qw_clients, qw_auth, strict=True)):
+                    if not ok:
+                        log.warning("qwen token #%d invalid/expired, skipping", i)
+                        await qw_client.aclose()
+                        continue
+                    qwen_accounts.append(
+                        QwenAccount(
+                            len(qwen_accounts),
+                            qw_client,
+                            session_cache_size=settings.session_cache_size,
+                            ttl=settings.session_ttl,
+                            store=qwen_session_store,
+                            stable_id=_token_stable_id(token),
+                        )
                     )
-                )
-            log.info("qwen accounts ready: %d", len(qwen_accounts))
+                log.info("qwen accounts ready: %d", len(qwen_accounts))
         if accounts:
             app.state.pool = AccountPool(
                 accounts,
@@ -379,12 +390,22 @@ docs_path = Path(__file__).resolve().parents[2] / "docs"
 if docs_path.is_dir():
     app.mount("/docs", StaticFiles(directory=str(docs_path), html=True), name="docs")
 
+_root_html: str | None = None
+_root_html_checked = False
+
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
-    web_path = Path(__file__).resolve().parents[2] / "web" / "index.html"
-    if web_path.exists():
-        return await asyncio.to_thread(web_path.read_text, encoding="utf-8")
+    global _root_html, _root_html_checked
+    if not _root_html_checked:
+        web_path = Path(__file__).resolve().parents[2] / "web" / "index.html"
+        if web_path.exists():
+            _root_html = await asyncio.to_thread(web_path.read_text, encoding="utf-8")
+        else:
+            _root_html = None
+        _root_html_checked = True
+    if _root_html is not None:
+        return _root_html
     return HTMLResponse("<h1>DanyAPI</h1><p>Web interface not found</p>", status_code=404)
 
 
@@ -929,23 +950,37 @@ async def _upload_attachments(account, attachments: list[Attachment], model_type
         pow_headers_list = await asyncio.gather(*(_fresh_pow_upload_headers(account) for _ in attachments))
     else:
         pow_headers_list = []
-    for att, pow_headers in zip(attachments, pow_headers_list, strict=True):
-        try:
-            info = await account.client.upload_file(
-                att.data,
-                att.name,
-                att.content_type,
-                model_type,
-                thinking_enabled=thinking,
-                pow_headers=pow_headers,
-            )
-        except DeepSeekError as exc:
-            _handle_account_error(account, exc)
-            raise HTTPException(_deepseek_status(exc), f"file upload failed: {exc}") from exc
-        file_id = info.get("id")
-        if not file_id:
-            raise HTTPException(502, f"file upload failed for {att.name}: no file id")
-        file_ids.append(file_id)
+    if not pow_headers_list:
+        return file_ids
+    sem = asyncio.Semaphore(4)
+
+    async def _upload_one(att: Attachment, pow_headers) -> str:
+        async with sem:
+            try:
+                info = await account.client.upload_file(
+                    att.data,
+                    att.name,
+                    att.content_type,
+                    model_type,
+                    thinking_enabled=thinking,
+                    pow_headers=pow_headers,
+                )
+            except DeepSeekError as exc:
+                _handle_account_error(account, exc)
+                raise HTTPException(_deepseek_status(exc), f"file upload failed: {exc}") from exc
+            file_id = info.get("id")
+            if not file_id:
+                raise HTTPException(502, f"file upload failed for {att.name}: no file id")
+            return file_id
+
+    results = await asyncio.gather(
+        *(_upload_one(att, pow_headers) for att, pow_headers in zip(attachments, pow_headers_list, strict=True)),
+        return_exceptions=True,
+    )
+    for item in results:
+        if isinstance(item, BaseException):
+            raise item
+        file_ids.append(item)
     return file_ids
 
 
@@ -1094,6 +1129,7 @@ def _resolve_provider(model: str) -> str:
 
 
 BYOK_POOL_LIMIT = 512
+BYOK_AUTH_LIMIT = 4096
 
 
 def _byok_mode() -> bool:
@@ -1114,6 +1150,34 @@ async def _byok_locks_state() -> dict[str, asyncio.Lock]:
         locks = {"deepseek": asyncio.Lock(), "qwen": asyncio.Lock()}
         app.state.byok_locks = locks
     return locks
+
+
+async def _byok_auth_state() -> dict[str, dict[str, Any]]:
+    auth = getattr(app.state, "byok_auth", None)
+    if auth is None:
+        auth = {"deepseek": {}, "qwen": {}}
+        app.state.byok_auth = auth
+    return auth
+
+
+def _cached_auth(store: dict[str, Any], stable: str, ttl: float, now: float) -> bool | None:
+    if ttl <= 0:
+        return None
+    record = store.get(stable)
+    if not isinstance(record, (list, tuple)) or len(record) != 2:
+        return None
+    try:
+        ts = float(record[1])
+    except (TypeError, ValueError):
+        return None
+    if now - ts > ttl:
+        return None
+    return bool(record[0])
+
+
+def _evict_auth(store: dict[str, Any]) -> None:
+    while len(store) > BYOK_AUTH_LIMIT:
+        store.pop(next(iter(store)), None)
 
 
 async def _extract_request_api_key(request: Request) -> str | None:
@@ -1186,13 +1250,39 @@ async def _close_busy_client(account: Any, sem: asyncio.Semaphore) -> None:
             sem.release()
 
 
+async def _byok_validate(
+    provider: str,
+    token: str,
+    client: Any,
+) -> bool:
+    auth = await _byok_auth_state()
+    store = auth[provider]
+    stable = _token_stable_id(token)
+    ttl = settings.byok_auth_ttl
+    cached = _cached_auth(store, stable, ttl, time.monotonic())
+    if cached is not None:
+        return cached
+    try:
+        ok = bool(await client.check_auth())
+    except Exception:
+        ok = False
+    store.pop(stable, None)
+    store[stable] = [ok, time.monotonic()]
+    _evict_auth(store)
+    return ok
+
+
+def _byok_cache_key(tokens: list[str]) -> str:
+    return "|".join(sorted(_token_stable_id(token) for token in tokens))
+
+
 async def _byok_pool(provider: str, tokens: list[str]) -> AccountPool:
     if provider not in ("deepseek", "qwen"):
         raise HTTPException(400, f"unknown provider: {provider}")
+    tokens = list(dict.fromkeys(tokens))
     pools = await _byok_pools_state()
     cache = pools[provider]
-    ids = tuple(_token_stable_id(token) for token in tokens)
-    cache_key = "|".join(ids)
+    cache_key = _byok_cache_key(tokens)
     pool = cache.get(cache_key)
     if pool is not None and pool.healthy:
         cache.pop(cache_key)
@@ -1202,6 +1292,8 @@ async def _byok_pool(provider: str, tokens: list[str]) -> AccountPool:
     async with locks[provider]:
         pool = cache.get(cache_key)
         if pool is not None and pool.healthy:
+            cache.pop(cache_key)
+            cache[cache_key] = pool
             return pool
         if pool is not None:
             cache.pop(cache_key, None)
@@ -1214,7 +1306,7 @@ async def _byok_pool(provider: str, tokens: list[str]) -> AccountPool:
             accounts: list[DeepSeekAccount] = []
             for i, token in enumerate(tokens):
                 ds_client = DeepSeekClient(token=token, timeout=settings.timeout)
-                if not await ds_client.check_auth():
+                if not await _byok_validate("deepseek", token, ds_client):
                     log.warning("byok deepseek token invalid/expired, skipping")
                     await ds_client.aclose()
                     continue
@@ -1244,7 +1336,7 @@ async def _byok_pool(provider: str, tokens: list[str]) -> AccountPool:
             qwen_accounts: list[QwenAccount] = []
             for i, token in enumerate(tokens):
                 qw_client = QwenClient(token=token, timeout=settings.timeout)
-                if not await qw_client.check_auth():
+                if not await _byok_validate("qwen", token, qw_client):
                     log.warning("byok qwen token invalid/expired, skipping")
                     await qw_client.aclose()
                     continue
@@ -1452,6 +1544,23 @@ async def _image_generations(req: ImageGenerationRequest, pool: AccountPool | No
     result_sid = existing_sid
     try:
         async with httpx.AsyncClient(follow_redirects=True, timeout=30) as hc:
+            download_sem = asyncio.Semaphore(4)
+
+            async def _fetch_image(url: str) -> dict:
+                if not use_http:
+                    return {"url": url}
+                async with download_sem:
+                    try:
+                        img_resp = await hc.get(url)
+                        if img_resp.status_code != 200:
+                            log.warning("image download failed (%s) for %s, returning url", img_resp.status_code, url)
+                            return {"url": url}
+                        payload_bytes = _resize_image_bytes(img_resp.content, dims)
+                        return {"b64_json": base64.b64encode(payload_bytes).decode()}
+                    except Exception as exc:
+                        log.warning("image fetch failed for %s, returning url: %s", url, exc)
+                        return {"url": url}
+
             for _ in range(count):
                 result = await qwen_api.collect_image(
                     account=account,
@@ -1466,21 +1575,8 @@ async def _image_generations(req: ImageGenerationRequest, pool: AccountPool | No
                 result_sid = result.get("session_id") or result_sid
                 if result.get("usage"):
                     usage = result.get("usage")
-                for url in result["image_urls"]:
-                    if not use_http:
-                        data.append({"url": url})
-                        continue
-                    try:
-                        img_resp = await hc.get(url)
-                        if img_resp.status_code != 200:
-                            log.warning("image download failed (%s) for %s, returning url", img_resp.status_code, url)
-                            data.append({"url": url})
-                            continue
-                        payload_bytes = _resize_image_bytes(img_resp.content, dims)
-                        data.append({"b64_json": base64.b64encode(payload_bytes).decode()})
-                    except Exception as exc:
-                        log.warning("image fetch failed for %s, returning url: %s", url, exc)
-                        data.append({"url": url})
+                if result["image_urls"]:
+                    data.extend(await asyncio.gather(*(_fetch_image(url) for url in result["image_urls"])))
     except AccountPoolBusy:
         raise HTTPException(429, "all accounts are busy, try again later") from None
 

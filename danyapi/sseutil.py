@@ -45,31 +45,40 @@ MAIN_RESPONSE_TYPES = ("RESPONSE", "TEMPLATE_RESPONSE")
 THINK_TYPES = ("THINK",)
 
 
+_COMPACT_THRESHOLD = 65536
+
+
 class IncrementalSSE:
     def __init__(self) -> None:
         self._buffer = bytearray()
+        self._pos = 0
 
     def feed(self, chunk: bytes) -> Iterator[SSEEvent]:
         if not isinstance(self._buffer, bytearray):
             self._buffer = bytearray(self._buffer)
         self._buffer += chunk
         while True:
-            idx = self._buffer.find(b"\n\n")
+            idx = self._buffer.find(b"\n\n", self._pos)
             if idx == -1:
-                idx = self._buffer.find(b"\r\n\r\n")
+                idx = self._buffer.find(b"\r\n\r\n", self._pos)
                 if idx == -1:
                     break
-                block = self._buffer[:idx].decode("utf-8", errors="replace")
-                self._buffer[: idx + 4] = b""
+                block = bytes(self._buffer[self._pos : idx]).decode("utf-8", errors="replace")
+                self._pos = idx + 4
             else:
-                block = self._buffer[:idx].decode("utf-8", errors="replace")
-                self._buffer[: idx + 2] = b""
+                block = bytes(self._buffer[self._pos : idx]).decode("utf-8", errors="replace")
+                self._pos = idx + 2
             yield from parse_sse(block)
+        if self._pos and (self._pos >= _COMPACT_THRESHOLD or self._pos == len(self._buffer)):
+            del self._buffer[: self._pos]
+            self._pos = 0
 
     def finish(self) -> Iterator[SSEEvent]:
-        if self._buffer.strip():
-            yield from parse_sse(self._buffer.decode("utf-8", errors="replace"))
+        tail = bytes(self._buffer[self._pos :])
+        if tail.strip():
+            yield from parse_sse(tail.decode("utf-8", errors="replace"))
         self._buffer = bytearray()
+        self._pos = 0
 
 
 def _normalise_key(key: str) -> str:
@@ -219,6 +228,8 @@ class MessageReconstructor:
         self._prev_reasoning = ""
         self.response_message_id: str | None = None
         self.hint_error: dict | None = None
+        self._revision = 0
+        self._agg_cache: tuple[int, int, str, str] | None = None
 
     def handle(self, event: SSEEvent) -> None:
         if event.event == "ready":
@@ -243,8 +254,10 @@ class MessageReconstructor:
             self._last_op = op
             self._last_path = path
         _apply_delta(self.message, op, path, data["v"])
+        self._revision += 1
+        self._agg_cache = None
 
-    def _aggregate(self, types: tuple[str, ...]) -> str:
+    def _agg(self, types: tuple[str, ...]) -> str:
         fragments = self.message.get("fragments") or []
         parts = []
         for frag in fragments:
@@ -252,24 +265,32 @@ class MessageReconstructor:
                 parts.append(_fragment_text(frag))
         return "".join(parts)
 
+    def _aggregates(self) -> tuple[str, str]:
+        cache = self._agg_cache
+        if cache is not None and cache[0] == id(self.message) and cache[1] == self._revision:
+            return cache[2], cache[3]
+        content = self._agg(MAIN_RESPONSE_TYPES)
+        reasoning = self._agg(THINK_TYPES)
+        self._agg_cache = (id(self.message), self._revision, content, reasoning)
+        return content, reasoning
+
     @property
     def content(self) -> str:
-        return self._aggregate(MAIN_RESPONSE_TYPES)
+        return self._aggregates()[0]
 
     @property
     def reasoning(self) -> str:
-        return self._aggregate(THINK_TYPES)
+        return self._aggregates()[1]
 
     def take_diffs(self) -> tuple[str, str]:
-        content, reasoning = self.content, self.reasoning
+        content, reasoning = self._aggregates()
         c_diff = content.removeprefix(self._prev_content)
         r_diff = reasoning.removeprefix(self._prev_reasoning)
         self._prev_content, self._prev_reasoning = content, reasoning
         return c_diff, r_diff
 
     def extend_with(self, other: MessageReconstructor) -> None:
-        old_content = self.content
-        old_reasoning = self.reasoning
+        old_content, old_reasoning = self._aggregates()
         other_fragments = (other.message or {}).get("fragments")
         if isinstance(other_fragments, list) and other_fragments:
             fragments = self.message.get("fragments")
@@ -286,6 +307,8 @@ class MessageReconstructor:
         self.hint_error = other.hint_error
         self._prev_content = old_content
         self._prev_reasoning = old_reasoning
+        self._revision += 1
+        self._agg_cache = None
 
     @property
     def status(self) -> str | None:

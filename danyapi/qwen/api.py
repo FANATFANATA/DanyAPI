@@ -584,6 +584,7 @@ async def stream_openai(
             tool_schemas = toolemu.tool_schema_map(tools)
 
         rec: QwenStreamReconstructor | None = None
+        content_parts: list[str] = []
         content_buf = ""
         content_shown_len = 0
         tool_hidden = False
@@ -679,7 +680,8 @@ async def stream_openai(
                         delta: dict = {}
                         if c_diff:
                             if tool_mode:
-                                content_buf += c_diff
+                                content_parts.append(c_diff)
+                                content_buf = "".join(content_parts)
                                 shown, content_shown_len, tool_hidden = toolemu.tool_visible(content_buf, content_shown_len, tool_hidden, tool_schemas)
                                 if shown:
                                     delta["content"] = shown
@@ -729,7 +731,8 @@ async def stream_openai(
                     delta2: dict = {}
                     if c_diff:
                         if tool_mode:
-                            content_buf += c_diff
+                            content_parts.append(c_diff)
+                            content_buf = "".join(content_parts)
                             shown, content_shown_len, tool_hidden = toolemu.tool_visible(content_buf, content_shown_len, tool_hidden, tool_schemas)
                             if shown:
                                 delta2["content"] = shown

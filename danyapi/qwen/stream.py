@@ -11,6 +11,7 @@ THINK_PHASES = {"think", "DeepThinking"}
 SUMMARY_PHASE = "thinking_summary"
 
 _IMAGE_URL_RE = re.compile(r"!\[[^\]]*\]\((https?://[^\s)>'\"]+)\)|(https?://cdn\.qwenlm\.ai/[^\s)>'\"]+)")
+_IMAGE_OVERLAP = 4096
 _TRAILING_PUNCT = ".,;:!?"
 
 
@@ -42,22 +43,35 @@ def _summary_text(item: Any) -> str:
 class QwenStreamReconstructor:
     def __init__(self) -> None:
         self.response_id: str | None = None
-        self.content: str = ""
-        self.reasoning: str = ""
+        self._content_parts: list[str] = []
+        self._reasoning_parts: list[str] = []
         self.image_urls: list[str] = []
         self.image_size: tuple[int, int] | None = None
         self.finished: bool = False
         self.error: dict | None = None
         self.usage: dict = {}
-        self._prev_content: str = ""
-        self._prev_reasoning: str = ""
+        self._content_pending: list[str] = []
+        self._reasoning_pending: list[str] = []
+        self._reasoning_committed: list[str] = []
+        self._reasoning_replaced: bool = False
+        self._image_scan_tail: str = ""
         self._seen_image_urls: set[str] = set()
 
+    @property
+    def content(self) -> str:
+        return "".join(self._content_parts)
+
+    @property
+    def reasoning(self) -> str:
+        return "".join(self._reasoning_parts)
+
     def _collect_image_urls(self, text: str) -> None:
-        for url in _extract_image_urls(text):
+        window = self._image_scan_tail + text
+        for url in _extract_image_urls(window):
             if url not in self._seen_image_urls:
                 self._seen_image_urls.add(url)
                 self.image_urls.append(url)
+        self._image_scan_tail = window[-_IMAGE_OVERLAP:]
 
     def handle(self, event: SSEEvent) -> None:
         data = event.data
@@ -90,8 +104,9 @@ class QwenStreamReconstructor:
         if phase in IMAGE_PHASES:
             text = _delta_text(delta, "content")
             if text:
-                self.content += text
-                self._collect_image_urls(self.content)
+                self._content_parts.append(text)
+                self._content_pending.append(text)
+                self._collect_image_urls(text)
             image_field = delta.get("image_url") or delta.get("image")
             if isinstance(image_field, str) and image_field.startswith("http"):
                 if image_field not in self._seen_image_urls:
@@ -125,12 +140,14 @@ class QwenStreamReconstructor:
         elif phase in ANSWER_PHASES:
             text = _delta_text(delta, "content")
             if text:
-                self.content += text
-                self._collect_image_urls(self.content)
+                self._content_parts.append(text)
+                self._content_pending.append(text)
+                self._collect_image_urls(text)
         elif phase in THINK_PHASES:
             text = _delta_text(delta, "content")
             if text:
-                self.reasoning += text
+                self._reasoning_parts.append(text)
+                self._reasoning_pending.append(text)
         elif phase == SUMMARY_PHASE:
             extra = delta.get("extra")
             if isinstance(extra, dict):
@@ -140,13 +157,23 @@ class QwenStreamReconstructor:
                     if isinstance(items, list):
                         joined = "\n\n".join(text for text in (_summary_text(item) for item in items) if text)
                         if joined:
-                            self.reasoning = joined
+                            self._reasoning_parts[:] = [joined]
+                            self._reasoning_pending[:] = [joined]
+                            self._reasoning_replaced = True
 
     def take_diffs(self) -> tuple[str, str]:
-        content, reasoning = self.content, self.reasoning
-        c_diff = content.removeprefix(self._prev_content)
-        r_diff = reasoning.removeprefix(self._prev_reasoning)
-        self._prev_content, self._prev_reasoning = content, reasoning
+        c_diff = "".join(self._content_pending)
+        self._content_pending.clear()
+        if self._reasoning_replaced:
+            current_reasoning = "".join(self._reasoning_parts)
+            r_diff = current_reasoning.removeprefix("".join(self._reasoning_committed))
+            self._reasoning_committed = list(self._reasoning_parts)
+            self._reasoning_pending.clear()
+            self._reasoning_replaced = False
+        else:
+            self._reasoning_committed.extend(self._reasoning_pending)
+            r_diff = "".join(self._reasoning_pending)
+            self._reasoning_pending.clear()
         return c_diff, r_diff
 
     @property
