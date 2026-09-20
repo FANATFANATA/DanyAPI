@@ -390,22 +390,27 @@ docs_path = Path(__file__).resolve().parents[2] / "docs"
 if docs_path.is_dir():
     app.mount("/docs", StaticFiles(directory=str(docs_path), html=True), name="docs")
 
-_root_html: str | None = None
-_root_html_checked = False
+
+@dataclass
+class _RootContext:
+    html: str | None = None
+    checked: bool = False
+
+
+_root_ctx = _RootContext()
 
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
-    global _root_html, _root_html_checked
-    if not _root_html_checked:
+    if not _root_ctx.checked:
         web_path = Path(__file__).resolve().parents[2] / "web" / "index.html"
         if web_path.exists():
-            _root_html = await asyncio.to_thread(web_path.read_text, encoding="utf-8")
+            _root_ctx.html = await asyncio.to_thread(web_path.read_text, encoding="utf-8")
         else:
-            _root_html = None
-        _root_html_checked = True
-    if _root_html is not None:
-        return _root_html
+            _root_ctx.html = None
+        _root_ctx.checked = True
+    if _root_ctx.html is not None:
+        return _root_ctx.html
     return HTMLResponse("<h1>DanyAPI</h1><p>Web interface not found</p>", status_code=404)
 
 
