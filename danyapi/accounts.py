@@ -90,6 +90,13 @@ class ContextIndex:
     def max_size(self) -> int:
         return self._maxsize
 
+    def flush(self) -> None:
+        if self._store is not None:
+            try:
+                self._store.flush()
+            except Exception as exc:
+                log.debug("context store flush failed: %s", exc)
+
     def lookup(self, sequence: tuple[str, ...]) -> str | None:
         if not sequence:
             return None
@@ -344,6 +351,22 @@ class AccountPool(Generic[AccountT]):
             "context_cache_size": self._contexts.max_size,
             "ttl_seconds": self._ttl,
         }
+
+    def flush(self) -> None:
+        self._contexts.flush()
+        if self._affinity_store is not None:
+            try:
+                self._affinity_store.flush()
+            except Exception as exc:
+                log.debug("affinity store flush failed: %s", exc)
+        for acct in self.accounts:
+            sessions = getattr(acct, "sessions", None)
+            if sessions is None:
+                continue
+            try:
+                sessions.flush()
+            except Exception as exc:
+                log.debug("session store flush failed for %s: %s", getattr(acct, "label", acct), exc)
 
     async def acquire(self, session_id: str | None, max_wait: float | None = None) -> tuple[AccountT, str | None]:
         if not any(not a.broken for a in self.accounts):

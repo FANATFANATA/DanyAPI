@@ -172,6 +172,20 @@ class UsageTracker:
                 "recent": list(self._recent),
             }
 
+    def flush(self) -> None:
+        if self._store is None:
+            return
+        try:
+            with self._lock:
+                data = self._serialize()
+                recent = list(self._recent)
+            self._store.set("usage", data)
+            self._store.set("usage_recent", recent)
+            self._store.flush()
+            self._last_recent_persist = time.time()
+        except Exception as exc:
+            log.debug("usage flush failed: %s", exc)
+
     def reset(self) -> None:
         with self._lock:
             self._totals = {"requests": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}

@@ -132,3 +132,20 @@ def test_reset_clears_persisted_recent(cache_dir):
     tracker.reset()
     restored = UsageTracker(store=JsonStore("usage-recent-reset", "default"))
     assert restored.snapshot()["recent"] == []
+
+
+def test_flush_persists_recent_before_interval(cache_dir):
+    store = JsonStore("usage-flush", "default")
+    tracker = UsageTracker(store=store)
+    tracker.record("deepseek", "m1", 1, 1, 2)
+    tracker.record("deepseek", "m2", 3, 4, 7)
+    tracker.flush()
+    restored = UsageTracker(store=JsonStore("usage-flush", "default"))
+    snap = restored.snapshot()
+    assert snap["totals"]["requests"] == 2
+    assert snap["totals"]["total_tokens"] == 9
+    assert [entry["model"] for entry in snap["recent"]] == ["m1", "m2"]
+
+
+def test_flush_without_store_is_noop():
+    UsageTracker().flush()

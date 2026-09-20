@@ -220,6 +220,56 @@ def _token_stable_id(token: str) -> str:
     return hashlib.sha1(token.encode("utf-8"), usedforsecurity=False).hexdigest()[:16]
 
 
+_STATE_STORE_ATTRS = (
+    "deepseek_session_store",
+    "qwen_session_store",
+    "deepseek_context_store",
+    "qwen_context_store",
+    "deepseek_affinity_store",
+    "qwen_affinity_store",
+    "responses_store",
+)
+
+
+def _flush_state_stores() -> None:
+    tracker = getattr(app.state, "usage", None)
+    if tracker is not None:
+        try:
+            tracker.flush()
+        except Exception as exc:
+            log.debug("usage flush failed: %s", exc)
+    for attr in _STATE_STORE_ATTRS:
+        store = getattr(app.state, attr, None)
+        if store is None:
+            continue
+        try:
+            store.flush()
+        except Exception as exc:
+            log.debug("store flush failed for %s: %s", attr, exc)
+    pools: list[Any] = []
+    for attr in ("pool", "qwen_pool"):
+        pool_obj = getattr(app.state, attr, None)
+        if pool_obj is not None:
+            pools.append(pool_obj)
+    byok_pools = getattr(app.state, "byok_pools", None)
+    if isinstance(byok_pools, dict):
+        for cache in byok_pools.values():
+            if isinstance(cache, dict):
+                pools.extend(cache.values())
+    seen_pools: set[int] = set()
+    for pool_obj in pools:
+        if id(pool_obj) in seen_pools:
+            continue
+        seen_pools.add(id(pool_obj))
+        flush = getattr(pool_obj, "flush", None)
+        if flush is None:
+            continue
+        try:
+            flush()
+        except Exception as exc:
+            log.debug("pool flush failed: %s", exc)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     accounts: list[DeepSeekAccount] = []
@@ -322,6 +372,7 @@ async def lifespan(app: FastAPI):
             raise RuntimeError("no valid credentials: set DEEPSEEK_TOKENS or QWEN_TOKENS")
         yield
     finally:
+        _flush_state_stores()
         seen: set[int] = set()
         clients = [acct.client for acct in accounts] + [acct.client for acct in qwen_accounts]
         for pool_obj in (getattr(app.state, "pool", None), getattr(app.state, "qwen_pool", None)):
@@ -1225,6 +1276,13 @@ async def _close_pool(pool: Any) -> None:
             acct.sessions.close_all()
         except Exception as exc:
             log.info("session cleanup failed for byok account %r: %s", getattr(acct, "label", acct), exc)
+    flush = getattr(pool, "flush", None)
+    if flush is not None:
+        try:
+            flush()
+        except Exception as exc:
+            log.info("pool store flush failed: %s", exc)
+    for acct in pool.accounts:
         sem = getattr(acct, "sem", None)
         if sem is not None and sem.locked():
             log.info("schedule deferred client close for busy byok account %r", getattr(acct, "label", acct))
@@ -1644,7 +1702,6 @@ def _include_usage(req: ChatCompletionRequest) -> bool:
 
 
 def _deepseek_usage(total: int, prompt: str = "", provider_usage: dict | None = None) -> dict:
-    value = max(0, int(total or 0))
     prompt_tokens = 0
     if isinstance(provider_usage, dict):
         p_tokens = provider_usage.get("prompt_tokens")
@@ -1652,7 +1709,11 @@ def _deepseek_usage(total: int, prompt: str = "", provider_usage: dict | None = 
             prompt_tokens = p_tokens
     if not prompt_tokens:
         prompt_tokens = estimate_tokens(prompt)
-    return {"prompt_tokens": prompt_tokens, "completion_tokens": value, "total_tokens": prompt_tokens + value}
+    total_tokens = max(0, int(total or 0))
+    if total_tokens < prompt_tokens:
+        total_tokens = prompt_tokens
+    completion_tokens = max(0, total_tokens - prompt_tokens)
+    return {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens, "total_tokens": total_tokens}
 
 
 def _advance_session_usage(session, accumulated_total: int) -> int:

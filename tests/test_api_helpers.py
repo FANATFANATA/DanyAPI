@@ -131,7 +131,8 @@ def _rec(status=None, hint=None):
 
 def test_deepseek_usage():
     assert openai_mod._deepseek_usage(10) == {"prompt_tokens": 0, "completion_tokens": 10, "total_tokens": 10}
-    assert openai_mod._deepseek_usage(10, "Hello world") == {"prompt_tokens": 2, "completion_tokens": 10, "total_tokens": 12}
+    assert openai_mod._deepseek_usage(10, "Hello world") == {"prompt_tokens": 2, "completion_tokens": 8, "total_tokens": 10}
+    assert openai_mod._deepseek_usage(3, "Hello world") == {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3}
     assert openai_mod._deepseek_usage(-5) == {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
     assert openai_mod._deepseek_usage(None) == {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 

@@ -309,7 +309,6 @@ def _accumulate_usage(session, rec: QwenStreamReconstructor) -> dict:
     current = rec.usage_tokens
     current_input = current["prompt_tokens"]
     current_output = current["completion_tokens"]
-    current_total = current["total_tokens"] or current_input + current_output
     prev_input = int(getattr(session, "accumulated_input_tokens", 0) or 0)
     prev_output = int(getattr(session, "accumulated_output_tokens", 0) or 0)
     prompt_tokens = max(0, current_input - prev_input)
@@ -319,7 +318,7 @@ def _accumulate_usage(session, rec: QwenStreamReconstructor) -> dict:
     return {
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
-        "total_tokens": current_total or prompt_tokens + completion_tokens,
+        "total_tokens": prompt_tokens + completion_tokens,
     }
 
 

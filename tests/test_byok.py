@@ -125,6 +125,27 @@ async def test_byok_pool_partial_invalid_keys(monkeypatch):
     assert len(pool.accounts) == 1
 
 
+async def test_close_pool_flushes_pool_stores(monkeypatch):
+    monkeypatch.setattr(settings, "cache_enabled", False)
+    pool = openai_mod.AccountPool([])
+    flushed = {"count": 0}
+
+    def fake_flush():
+        flushed["count"] += 1
+
+    pool.flush = fake_flush
+    await openai_mod._close_pool(pool)
+    assert flushed["count"] == 1
+
+
+async def test_close_pool_without_flush_attribute():
+    class _Bare:
+        def __init__(self):
+            self.accounts = []
+
+    await openai_mod._close_pool(_Bare())
+
+
 async def test_byok_pool_qwen_fetches_models(monkeypatch):
     monkeypatch.setattr(settings, "cache_enabled", False)
     app.state.qwen_models = []

@@ -482,3 +482,34 @@ def test_lookup_expired_without_store():
     idx.index("s1", ("a",))
     idx._ts["s1"] = time.monotonic() - 10
     assert idx.lookup(("a",)) is None
+
+
+def test_context_index_flush_without_store():
+    ContextIndex(16).flush()
+
+
+def test_context_index_flush_persists(ctx_store):
+    idx = ContextIndex(16, store=ctx_store)
+    idx.index("s1", ("a",))
+    idx.flush()
+    assert JsonStore("ctx-persist", "default").get("s1") == ["a"]
+
+
+def test_pool_flush_without_stores():
+    AccountPool([make_acct(0)]).flush()
+
+
+def test_pool_flush_persists_context_and_affinity(pool_store):
+    ctx = JsonStore("flush-ctx", "default")
+    aff = JsonStore("flush-aff", "default")
+    pool = AccountPool([make_acct(0)], context_store=ctx, affinity_store=aff)
+    pool.index_context("s1", ("a",))
+    pool.register(0, "s1")
+    pool.flush()
+    pool2 = AccountPool(
+        [make_acct(0)],
+        context_store=JsonStore("flush-ctx", "default"),
+        affinity_store=JsonStore("flush-aff", "default"),
+    )
+    assert pool2.resolve_context(("a",)) == "s1"
+    assert pool2.account_for_session("s1") is not None
