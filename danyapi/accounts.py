@@ -371,11 +371,10 @@ class AccountPool(Generic[AccountT]):
     async def acquire(self, session_id: str | None, max_wait: float | None = None) -> tuple[AccountT, str | None]:
         if not any(not a.broken for a in self.accounts):
             revived = await self.revive_broken()
-            if revived is not None:
-                healthy = [revived]
-            elif any(getattr(acct, "broken_at", None) is not None for acct in self.accounts):
-                raise AccountPoolBusy()
-            raise RuntimeError(f"all {self.label} accounts are unavailable")
+            if revived is None:
+                if any(getattr(acct, "broken_at", None) is not None for acct in self.accounts):
+                    raise AccountPoolBusy()
+                raise RuntimeError(f"all {self.label} accounts are unavailable")
         if session_id:
             acct = self.account_for_session(session_id)
             if acct is not None:

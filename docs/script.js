@@ -32,7 +32,7 @@
     });
     var COPY_LABELS = {
         en: "Copy", ru: "Копировать",
-        okEn: "Copied!", okRu: "Скопировано!"
+        okEn: "Copied", okRu: "Скопировано"
     };
     function copyText(text) {
         if (navigator.clipboard && window.isSecureContext) {
@@ -128,7 +128,7 @@
             q2: "Нужен ли пользователям API-ключ?",
             a2: "При локальном запуске или личном сервере API-ключ не требуется (передайте любое значение). На публичном инстансе (режим BYOK) передайте ваш токен DeepSeek или Qwen как Bearer-токен.",
             q3: "Какие провайдеры и модели?",
-            a3: "DeepSeek (<code>deepseek-v4.1-flash</code>, <code>deepseek-v4.1-flash-thinking</code>) и Qwen (<code>qwen3.8-max</code>, <code>qwen3.7-plus</code>, … - подтягиваются из аккаунта). Маршрутизация по имени модели; оба работают одновременно.",
+            a3: "DeepSeek (<code>deepseek-v4.1-flash</code>, <code>deepseek-v4.1-flash-thinking</code>) и Qwen (<code>qwen3.8-max</code>, <code>qwen3.7-plus</code>, ... - подтягиваются из аккаунта). Маршрутизация по имени модели; оба работают одновременно.",
             q7: "Есть ли лимиты или забанят токен?",
             a7: "Запросы идут через бесплатные веб-клиенты в человекоподобном темпе. Добавьте больше токенов в пул для параллелизма - проект держится в рамках нормального использования, но бесплатные токены - best-effort.",
             q8: "Есть ли учёт использования?",
