@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 import uuid
+from bisect import bisect_right
 from collections.abc import Iterator
 from dataclasses import dataclass
 from difflib import get_close_matches
@@ -44,13 +45,19 @@ _DSML_HIDDEN_NAMES = (
     r"ds_rephrase|ds_translate|ds_bilingual|ds_inner|ds_header|ds_web_search|"
     r"search|result|reference|quote"
 )
-_DSML_HIDDEN = re.compile(
-    rf"<{_DSML_MARKER}\s*({_DSML_HIDDEN_NAMES})\b[^<>]*>.*?</{_DSML_MARKER}\s*\1\s*>",
-    re.DOTALL | re.IGNORECASE,
+_DSML_HIDDEN_PATS = tuple(
+    re.compile(
+        rf"<{_DSML_MARKER}\s*{name}\b[^<>]*>.*?</{_DSML_MARKER}\s*{name}\s*>",
+        re.DOTALL | re.IGNORECASE,
+    )
+    for name in _DSML_HIDDEN_NAMES.split("|")
 )
-_DSML_HIDDEN_NAKED = re.compile(
-    rf"{_DSML_MARKER}\s*<({_DSML_HIDDEN_NAMES})\b[^<>]*>.*?</\1>\s*{_DSML_MARKER}",
-    re.DOTALL | re.IGNORECASE,
+_DSML_HIDDEN_NAKED_PATS = tuple(
+    re.compile(
+        rf"{_DSML_MARKER}\s*<{name}\b[^<>]*>.*?</{name}>\s*{_DSML_MARKER}",
+        re.DOTALL | re.IGNORECASE,
+    )
+    for name in _DSML_HIDDEN_NAMES.split("|")
 )
 _DSML_EQUALS = r"=\uff1d"
 _DSML_LAX_MARKER = rf"(?:{_DSML_MARKER}|{_DSML_CHAR}+)"
@@ -78,8 +85,104 @@ _DSML_LAX_PARAMETER = re.compile(
     rf"(?:</?{_DSML_LAX_MARKER}\s*parameter\s*>|/?\s*parameter\s*>|</?parameter\s*>|/?parameter\s*>)",
     re.DOTALL | re.IGNORECASE,
 )
-_XML_ELEMENT = re.compile(r"<([a-zA-Z_][a-zA-Z0-9_-]*)\b([^>]*)>(.*?)</\1>", re.DOTALL | re.IGNORECASE)
 _XML_SELFCLOSE = re.compile(r"<([a-zA-Z_][a-zA-Z0-9_-]*)\b([^>]*?)/>", re.DOTALL | re.IGNORECASE)
+_XML_OPEN_TAG_SCAN = re.compile(r"<([a-zA-Z_][a-zA-Z0-9_-]*)\b([^>]*)>", re.IGNORECASE)
+
+
+def _find_xml_close(text: str, name: str, start: int, name_space: bool, tail_space: bool) -> tuple[int, int] | None:
+    signature = name.lower()
+    signature_len = len(signature)
+    found = start
+    length = len(text)
+    while True:
+        lt = text.find("</", found)
+        if lt == -1:
+            return None
+        j = lt + 2
+        if name_space:
+            while j < length and text[j] in " \t\r\n":
+                j += 1
+        if text[j : j + signature_len].lower() == signature:
+            k = j + signature_len
+            if tail_space:
+                while k < length and text[k] in " \t\r\n":
+                    k += 1
+            if k < length and text[k] == ">":
+                return lt, k + 1
+        found = lt + 1
+
+
+def _scan_xml_pairs(
+    text: str,
+    name_filter: frozenset[str] | None = None,
+    name_space: bool = False,
+    tail_space: bool = False,
+) -> Iterator[tuple[int, int, str, str, str]]:
+    pos = 0
+    length = len(text)
+    while pos < length:
+        open_match = _XML_OPEN_TAG_SCAN.search(text, pos)
+        if open_match is None:
+            return
+        name = open_match.group(1)
+        if name_filter is not None and name.lower() not in name_filter:
+            pos = open_match.end()
+            continue
+        close = _find_xml_close(text, name, open_match.end(), name_space, tail_space)
+        if close is None:
+            pos = open_match.end()
+            continue
+        close_start, end = close
+        yield open_match.start(), end, name, open_match.group(2), text[open_match.end() : close_start]
+        pos = end
+
+
+class _IntervalSet:
+    __slots__ = ("ends", "starts")
+
+    def __init__(self) -> None:
+        self.starts: list[int] = []
+        self.ends: list[int] = []
+
+    def add(self, start: int, end: int) -> None:
+        i = bisect_right(self.ends, start)
+        if i > 0 and start <= self.ends[i - 1]:
+            i -= 1
+            start = min(start, self.starts[i])
+            end = max(end, self.ends[i])
+            while i + 1 < len(self.ends) and self.starts[i + 1] <= end:
+                end = max(end, self.ends[i + 1])
+                del self.starts[i + 1]
+                del self.ends[i + 1]
+            self.starts[i] = start
+            self.ends[i] = end
+        else:
+            self.starts.insert(i, start)
+            self.ends.insert(i, end)
+
+    def contains(self, start: int, end: int) -> bool:
+        i = bisect_right(self.starts, start) - 1
+        return i >= 0 and self.ends[i] >= end
+
+
+def _blanked(text: str, mask: bytearray) -> str:
+    parts: list[str] = []
+    cursor = 0
+    i = 0
+    n = len(text)
+    while i < n:
+        if mask[i]:
+            parts.append(text[cursor:i])
+            while i < n and mask[i]:
+                i += 1
+            parts.append(" ")
+            cursor = i
+        else:
+            i += 1
+    parts.append(text[cursor:])
+    return "".join(parts)
+
+
 _XML_WRAPPER_OPEN = re.compile(
     r"<(?:tool_calls|tool_call|function_calls|function_call|tools|calls|_calls)\b[^>]*>",
     re.IGNORECASE,
@@ -256,10 +359,7 @@ _XML_ATTR_RE = re.compile(r"([a-zA-Z_][a-zA-Z0-9_.-]*)\s*=\s*(\"[^\"]*\"|'[^']*'
 _XML_NESTED_RE = re.compile(r"<[a-zA-Z_]")
 _XML_WRAPPER_CLOSE_RE = re.compile(r"</(?:tool_calls|tool_call|function_calls|function_call|tools|calls|_calls)\s*>", re.IGNORECASE)
 _XML_TOOL_NAMES = r"invoke|toolinvoke|tool_invoke|use_tool|tool_use|call|function|tool"
-_XML_TOOL_ELEMENT_RE = re.compile(
-    rf"<((?:{_XML_TOOL_NAMES}))\b([^>]*)>(.*?)</\1\s*>",
-    re.DOTALL | re.IGNORECASE,
-)
+_TOOL_TAG_NAMES = frozenset(name.strip().lower() for name in _XML_TOOL_NAMES.split("|"))
 _XML_TOOL_SELFCLOSE_RE = re.compile(
     r"<(?:invoke|toolinvoke|tool_invoke|use_tool|tool_use|call|function|tool)\b([^>]*?)/>",
     re.DOTALL | re.IGNORECASE,
@@ -291,8 +391,10 @@ def _strip_dsml(text: str) -> str:
         for _ in range(10):
             updated = _DSML_BLOCK.sub(" ", result)
             updated = _DSML_WRAP.sub(" ", updated)
-            updated = _DSML_HIDDEN.sub(" ", updated)
-            updated = _DSML_HIDDEN_NAKED.sub(" ", updated)
+            for pattern in _DSML_HIDDEN_PATS:
+                updated = pattern.sub(" ", updated)
+            for pattern in _DSML_HIDDEN_NAKED_PATS:
+                updated = pattern.sub(" ", updated)
             if updated == result:
                 break
             result = updated
@@ -364,7 +466,6 @@ def _stream_patterns(names: tuple[str, ...]) -> tuple[re.Pattern[str], ...]:
         _TOOL_STREAM_ARRAY_RE,
         _TOOL_STREAM_YAML_RE,
         _TOOL_STREAM_NAME_ATTR_RE,
-        _DSML_STREAM_START,
     ]
     if names:
         escaped = "|".join(re.escape(name) for name in names)
@@ -460,24 +561,11 @@ def _array_hold(text: str, start: int) -> int:
     return -1
 
 
-def tool_call_boundary(
-    text: str,
-    start: int = 0,
-    tool_schemas: dict[str, dict[str, Any]] | None = None,
-) -> tuple[int, bool]:
-    names = _stream_names(tool_schemas)
-    best = -1
-    complete = False
-    for pattern in _stream_patterns(names):
-        match = pattern.search(text, start)
-        if match is not None and (best == -1 or match.start() < best):
-            best = match.start()
-            complete = True
-    for marker in TOOL_STREAM_MARKERS:
-        pos = text.find(marker, start)
-        if pos != -1 and (best == -1 or pos < best):
-            best = pos
-            complete = True
+_boundary_cache: dict[tuple[str, ...], tuple[str, int, bool]] = {}
+_BOUNDARY_CACHE_MAX = 256
+
+
+def _boundary_hold(text: str, start: int, names: tuple[str, ...]) -> int:
     hold = -1
     for candidate in (
         _literal_hold(text, start),
@@ -487,8 +575,45 @@ def tool_call_boundary(
     ):
         if candidate != -1 and (hold == -1 or candidate < hold):
             hold = candidate
+    return hold
+
+
+def tool_call_boundary(
+    text: str,
+    start: int = 0,
+    tool_schemas: dict[str, dict[str, Any]] | None = None,
+) -> tuple[int, bool]:
+    names = _stream_names(tool_schemas)
+    cached = _boundary_cache.get(names)
+    if cached is not None:
+        old_text, old_best, old_complete = cached
+        if old_complete and old_best != -1 and start <= old_best and text.startswith(old_text):
+            hold = _boundary_hold(text, start, names)
+            if hold != -1 and hold < old_best:
+                return hold, False
+            return old_best, True
+    best = -1
+    complete = False
+    for pattern in _stream_patterns(names):
+        match = pattern.search(text, start)
+        if match is not None and (best == -1 or match.start() < best):
+            best = match.start()
+            complete = True
+    if "dsml" in text.casefold():
+        match = _DSML_STREAM_START.search(text, start)
+        if match is not None and (best == -1 or match.start() < best):
+            best = match.start()
+            complete = True
+    for marker in TOOL_STREAM_MARKERS:
+        pos = text.find(marker, start)
+        if pos != -1 and (best == -1 or pos < best):
+            best = pos
+            complete = True
+    hold = _boundary_hold(text, start, names)
     if hold != -1 and (best == -1 or hold < best):
         return hold, False
+    if best != -1 and (not _boundary_cache or len(_boundary_cache) < _BOUNDARY_CACHE_MAX):
+        _boundary_cache[names] = (text, best, complete)
     return best, complete
 
 
@@ -1410,6 +1535,22 @@ def _schema_for_name(tool_schemas: dict[str, dict[str, Any]] | None, name: str) 
     return None
 
 
+@lru_cache(maxsize=256)
+def _alias_rows(seed: tuple[tuple[str, tuple[Any, ...]], ...]) -> tuple[tuple[str, str, str], ...]:
+    rows: list[tuple[str, str, str]] = []
+    for known, aliases in seed:
+        for alias in aliases:
+            if not isinstance(alias, str) or not alias:
+                continue
+            rows.append((_name_key(alias), _casefold(alias), known))
+    return tuple(rows)
+
+
+@lru_cache(maxsize=256)
+def _schema_name_keys(keys: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(_name_key(key) for key in keys)
+
+
 def _resolve_alias(name: str, tool_schemas: dict[str, dict[str, Any]] | None) -> str | None:
     if not tool_schemas:
         return None
@@ -1417,11 +1558,10 @@ def _resolve_alias(name: str, tool_schemas: dict[str, dict[str, Any]] | None) ->
     key = _name_key(name)
     if not key:
         return None
-    for known, spec in tool_schemas.items():
-        aliases = (spec or {}).get("_aliases") or []
-        for alias in aliases:
-            if isinstance(alias, str) and (_name_key(alias) == key or _casefold(alias) == folded):
-                return known
+    seed = tuple((known, tuple((spec or {}).get("_aliases") or ())) for known, spec in (tool_schemas or {}).items())
+    for alias_key, alias_folded, known in _alias_rows(seed):
+        if alias_key == key or alias_folded == folded:
+            return known
     return None
 
 
@@ -1429,11 +1569,13 @@ def _fuzzy_known_name(name: str, tool_schemas: dict[str, dict[str, Any]]) -> str
     key = _name_key(name)
     if len(key) < 4:
         return None
-    matches = get_close_matches(key, [_name_key(known) for known in tool_schemas], n=2, cutoff=0.8)
+    keys = _schema_name_keys(tuple(tool_schemas))
+    matches = get_close_matches(key, keys, n=2, cutoff=0.8)
     if len(matches) != 1:
         return None
+    hit = matches[0]
     for known in tool_schemas:
-        if _name_key(known) == matches[0]:
+        if _name_key(known) == hit:
             return known
     return None
 
@@ -1546,14 +1688,13 @@ def _xml_invoke_arguments(body: str, param_types: dict[str, Any] | None = None, 
         _xml_set_param(params, key, _xml_value(match.group(3), (param_types or {}).get(key)))
     if params:
         return params
-    for match in _XML_ELEMENT.finditer(body):
-        key = match.group(1).strip()
-        lowered = key.lower()
+    for _, _, key, _, inner in _scan_xml_pairs(body):
+        lowered = key.strip().lower()
         if lowered in _XML_SKIP_ELEMENTS:
             continue
         if lowered in _XML_HTML_TAGS and lowered not in _ARGS_ALIASES:
             continue
-        _xml_set_param(params, key, _xml_value(match.group(3), (param_types or {}).get(key)))
+        _xml_set_param(params, key.strip(), _xml_value(inner, (param_types or {}).get(key.strip())))
     if params:
         if len(params) == 1:
             for key in _ARGS_ALIASES:
@@ -1594,11 +1735,10 @@ def _iter_xml_call_wrappers(text: str) -> Iterator[tuple[int, int, int, str]]:
         if match is None:
             return
         content_start = match.end()
-        rest = text[content_start:]
-        close = _XML_WRAPPER_CLOSE_RE.search(rest)
+        close = _XML_WRAPPER_CLOSE_RE.search(text, content_start)
         if close is None:
-            close = _XML_WRAPPER_OPEN.search(rest)
-        end = length if close is None else content_start + close.start()
+            close = _XML_WRAPPER_OPEN.search(text, content_start)
+        end = length if close is None else close.start()
         yield match.start(), content_start, end, text[content_start:end]
         pos = max(match.end(), end)
 
@@ -1615,15 +1755,13 @@ def _schema_xml_patterns(tool_name: str) -> tuple[re.Pattern[str], re.Pattern[st
 def _parse_xml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | None = None) -> tuple[list[ToolCall] | None, str]:
     calls: list[ToolCall] = []
     mask = bytearray(len(text))
-    consumed: list[tuple[int, int]] = []
+    consumed = _IntervalSet()
 
     def blank(start: int, end: int) -> None:
         mask[start:end] = b" " * (end - start)
 
-    for match in _XML_TOOL_ELEMENT_RE.finditer(text):
-        start, end = match.span()
-        attrs_text = match.group(2)
-        body = match.group(3)
+    for start, end, _tag, attrs_text, element_body in _scan_xml_pairs(text, _TOOL_TAG_NAMES, tail_space=True):
+        body = element_body
         name_match = _XML_NAME_ATTR_RE.search(attrs_text)
         tool_name = name_match.group(2) if name_match else None
         if not tool_name:
@@ -1639,10 +1777,10 @@ def _parse_xml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | N
         arguments.update(_xml_invoke_arguments(body, param_types) or {})
         calls.append(ToolCall.create(tool_name, arguments))
         blank(start, end)
-        consumed.append((start, end))
+        consumed.add(start, end)
     for match in _XML_TOOL_SELFCLOSE_RE.finditer(text):
         start, end = match.span()
-        if any(s <= start and end <= e for s, e in consumed):
+        if consumed.contains(start, end):
             continue
         attrs_text = match.group(1)
         name_match = _XML_NAME_ATTR_RE.search(attrs_text)
@@ -1653,7 +1791,7 @@ def _parse_xml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | N
         arguments = _xml_tag_attrs(_XML_NAME_ATTR_STRIP_RE.sub("", attrs_text), param_types)
         calls.append(ToolCall.create(tool_name, arguments))
         blank(start, end)
-        consumed.append((start, end))
+        consumed.add(start, end)
     for match in _XML_TOOL_CALL_BLOCK_RE.finditer(text):
         parsed = _extract_json_object(match.group(1))
         if parsed is None:
@@ -1664,9 +1802,9 @@ def _parse_xml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | N
             calls.extend(extracted)
             start, end = match.span()
             blank(start, end)
-            consumed.append((start, end))
+            consumed.add(start, end)
     for start, content_start, end, inner in _iter_xml_call_wrappers(text):
-        if any(s <= start and end <= e for s, e in consumed):
+        if consumed.contains(start, end):
             continue
         stripped_inner = inner.strip()
         if stripped_inner.startswith("["):
@@ -1674,7 +1812,7 @@ def _parse_xml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | N
             if array_calls:
                 calls.extend(array_calls)
                 blank(start, end)
-                consumed.append((start, end))
+                consumed.add(start, end)
                 continue
         json_parsed = _extract_json_object(stripped_inner)
         if json_parsed is not None:
@@ -1682,37 +1820,35 @@ def _parse_xml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | N
             if extracted:
                 calls.extend(extracted)
                 blank(start, end)
-                consumed.append((start, end))
+                consumed.add(start, end)
                 continue
-        elements = list(_XML_ELEMENT.finditer(inner))
-        top_level = [m for m in elements if not any(o is not m and o.start() < m.start() and o.end() > m.end() for o in elements)]
         pending_name: str | None = None
         block_calls = 0
-        for element in top_level:
-            element_name = element.group(1).strip().lower()
+        for element_start_rel, element_end_rel, element_raw_name, element_attrs, element_body in _scan_xml_pairs(inner):
+            raw_name = element_raw_name
+            element_name = raw_name.strip().lower()
             if element_name in _XML_SKIP_ELEMENTS:
                 continue
-            element_start = content_start + element.start()
-            element_end = content_start + element.end()
-            if any(s <= element_start and element_end <= e for s, e in consumed):
+            element_start = content_start + element_start_rel
+            element_end = content_start + element_end_rel
+            if consumed.contains(element_start, element_end):
                 continue
             if element_name == "name":
-                raw = _unescape_xml(element.group(3).strip())
+                raw = _unescape_xml(element_body.strip())
                 if raw:
                     pending_name = raw
                 continue
             if element_name in _ARGS_ALIASES:
-                container = _xml_invoke_arguments(element.group(3), None)
+                container = _xml_invoke_arguments(element_body, None)
                 if isinstance(container, dict) and pending_name:
                     calls.append(ToolCall.create(pending_name, container))
-                    consumed.append((element_start, element_end))
+                    consumed.add(element_start, element_end)
                     block_calls += 1
                     pending_name = None
                 continue
-            raw_name = element.group(1).strip()
             param_types = _schema_for_name(tool_schemas, raw_name)
-            arguments = _xml_tag_attrs(element.group(2), param_types)
-            arguments.update(_xml_invoke_arguments(element.group(3), param_types) or {})
+            arguments = _xml_tag_attrs(element_attrs, param_types)
+            arguments.update(_xml_invoke_arguments(element_body, param_types) or {})
             if param_types is None and isinstance(arguments.get("name"), str) and arguments["name"].strip():
                 raw_name = arguments.pop("name")
                 param_types = _schema_for_name(tool_schemas, raw_name)
@@ -1721,7 +1857,7 @@ def _parse_xml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | N
             if not arguments and param_types is None:
                 continue
             calls.append(ToolCall.create(raw_name, arguments))
-            consumed.append((element_start, element_end))
+            consumed.add(element_start, element_end)
             block_calls += 1
         for element in _XML_SELFCLOSE.finditer(inner):
             element_name = element.group(1).strip().lower()
@@ -1729,7 +1865,7 @@ def _parse_xml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | N
                 continue
             element_start = content_start + element.start()
             element_end = content_start + element.end()
-            if any(s <= element_start and element_end <= e for s, e in consumed):
+            if consumed.contains(element_start, element_end):
                 continue
             tool_name = element.group(1).strip()
             param_types = _schema_for_name(tool_schemas, tool_name)
@@ -1737,53 +1873,54 @@ def _parse_xml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | N
             if not arguments and param_types is None:
                 continue
             calls.append(ToolCall.create(tool_name, arguments))
-            consumed.append((element_start, element_end))
+            consumed.add(element_start, element_end)
             block_calls += 1
         if block_calls:
             blank(start, end)
-            consumed.append((start, end))
+            consumed.add(start, end)
     for tool_name, param_types in (tool_schemas or {}).items():
         open_pattern, selfclose_pattern = _schema_xml_patterns(tool_name)
         for match in open_pattern.finditer(text):
             start, end = match.span()
-            if any(s <= start and end <= e for s, e in consumed):
+            if consumed.contains(start, end):
                 continue
             merged = _xml_tag_attrs(match.group(1), param_types)
             merged.update(_xml_invoke_arguments(match.group(2), param_types) or {})
             calls.append(ToolCall.create(tool_name, merged))
-            consumed.append((start, end))
+            consumed.add(start, end)
             blank(start, end)
         for match in selfclose_pattern.finditer(text):
             start, end = match.span()
-            if any(s <= start and end <= e for s, e in consumed):
+            if consumed.contains(start, end):
                 continue
             arguments = _xml_tag_attrs(match.group(1), param_types)
             calls.append(ToolCall.create(tool_name, arguments))
-            consumed.append((start, end))
+            consumed.add(start, end)
             blank(start, end)
 
-    def _bare_eligible(match: re.Match) -> bool:
-        name = match.group(1).strip().lower()
+    def _bare_eligible(name: str) -> bool:
         return name not in _XML_SKIP_ELEMENTS and name not in _XML_HTML_TAGS
 
-    bare_candidates: list[tuple[int, int, bool, re.Match]] = []
-    for m in _XML_ELEMENT.finditer(text):
-        if _bare_eligible(m) and not any(s <= m.start() and m.end() <= e for s, e in consumed):
-            bare_candidates.append((m.start(), m.end(), False, m))
+    bare_candidates: list[tuple[int, int, bool, str, str, str]] = []
+    for start, end, raw_name, attrs, body in _scan_xml_pairs(text):
+        if _bare_eligible(raw_name.strip().lower()) and not consumed.contains(start, end):
+            bare_candidates.append((start, end, False, raw_name, attrs, body))
     for m in _XML_SELFCLOSE.finditer(text):
-        if _bare_eligible(m) and not any(s <= m.start() and m.end() <= e for s, e in consumed):
-            bare_candidates.append((m.start(), m.end(), True, m))
+        if _bare_eligible(m.group(1).strip().lower()) and not consumed.contains(m.start(), m.end()):
+            bare_candidates.append((m.start(), m.end(), True, m.group(1), m.group(2), ""))
     bare_candidates.sort(key=lambda item: (item[0], -item[1]))
-    for start, end, self_closed, match in bare_candidates:
-        if any(s <= start and end <= e for s, e, _, _ in bare_candidates if (s, e) != (start, end)):
+    seen = _IntervalSet()
+    for start, end, self_closed, bare_raw_name, attrs, body in bare_candidates:
+        raw_name = bare_raw_name
+        if seen.contains(start, end):
             continue
-        if any(s <= start and end <= e for s, e in consumed):
+        if consumed.contains(start, end):
             continue
-        raw_name = match.group(1).strip()
+        seen.add(start, end)
         param_types = _schema_for_name(tool_schemas, raw_name)
-        arguments = _xml_tag_attrs(match.group(2), param_types)
+        arguments = _xml_tag_attrs(attrs, param_types)
         if not self_closed:
-            arguments.update(_xml_invoke_arguments(match.group(3), param_types, False) or {})
+            arguments.update(_xml_invoke_arguments(body, param_types, False) or {})
         if param_types is None and isinstance(arguments.get("name"), str) and arguments["name"].strip():
             raw_name = arguments.pop("name")
             param_types = _schema_for_name(tool_schemas, raw_name)
@@ -1792,11 +1929,11 @@ def _parse_xml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | N
         if not arguments and param_types is None:
             continue
         calls.append(ToolCall.create(raw_name, arguments))
-        consumed.append((start, end))
+        consumed.add(start, end)
         blank(start, end)
     if not calls:
         return None, ""
-    remainder = "".join(text[i] if mask[i] == 0 else " " for i in range(len(text)))
+    remainder = _blanked(text, mask)
     remainder = _XML_OPEN_TAG.sub(" ", remainder)
     remainder = _XML_CLOSE_TAG.sub(" ", remainder)
     wrapper = " ".join(remainder.split())
@@ -1993,6 +2130,8 @@ def _parse_yaml_calls(text: str) -> list[ToolCall] | None:
 
 
 def _parse_dsml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | None = None) -> tuple[list[ToolCall], str] | None:
+    if "dsml" not in text.casefold():
+        return None
     block_match = _DSML_TOOL_CALLS_BLOCK.search(text)
     if block_match is None:
         return None
@@ -2161,7 +2300,7 @@ def _parse_tool_calls_impl(
             calls.extend(found)
             removed[start : end + 1] = b" " * (end - start + 1)
     if calls:
-        wrapper = "".join((stripped[i] if removed[i] == 0 else " ") for i in range(len(stripped)))
+        wrapper = _blanked(stripped, removed)
         if report is not None:
             report["strategies"].append("json_in_prose")
         return calls, " ".join(wrapper.split())
