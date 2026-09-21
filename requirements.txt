@@ -4,3 +4,4 @@ httpx
 pydantic
 python-dotenv
 pillow
+python-multipart
