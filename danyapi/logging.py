@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import logging
+import queue
 import re
 import sys
-from logging.handlers import RotatingFileHandler
+from logging.handlers import QueueHandler, QueueListener, RotatingFileHandler
 from pathlib import Path
 
 DEFAULT_FORMAT = "(%(asctime)s) %(message)s"
@@ -41,9 +42,13 @@ def _level_names() -> set[str]:
     return set(_FALLBACK_LEVEL_NAMES)
 
 
+_LEVEL_NAMES = _level_names()
+_queue_listeners: list[QueueListener] = []
+
+
 def _resolve_level(level: str | None) -> str:
     normalized = str(level or "").strip().upper()
-    if normalized in _level_names():
+    if normalized in _LEVEL_NAMES:
         return normalized
     return DEFAULT_LOG_LEVEL
 
@@ -77,7 +82,11 @@ class _LifecycleFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         if record.name == "uvicorn.access":
             return False
-        message = record.getMessage()
+        if isinstance(record.msg, str) and not record.args:
+            return self._apply(record, record.msg)
+        return self._apply(record, record.getMessage())
+
+    def _apply(self, record: logging.LogRecord, message: str) -> bool:
         if message in LIFECYCLE_MESSAGES:
             return False
         if message.startswith(LIFECYCLE_PREFIXES):
@@ -103,7 +112,7 @@ class _ColorFormatter(logging.Formatter):
         if not self._use_color:
             return text
         color = LEVEL_COLORS.get(record.levelname, "")
-        if record.levelname == "INFO" and _is_success(record.getMessage()):
+        if record.levelname == "INFO" and _is_success(text):
             color = SUCCESS_COLOR
         if not color:
             return text
@@ -175,7 +184,7 @@ def configure() -> None:
             )
         else:
             try:
-                file_handler = _make_file_handler(
+                file_target = _make_file_handler(
                     str(path),
                     _coerce_max_bytes(settings.log_max_bytes),
                     _coerce_backup_count(settings.log_backup_count),
@@ -183,10 +192,15 @@ def configure() -> None:
             except OSError as exc:
                 logging.getLogger(__name__).warning("cannot open log file %s: %s, using console only", path, exc)
             else:
-                file_handler.name = FILE_HANDLER_NAME
-                file_handler.setLevel(level)
-                file_handler.addFilter(_LifecycleFilter())
-                root.addHandler(file_handler)
+                queue_for_file: queue.Queue[logging.LogRecord] = queue.Queue()
+                queue_handler = QueueHandler(queue_for_file)
+                queue_handler.name = FILE_HANDLER_NAME
+                queue_handler.setLevel(level)
+                queue_handler.addFilter(_LifecycleFilter())
+                listener = QueueListener(queue_for_file, file_target)
+                listener.start()
+                _queue_listeners.append(listener)
+                root.addHandler(queue_handler)
 
 
 def uvicorn_log_config() -> dict:

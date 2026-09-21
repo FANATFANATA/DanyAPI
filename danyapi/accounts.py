@@ -125,19 +125,22 @@ class ContextIndex:
                 self._seqs.pop(sid, None)
                 self._recency.pop(sid, None)
                 self._ts.pop(sid, None)
-                if store is not None:
-                    store.discard(sid)
             if best_sid is not None:
                 self.hits += 1
                 self._touch(best_sid, now)
             else:
                 self.misses += 1
-            return best_sid
+        if store is not None:
+            for sid in expired:
+                store.discard(sid)
+        return best_sid
 
     def index(self, session_id: str, sequence: tuple[str, ...]) -> None:
         if not session_id or not sequence:
             return
         now = time.monotonic()
+        store = self._store
+        evicted: list[str] = []
         with self._lock:
             current = self._seqs.get(session_id)
             if current is not None and len(current) >= len(sequence) and sequence == current[: len(sequence)]:
@@ -150,10 +153,11 @@ class ContextIndex:
                 self._seqs.pop(oldest, None)
                 self._recency.pop(oldest, None)
                 self._ts.pop(oldest, None)
-                if self._store is not None:
-                    self._store.discard(oldest)
-            if self._store is not None:
-                self._store.set(session_id, list(sequence))
+                evicted.append(oldest)
+        if store is not None:
+            for oldest in evicted:
+                store.discard(oldest)
+            store.set(session_id, list(sequence))
 
     def forget(self, session_id: str) -> None:
         with self._lock:
@@ -279,22 +283,24 @@ class AccountPool(Generic[AccountT]):
     def register(self, account_index: int, session_id: str) -> None:
         now = time.monotonic()
         record = self._affinity_record(account_index)
+        evicted: list[str] = []
         with self._affinity_lock:
             self._by_session[session_id] = (account_index, now)
-            if self._affinity_store is not None:
-                if self._affinity_store.get(session_id) != record:
-                    self._affinity_store.set(session_id, record)
             while len(self._by_session) > _MAX_AFFINITY:
                 oldest = next(iter(self._by_session))
                 self._by_session.pop(oldest, None)
-                if self._affinity_store is not None:
-                    self._affinity_store.discard(oldest)
+                evicted.append(oldest)
             if self._ttl > 0 and len(self._by_session) > max(4096, len(self.accounts) * 1024):
                 stale = [sid for sid, (_, ts) in self._by_session.items() if now - ts > self._ttl]
                 for sid in stale:
                     self._by_session.pop(sid, None)
-                    if self._affinity_store is not None:
-                        self._affinity_store.discard(sid)
+                    evicted.append(sid)
+        store = self._affinity_store
+        if store is not None:
+            if store.get(session_id) != record:
+                store.set(session_id, record)
+            for sid in evicted:
+                store.discard(sid)
 
     def forget(self, session_id: str) -> None:
         with self._affinity_lock:
@@ -312,6 +318,9 @@ class AccountPool(Generic[AccountT]):
         self._contexts.forget(session_id)
 
     def account_for_session(self, session_id: str) -> AccountT | None:
+        store = self._affinity_store
+        dirty = False
+        acct: AccountT | None = None
         with self._affinity_lock:
             entry = self._by_session.get(session_id)
             if entry is None:
@@ -320,20 +329,20 @@ class AccountPool(Generic[AccountT]):
             now = time.monotonic()
             if self._ttl > 0 and now - ts > self._ttl:
                 self._by_session.pop(session_id, None)
-                self._contexts.forget(session_id)
-                if self._affinity_store is not None:
-                    self._affinity_store.discard(session_id)
-                return None
-            acct = self.accounts[idx]
-            if acct is None or acct.broken:
-                self._by_session.pop(session_id, None)
-                self._contexts.forget(session_id)
-                if self._affinity_store is not None:
-                    self._affinity_store.discard(session_id)
-                return None
-            if self._ttl > 0 and now != ts:
-                self._by_session[session_id] = (idx, now)
-            return acct
+                dirty = True
+            else:
+                acct = self.accounts[idx]
+                if acct is None or acct.broken:
+                    self._by_session.pop(session_id, None)
+                    dirty = True
+                elif self._ttl > 0 and now != ts:
+                    self._by_session[session_id] = (idx, now)
+        if dirty:
+            self._contexts.forget(session_id)
+            if store is not None:
+                store.discard(session_id)
+            return None
+        return acct
 
     def stats(self) -> dict[str, Any]:
         with self._affinity_lock:
@@ -369,19 +378,20 @@ class AccountPool(Generic[AccountT]):
                 log.debug("session store flush failed for %s: %s", getattr(acct, "label", acct), exc)
 
     async def acquire(self, session_id: str | None, max_wait: float | None = None) -> tuple[AccountT, str | None]:
-        if not any(not a.broken for a in self.accounts):
+        healthy = [a for a in self.accounts if not a.broken]
+        if not healthy:
             revived = await self.revive_broken()
             if revived is None:
                 if any(getattr(acct, "broken_at", None) is not None for acct in self.accounts):
                     raise AccountPoolBusy()
                 raise RuntimeError(f"all {self.label} accounts are unavailable")
+            healthy = [a for a in self.accounts if not a.broken]
         if session_id:
             acct = self.account_for_session(session_id)
             if acct is not None:
                 if acct.sem.locked() and max_wait is not None:
                     return await self._wait_free(acct, max_wait, session_id)
                 return acct, session_id
-        healthy = [a for a in self.accounts if not a.broken]
         n = len(healthy)
         start = self._rr % n
         for i in range(n):

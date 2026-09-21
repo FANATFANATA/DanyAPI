@@ -1,11 +1,18 @@
 (function () {
     "use strict";
     var nav = document.getElementById("nav");
-    function onScroll() {
+    var scrollTicking = false;
+    function updateNav() {
+        scrollTicking = false;
         nav.classList.toggle("scrolled", window.scrollY > 20);
     }
+    function onScroll() {
+        if (scrollTicking) return;
+        scrollTicking = true;
+        requestAnimationFrame(updateNav);
+    }
     window.addEventListener("scroll", onScroll, { passive: true });
-    onScroll();
+    updateNav();
     var revealEls = document.querySelectorAll(".reveal");
     if ("IntersectionObserver" in window) {
         var io = new IntersectionObserver(function (entries) {
@@ -177,18 +184,18 @@
         var t = I18N[lang];
         document.documentElement.lang = lang;
 
-        document.querySelectorAll("[data-i18n]").forEach(function (el) {
-            var key = el.getAttribute("data-i18n");
-            if (t && t[key] !== undefined) {
-                el.innerHTML = t[key];
+        var els = document.querySelectorAll("[data-i18n], [data-i18n-aria]");
+        for (var i = 0; i < els.length; i++) {
+            var el = els[i];
+            if (el.hasAttribute("data-i18n")) {
+                var key = el.getAttribute("data-i18n");
+                if (t && t[key] !== undefined) el.innerHTML = t[key];
             }
-        });
-        document.querySelectorAll("[data-i18n-aria]").forEach(function (el) {
-            var key = el.getAttribute("data-i18n-aria");
-            if (t && t[key] !== undefined) {
-                el.setAttribute("aria-label", t[key]);
+            if (el.hasAttribute("data-i18n-aria")) {
+                var ariaKey = el.getAttribute("data-i18n-aria");
+                if (t && t[ariaKey] !== undefined) el.setAttribute("aria-label", t[ariaKey]);
             }
-        });
+        }
         if (t && t.meta_title) document.title = t.meta_title;
 
         document.querySelectorAll(".lang-btn").forEach(function (btn) {
@@ -201,8 +208,11 @@
         var main = document.querySelector("main");
         if (main) {
             main.classList.remove("i18n-swap");
-            void main.offsetWidth;
-            main.classList.add("i18n-swap");
+            requestAnimationFrame(function () {
+                requestAnimationFrame(function () {
+                    main.classList.add("i18n-swap");
+                });
+            });
         }
     }
 

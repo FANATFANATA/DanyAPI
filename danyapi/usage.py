@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
 import time
@@ -30,6 +31,14 @@ def reset_tracker() -> None:
         _tracker[0] = None
 
 
+def _loop_active() -> bool:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
+
+
 def record_usage(
     provider: str,
     model: str,
@@ -45,6 +54,7 @@ def record_usage(
 
 
 class UsageTracker:
+    _USAGE_PERSIST_INTERVAL = 5.0
     _RECENT_PERSIST_INTERVAL = 5.0
 
     def __init__(self, store: JsonStore | None = None, max_records: int = 1000) -> None:
@@ -57,6 +67,7 @@ class UsageTracker:
         self._by_user: dict[str, dict[str, int]] = {}
         self._recent: deque[dict[str, Any]] = deque(maxlen=max_records)
         self._last_recent_persist = 0.0
+        self._last_usage_persist = 0.0
         self._restore()
 
     def _restore(self) -> None:
@@ -90,13 +101,16 @@ class UsageTracker:
             restored_recent = [entry for entry in recent if isinstance(entry, dict)]
             self._recent = deque(restored_recent[-self._max_records :], maxlen=self._max_records)
 
-    def _serialize(self) -> dict[str, Any]:
+    def _snapshot_locked(self) -> dict[str, Any]:
         return {
             "totals": dict(self._totals),
             "by_model": {key: dict(value) for key, value in self._by_model.items()},
             "by_provider": {key: dict(value) for key, value in self._by_provider.items()},
             "by_user": {key: dict(value) for key, value in self._by_user.items()},
         }
+
+    def _serialize(self) -> dict[str, Any]:
+        return self._snapshot_locked()
 
     @staticmethod
     def _add(bucket: dict[str, dict[str, int]], key: str, prompt_tokens: int, completion_tokens: int, total_tokens: int) -> None:
@@ -154,8 +168,10 @@ class UsageTracker:
             )
             if self._store is not None:
                 try:
-                    self._store.set("usage", self._serialize())
                     now = time.time()
+                    if not _loop_active() or now - self._last_usage_persist >= self._USAGE_PERSIST_INTERVAL:
+                        self._last_usage_persist = now
+                        self._store.set("usage", self._serialize())
                     if now - self._last_recent_persist >= self._RECENT_PERSIST_INTERVAL:
                         self._last_recent_persist = now
                         self._store.set("usage_recent", list(self._recent))
@@ -164,13 +180,9 @@ class UsageTracker:
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
-            return {
-                "totals": dict(self._totals),
-                "by_model": {key: dict(value) for key, value in self._by_model.items()},
-                "by_provider": {key: dict(value) for key, value in self._by_provider.items()},
-                "by_user": {key: dict(value) for key, value in self._by_user.items()},
-                "recent": list(self._recent),
-            }
+            data = self._snapshot_locked()
+            data["recent"] = list(self._recent)
+            return data
 
     def flush(self) -> None:
         if self._store is None:
@@ -183,6 +195,7 @@ class UsageTracker:
             self._store.set("usage_recent", recent)
             self._store.flush()
             self._last_recent_persist = time.time()
+            self._last_usage_persist = self._last_recent_persist
         except Exception as exc:
             log.debug("usage flush failed: %s", exc)
 
@@ -194,6 +207,7 @@ class UsageTracker:
             self._by_user.clear()
             self._recent.clear()
             self._last_recent_persist = 0.0
+            self._last_usage_persist = 0.0
             if self._store is not None:
                 try:
                     self._store.discard("usage")

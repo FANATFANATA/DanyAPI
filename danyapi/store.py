@@ -89,7 +89,9 @@ class JsonStore:
     def _write(self) -> None:
         if self._path is None:
             return
-        self._commit(self._data)
+        with self._lock:
+            snapshot = dict(self._data)
+        self._commit(snapshot)
 
     def _flush_background(self) -> None:
         while True:
@@ -110,22 +112,29 @@ class JsonStore:
         except RuntimeError:
             self._write()
             return
-        self._dirty = True
-        if self._pending:
-            return
-        self._pending = True
-        self._idle.clear()
+        with self._lock:
+            self._dirty = True
+            if self._pending:
+                return
+            self._pending = True
+            self._idle.clear()
         try:
             loop.run_in_executor(None, self._flush_background)
         except RuntimeError:
-            self._dirty = False
-            self._pending = False
-            self._idle.set()
+            with self._lock:
+                self._dirty = False
+                self._pending = False
+                self._idle.set()
             self._write()
 
     def flush(self) -> None:
-        while self._pending:
-            self._idle.wait(0.1)
+        if self._path is None:
+            return
+        while True:
+            with self._lock:
+                if not self._pending:
+                    return
+            self._idle.wait()
 
     def get(self, key: str, default: Any = None) -> Any:
         with self._lock:
@@ -138,28 +147,28 @@ class JsonStore:
             self._data.pop(key, None)
             self._data[key] = value
             self._evict()
-            self._note_changed()
+        self._note_changed()
 
     def pop(self, key: str, default: Any = None) -> Any:
         with self._lock:
             if key not in self._data:
                 return default
             value = self._data.pop(key)
-            self._note_changed()
-            return value
+        self._note_changed()
+        return value
 
     def discard(self, key: str) -> None:
         with self._lock:
             if key in self._data:
                 self._data.pop(key)
-                self._note_changed()
+        self._note_changed()
 
     def clear(self) -> None:
         with self._lock:
             if not self._data:
                 return
             self._data.clear()
-            self._note_changed()
+        self._note_changed()
 
     def items(self) -> list[tuple[str, Any]]:
         with self._lock:

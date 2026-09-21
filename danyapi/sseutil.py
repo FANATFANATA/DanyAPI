@@ -45,10 +45,12 @@ MAIN_RESPONSE_TYPES = ("RESPONSE", "TEMPLATE_RESPONSE")
 THINK_TYPES = ("THINK",)
 
 
-_COMPACT_THRESHOLD = 65536
+_COMPACT_THRESHOLD = 8192
 
 
 class IncrementalSSE:
+    __slots__ = ("_buffer", "_pos")
+
     def __init__(self) -> None:
         self._buffer = bytearray()
         self._pos = 0
@@ -219,7 +221,34 @@ def _fragment_text(fragment: Any) -> str:
     return ""
 
 
+def _diff_suffix(previous: str, current: str, prefix_ok: bool) -> str:
+    if current == previous:
+        return ""
+    if prefix_ok and len(current) > len(previous) and current.startswith(previous):
+        return current[len(previous) :]
+    return current.removeprefix(previous)
+
+
 class MessageReconstructor:
+    __slots__ = (
+        "_agg_fragments",
+        "_aggregate_dirty",
+        "_content",
+        "_content_prefix_ok",
+        "_diffs_revision",
+        "_frag_idx",
+        "_last_op",
+        "_last_path",
+        "_prev_content",
+        "_prev_reasoning",
+        "_reasoning",
+        "_reasoning_prefix_ok",
+        "_revision",
+        "hint_error",
+        "message",
+        "response_message_id",
+    )
+
     def __init__(self) -> None:
         self.message: dict = {}
         self._last_op = "SET"
@@ -229,7 +258,14 @@ class MessageReconstructor:
         self.response_message_id: str | None = None
         self.hint_error: dict | None = None
         self._revision = 0
-        self._agg_cache: tuple[int, int, str, str] | None = None
+        self._agg_fragments: Any = None
+        self._frag_idx = 0
+        self._content = ""
+        self._reasoning = ""
+        self._aggregate_dirty = True
+        self._content_prefix_ok = True
+        self._reasoning_prefix_ok = True
+        self._diffs_revision = -1
 
     def handle(self, event: SSEEvent) -> None:
         if event.event == "ready":
@@ -255,23 +291,75 @@ class MessageReconstructor:
             self._last_path = path
         _apply_delta(self.message, op, path, data["v"])
         self._revision += 1
-        self._agg_cache = None
+        self._aggregate_dirty = True
+        if self._fast_append_tail(op, path, data["v"]):
+            self._aggregate_dirty = False
 
-    def _agg(self, types: tuple[str, ...]) -> str:
-        fragments = self.message.get("fragments") or []
-        parts = []
-        for frag in fragments:
-            if isinstance(frag, dict) and frag.get("type") in types:
-                parts.append(_fragment_text(frag))
-        return "".join(parts)
+    def _fast_append_tail(self, op: str, path: str, value: Any) -> bool:
+        if op != "APPEND" or not isinstance(value, str):
+            return False
+        frags = self.message.get("fragments")
+        if not isinstance(frags, list) or frags is not self._agg_fragments or not frags:
+            return False
+        if self._frag_idx != len(frags):
+            return False
+        parts = [p for p in path.split("/") if p]
+        if len(parts) != 4 or parts[0] != "response" or parts[1] != "fragments" or parts[3] != "content":
+            return False
+        try:
+            index = int(parts[2])
+        except ValueError:
+            return False
+        if index != self._frag_idx - 1:
+            return False
+        tail = frags[self._frag_idx - 1]
+        if not isinstance(tail, dict):
+            return False
+        frag_type = tail.get("type")
+        if frag_type in MAIN_RESPONSE_TYPES:
+            self._content += value
+        elif frag_type in THINK_TYPES:
+            self._reasoning += value
+        else:
+            return False
+        return True
 
     def _aggregates(self) -> tuple[str, str]:
-        cache = self._agg_cache
-        if cache is not None and cache[0] == id(self.message) and cache[1] == self._revision:
-            return cache[2], cache[3]
-        content = self._agg(MAIN_RESPONSE_TYPES)
-        reasoning = self._agg(THINK_TYPES)
-        self._agg_cache = (id(self.message), self._revision, content, reasoning)
+        frags = self.message.get("fragments")
+        if frags is self._agg_fragments and not self._aggregate_dirty:
+            return self._content, self._reasoning
+        if isinstance(frags, list) and frags is self._agg_fragments and len(frags) > self._frag_idx:
+            for i in range(self._frag_idx, len(frags)):
+                frag = frags[i]
+                if isinstance(frag, dict):
+                    frag_type = frag.get("type")
+                    if frag_type in MAIN_RESPONSE_TYPES:
+                        self._content += _fragment_text(frag)
+                    elif frag_type in THINK_TYPES:
+                        self._reasoning += _fragment_text(frag)
+            self._frag_idx = len(frags)
+            self._aggregate_dirty = False
+            return self._content, self._reasoning
+        if isinstance(frags, list):
+            content = ""
+            reasoning = ""
+            for frag in frags:
+                if isinstance(frag, dict):
+                    frag_type = frag.get("type")
+                    if frag_type in MAIN_RESPONSE_TYPES:
+                        content += _fragment_text(frag)
+                    elif frag_type in THINK_TYPES:
+                        reasoning += _fragment_text(frag)
+        else:
+            content = ""
+            reasoning = ""
+        self._content = content
+        self._reasoning = reasoning
+        self._frag_idx = len(frags) if isinstance(frags, list) else 0
+        self._agg_fragments = frags
+        self._aggregate_dirty = False
+        self._content_prefix_ok = False
+        self._reasoning_prefix_ok = False
         return content, reasoning
 
     @property
@@ -283,10 +371,15 @@ class MessageReconstructor:
         return self._aggregates()[1]
 
     def take_diffs(self) -> tuple[str, str]:
+        if self._revision == self._diffs_revision:
+            return "", ""
         content, reasoning = self._aggregates()
-        c_diff = content.removeprefix(self._prev_content)
-        r_diff = reasoning.removeprefix(self._prev_reasoning)
+        c_diff = _diff_suffix(self._prev_content, content, self._content_prefix_ok)
+        r_diff = _diff_suffix(self._prev_reasoning, reasoning, self._reasoning_prefix_ok)
         self._prev_content, self._prev_reasoning = content, reasoning
+        self._content_prefix_ok = True
+        self._reasoning_prefix_ok = True
+        self._diffs_revision = self._revision
         return c_diff, r_diff
 
     def extend_with(self, other: MessageReconstructor) -> None:
@@ -308,7 +401,7 @@ class MessageReconstructor:
         self._prev_content = old_content
         self._prev_reasoning = old_reasoning
         self._revision += 1
-        self._agg_cache = None
+        self._aggregate_dirty = True
 
     @property
     def status(self) -> str | None:

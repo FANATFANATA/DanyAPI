@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import datetime
 import json
 import os
@@ -10,6 +12,8 @@ import tempfile
 import urllib.error
 import urllib.request
 import uuid
+from concurrent.futures import ThreadPoolExecutor
+from functools import cache
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -155,6 +159,7 @@ def ask(question, default):
         print("    answer y or n")
 
 
+@cache
 def is_termux():
     return "com.termux" in sys.prefix or Path("/data/data/com.termux").exists()
 
@@ -275,15 +280,21 @@ def load_defaults():
 
 
 def update_env(values):
-    lines = ENV_FILE.read_text(encoding="utf-8").splitlines(keepends=True)
-    for key, value in values.items():
-        pattern = re.compile(rf"^\s*{re.escape(key)}\s*=")
-        matching = [i for i, line in enumerate(lines) if pattern.match(line)]
-        if matching:
-            lines[matching[0]] = f"{key}={quote(value)}\n"
-            for i in reversed(matching[1:]):
-                del lines[i]
+    raw = ENV_FILE.read_text(encoding="utf-8").splitlines(keepends=True)
+    lines = []
+    seen = set()
+    for line in raw:
+        m = re.match(r"^\s*([A-Za-z0-9_]+)\s*=", line)
+        key = m.group(1) if m else None
+        if key is not None and key in values:
+            if key in seen:
+                continue
+            seen.add(key)
+            lines.append(f"{key}={quote(values[key])}\n")
         else:
+            lines.append(line)
+    for key, value in values.items():
+        if key not in seen:
             lines.append(f"{key}={quote(value)}\n")
     fd, path = tempfile.mkstemp(dir=str(ROOT), suffix=".env.tmp")
     try:
@@ -418,10 +429,10 @@ def check_provider(name, creds):
     if not tokens:
         return True, ""
     checker = check_deepseek_token if name == "DeepSeek" else check_qwen_token
-    for token in tokens:
-        ok, detail = checker(token)
-        if not ok:
-            return False, f"token invalid: {detail}"
+    with ThreadPoolExecutor(max_workers=max(1, min(len(tokens), 8))) as pool:
+        for ok, detail in pool.map(checker, tokens):
+            if not ok:
+                return False, f"token invalid: {detail}"
     return True, ""
 
 

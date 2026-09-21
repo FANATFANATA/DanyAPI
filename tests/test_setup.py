@@ -89,15 +89,20 @@ def test_split_tokens_variants():
 
 
 def test_check_provider_valid_tokens():
-    with (
-        patch.object(setup, "check_deepseek_token", side_effect=[(True, ""), (True, "")]),
-    ):
+    calls = []
+
+    def checker(token):
+        calls.append(token)
+        return True, ""
+
+    with patch.object(setup, "check_deepseek_token", side_effect=checker):
         ok, detail = setup.check_provider("DeepSeek", {"DEEPSEEK_TOKENS": "t1, t2"})
     assert ok is True
     assert detail == ""
+    assert set(calls) == {"t1", "t2"}
 
 
-def test_check_provider_invalid_token_fails_fast():
+def test_check_provider_invalid_token_reports_first_failure_in_order():
     calls = []
 
     def checker(token):
@@ -110,7 +115,7 @@ def test_check_provider_invalid_token_fails_fast():
         ok, detail = setup.check_provider("DeepSeek", {"DEEPSEEK_TOKENS": "t1,t2,t3"})
     assert ok is False
     assert "http 401" in detail
-    assert calls == ["t1", "t2"]
+    assert "t2" in calls
 
 
 def test_check_provider_empty_is_ok():

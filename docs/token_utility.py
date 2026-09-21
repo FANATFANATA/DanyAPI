@@ -925,32 +925,38 @@ document.querySelectorAll("button.copy-btn").forEach(btn => {
 """
 
 
+_TEXTS_RE = re.compile(r"__(\w+)__")
+
+_STATIC_SUBS: dict[str, str] = {
+    **TEXTS,
+    "FAVICON_DATA_URI": FAVICON_DATA_URI,
+    "FONTS_CSS_URL": FONTS_CSS_URL,
+    "NOISE_DATA_URI": NOISE_DATA_URI,
+    "DEEPSEEK_URL": DEEPSEEK_URL,
+    "QWEN_URL": QWEN_URL,
+}
+
+_TEXTS_JSON = json.dumps(TEXTS, ensure_ascii=False)
+
+
 def _apply_texts(template: str, extra: dict[str, str] | None = None) -> str:
     """Fill __key__ placeholders with the TEXTS config (plus any extra values)."""
-    out = template
-    for key, value in TEXTS.items():
-        out = out.replace(f"__{key}__", value)
-    # Shared HTML assets (identical markup on both pages).
-    out = out.replace("__FAVICON_DATA_URI__", FAVICON_DATA_URI)
-    out = out.replace("__FONTS_CSS_URL__", FONTS_CSS_URL)
-    out = out.replace("__NOISE_DATA_URI__", NOISE_DATA_URI)
-    if extra:
-        for key, value in extra.items():
-            out = out.replace(f"__{key}__", value)
-    return out
+    subs = _STATIC_SUBS if extra is None else {**_STATIC_SUBS, **extra}
+    return _TEXTS_RE.sub(lambda m: subs.get(m.group(1), m.group(0)), template)
+
+
+_SETUP_PAGE_STATIC = _apply_texts(SETUP_PAGE)
+_RESULTS_PAGE_STATIC = _apply_texts(RESULTS_PAGE)
 
 
 def render_setup_page(port: int = RESULT_PORT) -> str:
-    texts_json = json.dumps(TEXTS, ensure_ascii=False)
     return _apply_texts(
-        SETUP_PAGE,
+        _SETUP_PAGE_STATIC,
         {
             "BOOKMARKLET": html_escape(build_bookmarklet(port)),
-            "DEEPSEEK_URL": DEEPSEEK_URL,
-            "QWEN_URL": QWEN_URL,
             "HAS_DEEPSEEK": "true" if STATE["deepseek"] else "false",
             "HAS_QWEN": "true" if STATE["qwen"] else "false",
-            "TEXTS_JSON": texts_json,
+            "TEXTS_JSON": _TEXTS_JSON,
         },
     )
 
@@ -961,7 +967,7 @@ def render_results_page() -> str:
 
     public_url = TEXTS["footer_public_url"]
     return _apply_texts(
-        RESULTS_PAGE,
+        _RESULTS_PAGE_STATIC,
         {
             "DEEPSEEK_TOKEN": show(STATE["deepseek"]),
             "QWEN_TOKEN": show(STATE["qwen"]),
@@ -990,6 +996,8 @@ SUCCESS_PAGE = r"""<!DOCTYPE html>
 </script>
 </body></html>
 """
+
+_SUCCESS_PAGE_STATIC = _apply_texts(SUCCESS_PAGE)
 
 
 def register_token(provider: str, token: str) -> bool:
@@ -1062,7 +1070,7 @@ class Handler(BaseHTTPRequestHandler):
             provider = (qs.get("p") or [""])[0]
             token = (qs.get("t") or [""])[0].strip()
             register_token(provider, token)
-            self._send(_apply_texts(SUCCESS_PAGE).encode())
+            self._send(_SUCCESS_PAGE_STATIC.encode())
         else:  # "/" and anything else -> setup page
             self._send(render_setup_page(port=self.serve_port).encode())
 

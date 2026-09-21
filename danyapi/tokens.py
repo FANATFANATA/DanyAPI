@@ -10,7 +10,7 @@ _IMAGE_TOKEN_COST = 85
 
 @lru_cache(maxsize=4096)
 def _cjk_count(text: str) -> int:
-    return sum(1 for _ in _CJK_RE.finditer(text))
+    return len(_CJK_RE.findall(text))
 
 
 @lru_cache(maxsize=4096)

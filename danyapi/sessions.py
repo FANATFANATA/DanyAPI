@@ -42,6 +42,7 @@ class SessionRegistry:
         self._store = store
         self._key_prefix = key_prefix
         self._session_locks: dict[str, asyncio.Lock] = {}
+        self._session_refs: dict[str, int] = {}
         self._session_locks_guard = asyncio.Lock()
         self._restore()
 
@@ -106,6 +107,7 @@ class SessionRegistry:
             oldest, _ = self._sessions.popitem(last=False)
             self._store.discard(self._session_key(oldest))
             self._session_locks.pop(oldest, None)
+            self._session_refs.pop(oldest, None)
 
     async def _create(self, **kwargs: Any) -> Any:
         return await self._client.create_session(**kwargs)
@@ -126,20 +128,26 @@ class SessionRegistry:
         if not session_id:
             return None
         now = self._now()
+        store = self._store
+        expired = False
         with self._lock:
             entry = self._sessions.get(session_id)
             if entry is None:
                 return None
             if self._expired(session_id, now):
                 self._sessions.pop(session_id, None)
-                if self._store is not None:
-                    self._store.discard(self._session_key(session_id))
-                self._session_locks.pop(session_id, None)
-                return None
-            session = entry[0]
-            self._sessions.move_to_end(session_id)
-            self._sessions[session_id] = (session, now)
-            return session
+                expired = True
+            else:
+                session = entry[0]
+                self._sessions.move_to_end(session_id)
+                self._sessions[session_id] = (session, now)
+        if expired:
+            self._session_locks.pop(session_id, None)
+            self._session_refs.pop(session_id, None)
+            if store is not None:
+                store.discard(self._session_key(session_id))
+            return None
+        return session
 
     async def _session_lock(self, session_key: str) -> asyncio.Lock:
         async with self._session_locks_guard:
@@ -147,13 +155,28 @@ class SessionRegistry:
             if lock is None:
                 lock = asyncio.Lock()
                 self._session_locks[session_key] = lock
-            return lock
+            self._session_refs[session_key] = self._session_refs.get(session_key, 0) + 1
+        return lock
+
+    async def _release_session_lock(self, session_key: str) -> None:
+        async with self._session_locks_guard:
+            refs = self._session_refs.get(session_key)
+            if refs is None:
+                return
+            if refs <= 1:
+                self._session_refs.pop(session_key, None)
+                self._session_locks.pop(session_key, None)
+            else:
+                self._session_refs[session_key] = refs - 1
 
     async def obtain(self, session_id: str | None, **kwargs: Any) -> tuple[Any, str]:
         if session_id:
             lock = await self._session_lock(session_id)
-            async with lock:
-                return await self._obtain(session_id, **kwargs)
+            try:
+                async with lock:
+                    return await self._obtain(session_id, **kwargs)
+            finally:
+                await self._release_session_lock(session_id)
         return await self._obtain(session_id, **kwargs)
 
     async def _obtain(self, session_id: str | None, **kwargs: Any) -> tuple[Any, str]:
@@ -165,6 +188,8 @@ class SessionRegistry:
         new_id = session.id
         bind_key = session_id or new_id
         now = self._now()
+        evicted: list[str] = []
+        record: dict[str, Any] | None = None
         with self._lock:
             self._sessions[new_id] = (session, now)
             if bind_key != new_id:
@@ -172,21 +197,28 @@ class SessionRegistry:
             self._sessions.move_to_end(bind_key)
             if bind_key != new_id:
                 self._sessions.move_to_end(new_id)
-            while len(self._sessions) > self._maxsize:
-                protect = {new_id, bind_key}
-                evictable = [k for k in self._sessions if k not in protect]
-                if not evictable:
+            protect = {new_id, bind_key}
+            seen: set[str] = set()
+            while self._sessions and len(self._sessions) > self._maxsize:
+                oldest, entry = self._sessions.popitem(last=False)
+                if oldest not in protect:
+                    evicted.append(oldest)
+                    self._session_locks.pop(oldest, None)
+                    self._session_refs.pop(oldest, None)
+                    continue
+                self._sessions[oldest] = entry
+                if oldest in seen:
                     break
-                oldest = min(evictable, key=lambda k: self._sessions[k][1])
-                self._sessions.pop(oldest, None)
-                if self._store is not None:
-                    self._store.discard(self._session_key(oldest))
-                self._session_locks.pop(oldest, None)
+                seen.add(oldest)
             if self._store is not None:
                 record = self._serialize(session)
-                self._store.set(self._session_key(new_id), record)
-                if bind_key != new_id:
-                    self._store.set(self._session_key(bind_key), record)
+        store = self._store
+        if store is not None and record is not None:
+            store.set(self._session_key(new_id), record)
+            if bind_key != new_id:
+                store.set(self._session_key(bind_key), record)
+            for oldest in evicted:
+                store.discard(self._session_key(oldest))
         return session, bind_key
 
     def touch_last_message(self, session_id: str, message_id: str | None) -> None:
@@ -205,11 +237,13 @@ class SessionRegistry:
         if self._store is not None:
             self._store.discard(self._session_key(session_id))
         self._session_locks.pop(session_id, None)
+        self._session_refs.pop(session_id, None)
 
     def close_all(self) -> None:
         with self._lock:
             self._sessions.clear()
         self._session_locks.clear()
+        self._session_refs.clear()
         if self._store is not None:
             prefix = self._key_prefix
             for key, _ in self._store.items():

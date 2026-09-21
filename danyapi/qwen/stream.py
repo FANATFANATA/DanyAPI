@@ -11,7 +11,7 @@ THINK_PHASES = {"think", "DeepThinking"}
 SUMMARY_PHASE = "thinking_summary"
 
 _IMAGE_URL_RE = re.compile(r"!\[[^\]]*\]\((https?://[^\s)>'\"]+)\)|(https?://cdn\.qwenlm\.ai/[^\s)>'\"]+)")
-_IMAGE_OVERLAP = 4096
+_IMAGE_TAIL_LIMIT = 4096
 _TRAILING_PUNCT = ".,;:!?"
 
 
@@ -27,6 +27,20 @@ def _extract_image_urls(text: str) -> list[str]:
         if url:
             urls.append(url)
     return urls
+
+
+def _incomplete_tail(window: str) -> str:
+    if len(window) > _IMAGE_TAIL_LIMIT:
+        window = window[-_IMAGE_TAIL_LIMIT:]
+    scan_from = 0
+    for match in _IMAGE_URL_RE.finditer(window):
+        scan_from = match.end()
+    tail_index = len(window)
+    for marker in ("![", "http"):
+        start = window.rfind(marker, scan_from)
+        if start != -1 and start < tail_index:
+            tail_index = start
+    return window[tail_index:] if tail_index < len(window) else ""
 
 
 def _summary_text(item: Any) -> str:
@@ -45,6 +59,9 @@ class QwenStreamReconstructor:
         self.response_id: str | None = None
         self._content_parts: list[str] = []
         self._reasoning_parts: list[str] = []
+        self._content_joined_cache: str | None = None
+        self._reasoning_joined_cache: str | None = None
+        self._nonempty: bool = False
         self.image_urls: list[str] = []
         self.image_size: tuple[int, int] | None = None
         self.finished: bool = False
@@ -59,19 +76,26 @@ class QwenStreamReconstructor:
 
     @property
     def content(self) -> str:
-        return "".join(self._content_parts)
+        if self._content_joined_cache is None:
+            self._content_joined_cache = "".join(self._content_parts)
+        return self._content_joined_cache
 
     @property
     def reasoning(self) -> str:
-        return "".join(self._reasoning_parts)
+        if self._reasoning_joined_cache is None:
+            self._reasoning_joined_cache = "".join(self._reasoning_parts)
+        return self._reasoning_joined_cache
 
     def _collect_image_urls(self, text: str) -> None:
+        if not text:
+            return
         window = self._image_scan_tail + text
         for url in _extract_image_urls(window):
             if url not in self._seen_image_urls:
                 self._seen_image_urls.add(url)
                 self.image_urls.append(url)
-        self._image_scan_tail = window[-_IMAGE_OVERLAP:]
+                self._nonempty = True
+        self._image_scan_tail = _incomplete_tail(window)
 
     def handle(self, event: SSEEvent) -> None:
         data = event.data
@@ -105,6 +129,8 @@ class QwenStreamReconstructor:
             text = _delta_text(delta, "content")
             if text:
                 self._content_parts.append(text)
+                self._content_joined_cache = None
+                self._nonempty = True
                 self._content_pending.append(text)
                 self._collect_image_urls(text)
             image_field = delta.get("image_url") or delta.get("image")
@@ -112,6 +138,7 @@ class QwenStreamReconstructor:
                 if image_field not in self._seen_image_urls:
                     self._seen_image_urls.add(image_field)
                     self.image_urls.append(image_field)
+                    self._nonempty = True
             extra = delta.get("extra")
             if isinstance(extra, dict):
                 hw = extra.get("output_image_hw")
@@ -130,6 +157,7 @@ class QwenStreamReconstructor:
                         if val not in self._seen_image_urls:
                             self._seen_image_urls.add(val)
                             self.image_urls.append(val)
+                            self._nonempty = True
                     elif isinstance(val, list):
                         for item in val:
                             item_url = item if isinstance(item, str) else (item.get("url") if isinstance(item, dict) else None)
@@ -137,16 +165,21 @@ class QwenStreamReconstructor:
                                 if item_url not in self._seen_image_urls:
                                     self._seen_image_urls.add(item_url)
                                     self.image_urls.append(item_url)
+                                    self._nonempty = True
         elif phase in ANSWER_PHASES:
             text = _delta_text(delta, "content")
             if text:
                 self._content_parts.append(text)
+                self._content_joined_cache = None
+                self._nonempty = True
                 self._content_pending.append(text)
                 self._collect_image_urls(text)
         elif phase in THINK_PHASES:
             text = _delta_text(delta, "content")
             if text:
                 self._reasoning_parts.append(text)
+                self._reasoning_joined_cache = None
+                self._nonempty = True
                 self._reasoning_pending.append(text)
         elif phase == SUMMARY_PHASE:
             extra = delta.get("extra")
@@ -158,6 +191,8 @@ class QwenStreamReconstructor:
                         joined = "\n\n".join(text for text in (_summary_text(item) for item in items) if text)
                         if joined:
                             self._reasoning_parts[:] = [joined]
+                            self._reasoning_joined_cache = joined
+                            self._nonempty = True
                             self._reasoning_pending[:] = [joined]
                             self._reasoning_replaced = True
 
@@ -178,7 +213,7 @@ class QwenStreamReconstructor:
 
     @property
     def has_content(self) -> bool:
-        return bool(self.content or self.reasoning or self.image_urls)
+        return self._nonempty
 
     @property
     def usage_tokens(self) -> dict:

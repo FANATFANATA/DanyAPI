@@ -36,12 +36,31 @@ def new_uuid() -> str:
 _WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
+_TIMEZONE_TTL = 1.0
+
+
+class _TzCache:
+    def __init__(self) -> None:
+        self.value: str = ""
+        self.ts: float = 0.0
+
+
+_tz_cache = _TzCache()
+
 
 def timezone_header() -> str:
     now = datetime.datetime.now().astimezone()
     offset = now.strftime("%z")
     stamp = f"{_WEEKDAYS[now.weekday()]} {_MONTHS[now.month - 1]} {now.day:02d} {now.year} {now.hour:02d}:{now.minute:02d}:{now.second:02d}"
     return f"{stamp} GMT{offset}"
+
+
+def _cached_timezone_header() -> str:
+    now = time.monotonic()
+    if now - _tz_cache.ts >= _TIMEZONE_TTL or not _tz_cache.value:
+        _tz_cache.value = timezone_header()
+        _tz_cache.ts = now
+    return _tz_cache.value
 
 
 @dataclass
@@ -92,7 +111,7 @@ class QwenClient:
     def _request_headers(headers: dict | None = None) -> dict:
         base = {
             "X-Request-Id": new_uuid(),
-            "Timezone": timezone_header(),
+            "Timezone": _cached_timezone_header(),
         }
         if headers:
             base.update(headers)

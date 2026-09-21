@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import random
+import re
 import time
 import uuid
 from collections.abc import Iterator
@@ -349,16 +350,32 @@ def _split_stop(stop: Any) -> list[str]:
     return []
 
 
+_CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3040-\u30ff\uac00-\ud7af]")
+
+
+def _token_estimate(cjk: int, other: int) -> int:
+    if other == 0:
+        return cjk
+    return cjk + max(1, other // 4)
+
+
 def _trim_to_tokens(text: str, budget: int | None) -> str:
     if budget is None or not text or estimate_tokens(text) <= budget:
         return text
     words = text.split(" ")
     parts: list[str] = []
-    for word in words:
-        candidate = " ".join([*parts, word])
-        if estimate_tokens(candidate) > budget:
+    total_cjk = 0
+    total_other = 0
+    for i, word in enumerate(words):
+        cjk = len(_CJK_RE.findall(word))
+        other = len(word) - cjk + (1 if i else 0)
+        cand_cjk = total_cjk + cjk
+        cand_other = total_other + other
+        if _token_estimate(cand_cjk, cand_other) > budget:
             break
         parts.append(word)
+        total_cjk = cand_cjk
+        total_other = cand_other
     return " ".join(parts)
 
 
@@ -432,13 +449,14 @@ async def _collect_response(
     stale_rebuilt = False
     attempt = 0
     rec: QwenStreamReconstructor | None = None
+    prompt_with_images = _append_image_markdown(prompt, messages)
     try:
         while True:
             try:
                 resp = await _send_completion(
                     account.client,
                     session,
-                    _append_image_markdown(prompt, messages),
+                    prompt_with_images,
                     model_id,
                     thinking,
                     search,
@@ -461,6 +479,7 @@ async def _collect_response(
                         tool_schemas = toolemu.tool_schema_map(tools)
                     except ValueError as build_exc:
                         raise exc from build_exc
+                    prompt_with_images = _append_image_markdown(prompt, messages)
                     log.warning(
                         "qwen chat %s is stale (%s), rebuilt full history into a fresh chat",
                         session_key,
@@ -661,7 +680,6 @@ async def stream_openai(
             tool_schemas = toolemu.tool_schema_map(tools)
 
         rec: QwenStreamReconstructor | None = None
-        content_parts: list[str] = []
         content_buf = ""
         content_shown_len = 0
         tool_hidden = False
@@ -670,9 +688,10 @@ async def stream_openai(
         had_cached_session = bool(existing_sid) and account.sessions.get(existing_sid) is not None
         stale_rebuilt = False
         attempt = 0
+        prompt_with_images = _append_image_markdown(prompt, messages)
         while True:
             try:
-                resp = await _send_completion(account.client, session, _append_image_markdown(prompt, messages), model_id, thinking, search)
+                resp = await _send_completion(account.client, session, prompt_with_images, model_id, thinking, search)
             except ContextLimitError:
                 _drop_session(pool, account, session_key)
                 for line in _stream_context_limit_lines(chunk_id, created, model, session_key):
@@ -692,6 +711,7 @@ async def stream_openai(
                         for line in _stream_error_lines(chunk_id, created, model, detail, session_key):
                             yield line
                         return
+                    prompt_with_images = _append_image_markdown(prompt, messages)
                     log.warning(
                         "qwen chat %s is stale (%s), rebuilt full history into a fresh chat",
                         session_key,
@@ -757,8 +777,7 @@ async def stream_openai(
                         delta: dict = {}
                         if c_diff:
                             if tool_mode:
-                                content_parts.append(c_diff)
-                                content_buf = "".join(content_parts)
+                                content_buf += c_diff
                                 shown, content_shown_len, tool_hidden = toolemu.tool_visible(content_buf, content_shown_len, tool_hidden, tool_schemas)
                                 if shown:
                                     delta["content"] = shown
@@ -808,8 +827,7 @@ async def stream_openai(
                     delta2: dict = {}
                     if c_diff:
                         if tool_mode:
-                            content_parts.append(c_diff)
-                            content_buf = "".join(content_parts)
+                            content_buf += c_diff
                             shown, content_shown_len, tool_hidden = toolemu.tool_visible(content_buf, content_shown_len, tool_hidden, tool_schemas)
                             if shown:
                                 delta2["content"] = shown

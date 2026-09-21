@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import os
 import shutil
@@ -12,6 +14,8 @@ ROOT = Path(__file__).resolve().parent.parent
 REPO = "FANATFANATA/DanyAPI"
 API = f"https://api.github.com/repos/{REPO}/releases/latest"
 TAG_FILE = ROOT / ".installed-release"
+TAG_CACHE = ROOT / ".latest-release-cache"
+TAG_CACHE_TTL = 10 * 60
 ENV_FILE = ROOT / ".env"
 USER_FILES = (".env",)
 
@@ -28,14 +32,34 @@ def env_flag(name, default):
     return value.strip().lower() not in ("0", "false", "no", "off")
 
 
+def cached_latest_tag():
+    try:
+        stat = TAG_CACHE.stat()
+        if time.time() - stat.st_mtime > TAG_CACHE_TTL:
+            return None, False
+        tag = TAG_CACHE.read_text(encoding="utf-8").strip()
+        return (tag or None), True
+    except OSError:
+        return None, False
+
+
 def api_latest_tag():
+    cached, fresh = cached_latest_tag()
+    if fresh:
+        return cached
     req = urllib.request.Request(API, headers={"User-Agent": "DanyAPI", "Accept": "application/vnd.github+json"})
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-            return data.get("tag_name")
+            tag = data.get("tag_name")
     except Exception:
         return None
+    if tag:
+        try:
+            TAG_CACHE.write_text(tag, encoding="utf-8")
+        except OSError:
+            pass
+    return tag
 
 
 def git_local_tag():
