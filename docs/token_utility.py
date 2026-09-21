@@ -9,7 +9,7 @@ Uses your DEFAULT browser (no automation, no dependencies).
 Flow:
   1. A tiny local server starts (127.0.0.1:8765) and a page opens in your
      default browser.
-  2. Step by step wizard: first drag the "🔍 Run DanyAPI token utility" button to
+  2. Step by step wizard: first drag the " Run DanyAPI token utility" button to
      your bookmarks bar (one time only), click Next.
   3. The page guides you to DeepSeek: log in, click the grabber bookmark
      there. The token is sent silently, the DeepSeek tab closes itself,
@@ -61,7 +61,7 @@ TEXTS: dict[str, str] = {
     # Step 0 - bookmarklet
     "step0_heading": "One-time: add the token utility bookmarklet",
     "step0_intro": "<b>Drag</b> this button onto your browser's <b>bookmarks bar</b>,<br>(press Ctrl+Shift+B if you don't see the bar):",
-    "bookmarklet_label": "🔍 Run DanyAPI token utility",
+    "bookmarklet_label": "Run DanyAPI token utility",
     "bookmarklet_aria": "DanyAPI token utility - drag this button onto your bookmarks bar",
     "step0_fineprint": "Why is this necessary? We know this looks <i>weird and unfamiliar</i>, but while other methods for"
     " extracting tokens exist, they are <b>not browser-agnostic</b>. This bookmarklet will execute JavaScript in the"
@@ -71,25 +71,25 @@ TEXTS: dict[str, str] = {
     "step1_heading": "DeepSeek token",
     "step1_p1": "<b>1.</b> Open DeepSeek by clicking the button below.",
     "step1_p2": "<b>2.</b> Sign in to your account if needed.",
-    "step1_p3": "<b>3.</b> On the DeepSeek page, click your <b>“🔍 Run DanyAPI token utility”</b> bookmark.",
+    "step1_p3": "<b>3.</b> On the DeepSeek page, click your <b>“Run DanyAPI token utility”</b> bookmark.",
     "step1_fineprint": "The tab closes automatically after the token is sent. If the token is valid, a green checkmark"
     " will appear on this page and you will be guided to the next step within a few seconds. Overwise a red cross will"
     " appear, and you can click the button below to try again.",
     "step1_button": "Open DeepSeek →",
-    "step1_waiting": "Waiting for the DeepSeek token…",
+    "step1_waiting": "Waiting for the DeepSeek token...",
     # Step 2 - Qwen
     "step2_heading": "Qwen token",
     "step2_p1": "<b>1.</b> Open Qwen by clicking the button below.",
     "step2_p2": "<b>2.</b> Sign in to your account if needed.",
-    "step2_p3": "<b>3.</b> On the Qwen page, click the <b>“🔍 Run DanyAPI token utility”</b> bookmark.",
+    "step2_p3": "<b>3.</b> On the Qwen page, click the <b>“Run DanyAPI token utility”</b> bookmark.",
     "step2_fineprint": "The tab closes automatically after the token is sent. If the token is valid, a green checkmark"
     " will appear on this page and you will be guided to the next step within a few seconds. Overwise a red cross will"
     " appear, and you can click the button below to try again.",
     "step2_button": "Open Qwen →",
-    "step2_waiting": "Waiting for the Qwen token…",
+    "step2_waiting": "Waiting for the Qwen token...",
     # Step 3 - done
     "step3_heading": "Tokens successfully extracted!",
-    "step3_text": "Redirecting to your tokens…",
+    "step3_text": "Redirecting to your tokens...",
     # Footer
     "footer_public_instance": "Public Instance",
     "footer_docs": "Docs",
@@ -98,15 +98,15 @@ TEXTS: dict[str, str] = {
     "footer_docs_url": "https://danyapi.cloudpub.ru/docs/",
     "footer_github_url": "https://github.com/FANATFANATA/DanyAPI",
     # --- Wizard page JS --------------------------------------------------
-    "js_title_wizard": "🔑 DanyAPI token utilities",
-    "js_title_step1": "🤖 Step 1 of 2 - DeepSeek",
-    "js_title_step2": "🤖 Step 2 of 2 - Qwen",
-    "js_title_done": "🎉 All done!",
+    "js_title_wizard": "DanyAPI token utilities",
+    "js_title_step1": "Step 1 of 2 - DeepSeek",
+    "js_title_step2": "Step 2 of 2 - Qwen",
+    "js_title_done": "All done",
     "js_alert_popup_blocked": "Popup blocked! Please allow popups for this page and try again.",
-    "js_ok_both": "✔ {provider} token received! Redirecting to your tokens shortly…",
-    "js_ok_deepseek": "✔ DeepSeek token received! Moving on to Qwen shortly…",
-    "js_ok_qwen": "✔ Qwen token received! Moving to your tokens shortly…",
-    "js_fail": "✖ No token found - you are probably not logged in. Log in on {provider}, then try again.",
+    "js_ok_both": "{provider} token received. Redirecting to your tokens shortly...",
+    "js_ok_deepseek": "DeepSeek token received. Moving on to Qwen shortly...",
+    "js_ok_qwen": "Qwen token received. Moving to your tokens shortly...",
+    "js_fail": "No token found - you are probably not logged in. Log in on {provider}, then try again.",
     # --- Results page ----------------------------------------------------
     "results_page_title": "DanyAPI - Your tokens",
     "results_title": "Your Tokens",
@@ -117,14 +117,14 @@ TEXTS: dict[str, str] = {
     "results_pane_ds": "DeepSeek token",
     "results_pane_qw": "Qwen token",
     "results_copy": "Copy",
-    "results_copied": "✓ Copied",
-    "results_no_token": "❌ No token received - complete the setup page first.",
+    "results_copied": "Copied",
+    "results_no_token": "No token received - complete the setup page first.",
     "results_footer_again": "Run utility again",
     "results_footer_docs": "Docs",
     "results_footer_github": "GitHub",
     # --- Popup page (shown in the provider tab after collection) --------
     "popup_title": "Token received",
-    "popup_message": "✔ Token received - you can close this tab and return to the DanyAPI page.",
+    "popup_message": "Token received - you can close this tab and return to the DanyAPI page.",
 }
 
 # ----------------------------------------------------------------------------
@@ -549,7 +549,7 @@ SETUP_PAGE = r"""<!DOCTYPE html>
 
   <!-- STEP 3: all done -->
   <div class="step hidden" id="step3">
-    <h2><span class="badge done">✓</span> __step3_heading__</h2>
+    <h2><span class="badge done">OK</span> __step3_heading__</h2>
     <p>__step3_text__</p>
   </div>
 
@@ -579,14 +579,10 @@ const state = { step: 0, deepseek: __HAS_DEEPSEEK__, qwen: __HAS_QWEN__ };
   c.style.width = "214px"; c.style.height = "24px";
   var ctx = c.getContext("2d");
   ctx.scale(dpr, dpr);
-  var full = T.bookmarklet_label;
-  var emoji = full.split(" ")[0], text = " " + full.split(" ").slice(1).join(" ");
   ctx.textBaseline = "middle";
-  ctx.font = "17px sans-serif";
-  ctx.fillText(emoji, 2, 13);
   ctx.font = "700 0.9rem Manrope, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
   ctx.fillStyle = "#ffd479";
-  ctx.fillText(text, 26, 12.5);
+  ctx.fillText(T.bookmarklet_label, 4, 12.5);
 })();
 
 function syncFromServer() {
@@ -1013,10 +1009,10 @@ def register_token(provider: str, token: str) -> bool:
     if token and re.fullmatch(r"\S{16,4096}", token):
         STATE[provider] = token
         STATE[provider + "_failed"] = False
-        print(f"    ✔ {provider} token received ({len(token)} chars)")
+        print(f"    [ok] {provider} token received ({len(token)} chars)")
         return True
     STATE[provider + "_failed"] = True
-    print(f"    ✖ {provider}: no valid token found (user probably not logged in)")
+    print(f"    [fail] {provider}: no valid token found (user probably not logged in)")
     return False
 
 
@@ -1065,12 +1061,8 @@ class Handler(BaseHTTPRequestHandler):
             qs = parse_qs(parts.query)
             provider = (qs.get("p") or [""])[0]
             token = (qs.get("t") or [""])[0].strip()
-            if register_token(provider, token):
-                self._send(SUCCESS_PAGE.encode())
-            else:
-                # Invalid/missing token: still close the tab like a success -
-                # the wizard itself shows the red "no token" hint via /status.
-                self._send(SUCCESS_PAGE.encode())
+            register_token(provider, token)
+            self._send(_apply_texts(SUCCESS_PAGE).encode())
         else:  # "/" and anything else -> setup page
             self._send(render_setup_page(port=self.serve_port).encode())
 
@@ -1101,7 +1093,7 @@ def serve(port: int = RESULT_PORT, open_browser: bool = True) -> None:
     print(f"  Local page: {url}")
     print("  (Ctrl+C in this window to stop when you're done.)\n")
     if open_browser:
-        print("  Opening your default browser…")
+        print("  Opening your default browser...")
         webbrowser.open_new_tab(url)
     try:
         server.serve_forever()
