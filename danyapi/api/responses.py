@@ -535,9 +535,28 @@ def sse_event(event_type: str, data: dict) -> str:
 def _iter_sse_payloads(chunk: Any) -> Iterator[dict | None]:
     if not isinstance(chunk, str):
         return
-    for block in chunk.split("\n\n"):
+    start = 0
+    length = len(chunk)
+    while start <= length:
+        end = chunk.find("\n\n", start)
+        if end == -1:
+            block = chunk[start:]
+            start = length + 1
+        else:
+            block = chunk[start:end]
+            start = end + 2
         data_line = None
-        for line in block.splitlines():
+        line_start = 0
+        block_len = len(block)
+        while line_start <= block_len:
+            line_end = block.find("\n", line_start)
+            if line_end == -1:
+                line = block[line_start:]
+                line_start = block_len + 1
+            else:
+                line = block[line_start:line_end]
+                line = line.removesuffix("\r")
+                line_start = line_end + 1
             if line.startswith("data:"):
                 data_line = line[5:].strip()
         if data_line is None:
@@ -574,11 +593,11 @@ class _StreamState:
         self.output: list[dict] = []
         self.reasoning_id: str | None = None
         self.reasoning_index: int | None = None
-        self.reasoning_text = ""
+        self.reasoning_parts: list[str] = []
         self.reasoning_open = False
         self.message_id: str | None = None
         self.message_index: int | None = None
-        self.message_text = ""
+        self.message_parts: list[str] = []
         self.message_open = False
         self.tool_items: dict[int, dict] = {}
         self.usage: Any = None
@@ -607,7 +626,7 @@ class _StreamState:
                 "response.reasoning_summary_part.added",
                 {"item_id": self.reasoning_id, "output_index": self.reasoning_index, "summary_index": 0, "part": part},
             )
-        self.reasoning_text += text
+        self.reasoning_parts.append(text)
         yield self.emit(
             "response.reasoning_summary_text.delta",
             {"item_id": self.reasoning_id, "output_index": self.reasoning_index, "summary_index": 0, "delta": text},
@@ -617,11 +636,12 @@ class _StreamState:
         if not self.reasoning_open:
             return
         self.reasoning_open = False
+        text = "".join(self.reasoning_parts)
         yield self.emit(
             "response.reasoning_summary_text.done",
-            {"item_id": self.reasoning_id, "output_index": self.reasoning_index, "summary_index": 0, "text": self.reasoning_text},
+            {"item_id": self.reasoning_id, "output_index": self.reasoning_index, "summary_index": 0, "text": text},
         )
-        part = {"type": "summary_text", "text": self.reasoning_text}
+        part = {"type": "summary_text", "text": text}
         yield self.emit(
             "response.reasoning_summary_part.done",
             {"item_id": self.reasoning_id, "output_index": self.reasoning_index, "summary_index": 0, "part": part},
@@ -644,7 +664,7 @@ class _StreamState:
                 "response.content_part.added",
                 {"item_id": self.message_id, "output_index": self.message_index, "content_index": 0, "part": part},
             )
-        self.message_text += text
+        self.message_parts.append(text)
         yield self.emit(
             "response.output_text.delta",
             {"item_id": self.message_id, "output_index": self.message_index, "content_index": 0, "delta": text},
@@ -654,11 +674,12 @@ class _StreamState:
         if not self.message_open:
             return
         self.message_open = False
+        text = "".join(self.message_parts)
         yield self.emit(
             "response.output_text.done",
-            {"item_id": self.message_id, "output_index": self.message_index, "content_index": 0, "text": self.message_text},
+            {"item_id": self.message_id, "output_index": self.message_index, "content_index": 0, "text": text},
         )
-        part = {"type": "output_text", "text": self.message_text, "annotations": []}
+        part = {"type": "output_text", "text": text, "annotations": []}
         yield self.emit(
             "response.content_part.done",
             {"item_id": self.message_id, "output_index": self.message_index, "content_index": 0, "part": part},
