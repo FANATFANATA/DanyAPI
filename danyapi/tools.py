@@ -52,6 +52,32 @@ _DSML_HIDDEN_NAKED = re.compile(
     rf"{_DSML_MARKER}\s*<({_DSML_HIDDEN_NAMES})\b[^<>]*>.*?</\1>\s*{_DSML_MARKER}",
     re.DOTALL | re.IGNORECASE,
 )
+_DSML_EQUALS = r"=\uff1d"
+_DSML_LAX_MARKER = rf"(?:{_DSML_MARKER}|{_DSML_CHAR}+)"
+_DSML_LAX_SKIP_TAGS = frozenset(
+    {"parameter", "tool_calls", "tool_call", "function_call", "function_calls", "call", "calls", "tool", "functions", "tools", "name"}
+    | set(_DSML_HIDDEN_NAMES.split("|"))
+)
+_DSML_LAX_TAG = re.compile(
+    rf"</?{_DSML_LAX_MARKER}\s*[a-zA-Z_][a-zA-Z0-9_-]*\b[^<>]*>",
+    re.IGNORECASE,
+)
+_DSML_LAX_BLOCK = re.compile(
+    rf"<{_DSML_LAX_MARKER}\s*(?:tool_calls|calls)\b[^<>]*>(?P<body>.*?)</{_DSML_LAX_MARKER}\s*(?:tool_calls|calls)\s*>",
+    re.DOTALL | re.IGNORECASE,
+)
+_DSML_LAX_OPENANY = re.compile(
+    rf"<(?P<sep>{_DSML_LAX_MARKER})\s*(?P<tagname>[a-zA-Z_][a-zA-Z0-9_-]*)\b(?P<attrs>[^>]*)>",
+    re.IGNORECASE,
+)
+_DSML_LAX_NAME_ATTR = re.compile(rf"\bname\s*[{_DSML_EQUALS}]\s*([\"'])([^\"']+)\1", re.IGNORECASE)
+_DSML_LAX_TOOLNAME_TAIL = re.compile(rf"(?<!parameter\s)\bname\s*[{_DSML_EQUALS}]\s*([\"'])([^\"']+)\1", re.IGNORECASE)
+_DSML_LAX_PARAMETER = re.compile(
+    rf"(?:<{_DSML_LAX_MARKER}\s*)?parameter\b\s+name\s*[{_DSML_EQUALS}]\s*"
+    rf"([\"']?)(?P<name>[^\"']+)\1[^>]*>(?P<value>.*?)"
+    rf"(?:</?{_DSML_LAX_MARKER}\s*parameter\s*>|/?\s*parameter\s*>|</?parameter\s*>|/?parameter\s*>)",
+    re.DOTALL | re.IGNORECASE,
+)
 _XML_ELEMENT = re.compile(r"<([a-zA-Z_][a-zA-Z0-9_-]*)\b([^>]*)>(.*?)</\1>", re.DOTALL | re.IGNORECASE)
 _XML_SELFCLOSE = re.compile(r"<([a-zA-Z_][a-zA-Z0-9_-]*)\b([^>]*?)/>", re.DOTALL | re.IGNORECASE)
 _XML_WRAPPER_OPEN = re.compile(
@@ -228,8 +254,6 @@ _XML_PARAM_RE = re.compile(
 )
 _XML_ATTR_RE = re.compile(r"([a-zA-Z_][a-zA-Z0-9_.-]*)\s*=\s*(\"[^\"]*\"|'[^']*')", re.IGNORECASE)
 _XML_NESTED_RE = re.compile(r"<[a-zA-Z_]")
-_PYTHON_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*")
-_PYTHON_CALL_RE = re.compile(r"\s*([A-Za-z_][A-Za-z0-9_-]*)\s*\(")
 _XML_WRAPPER_CLOSE_RE = re.compile(r"</(?:tool_calls|tool_call|function_calls|function_call|tools|calls|_calls)\s*>", re.IGNORECASE)
 _XML_TOOL_NAMES = r"invoke|toolinvoke|tool_invoke|use_tool|tool_use|call|function|tool"
 _XML_TOOL_ELEMENT_RE = re.compile(
@@ -436,21 +460,6 @@ def _array_hold(text: str, start: int) -> int:
     return -1
 
 
-def _python_hold(text: str, start: int, names: tuple[str, ...]) -> int:
-    if not names:
-        return -1
-    line_start = text.rfind("\n") + 1
-    if line_start < start:
-        return -1
-    line = text[line_start:].lstrip().lower()
-    if not line:
-        return -1
-    for name in names:
-        if (name + "(").startswith(line):
-            return line_start
-    return -1
-
-
 def tool_call_boundary(
     text: str,
     start: int = 0,
@@ -475,7 +484,6 @@ def tool_call_boundary(
         _json_hold(text, start),
         _tag_hold(text, start, names),
         _array_hold(text, start),
-        _python_hold(text, start, names),
     ):
         if candidate != -1 and (hold == -1 or candidate < hold):
             hold = candidate
@@ -507,6 +515,10 @@ TOOL_CALL_INSTRUCTION = (
     "</invoke>\n"
     "</tool_calls>\n"
     "Use the exact function names and argument keys from the list above.\n"
+    'The numbers (1, 2, ...) only help you scan the list; always write the real function name in <invoke name="...">.\n'
+    "Never invent a function name or an argument key that is not in the list.\n"
+    "Use only argument values that are real and present in the conversation; never guess or fabricate a value.\n"
+    "If no listed function fits or a required value is unknown, reply with normal text instead of calling a function.\n"
     "Put independent calls in separate sibling <invoke> elements.\n"
     "No text before or after the <tool_calls> block.\n"
     "{choice}"
@@ -519,8 +531,8 @@ TOOL_TAIL_REMINDER = (
 )
 
 CHOICE_INSTRUCTIONS = {
-    "required": "You MUST call one or more functions from the list above.",
-    "function": "You MUST call a function.",
+    "required": "You MUST call one or more functions from the list above. Call no function that is not in the list.",
+    "function": "You MUST call a function from the list above. Call no function that is not in the list.",
 }
 
 JSON_MODE_INSTRUCTION = "You must reply with ONLY a valid JSON object.{constraints}"
@@ -578,6 +590,29 @@ def _choice_name(tool_choice: Any) -> str | None:
     return None
 
 
+def _argument_summary(fn: dict) -> str | None:
+    params = fn.get("parameters")
+    if not isinstance(params, dict):
+        return None
+    properties = params.get("properties")
+    if not isinstance(properties, dict) or not properties:
+        return None
+    required = params.get("required")
+    required_names = set(required) if isinstance(required, list) else set()
+    parts: list[str] = []
+    for key, prop in properties.items():
+        if not isinstance(key, str) or not key:
+            continue
+        prop_type = prop.get("type") if isinstance(prop, dict) else (prop if isinstance(prop, str) else None)
+        if isinstance(prop_type, str) and prop_type:
+            parts.append(f"{key} ({prop_type}{', required' if key in required_names else ', optional'})")
+        elif key in required_names:
+            parts.append(f"{key} (required)")
+        else:
+            parts.append(key)
+    return ", ".join(parts) if parts else None
+
+
 def render_tool_schema(tools: list[Any] | None, tool_choice: Any = None) -> str | None:
     if not tools:
         return None
@@ -603,12 +638,15 @@ def render_tool_schema(tools: list[Any] | None, tool_choice: Any = None) -> str 
             else:
                 params_json = json.dumps(params, ensure_ascii=False, separators=(",", ":"))
             lines.append(f"   parameters: {params_json}")
+            argument_summary = _argument_summary(fn)
+            if argument_summary:
+                lines.append(f"   arguments: {argument_summary}")
     if choice in CHOICE_INSTRUCTIONS:
         choice_line = CHOICE_INSTRUCTIONS[choice]
     elif isinstance(choice, str) and choice not in ("auto", "none", "required"):
         choice_line = f"You MUST call exactly the function {choice} and no other functions."
     else:
-        choice_line = "If you do not need to call any function, reply normally with your answer."
+        choice_line = "If you do not need to call any function, reply normally with your answer and do not invent a tool call."
     return TOOL_CALL_INSTRUCTION.format(
         functions="\n".join(lines),
         choice=choice_line,
@@ -1838,172 +1876,6 @@ def _iter_json_objects(text: str) -> Iterator[tuple[dict, int, int]]:
         i = end + 1
 
 
-def _split_top_level(text: str, delimiter: str = ",") -> list[str]:
-    parts: list[str] = []
-    current: list[str] = []
-    depth = 0
-    in_string = False
-    escaped = False
-    for ch in text:
-        if in_string:
-            current.append(ch)
-            if escaped:
-                escaped = False
-            elif ch == "\\":
-                escaped = True
-            elif ch == '"':
-                in_string = False
-            continue
-        if ch == '"':
-            in_string = True
-            current.append(ch)
-        elif ch in "{([":
-            depth += 1
-            current.append(ch)
-        elif ch in "})]":
-            depth -= 1
-            current.append(ch)
-        elif ch == delimiter and depth == 0:
-            parts.append("".join(current))
-            current = []
-        else:
-            current.append(ch)
-    parts.append("".join(current))
-    return parts
-
-
-def _python_value(text: str) -> Any:
-    stripped = text.strip()
-    if not stripped:
-        return None
-    if stripped.startswith(("{", "[")):
-        try:
-            return _loads_lenient(stripped)
-        except (ValueError, TypeError, AttributeError):
-            return stripped
-    if stripped[0] in ("'", '"'):
-        if len(stripped) < 2 or stripped[-1] != stripped[0]:
-            return stripped
-        if stripped[0] == '"':
-            try:
-                return json.loads(stripped)
-            except (json.JSONDecodeError, TypeError):
-                return stripped[1:-1]
-        normalized = _normalize_single_quotes(stripped)
-        try:
-            return json.loads(normalized)
-        except (json.JSONDecodeError, TypeError):
-            return stripped[1:-1].replace("\\'", "'")
-    low = stripped.lower()
-    if low in ("true", "false"):
-        return low == "true"
-    if low in ("none", "null"):
-        return None
-    try:
-        return int(stripped)
-    except (ValueError, TypeError):
-        pass
-    try:
-        return float(stripped)
-    except (ValueError, TypeError):
-        pass
-    return stripped
-
-
-def _parse_python_call_args(text: str) -> dict[str, Any] | None:
-    args: dict[str, Any] = {}
-    for raw_part in _split_top_level(text):
-        part = raw_part.strip()
-        if not part:
-            continue
-        eq = part.find("=")
-        if eq <= 0:
-            return None
-        key = part[:eq].strip()
-        if not _PYTHON_KEY_RE.fullmatch(key):
-            return None
-        args[key] = _python_value(part[eq + 1 :])
-    return args
-
-
-def _python_call_match(text: str) -> tuple[str, str] | None:
-    match = _PYTHON_CALL_RE.match(text)
-    if match is None:
-        return None
-    depth = 1
-    in_double = False
-    in_single = False
-    escaped = False
-    for i in range(match.end(), len(text)):
-        ch = text[i]
-        if in_double:
-            if escaped:
-                escaped = False
-            elif ch == "\\":
-                escaped = True
-            elif ch == '"':
-                in_double = False
-            continue
-        if in_single:
-            if escaped:
-                escaped = False
-            elif ch == "\\":
-                escaped = True
-            elif ch == "'":
-                in_single = False
-            continue
-        if ch == '"':
-            in_double = True
-        elif ch == "'":
-            in_single = True
-        elif ch == "(":
-            depth += 1
-        elif ch == ")":
-            depth -= 1
-            if depth == 0:
-                if text[i + 1 :].strip():
-                    return None
-                return match.group(1), text[match.end() : i]
-    return None
-
-
-def _parse_python_calls(text: str) -> tuple[list[ToolCall], str] | None:
-    stripped = text.strip()
-    if not stripped:
-        return None
-    single = _python_call_match(stripped)
-    if single is not None:
-        name, args_text = single
-        if not args_text.strip():
-            return [ToolCall.create(name, {})], ""
-        args = _parse_python_call_args(args_text)
-        if args is not None:
-            return [ToolCall.create(name, args)], ""
-        return None
-    lines = [line.strip() for line in stripped.splitlines() if line.strip()]
-    first = -1
-    for i, line in enumerate(lines):
-        if _python_call_match(line) is not None:
-            first = i
-            break
-    if first < 0:
-        return None
-    calls: list[ToolCall] = []
-    for line in lines[first:]:
-        parsed = _python_call_match(line)
-        if parsed is None:
-            return None
-        name, args_text = parsed
-        if not args_text.strip():
-            calls.append(ToolCall.create(name, {}))
-        else:
-            args = _parse_python_call_args(args_text)
-            if args is None:
-                return None
-            calls.append(ToolCall.create(name, args))
-    return calls, " ".join(lines[:first])
-
-
 _YAML_KEY_VALUE_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(.*)$")
 _YAML_TOOL_CALLS_RE = re.compile(r"^tool_calls\s*:?\s*(.*)$", re.IGNORECASE)
 
@@ -2147,6 +2019,89 @@ def _parse_dsml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | 
     return calls, wrapper
 
 
+def _lax_tool_name(attrs: str) -> str | None:
+    match = _DSML_LAX_NAME_ATTR.search(attrs)
+    if match is not None:
+        return match.group(2).strip()
+    return None
+
+
+def _infer_tool_name_from_schemas(param_keys: set[str], tool_schemas: dict[str, dict[str, Any]] | None) -> str | None:
+    if not param_keys or not tool_schemas:
+        return None
+    candidates: list[tuple[int, str]] = []
+    for name, spec in tool_schemas.items():
+        if not isinstance(spec, dict):
+            continue
+        properties = set(spec) - {"_aliases"}
+        if not properties:
+            continue
+        candidates.append((len(properties & param_keys), str(name)))
+    if not candidates:
+        return None
+    best = max(candidates, key=lambda item: (item[0], -len(item[1])))
+    tied = [item for item in candidates if item[0] == best[0]]
+    if len(tied) != 1:
+        return None
+    return best[1]
+
+
+def _parse_dsml_lax_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | None = None) -> tuple[list[ToolCall], str] | None:
+    if _DSML_LAX_TAG.search(text) is None:
+        return None
+    block_match = _DSML_LAX_BLOCK.search(text)
+    block = block_match.group("body") if block_match is not None else text
+    opens = list(_DSML_LAX_OPENANY.finditer(block))
+    invokes = [o for o in opens if o.group("tagname").strip().lower() not in _DSML_LAX_SKIP_TAGS]
+    params = list(_DSML_LAX_PARAMETER.finditer(block))
+    calls: list[ToolCall] = []
+    for index, invoke in enumerate(invokes):
+        tool_name = _lax_tool_name(invoke.group("attrs"))
+        if not tool_name:
+            next_start = invokes[index + 1].start() if index + 1 < len(invokes) else len(block)
+            tail = block[invoke.end() : next_start]
+            tail_name = _DSML_LAX_TOOLNAME_TAIL.search(tail)
+            if tail_name is not None:
+                tool_name = tail_name.group(2).strip()
+        if not tool_name:
+            continue
+        param_types = _schema_for_name(tool_schemas, tool_name)
+        params_by_call: dict[str, Any] = {}
+        for param in params:
+            if param.start() <= invoke.start():
+                continue
+            if index + 1 < len(invokes) and param.start() >= invokes[index + 1].start():
+                continue
+            key = param.group("name").strip()
+            params_by_call[key] = _xml_value(param.group("value"), (param_types or {}).get(key))
+        calls.append(ToolCall.create(tool_name, params_by_call))
+    if not calls and block_match is not None and params:
+        inferred = _infer_tool_name_from_schemas({item.group("name").strip() for item in params}, tool_schemas)
+        if inferred is not None:
+            param_types = _schema_for_name(tool_schemas, inferred)
+            inferred_params: dict[str, Any] = {}
+            for param in params:
+                key = param.group("name").strip()
+                inferred_params[key] = _xml_value(param.group("value"), (param_types or {}).get(key))
+            calls.append(ToolCall.create(inferred, inferred_params))
+    if not calls:
+        return None
+    spans: list[tuple[int, int]] = [(o.start(), o.end()) for o in _DSML_LAX_OPENANY.finditer(text)]
+    spans.extend((p.start(), p.end()) for p in _DSML_LAX_PARAMETER.finditer(text))
+    spans.sort()
+    wrapper_parts: list[str] = []
+    cursor = 0
+    for start, end in spans:
+        if end < cursor:
+            continue
+        if start > cursor:
+            wrapper_parts.append(text[cursor:start])
+        cursor = end
+    wrapper_parts.append(text[cursor:])
+    wrapper = " ".join(_DSML_NAKED.sub(" ", _DSML_LAX_TAG.sub(" ", " ".join(wrapper_parts))).split())
+    return calls, wrapper
+
+
 def _parse_tool_calls_impl(
     text: str,
     tool_schemas: dict[str, dict[str, Any]] | None,
@@ -2159,6 +2114,11 @@ def _parse_tool_calls_impl(
         if report is not None:
             report["strategies"].append("dsml")
         return dsml_parsed
+    dsml_lax_parsed = _parse_dsml_lax_tool_calls(text, tool_schemas)
+    if dsml_lax_parsed is not None:
+        if report is not None:
+            report["strategies"].append("dsml_lax")
+        return dsml_lax_parsed
     stripped = _strip_fences(_strip_dsml(text))
     extracted = _extract_json_object(stripped)
     if extracted is not None:
@@ -2188,12 +2148,6 @@ def _parse_tool_calls_impl(
         if report is not None:
             report["strategies"].append("xml")
         return xml_calls, wrapper
-    python_calls = _parse_python_calls(stripped)
-    if python_calls is not None:
-        py_calls, py_wrapper = python_calls
-        if report is not None:
-            report["strategies"].append("python_call")
-        return py_calls, py_wrapper
     yaml_calls = _parse_yaml_calls(stripped)
     if yaml_calls:
         if report is not None:

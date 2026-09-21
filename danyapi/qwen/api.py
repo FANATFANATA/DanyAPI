@@ -16,6 +16,7 @@ from .. import tools as toolemu
 from ..accounts import account_lock
 from ..config import settings
 from ..deepseek.stream import IncrementalSSE
+from ..tokens import estimate_tokens
 from ..usage import record_usage
 from .client import QwenClient, QwenError
 from .stream import QwenStreamReconstructor, error_code
@@ -305,7 +306,7 @@ async def _human_delay() -> None:
         await asyncio.sleep(delay)
 
 
-def _accumulate_usage(session, rec: QwenStreamReconstructor) -> dict:
+def _accumulate_usage(session, rec: QwenStreamReconstructor, prompt: str = "", completion_text: str | None = None) -> dict:
     current = rec.usage_tokens
     current_input = current["prompt_tokens"]
     current_output = current["completion_tokens"]
@@ -315,11 +316,96 @@ def _accumulate_usage(session, rec: QwenStreamReconstructor) -> dict:
     completion_tokens = max(0, current_output - prev_output)
     session.accumulated_input_tokens = current_input
     session.accumulated_output_tokens = current_output
+    if not completion_tokens and completion_text:
+        completion_tokens = estimate_tokens(completion_text)
+        prompt_tokens = max(prompt_tokens, estimate_tokens(prompt) if prompt else estimate_tokens(completion_text))
     return {
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
         "total_tokens": prompt_tokens + completion_tokens,
     }
+
+
+def _usage_details(usage: dict, reasoning_text: str | None = None) -> dict:
+    result = dict(usage)
+    if not isinstance(result.get("prompt_tokens_details"), dict):
+        result["prompt_tokens_details"] = {"cached_tokens": 0}
+    if not isinstance(result.get("completion_tokens_details"), dict):
+        result["completion_tokens_details"] = {"reasoning_tokens": estimate_tokens(reasoning_text or "")}
+    return result
+
+
+def _max_calls(parallel_tool_calls: bool | None) -> int | None:
+    return 1 if parallel_tool_calls is False else None
+
+
+def _split_stop(stop: Any) -> list[str]:
+    if stop is None:
+        return []
+    if isinstance(stop, str):
+        return [stop] if stop else []
+    if isinstance(stop, list):
+        return [item for item in stop if isinstance(item, str) and item]
+    return []
+
+
+def _trim_to_tokens(text: str, budget: int | None) -> str:
+    if budget is None or not text or estimate_tokens(text) <= budget:
+        return text
+    words = text.split(" ")
+    parts: list[str] = []
+    for word in words:
+        candidate = " ".join([*parts, word])
+        if estimate_tokens(candidate) > budget:
+            break
+        parts.append(word)
+    return " ".join(parts)
+
+
+def _apply_limits(content: str, max_tokens: int | None, stop: Any) -> tuple[str, str]:
+    text = content or ""
+    finish = "stop"
+    stops = _split_stop(stop)
+    if stops:
+        cut = -1
+        for marker in stops:
+            position = text.find(marker)
+            if position != -1 and (cut == -1 or position < cut):
+                cut = position
+        if cut != -1:
+            text = text[:cut]
+    trimmed = _trim_to_tokens(text, max_tokens)
+    if trimmed != text:
+        finish = "length"
+    return trimmed, finish
+
+
+def _build_limited_message(
+    rec: QwenStreamReconstructor,
+    tool_mode: bool,
+    tool_schemas: Any,
+    max_tokens: int | None,
+    stop: Any,
+    parallel_tool_calls: bool | None,
+) -> tuple[dict, str]:
+    message: dict
+    if tool_mode:
+        parsed = toolemu.parse_tool_calls(rec.content, tool_schemas)
+        if parsed is not None:
+            tool_calls, tool_text = parsed
+            if tool_calls:
+                if _max_calls(parallel_tool_calls) is not None:
+                    tool_calls = tool_calls[: _max_calls(parallel_tool_calls)]
+                return toolemu.format_tool_message(tool_calls, tool_text, rec.reasoning), "tool_calls"
+        message = {"role": "assistant", "content": rec.content}
+        if rec.reasoning:
+            message["reasoning_content"] = rec.reasoning
+        return message, "stop"
+    text, limit_finish = _apply_limits(rec.content or "", max_tokens, stop)
+    message = {"role": "assistant", "content": text}
+    if rec.reasoning:
+        message["reasoning_content"] = rec.reasoning
+    return message, limit_finish
 
 
 async def _collect_response(
@@ -456,6 +542,10 @@ async def collect_non_stream(
     tool_choice=None,
     response_format=None,
     user=None,
+    max_tokens: int | None = None,
+    stop: Any = None,
+    n: int | None = None,
+    parallel_tool_calls: bool | None = None,
 ):
     await _human_delay()
     async with account_lock(lock, settings.acquire_timeout):
@@ -494,7 +584,7 @@ async def collect_non_stream(
                 400,
                 "context length exceeded: conversation too long, start a new conversation",
             )
-        usage = _accumulate_usage(session, rec)
+        usage = _accumulate_usage(session, rec, prompt, completion_text=rec.content or rec.reasoning)
         account.sessions.touch_last_message(session_key, rec.response_id)
         record_usage(
             "qwen",
@@ -509,37 +599,21 @@ async def collect_non_stream(
         if not rec.has_content and rec.error:
             raise HTTPException(_error_status(error_code(rec.error)), _error_body(rec))
 
-        if tool_mode:
-            parsed = toolemu.parse_tool_calls(rec.content, tool_schemas)
-            if parsed is not None:
-                tool_calls, tool_text = parsed
-                if tool_calls:
-                    message = toolemu.format_tool_message(tool_calls, tool_text, rec.reasoning)
-                    finish = "tool_calls"
-                else:
-                    message = {"role": "assistant", "content": rec.content}
-                    if rec.reasoning:
-                        message["reasoning_content"] = rec.reasoning
-                    finish = "stop"
-            else:
-                message = {"role": "assistant", "content": rec.content}
-                if rec.reasoning:
-                    message["reasoning_content"] = rec.reasoning
-                finish = "stop"
-        else:
-            message = {"role": "assistant", "content": rec.content}
-            if rec.reasoning:
-                message["reasoning_content"] = rec.reasoning
-            finish = "stop"
-        return {
+        message, finish = _build_limited_message(rec, tool_mode, tool_schemas, max_tokens, stop, parallel_tool_calls)
+        response = {
             "id": f"chatcmpl-{uuid.uuid4().hex}",
             "object": "chat.completion",
             "created": int(time.time()),
             "model": model,
-            "choices": [{"index": 0, "message": message, "finish_reason": finish}],
-            "usage": usage,
+            "system_fingerprint": "fp_danyapi",
+            "choices": [{"index": 0, "message": message, "finish_reason": finish, "logprobs": None}],
+            "usage": _usage_details(usage, rec.reasoning),
             "session_id": session_key,
         }
+        if isinstance(n, int) and n and n > 1:
+            template = response["choices"][0]
+            response["choices"] = [dict(template) | {"index": i} for i in range(n)]
+        return response
 
 
 async def stream_openai(
@@ -561,6 +635,10 @@ async def stream_openai(
     tool_choice=None,
     response_format=None,
     user=None,
+    max_tokens: int | None = None,
+    stop: Any = None,
+    n: int | None = None,
+    parallel_tool_calls: bool | None = None,
 ):
     chunk_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
@@ -793,7 +871,7 @@ async def stream_openai(
             for line in _stream_context_limit_lines(chunk_id, created, model, session_key):
                 yield line
             return
-        usage = _accumulate_usage(session, rec)
+        usage = _accumulate_usage(session, rec, prompt, completion_text=rec.content or rec.reasoning)
         account.sessions.touch_last_message(session_key, rec.response_id)
         record_usage(
             "qwen",
@@ -825,6 +903,8 @@ async def stream_openai(
             if parsed is not None:
                 tool_calls, _ = parsed
                 if tool_calls:
+                    if _max_calls(parallel_tool_calls) is not None:
+                        tool_calls = tool_calls[: _max_calls(parallel_tool_calls)]
                     for delta in toolemu.tool_call_deltas(tool_calls):
                         yield _sse(
                             {
@@ -911,7 +991,7 @@ async def stream_openai(
                 "object": "chat.completion.chunk",
                 "created": created,
                 "model": model,
-                "usage": usage,
+                "usage": _usage_details(usage, rec.reasoning),
                 "choices": [],
             }
             if session_key:
@@ -962,7 +1042,7 @@ async def collect_image(
                 400,
                 "context length exceeded: conversation too long, start a new conversation",
             )
-        usage = _accumulate_usage(session, rec)
+        usage = _accumulate_usage(session, rec, prompt, completion_text=rec.content or rec.reasoning)
         account.sessions.touch_last_message(session_key, rec.response_id)
         record_usage(
             "qwen",

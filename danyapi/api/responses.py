@@ -407,6 +407,93 @@ def messages_from_output(output: Any) -> list[dict]:
     return messages
 
 
+def _input_message_item(message: dict) -> list[dict]:
+    role = message.get("role") or "user"
+    content = message.get("content")
+    if role in ("tool", "function"):
+        call_id = message.get("tool_call_id") or message.get("name") or f"call_{uuid.uuid4().hex[:12]}"
+        output = _as_text(content)
+        return [
+            {
+                "id": f"fc_{uuid.uuid4().hex}",
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": output if isinstance(output, str) else "",
+            }
+        ]
+    parts: list[dict] = []
+    if isinstance(content, list):
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            part_type = part.get("type")
+            if part_type == "text":
+                parts.append({"type": "input_text", "text": part.get("text") or "", "annotations": []})
+            elif part_type == "image_url":
+                image_url = part.get("image_url")
+                if isinstance(image_url, dict):
+                    image_url = image_url.get("url")
+                parts.append({"type": "input_image", "image_url": image_url or "", "detail": "auto"})
+            elif part_type in ("input_file", "file"):
+                file_spec = part.get("file") if isinstance(part.get("file"), dict) else part
+                parts.append({"type": "input_file", "file": file_spec, "filename": part.get("filename")})
+    elif isinstance(content, str) and content:
+        parts.append({"type": "input_text", "text": content, "annotations": []})
+    if not parts:
+        parts.append({"type": "input_text", "text": "", "annotations": []})
+    items: list[dict] = [
+        {
+            "id": f"msg_{uuid.uuid4().hex}",
+            "type": "message",
+            "status": "completed",
+            "role": role,
+            "content": parts,
+        }
+    ]
+    tool_calls = message.get("tool_calls")
+    if isinstance(tool_calls, list):
+        for call in tool_calls:
+            if not isinstance(call, dict):
+                continue
+            function = call.get("function")
+            if not isinstance(function, dict):
+                function = call
+            arguments = function.get("arguments")
+            if isinstance(arguments, (dict, list)):
+                arguments = json.dumps(arguments, ensure_ascii=False)
+            items.append(
+                {
+                    "id": f"fc_{uuid.uuid4().hex}",
+                    "type": "function_call",
+                    "call_id": call.get("id") or f"call_{uuid.uuid4().hex[:12]}",
+                    "name": function.get("name") or "",
+                    "arguments": arguments if isinstance(arguments, str) else "{}",
+                    "status": "completed",
+                }
+            )
+    reasoning = message.get("reasoning_content")
+    if isinstance(reasoning, str) and reasoning:
+        items.insert(
+            0,
+            {
+                "id": f"rs_{uuid.uuid4().hex}",
+                "type": "reasoning",
+                "summary": [{"type": "summary_text", "text": reasoning}],
+            },
+        )
+    return items
+
+
+def input_items_from_messages(messages: Any) -> list[dict]:
+    if not isinstance(messages, list):
+        return []
+    items: list[dict] = []
+    for message in messages:
+        if isinstance(message, dict):
+            items.extend(_input_message_item(message))
+    return items
+
+
 INCOMPLETE_REASONS = {
     "length": "max_output_tokens",
     "content_filter": "content_filter",
@@ -732,9 +819,26 @@ async def translate_stream(
     for line in state.close_all():
         yield line
     if error is not None:
+        failed = build_response_object(info, response_id, created_at, output=state.output, status="failed", usage=state.usage, error=_error_payload(error))
+        yield state.emit("response.failed", {"response": failed})
         payload = {"type": "error", "sequence_number": state.next_sequence()}
         payload.update(_error_payload(error))
         yield sse_event("error", payload)
+        return
+    if state.finish in INCOMPLETE_REASONS:
+        incomplete_details = {"reason": INCOMPLETE_REASONS[state.finish]}
+        final = build_response_object(
+            info,
+            response_id,
+            created_at,
+            output=state.output,
+            status="incomplete",
+            usage=state.usage,
+            incomplete_details=incomplete_details,
+        )
+        if callable(on_complete):
+            on_complete(final)
+        yield state.emit("response.incomplete", {"response": final})
         return
     final = build_response_object(info, response_id, created_at, output=state.output, status="completed", usage=state.usage)
     if callable(on_complete):

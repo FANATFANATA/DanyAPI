@@ -16,9 +16,10 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, Response, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
@@ -82,6 +83,8 @@ RESPONSE_INCOMPLETE_MESSAGE = "Response is incomplete: provider errors interrupt
 REDUCED_CONTEXT_MESSAGE = "Response was generated from reduced context because the original input exceeded the model limit and may be incomplete"
 
 _TOKENS_LOCK = asyncio.Lock()
+SYSTEM_FINGERPRINT = "fp_danyapi"
+MODEL_CREATED_AT = int(time.time())
 
 
 class DeepSeekStreamError(Exception):
@@ -98,7 +101,7 @@ class ChatMessage(BaseModel):
     @field_validator("role")
     @classmethod
     def validate_role(cls, v: str) -> str:
-        allowed_roles = {"user", "assistant", "system", "tool", "function"}
+        allowed_roles = {"user", "assistant", "system", "developer", "tool", "function"}
         if v not in allowed_roles:
             raise ValueError(f"Invalid role: {v}. Allowed roles: {allowed_roles}")
         return v
@@ -142,6 +145,38 @@ class ChatCompletionRequest(BaseModel):
     parallel_tool_calls: bool | None = None
     response_format: Any = None
     stream_options: Any = None
+    max_tokens: int | None = None
+    max_completion_tokens: int | None = None
+    n: int | None = None
+    stop: Any = None
+    presence_penalty: float | None = None
+    frequency_penalty: float | None = None
+    seed: int | None = None
+    logit_bias: dict[str, float] | None = None
+    logprobs: bool | None = None
+    top_logprobs: int | None = None
+    modalities: list[str] | None = None
+    store: bool | None = None
+    metadata: dict[str, Any] | None = None
+    functions: list[Any] | None = None
+    function_call: Any = None
+
+
+class CompletionRequest(BaseModel):
+    model: str = Field(default="deepseek-v4.1-flash")
+    prompt: Any = ""
+    suffix: str | None = None
+    max_tokens: int | None = None
+    temperature: float | None = None
+    top_p: float | None = None
+    n: int | None = None
+    stream: bool = False
+    stop: Any = None
+    presence_penalty: float | None = None
+    frequency_penalty: float | None = None
+    logit_bias: dict[str, float] | None = None
+    user: str | None = None
+    session_id: str | None = None
 
 
 class ImageGenerationRequest(BaseModel):
@@ -904,6 +939,137 @@ async def _log_requests(request: Request, call_next):
     return response
 
 
+def _error_type_for_status(status: int) -> str:
+    if status == 401:
+        return "authentication_error"
+    if status == 403:
+        return "permission_error"
+    if status == 404:
+        return "not_found_error"
+    if status == 408:
+        return "request_timeout"
+    if status == 409:
+        return "conflict_error"
+    if status == 413:
+        return "request_too_large"
+    if status == 429:
+        return "rate_limit_error"
+    if status == 501 or status == 503:
+        return "api_error"
+    if status == 502 or status == 504:
+        return "server_error"
+    if status >= 500:
+        return "server_error"
+    return "invalid_request_error"
+
+
+def _error_code_for_status(status: int) -> str | None:
+    if status == 429:
+        return "rate_limit_exceeded"
+    if status == 400:
+        return "invalid_request_error"
+    return None
+
+
+def _exception_message(exc: Exception) -> str:
+    text = str(exc).strip()
+    if not text:
+        return "An unexpected error occurred"
+    return text
+
+
+def _openai_error_payload(status: int, message: str, request_id: str | None = None) -> dict:
+    payload = {
+        "error": {
+            "message": message,
+            "type": _error_type_for_status(status),
+            "param": None,
+            "code": _error_code_for_status(status),
+        }
+    }
+    if request_id:
+        payload["error"]["request_id"] = request_id
+    return payload
+
+
+def _request_id_header(request: Request) -> str:
+    provided = request.headers.get("x-request-id")
+    if provided and len(provided) <= 128:
+        return provided
+    return uuid.uuid4().hex
+
+
+@app.exception_handler(RequestValidationError)
+async def _on_validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
+    request_id = _request_id_header(request)
+    return JSONResponse(
+        status_code=400,
+        content=_openai_error_payload(400, f"invalid request body: {exc.errors()}", request_id),
+        headers={"x-request-id": request_id},
+    )
+
+
+@app.exception_handler(HTTPException)
+async def _on_http_exception(request: Request, exc: HTTPException) -> JSONResponse:
+    request_id = _request_id_header(request)
+    headers = {"x-request-id": request_id}
+    if exc.headers:
+        headers.update({str(k): str(v) for k, v in exc.headers.items()})
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=_openai_error_payload(exc.status_code, str(exc.detail), request_id),
+        headers=headers,
+    )
+
+
+@app.exception_handler(Exception)
+async def _on_uncaught_exception(request: Request, exc: Exception) -> JSONResponse:
+    request_id = _request_id_header(request)
+    return JSONResponse(
+        status_code=500,
+        content=_openai_error_payload(500, _exception_message(exc), request_id),
+        headers={"x-request-id": request_id},
+    )
+
+
+def _account_busy_count(pool: Any) -> int:
+    busy = 0
+    for acct in getattr(pool, "accounts", None) or []:
+        sem = getattr(acct, "sem", None)
+        if sem is not None and sem.locked():
+            busy += 1
+    return busy
+
+
+def _pool_rate_headers(pool: Any | None) -> dict[str, str]:
+    if pool is None or not hasattr(pool, "stats"):
+        return {}
+    stats = pool.stats()
+    total = int(stats.get("healthy", 0) or 0)
+    busy = _account_busy_count(pool)
+    return {
+        "x-ratelimit-limit-requests": str(max(total, 0)),
+        "x-ratelimit-remaining-requests": str(max(total - busy, 0)),
+        "x-ratelimit-reset-requests": str(int(time.time())),
+    }
+
+
+@app.middleware("http")
+async def _openai_headers(request: Request, call_next):
+    request_id = _request_id_header(request)
+    response = await call_next(request)
+    headers = response.headers
+    if not headers.get("x-request-id"):
+        headers["x-request-id"] = request_id
+    if not headers.get("x-ratelimit-limit-requests"):
+        for candidate in (getattr(app.state, "pool", None), getattr(app.state, "qwen_pool", None)):
+            if candidate is not None:
+                for key, value in _pool_rate_headers(candidate).items():
+                    headers[key] = value
+                break
+    return response
+
+
 MAX_FILES_PER_REQUEST = 50
 MAX_FILE_SIZE = 100 * 1024 * 1024
 MAX_ATTACHMENT_TOTAL_SIZE = 10 * 1024 * 1024
@@ -1113,15 +1279,14 @@ async def usage_stats() -> dict:
     return tracker.snapshot()
 
 
-@app.get("/v1/models")
-async def list_models() -> dict:
+def _all_models() -> list[dict]:
     models: list[dict] = []
     for name, model_type in MODEL_TYPE_BY_NAME.items():
         models.append(
             {
                 "id": name,
                 "object": "model",
-                "created": 0,
+                "created": MODEL_CREATED_AT,
                 "owned_by": "deepseek",
                 "model_type": model_type,
             }
@@ -1131,7 +1296,7 @@ async def list_models() -> dict:
                 {
                     "id": f"{name}{suffix}",
                     "object": "model",
-                    "created": 0,
+                    "created": MODEL_CREATED_AT,
                     "owned_by": "deepseek",
                     "model_type": model_type,
                 }
@@ -1144,13 +1309,26 @@ async def list_models() -> dict:
             {
                 "id": model["id"],
                 "object": "model",
-                "created": 0,
+                "created": MODEL_CREATED_AT,
                 "owned_by": model.get("owned_by", "qwen"),
                 "name": model.get("name"),
                 "model_type": model.get("model_type", "chat"),
             }
         )
-    return {"object": "list", "data": models}
+    return models
+
+
+@app.get("/v1/models")
+async def list_models() -> dict:
+    return {"object": "list", "data": _all_models()}
+
+
+@app.get("/v1/models/{model_id}")
+async def get_model(model_id: str) -> dict:
+    for model in _all_models():
+        if model.get("id") == model_id:
+            return model
+    raise HTTPException(404, f"The model '{model_id}' does not exist")
 
 
 RETRYABLE_FINISH_REASONS = {
@@ -1443,6 +1621,10 @@ async def _byok_pool_for(provider: str, request: Request) -> AccountPool:
 
 @app.post("/v1/chat/completions")
 async def chat_completions(req: ChatCompletionRequest, request: Request) -> Any:
+    return await _dispatch_chat(req, request)
+
+
+async def _dispatch_chat(req: ChatCompletionRequest, request: Request) -> Any:
     provider = _resolve_provider(req.model)
     if _byok_mode():
         pool = await _byok_pool_for(provider, request)
@@ -1452,6 +1634,188 @@ async def chat_completions(req: ChatCompletionRequest, request: Request) -> Any:
     if provider == "qwen":
         return await _chat_completions_qwen(req)
     return await _chat_completions_deepseek(req)
+
+
+def _completion_prompts(prompt: Any) -> list[str]:
+    if isinstance(prompt, str):
+        return [prompt]
+    if isinstance(prompt, list):
+        prompts: list[str] = []
+        for item in prompt:
+            if isinstance(item, str):
+                prompts.append(item)
+            elif isinstance(item, list):
+                prompts.append(" ".join(str(token) for token in item))
+            else:
+                raise HTTPException(400, "prompt must be a string, a list of strings, or a list of token lists")
+        if not prompts:
+            raise HTTPException(400, "prompt must not be empty")
+        return prompts
+    raise HTTPException(400, "prompt must be a string, a list of strings, or a list of token lists")
+
+
+def _completion_chat_request(req: CompletionRequest, prompt_text: str, stream: bool) -> ChatCompletionRequest:
+    return ChatCompletionRequest(
+        model=req.model,
+        messages=[ChatMessage(role="user", content=prompt_text)],
+        stream=stream,
+        temperature=req.temperature,
+        top_p=req.top_p,
+        max_tokens=req.max_tokens,
+        n=req.n,
+        stop=req.stop,
+        presence_penalty=req.presence_penalty,
+        frequency_penalty=req.frequency_penalty,
+        logit_bias=req.logit_bias,
+        user=req.user,
+        session_id=req.session_id,
+    )
+
+
+def _legacy_choice_from_chat(chat_choice: dict, index: int) -> dict:
+    message = chat_choice.get("message") or {}
+    text = message.get("content") if isinstance(message, dict) else ""
+    return {
+        "index": index,
+        "text": text if isinstance(text, str) else "",
+        "logprobs": None,
+        "finish_reason": chat_choice.get("finish_reason") or "stop",
+    }
+
+
+def _legacy_completion_response(chat_dict: dict, base_index: int) -> dict:
+    choices: list[dict] = []
+    for i, chat_choice in enumerate(chat_dict.get("choices") or []):
+        choices.append(_legacy_choice_from_chat(chat_choice, base_index + i))
+    return {
+        "id": chat_dict.get("id"),
+        "object": "text_completion",
+        "created": chat_dict.get("created", int(time.time())),
+        "model": chat_dict.get("model"),
+        "choices": choices,
+        "usage": chat_dict.get("usage"),
+        "session_id": chat_dict.get("session_id"),
+    }
+
+
+def _translate_chat_chunk_to_completion(chunk: dict) -> dict:
+    piece: dict[str, Any] = {
+        "id": chunk.get("id", ""),
+        "object": "text_completion",
+        "created": chunk.get("created", int(time.time())),
+        "model": chunk.get("model", ""),
+        "choices": [],
+    }
+    if "usage" in chunk:
+        piece["usage"] = chunk["usage"]
+    if "error" in chunk:
+        error = chunk["error"]
+        piece["error"] = {"message": error.get("message") if isinstance(error, dict) else error}
+    for choice in chunk.get("choices") or []:
+        delta = choice.get("delta") or {}
+        text = delta.get("content") if isinstance(delta, dict) else ""
+        piece["choices"].append(
+            {
+                "index": choice.get("index", 0),
+                "text": text if isinstance(text, str) else "",
+                "logprobs": None,
+                "finish_reason": choice.get("finish_reason"),
+            }
+        )
+    return piece
+
+
+async def _translate_completion_stream(chat_gen):
+    async for line in chat_gen:
+        if not line.startswith("data: "):
+            yield line
+            continue
+        payload = line[len("data: ") :].strip()
+        if payload == "[DONE]":
+            yield line
+            continue
+        try:
+            chunk = json.loads(payload)
+        except ValueError:
+            yield line
+            continue
+        yield _sse(_translate_chat_chunk_to_completion(chunk))
+
+
+async def _completions_stream(req: CompletionRequest, prompts: list[str], request: Request):
+    for prompt_text in prompts:
+        chat_req = _completion_chat_request(req, prompt_text, stream=True)
+        chat_resp = await _dispatch_chat(chat_req, request)
+        if isinstance(chat_resp, StreamingResponse):
+            async for line in _translate_completion_stream(chat_resp.body_iterator):
+                yield line
+        else:
+            data = _legacy_completion_response(chat_resp, 0)
+            for choice in data["choices"]:
+                yield _sse(
+                    {
+                        "id": data["id"],
+                        "object": "text_completion",
+                        "created": data["created"],
+                        "model": data["model"],
+                        "choices": [choice],
+                    }
+                )
+    yield "data: [DONE]\n\n"
+
+
+@app.post("/v1/completions")
+async def completions(req: CompletionRequest, request: Request) -> Any:
+    prompts = _completion_prompts(req.prompt)
+    if req.stream:
+        return StreamingResponse(
+            _completions_stream(req, prompts, request),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+    choices: list[dict] = []
+    prompt_tokens = 0
+    completion_tokens = 0
+    total_tokens = 0
+    base_index = 0
+    created = 0
+    completion_id = ""
+    completion_model = req.model
+    for prompt_text in prompts:
+        chat_req = _completion_chat_request(req, prompt_text, stream=False)
+        chat_dict = await _dispatch_chat(chat_req, request)
+        choices.extend(_legacy_choice_from_chat(choice, base_index + i) for i, choice in enumerate(chat_dict.get("choices") or []))
+        base_index += len(chat_dict.get("choices") or [])
+        if not completion_id:
+            completion_id = chat_dict.get("id")
+        created = chat_dict.get("created", created)
+        u = chat_dict.get("usage")
+        if isinstance(u, dict):
+            prompt_tokens += int(u.get("prompt_tokens") or 0)
+            completion_tokens += int(u.get("completion_tokens") or 0)
+            total_tokens += int(u.get("total_tokens") or 0)
+    return {
+        "id": completion_id or f"cmpl-{uuid.uuid4().hex}",
+        "object": "text_completion",
+        "created": created or int(time.time()),
+        "model": completion_model,
+        "choices": choices,
+        "usage": {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+        },
+    }
+
+
+@app.post("/v1/embeddings")
+async def embeddings_not_supported() -> dict:
+    raise HTTPException(501, "embeddings are not supported by DanyAPI")
+
+
+@app.post("/v1/moderations")
+async def moderations_not_supported() -> dict:
+    raise HTTPException(501, "moderations are not supported by DanyAPI")
 
 
 def _responses_provider_call(req: ResponsesRequest) -> Any:
@@ -1577,6 +1941,39 @@ async def delete_response(response_id: str) -> dict:
     return {"id": response_id, "object": "response.deleted", "deleted": True}
 
 
+@app.get("/v1/responses/{response_id}/input_items")
+async def get_response_input_items(response_id: str) -> dict:
+    record = _responses_store().get(response_id)
+    if not isinstance(record, dict):
+        raise HTTPException(404, f"response {response_id} not found")
+    stored = record.get("conversation")
+    messages = stored if isinstance(stored, list) else []
+    if not messages:
+        public = record.get("public")
+        if isinstance(public, dict) and isinstance(public.get("input"), list):
+            messages = public["input"].copy()
+    items = responses_api.input_items_from_messages(messages)
+    return {
+        "object": "response.input_items_list",
+        "data": items,
+        "first_id": items[0]["id"] if items else None,
+        "last_id": items[-1]["id"] if items else None,
+        "has_more": False,
+    }
+
+
+@app.post("/v1/responses/{response_id}/cancel")
+async def cancel_response(response_id: str) -> dict:
+    record = _responses_store().get(response_id)
+    if not isinstance(record, dict):
+        raise HTTPException(404, f"response {response_id} not found")
+    public = record.get("public")
+    if isinstance(public, dict) and public.get("status") in ("in_progress", "queued"):
+        record["public"] = dict(public) | {"status": "cancelled", "incomplete_details": {"reason": "cancelled"}}
+        return record["public"]
+    return {"id": response_id, "object": "response", "status": "cancelled"}
+
+
 @app.post("/v1/images/generations")
 async def image_generations(req: ImageGenerationRequest, request: Request) -> dict:
     pool: AccountPool | None
@@ -1654,6 +2051,95 @@ async def _image_generations(req: ImageGenerationRequest, pool: AccountPool | No
     }
 
 
+async def _image_pool(request: Request) -> AccountPool:
+    pool: AccountPool | None
+    if _byok_mode():
+        pool = await _byok_pool_for("qwen", request)
+    else:
+        pool = getattr(app.state, "qwen_pool", None)
+    if pool is None:
+        raise HTTPException(503, "qwen provider is not configured (required for image generation)")
+    return pool
+
+
+def _image_markdown(data: bytes, content_type: str) -> str:
+    return f"![image](data:{content_type or 'image/png'};base64,{base64.b64encode(data).decode('ascii')})"
+
+
+async def _read_upload(file: UploadFile) -> tuple[bytes, str]:
+    data = await file.read(MAX_FILE_SIZE + 1)
+    if len(data) > MAX_FILE_SIZE:
+        raise HTTPException(413, f"uploaded file exceeds {MAX_FILE_SIZE // (1024 * 1024)} MB limit")
+    content_type = (file.content_type or "application/octet-stream").split(";", 1)[0].strip() or "application/octet-stream"
+    return data, content_type
+
+
+def _image_edit_req(prompt: str, image_md: str, mask_md: str | None) -> str:
+    parts: list[str] = []
+    if prompt.strip():
+        parts.append(prompt.strip())
+    parts.append(image_md)
+    if mask_md:
+        parts.append(mask_md)
+    return "\n".join(parts)
+
+
+@app.post("/v1/images/edits")
+async def image_edits(
+    request: Request,
+    image: UploadFile = File(...),
+    prompt: str = Form(default=""),
+    mask: UploadFile | None = File(default=None),
+    model: str = Form(default="qwen-image-gen"),
+    n: int = Form(default=1),
+    size: str | None = Form(default=None),
+    response_format: str = Form(default="url"),
+    user: str | None = Form(default=None),
+    session_id: str | None = Form(default=None),
+) -> dict:
+    pool = await _image_pool(request)
+    image_data, image_type = await _read_upload(image)
+    edited = _image_edit_req(prompt, _image_markdown(image_data, image_type), None)
+    if mask is not None:
+        mask_data, mask_type = await _read_upload(mask)
+        edited = f"{edited}\n{_image_markdown(mask_data, mask_type)}"
+    req = ImageGenerationRequest(
+        model=model,
+        prompt=edited,
+        n=n,
+        size=size,
+        response_format=response_format,
+        session_id=session_id,
+        user=user,
+    )
+    return await _image_generations(req, pool)
+
+
+@app.post("/v1/images/variations")
+async def image_variations(
+    request: Request,
+    image: UploadFile = File(...),
+    model: str = Form(default="qwen-image-gen"),
+    n: int = Form(default=1),
+    size: str | None = Form(default=None),
+    response_format: str = Form(default="url"),
+    user: str | None = Form(default=None),
+    session_id: str | None = Form(default=None),
+) -> dict:
+    pool = await _image_pool(request)
+    image_data, image_type = await _read_upload(image)
+    req = ImageGenerationRequest(
+        model=model,
+        prompt=_image_markdown(image_data, image_type),
+        n=n,
+        size=size,
+        response_format=response_format,
+        session_id=session_id,
+        user=user,
+    )
+    return await _image_generations(req, pool)
+
+
 async def _acquire_account(pool: AccountPool, session_id: str | None):
     try:
         return await pool.acquire(session_id, settings.acquire_timeout)
@@ -1665,6 +2151,83 @@ async def _acquire_account(pool: AccountPool, session_id: str | None):
 
 def _can_reuse_session(account: Any, session_id: str | None, **kwargs: Any) -> bool:
     return bool(account.sessions.can_reuse(session_id, **kwargs))
+
+
+def _materialize_tools(req: ChatCompletionRequest) -> tuple[Any, Any]:
+    tools = getattr(req, "tools", None)
+    tool_choice = getattr(req, "tool_choice", None)
+    functions = getattr(req, "functions", None)
+    if functions:
+        converted: list[dict] = []
+        for fn in functions:
+            if not isinstance(fn, dict):
+                continue
+            function: dict[str, Any] = {"name": fn.get("name") or ""}
+            if "description" in fn:
+                function["description"] = fn["description"]
+            if "parameters" in fn:
+                function["parameters"] = fn["parameters"]
+            converted.append({"type": "function", "function": function})
+        if converted:
+            if isinstance(tools, list):
+                tools = list(tools) + converted
+            else:
+                tools = converted
+    if tool_choice is None and getattr(req, "function_call", None) is not None:
+        function_call = req.function_call
+        if isinstance(function_call, str):
+            if function_call in ("auto", "none"):
+                tool_choice = function_call
+            elif function_call:
+                tool_choice = {"type": "function", "function": {"name": function_call}}
+        elif isinstance(function_call, dict) and isinstance(function_call.get("name"), str) and function_call["name"]:
+            tool_choice = {"type": "function", "function": {"name": function_call["name"]}}
+    return tools, tool_choice
+
+
+def _max_calls(parallel_tool_calls: bool | None) -> int | None:
+    return 1 if parallel_tool_calls is False else None
+
+
+def _split_stop(stop: Any) -> list[str]:
+    if stop is None:
+        return []
+    if isinstance(stop, str):
+        return [stop] if stop else []
+    if isinstance(stop, list):
+        return [item for item in stop if isinstance(item, str) and item]
+    return []
+
+
+def _trim_to_tokens(text: str, budget: int | None) -> str:
+    if budget is None or not text or estimate_tokens(text) <= budget:
+        return text
+    words = text.split(" ")
+    parts: list[str] = []
+    for word in words:
+        candidate = " ".join([*parts, word])
+        if estimate_tokens(candidate) > budget:
+            break
+        parts.append(word)
+    return " ".join(parts)
+
+
+def _apply_limits(content: str, max_tokens: int | None, stop: Any) -> tuple[str, str]:
+    text = content or ""
+    finish = "stop"
+    stops = _split_stop(stop)
+    if stops:
+        cut = -1
+        for marker in stops:
+            position = text.find(marker)
+            if position != -1 and (cut == -1 or position < cut):
+                cut = position
+        if cut != -1:
+            text = text[:cut]
+    trimmed = _trim_to_tokens(text, max_tokens)
+    if trimmed != text:
+        finish = "length"
+    return trimmed, finish
 
 
 async def _acquire_and_build(
@@ -1681,11 +2244,12 @@ async def _acquire_and_build(
         cached_sid = pool.resolve_context(context_seq) if context_seq else None
         account, existing_sid = await _acquire_account(pool, cached_sid)
     has_session = _can_reuse_session(account, existing_sid, **(reuse_kwargs or {}))
+    tools, tool_choice = _materialize_tools(req)
     try:
         prompt, tool_mode = toolemu.build_prompt(
             req.messages,
-            getattr(req, "tools", None),
-            getattr(req, "tool_choice", None),
+            tools,
+            tool_choice,
             has_session,
             getattr(req, "response_format", None),
         )
@@ -1701,7 +2265,7 @@ def _include_usage(req: ChatCompletionRequest) -> bool:
     return bool(opts.get("include_usage"))
 
 
-def _deepseek_usage(total: int, prompt: str = "", provider_usage: dict | None = None) -> dict:
+def _deepseek_usage(total: int, prompt: str = "", provider_usage: dict | None = None, completion_text: str | None = None) -> dict:
     prompt_tokens = 0
     if isinstance(provider_usage, dict):
         p_tokens = provider_usage.get("prompt_tokens")
@@ -1713,7 +2277,19 @@ def _deepseek_usage(total: int, prompt: str = "", provider_usage: dict | None = 
     if total_tokens < prompt_tokens:
         total_tokens = prompt_tokens
     completion_tokens = max(0, total_tokens - prompt_tokens)
+    if not completion_tokens and completion_text:
+        completion_tokens = estimate_tokens(completion_text)
+        total_tokens = prompt_tokens + completion_tokens
     return {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens, "total_tokens": total_tokens}
+
+
+def _usage_with_details(usage: dict, reasoning_text: str | None = None) -> dict:
+    result = dict(usage)
+    if not isinstance(result.get("prompt_tokens_details"), dict):
+        result["prompt_tokens_details"] = {"cached_tokens": 0}
+    if not isinstance(result.get("completion_tokens_details"), dict):
+        result["completion_tokens_details"] = {"reasoning_tokens": estimate_tokens(reasoning_text or "")}
+    return result
 
 
 def _advance_session_usage(session, accumulated_total: int) -> int:
@@ -1784,6 +2360,11 @@ async def _chat_completions_deepseek(req: ChatCompletionRequest, pool: AccountPo
     attachments = _collect_attachments(req)
     _validate_attachments(attachments)
 
+    tools, tool_choice = _materialize_tools(req)
+    max_tokens = getattr(req, "max_tokens", None)
+    if max_tokens is None:
+        max_tokens = getattr(req, "max_completion_tokens", None)
+
     common = {
         "account": account,
         "pool": pool,
@@ -1794,16 +2375,20 @@ async def _chat_completions_deepseek(req: ChatCompletionRequest, pool: AccountPo
         "thinking": thinking,
         "search": search,
         "attachments": attachments,
-        "tool_schemas": toolemu.tool_schema_map(getattr(req, "tools", None)),
+        "tool_schemas": toolemu.tool_schema_map(tools),
         "tool_mode": tool_mode,
         "include_usage": _include_usage(req),
         "context_seq": context_seq,
         "reduced_prompts": None,
         "messages": req.messages,
-        "tools": getattr(req, "tools", None),
-        "tool_choice": getattr(req, "tool_choice", None),
+        "tools": tools,
+        "tool_choice": tool_choice,
         "response_format": getattr(req, "response_format", None),
         "user": getattr(req, "user", None),
+        "max_tokens": max_tokens,
+        "stop": getattr(req, "stop", None),
+        "n": getattr(req, "n", None),
+        "parallel_tool_calls": getattr(req, "parallel_tool_calls", None),
     }
     if req.stream:
         return StreamingResponse(
@@ -1837,6 +2422,11 @@ async def _chat_completions_qwen(req: ChatCompletionRequest, pool: AccountPool |
                 raise HTTPException(400, "qwen only supports image attachments, use deepseek for files")
             prompt = f"{prompt}\n![image](data:{att.content_type};base64,{base64.b64encode(att.data).decode('ascii')})"
 
+    tools, tool_choice = _materialize_tools(req)
+    max_tokens = getattr(req, "max_tokens", None)
+    if max_tokens is None:
+        max_tokens = getattr(req, "max_completion_tokens", None)
+
     common = {
         "account": account,
         "pool": pool,
@@ -1846,15 +2436,19 @@ async def _chat_completions_qwen(req: ChatCompletionRequest, pool: AccountPool |
         "model_id": req.model,
         "thinking": thinking,
         "search": search,
-        "tool_schemas": toolemu.tool_schema_map(getattr(req, "tools", None)),
+        "tool_schemas": toolemu.tool_schema_map(tools),
         "tool_mode": tool_mode,
         "include_usage": _include_usage(req),
         "context_seq": context_seq,
         "messages": req.messages,
-        "tools": getattr(req, "tools", None),
-        "tool_choice": getattr(req, "tool_choice", None),
+        "tools": tools,
+        "tool_choice": tool_choice,
         "response_format": getattr(req, "response_format", None),
         "user": getattr(req, "user", None),
+        "max_tokens": max_tokens,
+        "stop": getattr(req, "stop", None),
+        "n": getattr(req, "n", None),
+        "parallel_tool_calls": getattr(req, "parallel_tool_calls", None),
     }
     if req.stream:
         return StreamingResponse(
@@ -2100,17 +2694,44 @@ def _build_assistant_message(
     reasoning: str | None,
     tool_mode: bool,
     tool_schemas: dict | None,
+    max_calls: int | None = None,
 ) -> tuple[dict, str]:
     if tool_mode:
         parsed = toolemu.parse_tool_calls(content, tool_schemas)
         if parsed is not None:
             tool_calls, tool_text = parsed
             if tool_calls:
+                if max_calls is not None:
+                    tool_calls = tool_calls[:max_calls]
                 return toolemu.format_tool_message(tool_calls, tool_text, reasoning), "tool_calls"
     message = {"role": "assistant", "content": content}
     if reasoning:
         message["reasoning_content"] = reasoning
     return message, "stop"
+
+
+def _build_limited_message(
+    content: str,
+    reasoning: str | None,
+    tool_mode: bool,
+    tool_schemas: dict | None,
+    max_tokens: int | None,
+    stop: Any,
+    parallel_tool_calls: bool | None,
+    provider_finish: Any,
+) -> tuple[dict, str]:
+    if tool_mode:
+        message, finish = _build_assistant_message(content, reasoning, True, tool_schemas, max_calls=_max_calls(parallel_tool_calls))
+        if finish == "stop":
+            finish = _finish_reason(provider_finish)
+        return message, finish
+    text, limit_finish = _apply_limits(content or "", max_tokens, stop)
+    message = {"role": "assistant", "content": text}
+    if reasoning:
+        message["reasoning_content"] = reasoning
+    if limit_finish == "length":
+        return message, "length"
+    return message, _finish_reason(provider_finish)
 
 
 def _build_completion_response(
@@ -2125,14 +2746,16 @@ def _build_completion_response(
         "object": "chat.completion",
         "created": int(time.time()),
         "model": model,
+        "system_fingerprint": SYSTEM_FINGERPRINT,
         "choices": [
             {
                 "index": 0,
                 "message": message,
                 "finish_reason": finish,
+                "logprobs": None,
             }
         ],
-        "usage": usage,
+        "usage": _usage_with_details(usage, (message or {}).get("reasoning_content")),
         "session_id": session_key,
     }
 
@@ -2350,6 +2973,10 @@ async def _collect_non_stream(
     tool_choice=None,
     response_format=None,
     user=None,
+    max_tokens: int | None = None,
+    stop: Any = None,
+    n: int | None = None,
+    parallel_tool_calls: bool | None = None,
 ):
     await _human_delay()
     async with account_lock(lock, settings.acquire_timeout):
@@ -2485,7 +3112,7 @@ async def _collect_non_stream(
                 raise HTTPException(502, _fake_context_error_body())
             raise HTTPException(429, _busy_error_body(rec))
         request_tokens = _advance_session_usage(session, rec.accumulated_tokens)
-        usage = _deepseek_usage(request_tokens, prompt, rec.usage)
+        usage = _deepseek_usage(request_tokens, prompt, rec.usage, completion_text=rec.content or rec.reasoning)
         account.sessions.touch_last_message(session_key, rec.id or response_message_id)
         record_usage(
             "deepseek",
@@ -2497,10 +3124,11 @@ async def _collect_non_stream(
             session_id=session_key,
         )
         log.info("deepseek completion success (%.0fms)", (time.monotonic() - started) * 1000)
-        message, finish = _build_assistant_message(content, reasoning, tool_mode, tool_schemas)
-        if finish == "stop":
-            finish = _finish_reason(rec.status)
+        message, finish = _build_limited_message(content, reasoning, tool_mode, tool_schemas, max_tokens, stop, parallel_tool_calls, rec.status)
         response = _build_completion_response(model, message, finish, usage, session_key)
+        if isinstance(n, int) and n and n > 1:
+            template = response["choices"][0]
+            response["choices"] = [dict(template) | {"index": i} for i in range(n)]
         if reduced_notice is not None:
             log.warning("deepseek response delivered from reduced context (%s)", model)
             response["error"] = {"message": reduced_notice, "finish_reason": RESPONSE_INCOMPLETE}
@@ -2530,6 +3158,10 @@ async def _stream_openai(
     tool_choice=None,
     response_format=None,
     user=None,
+    max_tokens: int | None = None,
+    stop: Any = None,
+    n: int | None = None,
+    parallel_tool_calls: bool | None = None,
 ):
     chunk_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
@@ -2969,7 +3601,7 @@ async def _stream_openai(
             return
 
         request_tokens = _advance_session_usage(session, rec.accumulated_tokens)
-        usage = _deepseek_usage(request_tokens, prompt, rec.usage)
+        usage = _deepseek_usage(request_tokens, prompt, rec.usage, completion_text=rec.content or rec.reasoning)
         account.sessions.touch_last_message(session_key, rec.id or response_message_id)
         record_usage(
             "deepseek",
@@ -2987,6 +3619,8 @@ async def _stream_openai(
             if parsed is not None:
                 tool_calls, _ = parsed
                 if tool_calls:
+                    if _max_calls(parallel_tool_calls) is not None:
+                        tool_calls = tool_calls[: _max_calls(parallel_tool_calls)]
                     for delta in toolemu.tool_call_deltas(tool_calls):
                         yield _sse(
                             {
@@ -3082,8 +3716,13 @@ async def _stream_openai(
                     "created": created,
                     "model": model,
                     "session_id": session_key,
-                    "usage": usage,
+                    "usage": _usage_with_details(usage, rec.reasoning),
                     "choices": [],
                 }
             )
         yield "data: [DONE]\n\n"
+
+
+@app.api_route("/v1/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
+async def unknown_v1_route(path: str) -> dict:
+    raise HTTPException(404, f"Unknown /v1 endpoint: /v1/{path}")

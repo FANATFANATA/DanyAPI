@@ -1487,49 +1487,6 @@ def test_parse_xml_name_and_input_flat_wrapper():
     assert json.loads(calls[0].arguments) == {"pattern": "*/"}
 
 
-def test_parse_python_call_single():
-    parsed = parse_tool_calls('get_weather(city="Moscow", units="celsius")')
-    assert parsed is not None
-    calls, _ = parsed
-    assert calls is not None
-    assert calls[0].name == "get_weather"
-    assert json.loads(calls[0].arguments) == {"city": "Moscow", "units": "celsius"}
-
-
-def test_parse_python_call_typed_values():
-    parsed = parse_tool_calls("read(filePath='a.py', limit=10, cached=False, note=None)")
-    assert parsed is not None
-    calls, _ = parsed
-    assert calls is not None
-    assert calls[0].name == "read"
-    assert json.loads(calls[0].arguments) == {"filePath": "a.py", "limit": 10, "cached": False, "note": None}
-
-
-def test_parse_python_call_multiline_and_multiple():
-    text = 'glob(pattern="*/")\nread(filePath="a.py", limit=5)'
-    parsed = parse_tool_calls(text)
-    assert parsed is not None
-    calls, _ = parsed
-    assert calls is not None
-    assert [c.name for c in calls] == ["glob", "read"]
-    assert json.loads(calls[1].arguments) == {"filePath": "a.py", "limit": 5}
-
-
-def test_parse_python_call_not_detected_in_prose():
-    assert parse_tool_calls("The answer is read(filePath='a.py').") is None
-    assert parse_tool_calls("Just check read(filePath='a.py') please.") is None
-
-
-def test_parse_python_call_after_prose():
-    parsed = parse_tool_calls('Let me check.\n\nglob(pattern="*/")')
-    assert parsed is not None
-    calls, wrapper = parsed
-    assert calls is not None
-    assert calls[0].name == "glob"
-    assert json.loads(calls[0].arguments) == {"pattern": "*/"}
-    assert wrapper == "Let me check."
-
-
 def test_parse_yaml_block():
     text = 'tool_calls:\n- name: glob\n  arguments:\n    pattern: "*/"\n- name: read\n  arguments:\n    filePath: a.py'
     parsed = parse_tool_calls(text)
@@ -1562,9 +1519,9 @@ def test_parse_yaml_inline_array():
 
 
 def test_parse_tool_calls_debug():
-    report = parse_tool_calls_debug('glob(pattern="*/")')
+    report = parse_tool_calls_debug('<invoke name="glob"><pattern>*/</pattern></invoke>')
     assert report["parsed"]
-    assert report["strategies"] == ["python_call"]
+    assert report["strategies"] == ["xml"]
     assert report["calls"][0]["name"] == "glob"
     assert report["calls"][0]["arguments"] == '{"pattern": "*/"}'
     assert report["wrapper"] == ""
@@ -1825,133 +1782,6 @@ def test_parse_xml_generic_selfclose():
     assert calls is not None
     assert calls[0].name == "glob"
     assert json.loads(calls[0].arguments) == {"pattern": "*/"}
-
-
-def test_parse_python_call_escaped_quotes():
-    parsed = parse_tool_calls('f(a="x\\"y")')
-    assert parsed is not None
-    calls, _ = parsed
-    assert calls is not None
-    assert json.loads(calls[0].arguments) == {"a": 'x"y'}
-
-
-def test_parse_python_call_nested_values():
-    parsed = parse_tool_calls('f(a={"b": 1}, c=[1, 2])')
-    assert parsed is not None
-    calls, _ = parsed
-    assert calls is not None
-    assert json.loads(calls[0].arguments) == {"a": {"b": 1}, "c": [1, 2]}
-
-
-def test_parse_python_call_empty_value():
-    parsed = parse_tool_calls("f(a=)")
-    assert parsed is not None
-    calls, _ = parsed
-    assert calls is not None
-    assert json.loads(calls[0].arguments) == {"a": None}
-
-
-def test_parse_python_call_broken_json_value():
-    parsed = parse_tool_calls("f(a={broken)")
-    assert parsed is not None
-    calls, _ = parsed
-    assert calls is not None
-    assert json.loads(calls[0].arguments) == {"a": "{broken"}
-
-
-def test_parse_python_call_mismatched_quotes():
-    parsed = parse_tool_calls("f(a='x'x)")
-    assert parsed is not None
-    calls, _ = parsed
-    assert calls is not None
-    assert json.loads(calls[0].arguments) == {"a": "'x'x"}
-
-
-def test_parse_python_call_invalid_escape():
-    parsed = parse_tool_calls('f(a="x\\q")')
-    assert parsed is not None
-    calls, _ = parsed
-    assert calls is not None
-    assert json.loads(calls[0].arguments) == {"a": "x\\q"}
-
-
-def test_parse_python_call_single_quote_invalid_escape():
-    parsed = parse_tool_calls("f(a='x\\q')")
-    assert parsed is not None
-    calls, _ = parsed
-    assert calls is not None
-    assert json.loads(calls[0].arguments) == {"a": "x\\q"}
-
-
-def test_parse_python_call_bare_value():
-    parsed = parse_tool_calls("f(city=Moscow)")
-    assert parsed is not None
-    calls, _ = parsed
-    assert calls is not None
-    assert json.loads(calls[0].arguments) == {"city": "Moscow"}
-
-
-def test_parse_python_call_trailing_comma():
-    parsed = parse_tool_calls("f(a=1,)")
-    assert parsed is not None
-    calls, _ = parsed
-    assert calls is not None
-    assert json.loads(calls[0].arguments) == {"a": 1}
-
-
-def test_parse_python_call_positional_rejected():
-    assert parse_tool_calls("f(1)") is None
-
-
-def test_parse_python_call_invalid_key():
-    assert parse_tool_calls("f(1a=2)") is None
-
-
-def test_parse_python_call_escaped_backslash():
-    parsed = parse_tool_calls('f(a="x\\\\y")')
-    assert parsed is not None
-    calls, _ = parsed
-    assert calls is not None
-    assert json.loads(calls[0].arguments) == {"a": "x\\y"}
-
-
-def test_parse_python_call_nested_parens():
-    assert parse_tool_calls("f(g(x=1))") is None
-
-
-def test_parse_python_call_unclosed():
-    assert parse_tool_calls("f(a=1") is None
-
-
-def test_parse_python_call_no_args():
-    parsed = parse_tool_calls("f()")
-    assert parsed is not None
-    calls, _ = parsed
-    assert calls is not None
-    assert calls[0].name == "f"
-    assert json.loads(calls[0].arguments) == {}
-
-
-def test_parse_python_call_empty_text():
-    from danyapi.tools import _parse_python_calls
-
-    assert _parse_python_calls("   ") is None
-
-
-def test_parse_python_call_prose_mid_lines():
-    assert parse_tool_calls("read(a=1)\nhello\nglob(b=2)") is None
-
-
-def test_parse_python_call_multi_no_args():
-    parsed = parse_tool_calls("glob()\nread(a=1)")
-    assert parsed is not None
-    calls, _ = parsed
-    assert calls is not None
-    assert [c.name for c in calls] == ["glob", "read"]
-
-
-def test_parse_python_call_multi_bad_args():
-    assert parse_tool_calls("glob(a=1)\nread(1)") is None
 
 
 def test_parse_yaml_quoted_name():
@@ -2374,15 +2204,6 @@ def test_parse_xml_tool_calls_generic_wrapper_without_parameters_via_name_child(
     assert json.loads(calls[0].arguments) == {}
 
 
-def test_parse_python_style_call_without_parameters():
-    text = "ping()"
-    calls, wrapper = parse_tool_calls(text, tool_schemas=tool_schema_map([NO_ARGS_TOOL]))
-    assert calls is not None
-    assert calls[0].name == "ping"
-    assert json.loads(calls[0].arguments) == {}
-    assert wrapper == ""
-
-
 def test_parse_json_call_without_parameters():
     text = '{"name": "ping", "arguments": {}}'
     calls, _ = parse_tool_calls(text)
@@ -2398,6 +2219,23 @@ SHELL_TOOL = {
         "description": "Run a shell command",
         "aliases": ["exec_command", "shell", "run_cmd"],
         "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]},
+    },
+}
+
+READ_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "read",
+        "description": "Read a file",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "filePath": {"type": "string"},
+                "offset": {"type": "integer"},
+                "limit": {"type": "integer"},
+            },
+            "required": ["filePath"],
+        },
     },
 }
 
@@ -2640,3 +2478,114 @@ def test_debug_report_unparsed_has_empty_renamed():
     rep = parse_tool_calls_debug("no calls here", tool_schema_map([SHELL_TOOL]))
     assert not rep["parsed"]
     assert rep["renamed"] == []
+
+
+_LAX_PIPE = "\uff5c"
+_LAX_MARK = _LAX_PIPE * 2
+
+
+def _lax_emulated_block(inner: str) -> str:
+    return f"<{_LAX_MARK} calls>\n{inner}\n</{_LAX_MARK} calls>"
+
+
+def test_parse_tool_calls_lax_calls_block_bash():
+    text = _lax_emulated_block(
+        f'<{_LAX_MARK} invoke name="bash">\n'
+        f'<{_LAX_MARK} parameter name="command">git status && git diff --stat</{_LAX_MARK} parameter>\n'
+        f'<{_LAX_MARK} parameter name="workdir">C:\\projects\\x</{_LAX_MARK} parameter>'
+    )
+    calls, wrapper = parse_tool_calls(text)
+    assert calls is not None
+    assert len(calls) == 1
+    assert calls[0].name == "bash"
+    assert json.loads(calls[0].arguments) == {"command": "git status && git diff --stat", "workdir": "C:\\projects\\x"}
+    assert wrapper == "" or not wrapper.strip()
+
+
+def test_parse_tool_calls_lax_calls_block_read():
+    text = _lax_emulated_block(
+        f'<{_LAX_MARK} invoke name="read">\n'
+        f'<{_LAX_MARK} parameter name="filePath">C:\\a\\b.py</{_LAX_MARK} parameter>\n'
+        f'<{_LAX_MARK} offset="500"{_LAX_MARK} limit="126"{_LAX_MARK}>'
+    )
+    calls, _ = parse_tool_calls(text)
+    assert calls is not None
+    assert calls[0].name == "read"
+    assert json.loads(calls[0].arguments) == {"filePath": "C:\\a\\b.py"}
+
+
+def test_parse_tool_calls_lax_no_invoke_folds_to_text():
+    text = _lax_emulated_block(
+        f'<{_LAX_MARK} parameter name="filePath" string="true">C:\\a\\b.py</{_LAX_MARK} parameter>\n'
+        f'<{_LAX_MARK} parameter name="offset" string="false">1</{_LAX_MARK} parameter>\n'
+        f'<{_LAX_MARK} parameter name="limit" string="false">90</{_LAX_MARK} parameter>\n'
+        f"</{_LAX_MARK} parameter>\n"
+        f"</{_LAX_MARK} invoke>"
+    )
+    result = parse_tool_calls(text)
+    if result is not None:
+        calls, wrapper = result
+        assert calls == []
+        assert "read" not in wrapper.lower()
+
+
+def test_parse_tool_calls_lax_no_invoke_infers_unique_schema():
+    text = _lax_emulated_block(
+        f'<{_LAX_MARK} parameter name="filePath" string="true">C:\\a\\b.py</{_LAX_MARK} parameter>\n'
+        f'<{_LAX_MARK} parameter name="offset" string="false">1</{_LAX_MARK} parameter>\n'
+        f'<{_LAX_MARK} parameter name="limit" string="false">90</{_LAX_MARK} parameter>\n'
+        f"</{_LAX_MARK} parameter>\n"
+        f"</{_LAX_MARK} invoke>"
+    )
+    schemas = tool_schema_map(
+        [
+            READ_TOOL,
+            SHELL_TOOL,
+        ]
+    )
+    calls, _ = parse_tool_calls(text, schemas)
+    assert calls is not None
+    assert calls[0].name == "read"
+    assert json.loads(calls[0].arguments) == {"filePath": "C:\\a\\b.py", "offset": 1, "limit": 90}
+
+
+def test_parse_tool_calls_lax_glyph_marker_their_name():
+    text = (
+        f"<{_LAX_MARK} their>\n"
+        f' name="verify_email">\n'
+        f'<{_LAX_MARK} parameter name="email">test@gmail.com</{_LAX_MARK} parameter>\n'
+        f'<{_LAX_MARK} parameter name="subject">hi</{_LAX_MARK} parameter>\n'
+        f"</{_LAX_MARK} their>"
+    )
+    calls, _ = parse_tool_calls(text)
+    assert calls is not None
+    assert calls[0].name == "verify_email"
+    assert json.loads(calls[0].arguments) == {"email": "test@gmail.com", "subject": "hi"}
+
+
+def test_render_tool_schema_anti_hallucination_guidance():
+    schema = render_tool_schema([WEATHER_TOOL, READ_TOOL])
+    assert schema is not None
+    assert "The numbers (1, 2, ...) only help you scan the list" in schema
+    assert "always write the real function name" in schema
+    assert "Never invent a function name or an argument key that is not in the list" in schema
+    assert "arguments: city (string, required)" in schema
+    assert "filePath (string, required), offset (integer, optional), limit (integer, optional)" in schema
+    assert "reply normally with your answer and do not invent a tool call" in schema
+
+
+def test_render_tool_schema_choice_required_anti_hallucination():
+    schema = render_tool_schema([WEATHER_TOOL, READ_TOOL], "required")
+    assert schema is not None
+    assert "MUST call" in schema
+    assert "Call no function that is not in the list" in schema
+
+
+def test_render_tool_schema_argument_summary_edge_cases():
+    bare = render_tool_schema([{"function": {"name": "a", "parameters": {"type": "object"}}}])
+    assert bare is not None
+    assert "   arguments:" not in bare
+    tool = {"function": {"name": "b", "parameters": {"type": "object", "properties": {"x": "integer"}}}}
+    schema = render_tool_schema([tool])
+    assert schema is not None
+    assert "arguments: x (integer, optional)" in schema
