@@ -209,7 +209,10 @@ def build_steps(pytest_args: list[str]) -> list[tuple[str, StepRunner]]:
         ("flake8", [sys.executable, "-m", "flake8"]),
         ("pyflakes", [sys.executable, "-m", "pyflakes", *PYTHON_DIRS]),
         ("mypy", [sys.executable, "-m", "mypy", *PYTHON_DIRS]),
-        ("pyright", [sys.executable, "-m", "pyright", *PYTHON_DIRS]),
+        (
+            "pyright",
+            [sys.executable, "-m", "pyright", "--pythonpath", sys.executable, *PYTHON_DIRS],
+        ),
         (
             "pylint",
             [
