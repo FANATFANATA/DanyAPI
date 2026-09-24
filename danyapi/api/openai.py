@@ -32,7 +32,7 @@ from ..qwen import api as qwen_api
 from ..qwen.accounts import QwenAccount
 from ..qwen.client import QwenClient, QwenError
 from ..store import JsonStore
-from ..tokens import count_messages_tokens, estimate_tokens
+from ..tokens import StreamBudget, count_messages_tokens, estimate_tokens
 from ..usage import init_tracker, record_usage
 from . import responses as responses_api
 
@@ -2831,9 +2831,16 @@ def _build_limited_message(
 ) -> tuple[dict, str]:
     if tool_mode:
         message, finish = _build_assistant_message(content, reasoning, True, tool_schemas, max_calls=_max_calls(parallel_tool_calls))
-        if finish == "stop":
-            finish = _finish_reason(provider_finish)
-        return message, finish
+        if finish == "tool_calls":
+            tool_text = message.get("content")
+            if isinstance(tool_text, str):
+                message["content"] = _trim_to_tokens(tool_text, max_tokens)
+            return message, finish
+        text, limit_finish = _apply_limits(str(message.get("content") or ""), max_tokens, stop)
+        message["content"] = text
+        if limit_finish == "length":
+            return message, "length"
+        return message, _finish_reason(provider_finish)
     text, limit_finish = _apply_limits(content or "", max_tokens, stop)
     message = {"role": "assistant", "content": text}
     if reasoning:
@@ -3305,6 +3312,11 @@ async def _stream_openai(
         tool_hidden = False
         role_sent = False
         started = time.monotonic()
+        budget = StreamBudget(max_tokens, _trim_to_tokens)
+
+        def content_piece(piece: str | None) -> str:
+            return budget.feed(piece)
+
         had_cached_session = bool(existing_sid) and account.sessions.get(existing_sid) is not None
         stale_rebuilt = False
         attempt = 0
@@ -3402,10 +3414,13 @@ async def _stream_openai(
                                 content_parts.append(c_diff)
                                 content_buf = "".join(content_parts)
                                 visible, content_shown_len, tool_hidden = toolemu.tool_visible(content_buf, content_shown_len, tool_hidden, tool_schemas)
-                                if visible:
-                                    delta["content"] = visible
+                                allowed = content_piece(visible)
+                                if allowed:
+                                    delta["content"] = allowed
                             else:
-                                delta["content"] = c_diff
+                                allowed = content_piece(c_diff)
+                                if allowed:
+                                    delta["content"] = allowed
                         if r_diff:
                             delta["reasoning_content"] = r_diff
                         if delta:
@@ -3457,10 +3472,13 @@ async def _stream_openai(
                             content_parts.append(c_diff)
                             content_buf = "".join(content_parts)
                             visible, content_shown_len, tool_hidden = toolemu.tool_visible(content_buf, content_shown_len, tool_hidden, tool_schemas)
-                            if visible:
-                                delta2["content"] = visible
+                            allowed = content_piece(visible)
+                            if allowed:
+                                delta2["content"] = allowed
                         else:
-                            delta2["content"] = c_diff
+                            allowed = content_piece(c_diff)
+                            if allowed:
+                                delta2["content"] = allowed
                     if r_diff:
                         delta2["reasoning_content"] = r_diff
                     if delta2:
@@ -3557,26 +3575,29 @@ async def _stream_openai(
                         content_parts.append(cont_rec.content)
                         content_buf = "".join(content_parts)
                         c_visible, content_shown_len, tool_hidden = toolemu.tool_visible(content_buf, content_shown_len, tool_hidden, tool_schemas)
-                        if c_visible:
+                        allowed = content_piece(c_visible)
+                        if allowed:
                             yield _sse(
                                 {
                                     "id": chunk_id,
                                     "object": "chat.completion.chunk",
                                     "created": created,
                                     "model": model,
-                                    "choices": [{"index": 0, "delta": {"content": c_visible}, "finish_reason": None}],
+                                    "choices": [{"index": 0, "delta": {"content": allowed}, "finish_reason": None}],
                                 }
                             )
                     else:
-                        yield _sse(
-                            {
-                                "id": chunk_id,
-                                "object": "chat.completion.chunk",
-                                "created": created,
-                                "model": model,
-                                "choices": [{"index": 0, "delta": {"content": cont_rec.content}, "finish_reason": None}],
-                            }
-                        )
+                        allowed = content_piece(cont_rec.content)
+                        if allowed:
+                            yield _sse(
+                                {
+                                    "id": chunk_id,
+                                    "object": "chat.completion.chunk",
+                                    "created": created,
+                                    "model": model,
+                                    "choices": [{"index": 0, "delta": {"content": allowed}, "finish_reason": None}],
+                                }
+                            )
                 if cont_rec.reasoning:
                     if not role_sent:
                         role_sent = True
@@ -3646,26 +3667,29 @@ async def _stream_openai(
                                 content_parts.append(rec.content)
                                 content_buf = "".join(content_parts)
                                 r_visible, content_shown_len, tool_hidden = toolemu.tool_visible(content_buf, content_shown_len, tool_hidden, tool_schemas)
-                                if r_visible:
+                                allowed = content_piece(r_visible)
+                                if allowed:
                                     yield _sse(
                                         {
                                             "id": chunk_id,
                                             "object": "chat.completion.chunk",
                                             "created": created,
                                             "model": model,
-                                            "choices": [{"index": 0, "delta": {"content": r_visible}, "finish_reason": None}],
+                                            "choices": [{"index": 0, "delta": {"content": allowed}, "finish_reason": None}],
                                         }
                                     )
                             else:
-                                yield _sse(
-                                    {
-                                        "id": chunk_id,
-                                        "object": "chat.completion.chunk",
-                                        "created": created,
-                                        "model": model,
-                                        "choices": [{"index": 0, "delta": {"content": rec.content}, "finish_reason": None}],
-                                    }
-                                )
+                                allowed = content_piece(rec.content)
+                                if allowed:
+                                    yield _sse(
+                                        {
+                                            "id": chunk_id,
+                                            "object": "chat.completion.chunk",
+                                            "created": created,
+                                            "model": model,
+                                            "choices": [{"index": 0, "delta": {"content": allowed}, "finish_reason": None}],
+                                        }
+                                    )
                         if rec.reasoning:
                             if not role_sent:
                                 role_sent = True
@@ -3735,6 +3759,19 @@ async def _stream_openai(
             if parsed is not None:
                 tool_calls, _ = parsed
                 if tool_calls:
+                    if budget.done:
+                        finish = "length"
+                        for line in _stream_error_sse(
+                            chunk_id,
+                            created,
+                            model,
+                            "max_tokens reached before the tool call completed",
+                            session_key,
+                            "length",
+                            "length",
+                        ):
+                            yield line
+                        return
                     if _max_calls(parallel_tool_calls) is not None:
                         tool_calls = tool_calls[: _max_calls(parallel_tool_calls)]
                     for delta in toolemu.tool_call_deltas(tool_calls):
@@ -3749,7 +3786,8 @@ async def _stream_openai(
                         )
                     finish = "tool_calls"
                 else:
-                    tail_text = (content_buf or rec.content)[content_shown_len:] if (content_buf or rec.content) else ""
+                    raw_tail = (content_buf or rec.content)[content_shown_len:] if (content_buf or rec.content) else ""
+                    tail_text = content_piece(raw_tail)
                     if tail_text:
                         yield _sse(
                             {
@@ -3766,9 +3804,10 @@ async def _stream_openai(
                                 ],
                             }
                         )
-                    finish = _finish_reason(rec.status)
+                    finish = "length" if budget.done else _finish_reason(rec.status)
             else:
-                tail_text = (content_buf or rec.content)[content_shown_len:] if (content_buf or rec.content) else ""
+                raw_tail = (content_buf or rec.content)[content_shown_len:] if (content_buf or rec.content) else ""
+                tail_text = content_piece(raw_tail)
                 if tail_text:
                     yield _sse(
                         {
@@ -3785,9 +3824,9 @@ async def _stream_openai(
                             ],
                         }
                     )
-                finish = _finish_reason(rec.status)
+                finish = "length" if budget.done else _finish_reason(rec.status)
         else:
-            finish = _finish_reason(rec.status)
+            finish = "length" if budget.done else _finish_reason(rec.status)
 
         if not role_sent:
             role_sent = True

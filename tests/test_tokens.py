@@ -1,4 +1,4 @@
-from danyapi.tokens import count_message_tokens, count_messages_tokens, count_prompt_tokens, estimate_tokens
+from danyapi.tokens import StreamBudget, count_message_tokens, count_messages_tokens, count_prompt_tokens, estimate_tokens
 
 
 def test_estimate_tokens_empty():
@@ -52,3 +52,59 @@ def test_count_messages_tokens():
 def test_count_prompt_tokens():
     assert count_prompt_tokens("Hello world") == estimate_tokens("Hello world")
     assert count_prompt_tokens("") == 0
+
+
+def _trim(text, budget):
+    if budget is None or estimate_tokens(text) <= budget:
+        return text
+    words = text.split(" ")
+    parts = []
+    total = 0
+    for word in words:
+        candidate = total + len(word) + (1 if parts else 0)
+        if max(1, candidate // 4) > budget:
+            break
+        parts.append(word)
+        total = candidate
+    return " ".join(parts)
+
+
+def test_stream_budget_passthrough_without_limit():
+    budget = StreamBudget(None, _trim)
+    assert budget.feed("Hello ") == "Hello "
+    assert budget.feed("world") == "world"
+    assert budget.text == "Hello world"
+    assert budget.done is False
+
+
+def test_stream_budget_trims_once_and_marks_done():
+    budget = StreamBudget(2, _trim)
+    first = budget.feed("Hello world foo")
+    assert first == "Hello world"
+    assert budget.done is True
+    assert budget.feed(" bar") == ""
+
+
+def test_stream_budget_drops_piece_that_overflows():
+    budget = StreamBudget(1, _trim)
+    assert budget.feed("Hello") == "Hello"
+    assert budget.done is False
+    assert budget.feed(" world") == ""
+    assert budget.done is True
+    assert budget.text == "Hello"
+    assert budget.feed(" foo") == ""
+
+
+def test_stream_budget_ignores_empty_and_none():
+    budget = StreamBudget(2, _trim)
+    assert budget.feed("") == ""
+    assert budget.feed(None) == ""
+    assert budget.text == ""
+    assert budget.done is False
+
+
+def test_stream_budget_partial_piece_is_dropped_when_not_prefix():
+    budget = StreamBudget(1, lambda text, limit: "Hello")
+    assert budget.feed("Hello") == "Hello"
+    assert budget.feed(" world") == ""
+    assert budget.done is True

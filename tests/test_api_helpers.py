@@ -1465,6 +1465,89 @@ def test_stream_emits_usage():
     client.close()
 
 
+def _long_deepseek_sse(words: int) -> str:
+    parts = [
+        "event: ready\n",
+        'data: {"request_message_id":1,"response_message_id":2,"model_type":"default"}\n',
+        "\n",
+    ]
+    for index in range(words):
+        fragment = {"id": 2 + index, "type": "RESPONSE", "content": f" word{index}"}
+        payload = {"v": {"response": {"message_id": 2, "parent_id": 1, "status": "WIP", "fragments": [fragment]}}}
+        parts.append(f"data: {json.dumps(payload)}\n")
+        parts.append("\n")
+    parts.append('data: {"p":"response/status","o":"SET","v":"FINISHED"}\n')
+    parts.append("\n")
+    return "".join(parts)
+
+
+async def test_stream_truncates_content_at_max_tokens():
+    acct = FakeAccount([])
+    acct.client.completion = AsyncMock(return_value=FakeResp(sse_text=_long_deepseek_sse(60)))
+    acct.sessions.obtain = AsyncMock(return_value=(FakeSession(), "s1"))
+    gen = openai_mod._stream_openai(
+        account=acct,
+        pool=MagicMock(),
+        existing_sid="s1",
+        lock=acct.sem,
+        prompt="x",
+        model="deepseek-v4.1-flash",
+        model_type="default",
+        thinking=False,
+        search=False,
+        max_tokens=10,
+    )
+    joined = "".join(await _collect_agen(gen))
+    assert '"finish_reason": "length"' in joined
+    text = ""
+    for line in joined.splitlines():
+        if not line.startswith("data: ") or line[6:].strip() == "[DONE]":
+            continue
+        try:
+            payload = json.loads(line[6:])
+        except ValueError:
+            continue
+        for choice in payload.get("choices") or []:
+            delta = choice.get("delta") or {}
+            if isinstance(delta.get("content"), str):
+                text += delta["content"]
+    assert text.strip()
+    assert len(text) < 200
+    assert joined.rstrip().endswith("data: [DONE]")
+
+
+async def test_stream_without_max_tokens_keeps_full_content():
+    acct = FakeAccount([])
+    acct.client.completion = AsyncMock(return_value=FakeResp(sse_text=_long_deepseek_sse(60)))
+    acct.sessions.obtain = AsyncMock(return_value=(FakeSession(), "s1"))
+    gen = openai_mod._stream_openai(
+        account=acct,
+        pool=MagicMock(),
+        existing_sid="s1",
+        lock=acct.sem,
+        prompt="x",
+        model="deepseek-v4.1-flash",
+        model_type="default",
+        thinking=False,
+        search=False,
+    )
+    joined = "".join(await _collect_agen(gen))
+    text = ""
+    for line in joined.splitlines():
+        if not line.startswith("data: ") or line[6:].strip() == "[DONE]":
+            continue
+        try:
+            payload = json.loads(line[6:])
+        except ValueError:
+            continue
+        for choice in payload.get("choices") or []:
+            delta = choice.get("delta") or {}
+            if isinstance(delta.get("content"), str):
+                text += delta["content"]
+    assert len(text) > 200
+    assert '"finish_reason": "length"' not in joined
+
+
 async def test_deepseek_human_delay_sleeps():
     from danyapi.api.openai import _human_delay
 

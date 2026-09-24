@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from functools import lru_cache
 from typing import Any
 
@@ -22,6 +23,34 @@ def estimate_tokens(text: str | None) -> int:
     if other == 0:
         return cjk
     return cjk + max(1, other // 4)
+
+
+class StreamBudget:
+    __slots__ = ("_budget", "_trim", "done", "text")
+
+    def __init__(self, budget: int | None, trim: Callable[[str, int | None], str]) -> None:
+        self._budget = budget
+        self._trim = trim
+        self.text = ""
+        self.done = False
+
+    def feed(self, piece: str | None) -> str:
+        if not piece or self.done:
+            return ""
+        if self._budget is None:
+            self.text += piece
+            return piece
+        candidate = self.text + piece
+        trimmed = self._trim(candidate, self._budget)
+        if trimmed == candidate:
+            self.text = candidate
+            return piece
+        self.done = True
+        if not trimmed.startswith(self.text):
+            return ""
+        send = trimmed[len(self.text) :]
+        self.text = trimmed
+        return send
 
 
 def count_message_tokens(message: Any) -> int:

@@ -17,7 +17,7 @@ from .. import tools as toolemu
 from ..accounts import account_lock
 from ..config import settings
 from ..deepseek.stream import IncrementalSSE
-from ..tokens import estimate_tokens
+from ..tokens import StreamBudget, estimate_tokens
 from ..usage import record_usage
 from .client import QwenClient, QwenError
 from .stream import QwenStreamReconstructor, error_code
@@ -413,10 +413,18 @@ def _build_limited_message(
             if tool_calls:
                 if _max_calls(parallel_tool_calls) is not None:
                     tool_calls = tool_calls[: _max_calls(parallel_tool_calls)]
-                return toolemu.format_tool_message(tool_calls, tool_text, rec.reasoning), "tool_calls"
-        message = {"role": "assistant", "content": rec.content}
+                message = toolemu.format_tool_message(tool_calls, tool_text, rec.reasoning)
+                tail = message.get("content")
+                if isinstance(tail, str) and _trim_to_tokens(tail, max_tokens) != tail:
+                    message["content"] = _trim_to_tokens(tail, max_tokens)
+                    return message, "length"
+                return message, "tool_calls"
+        text, limit_finish = _apply_limits(rec.content or "", max_tokens, stop)
+        message = {"role": "assistant", "content": text}
         if rec.reasoning:
             message["reasoning_content"] = rec.reasoning
+        if limit_finish == "length":
+            return message, "length"
         return message, "stop"
     text, limit_finish = _apply_limits(rec.content or "", max_tokens, stop)
     message = {"role": "assistant", "content": text}
@@ -684,6 +692,11 @@ async def stream_openai(
         content_shown_len = 0
         tool_hidden = False
         role_sent = False
+        budget = StreamBudget(max_tokens, _trim_to_tokens)
+
+        def content_piece(piece: str | None) -> str:
+            return budget.feed(piece)
+
         stop_response_id: str | None = None
         had_cached_session = bool(existing_sid) and account.sessions.get(existing_sid) is not None
         stale_rebuilt = False
@@ -779,10 +792,13 @@ async def stream_openai(
                             if tool_mode:
                                 content_buf += c_diff
                                 shown, content_shown_len, tool_hidden = toolemu.tool_visible(content_buf, content_shown_len, tool_hidden, tool_schemas)
-                                if shown:
-                                    delta["content"] = shown
+                                allowed = content_piece(shown)
+                                if allowed:
+                                    delta["content"] = allowed
                             else:
-                                delta["content"] = c_diff
+                                allowed = content_piece(c_diff)
+                                if allowed:
+                                    delta["content"] = allowed
                         if r_diff:
                             delta["reasoning_content"] = r_diff
                         if delta:
@@ -829,10 +845,13 @@ async def stream_openai(
                         if tool_mode:
                             content_buf += c_diff
                             shown, content_shown_len, tool_hidden = toolemu.tool_visible(content_buf, content_shown_len, tool_hidden, tool_schemas)
-                            if shown:
-                                delta2["content"] = shown
+                            allowed = content_piece(shown)
+                            if allowed:
+                                delta2["content"] = allowed
                         else:
-                            delta2["content"] = c_diff
+                            allowed = content_piece(c_diff)
+                            if allowed:
+                                delta2["content"] = allowed
                     if r_diff:
                         delta2["reasoning_content"] = r_diff
                     if delta2:
@@ -935,7 +954,7 @@ async def stream_openai(
                         )
                     finish = "tool_calls"
                 else:
-                    remainder = content_buf[content_shown_len:]
+                    remainder = content_piece(content_buf[content_shown_len:])
                     if remainder:
                         yield _sse(
                             {
@@ -952,9 +971,9 @@ async def stream_openai(
                                 ],
                             }
                         )
-                    finish = "stop"
+                    finish = "length" if budget.done else "stop"
             else:
-                remainder = content_buf[content_shown_len:]
+                remainder = content_piece(content_buf[content_shown_len:])
                 if remainder:
                     yield _sse(
                         {
@@ -971,9 +990,9 @@ async def stream_openai(
                             ],
                         }
                     )
-                finish = "stop"
+                finish = "length" if budget.done else "stop"
         else:
-            finish = "stop"
+            finish = "length" if budget.done else "stop"
 
         if not role_sent:
             role_sent = True
