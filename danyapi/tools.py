@@ -86,7 +86,7 @@ _DSML_LAX_PARAMETER = re.compile(
     re.DOTALL | re.IGNORECASE,
 )
 _XML_SELFCLOSE = re.compile(r"<([a-zA-Z_][a-zA-Z0-9_-]*)\b([^>]*?)/>", re.DOTALL | re.IGNORECASE)
-_XML_OPEN_TAG_SCAN = re.compile(r"<([a-zA-Z_][a-zA-Z0-9_-]*)\b([^>]*)>", re.IGNORECASE)
+_XML_OPEN_TAG_SCAN = re.compile(r"<\s*([a-zA-Z_][a-zA-Z0-9_-]*)\b([^>]*)>", re.IGNORECASE)
 
 
 def _find_xml_close(text: str, name: str, start: int, name_space: bool, tail_space: bool) -> tuple[int, int] | None:
@@ -130,8 +130,19 @@ def _scan_xml_pairs(
             continue
         close = _find_xml_close(text, name, open_match.end(), name_space, tail_space)
         if close is None:
-            pos = open_match.end()
-            continue
+            body_start = open_match.end()
+            if name_filter is None or open_match.group(2).rstrip().endswith("/"):
+                pos = body_start
+                continue
+            if text.rfind("<", body_start) > text.rfind(">", body_start):
+                pos = body_start
+                continue
+            wrapper_close = _XML_WRAPPER_CLOSE_RE.search(text, body_start)
+            trunc = wrapper_close.start() if wrapper_close is not None else length
+            if _XML_STRAY_TOOL_CLOSE_RE.search(text, body_start, trunc):
+                pos = body_start
+                continue
+            close = (trunc, trunc)
         close_start, end = close
         yield open_match.start(), end, name, open_match.group(2), text[open_match.end() : close_start]
         pos = end
@@ -352,12 +363,18 @@ _NAME_ALIASES = ("name", "tool", "action", "tool_name", "call")
 _JSON_TYPE_ATTRS = frozenset({"string", "boolean", "integer", "number", "object", "array", "null"})
 _FENCES_RE = re.compile(r"^```[a-zA-Z0-9_-]*\s*\n?(.*?)\n?```$", re.DOTALL | re.IGNORECASE)
 _XML_PARAM_RE = re.compile(
-    r'<parameter\b[^>]*?\bname\s*=\s*(["\'])([^"\']+)\1[^>]*>(.*?)</parameter\s*>',
+    r'<\s*parameter\b[^>]*?\bname\s*=\s*(["\'])([^"\']+)\1[^>]*?>'
+    r'(.*?)'
+    r'(?:</\s*parameter\s*>|(?=</?\s*(?:tool_calls|tool_call|function_calls|function_call|calls|invoke|parameter)\b)|$)',
     re.DOTALL | re.IGNORECASE,
 )
 _XML_ATTR_RE = re.compile(r"([a-zA-Z_][a-zA-Z0-9_.-]*)\s*=\s*(\"[^\"]*\"|'[^']*')", re.IGNORECASE)
 _XML_NESTED_RE = re.compile(r"<[a-zA-Z_]")
 _XML_WRAPPER_CLOSE_RE = re.compile(r"</(?:tool_calls|tool_call|function_calls|function_call|tools|calls|_calls)\s*>", re.IGNORECASE)
+_XML_STRAY_TOOL_CLOSE_RE = re.compile(
+    r"</\s*(?:invoke|toolinvoke|tool_invoke|use_tool|tool_use|call|function|tool)\s*>",
+    re.IGNORECASE,
+)
 _XML_TOOL_NAMES = r"invoke|toolinvoke|tool_invoke|use_tool|tool_use|call|function|tool"
 _TOOL_TAG_NAMES = frozenset(name.strip().lower() for name in _XML_TOOL_NAMES.split("|"))
 _XML_TOOL_SELFCLOSE_RE = re.compile(
