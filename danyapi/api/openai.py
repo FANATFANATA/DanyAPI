@@ -3328,6 +3328,29 @@ async def _collect_non_stream(
                 if (
                     not (rec.content or rec.reasoning)
                     and not _is_input_exceeds_limit(rec)
+                    and _is_fake_context_hint(rec)
+                    and had_cached_session
+                    and not stale_rebuilt
+                    and messages is not None
+                ):
+                    try:
+                        rebuilt_prompt, rebuilt_tool_mode = toolemu.build_prompt(messages, tools, tool_choice, False, response_format)
+                    except (ValueError, TypeError, AttributeError):
+                        rebuilt_prompt = None
+                    if rebuilt_prompt is not None:
+                        stale_rebuilt = True
+                        _drop_session(pool, account, session_key)
+                        prompt = rebuilt_prompt
+                        tool_mode = rebuilt_tool_mode
+                        tool_schemas = toolemu.tool_schema_map(tools)
+                        log.warning("deepseek session %s hit a fake length-limit hint, rebuilt full history into a fresh chat", session_key)
+                        session, session_key, parent_message_id = await _prepare_session(account, pool, existing_sid, context_seq)
+                        stop_message_id = None
+                        response_message_id = None
+                        continue
+                if (
+                    not (rec.content or rec.reasoning)
+                    and not _is_input_exceeds_limit(rec)
                     and (_is_retryable_hint(rec) or _is_fake_context_hint(rec))
                     and attempt < MAX_RETRIES
                 ):
@@ -3699,6 +3722,28 @@ async def _stream_openai(
                 rate_attempt += 1
                 await _wait_message_too_frequent("stream hint", rate_attempt)
                 continue
+            if not _is_input_exceeds_limit(rec) and _is_fake_context_hint(rec) and had_cached_session and not stale_rebuilt and messages is not None:
+                try:
+                    rebuilt_prompt, rebuilt_tool_mode = toolemu.build_prompt(messages, tools, tool_choice, False, response_format)
+                except (ValueError, TypeError, AttributeError):
+                    rebuilt_prompt = None
+                if rebuilt_prompt is not None:
+                    stale_rebuilt = True
+                    _drop_session(pool, account, session_key)
+                    prompt = rebuilt_prompt
+                    tool_mode = rebuilt_tool_mode
+                    tool_schemas = toolemu.tool_schema_map(tools)
+                    log.warning("deepseek session %s hit a fake length-limit hint, rebuilt full history into a fresh chat", session_key)
+                    session, session_key, parent_message_id = await _prepare_session(account, pool, existing_sid, context_seq)
+                    stop_message_id = None
+                    response_message_id = None
+                    content_parts = []
+                    content_buf = ""
+                    content_shown_len = 0
+                    tool_hidden = False
+                    role_sent = False
+                    stop_hit = False
+                    continue
             if not _is_input_exceeds_limit(rec) and (_is_retryable_hint(rec) or _is_fake_context_hint(rec)) and attempt < MAX_RETRIES:
                 attempt += 1
                 delay = _retry_delay(attempt)
