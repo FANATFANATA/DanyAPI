@@ -364,8 +364,8 @@ _JSON_TYPE_ATTRS = frozenset({"string", "boolean", "integer", "number", "object"
 _FENCES_RE = re.compile(r"^```[a-zA-Z0-9_-]*\s*\n?(.*?)\n?```$", re.DOTALL | re.IGNORECASE)
 _XML_PARAM_RE = re.compile(
     r'<\s*parameter\b[^>]*?\bname\s*=\s*(["\'])([^"\']+)\1[^>]*?>'
-    r'(.*?)'
-    r'(?:</\s*parameter\s*>|(?=</?\s*(?:tool_calls|tool_call|function_calls|function_call|calls|invoke|parameter)\b)|$)',
+    r"(.*?)"
+    r"(?:</\s*parameter\s*>|(?=</?\s*(?:tool_calls|tool_call|function_calls|function_call|calls|invoke|parameter)\b)|$)",
     re.DOTALL | re.IGNORECASE,
 )
 _XML_ATTR_RE = re.compile(r"([a-zA-Z_][a-zA-Z0-9_.-]*)\s*=\s*(\"[^\"]*\"|'[^']*')", re.IGNORECASE)
