@@ -1909,6 +1909,7 @@ def _responses_chat_request(req: ResponsesRequest, provider_messages: list[dict]
         parallel_tool_calls=req.parallel_tool_calls,
         response_format=responses_api.extract_response_format(req.text, req.response_format),
         stream_options={"include_usage": True} if req.stream else None,
+        max_tokens=req.max_output_tokens,
     )
 
 
@@ -2276,6 +2277,15 @@ def _materialize_tools(req: ChatCompletionRequest) -> tuple[Any, Any]:
     return tools, tool_choice
 
 
+MAX_STREAM_CHOICES = 8
+
+
+def _bounded_choices(n: int | None) -> int:
+    if not isinstance(n, int) or n <= 1:
+        return 1
+    return min(n, MAX_STREAM_CHOICES)
+
+
 def _max_calls(parallel_tool_calls: bool | None) -> int | None:
     return 1 if parallel_tool_calls is False else None
 
@@ -2288,6 +2298,38 @@ def _split_stop(stop: Any) -> list[str]:
     if isinstance(stop, list):
         return [item for item in stop if isinstance(item, str) and item]
     return []
+
+
+class _StreamStopFilter:
+    __slots__ = ("_buf", "_hold", "_markers")
+
+    def __init__(self, markers: list[str]) -> None:
+        self._markers = markers
+        self._hold = max(len(marker) for marker in markers) - 1
+        self._buf = ""
+
+    def feed(self, piece: str) -> tuple[str, bool]:
+        if not piece:
+            return "", False
+        text = self._buf + piece
+        cut = -1
+        for marker in self._markers:
+            pos = text.find(marker)
+            if pos != -1 and (cut == -1 or pos < cut):
+                cut = pos
+        if cut != -1:
+            self._buf = ""
+            return text[:cut], True
+        if self._hold > 0 and len(text) > self._hold:
+            self._buf = text[-self._hold :]
+            return text[: -self._hold], False
+        self._buf = text
+        return "", False
+
+    def flush(self) -> str:
+        out = self._buf
+        self._buf = ""
+        return out
 
 
 _CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3040-\u30ff\uac00-\ud7af]")
@@ -3435,9 +3477,20 @@ async def _stream_openai(
         role_sent = False
         started = time.monotonic()
         budget = StreamBudget(max_tokens, _trim_to_tokens)
+        stop_markers = _split_stop(stop)
+        stop_filter = _StreamStopFilter(stop_markers) if stop_markers else None
+        stop_hit = False
 
         def content_piece(piece: str | None) -> str:
-            return budget.feed(piece)
+            nonlocal stop_hit
+            if piece is None or stop_hit:
+                return ""
+            if stop_filter is None:
+                return budget.feed(piece)
+            filtered, hit = stop_filter.feed(piece)
+            if hit:
+                stop_hit = True
+            return budget.feed(filtered)
 
         had_cached_session = bool(existing_sid) and account.sessions.get(existing_sid) is not None
         stale_rebuilt = False
@@ -3503,6 +3556,7 @@ async def _stream_openai(
             rec = MessageReconstructor()
             incremental = IncrementalSSE()
             response_message_id = None
+            stop_message_id = None
             got_content = False
             role_sent = False
             stopped = False
@@ -3885,6 +3939,19 @@ async def _stream_openai(
         )
         log.info("deepseek completion success (%.0fms)", (time.monotonic() - started) * 1000)
 
+        if stop_filter is not None and not stop_hit:
+            tail_text = content_piece(stop_filter.flush())
+            if tail_text:
+                yield _sse(
+                    {
+                        "id": chunk_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": model,
+                        "choices": [{"index": 0, "delta": {"content": tail_text}, "finish_reason": None}],
+                    }
+                )
+
         if tool_mode:
             parsed = toolemu.parse_tool_calls(content_buf or rec.content, tool_schemas)
             if parsed is not None:
@@ -3935,7 +4002,7 @@ async def _stream_openai(
                                 ],
                             }
                         )
-                    finish = "length" if budget.done else _finish_reason(rec.status)
+                    finish = "stop" if stop_hit else ("length" if budget.done else _finish_reason(rec.status))
             else:
                 raw_tail = (content_buf or rec.content)[content_shown_len:] if (content_buf or rec.content) else ""
                 tail_text = content_piece(raw_tail)
@@ -3955,9 +4022,9 @@ async def _stream_openai(
                             ],
                         }
                     )
-                finish = "length" if budget.done else _finish_reason(rec.status)
+                finish = "stop" if stop_hit else ("length" if budget.done else _finish_reason(rec.status))
         else:
-            finish = "length" if budget.done else _finish_reason(rec.status)
+            finish = "stop" if stop_hit else ("length" if budget.done else _finish_reason(rec.status))
 
         if not role_sent:
             role_sent = True
@@ -3994,6 +4061,28 @@ async def _stream_openai(
                     "choices": [{"index": 0, "delta": {}, "finish_reason": finish}],
                 }
             )
+            for extra_index in range(1, _bounded_choices(n)):
+                if budget.text:
+                    yield _sse(
+                        {
+                            "id": chunk_id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": model,
+                            "session_id": session_key,
+                            "choices": [{"index": extra_index, "delta": {"content": budget.text}, "finish_reason": None}],
+                        }
+                    )
+                yield _sse(
+                    {
+                        "id": chunk_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": model,
+                        "session_id": session_key,
+                        "choices": [{"index": extra_index, "delta": {}, "finish_reason": finish}],
+                    }
+                )
         if include_usage:
             yield _sse(
                 {
