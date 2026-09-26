@@ -765,6 +765,17 @@ def test_unknown_v1_route():
 
 _DSML_MARK = "\uff5c\uff5c"
 _DSML_REPLY = f"Here is the plan.\n<{_DSML_MARK}DSML{_DSML_MARK}thinking>secret reasoning</{_DSML_MARK}DSML{_DSML_MARK}thinking>\nAll done."
+_DSML_REASONING = f"why\n<{_DSML_MARK}DSML{_DSML_MARK}thinking>private plan</{_DSML_MARK}DSML{_DSML_MARK}thinking>\nmuch"
+
+
+def _think_dsml_sse() -> str:
+    fragment = (
+        '{"v":{"response":{"message_id":2,"parent_id":1,"status":"WIP","fragments":'
+        '[{"id":2,"type":"THINK","content":' + json.dumps(_DSML_REASONING) + '},{"id":3,"type":"RESPONSE","content":' + json.dumps(_DSML_REPLY) + "}]}}}\n"
+    )
+    ready = 'data: {"request_message_id":1,"response_message_id":2,"model_type":"default"}\n'
+    status = 'data: {"p":"response/status","o":"SET","v":"FINISHED"}\n'
+    return "event: ready\n" + ready + "\n" + "data: " + fragment + "\n" + status + "\n"
 
 
 def test_build_assistant_message_strips_dsml():
@@ -774,6 +785,48 @@ def test_build_assistant_message_strips_dsml():
     assert "DSML" not in message["content"]
     assert "secret reasoning" not in message["content"]
     assert "All done." in message["content"]
+
+
+def test_build_assistant_message_strips_dsml_from_reasoning():
+    message, _finish = openai_mod._build_assistant_message("answer", _DSML_REASONING, False, None)
+    assert "DSML" not in message["reasoning_content"]
+    assert "private plan" not in message["reasoning_content"]
+    assert message["reasoning_content"].startswith("why")
+
+
+def test_build_assistant_message_strips_reasoning_in_tool_mode():
+    schemas = toolemu.tool_schema_map([WEATHER_TOOL])
+    body = json.dumps({"name": "get_weather", "arguments": {"city": "Moscow"}})
+    message, finish = openai_mod._build_assistant_message(body, _DSML_REASONING, True, schemas)
+    assert finish == "tool_calls"
+    assert "DSML" not in message["reasoning_content"]
+    assert "private plan" not in message["reasoning_content"]
+
+
+def test_build_limited_message_strips_reasoning_without_tools():
+    message, _finish = openai_mod._build_limited_message("answer", _DSML_REASONING, False, None, None, None, None, "FINISHED")
+    assert "DSML" not in message["reasoning_content"]
+    assert "private plan" not in message["reasoning_content"]
+
+
+async def test_stream_openai_strips_dsml_from_reasoning():
+    acct = FakeAccount([_think_dsml_sse()])
+    gen = openai_mod._stream_openai(
+        account=acct,
+        pool=MagicMock(),
+        existing_sid="s1",
+        lock=acct.sem,
+        prompt="x",
+        model="deepseek-v4.1-flash",
+        model_type="default",
+        thinking=True,
+        search=False,
+    )
+    joined = "".join(await _collect(gen))
+    assert "DSML" not in joined
+    assert "private plan" not in joined
+    assert "why" in joined
+    assert "All done." in joined
 
 
 def test_build_limited_message_strips_dsml_without_tools():

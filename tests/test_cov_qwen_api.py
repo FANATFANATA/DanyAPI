@@ -830,6 +830,19 @@ async def test_collect_image_stream_error():
 
 _DSML_MARK = "\uff5c\uff5c"
 _DSML_REPLY = f"Here is the plan.\n<{_DSML_MARK}DSML{_DSML_MARK}thinking>secret reasoning</{_DSML_MARK}DSML{_DSML_MARK}thinking>\nAll done."
+_DSML_REASONING = f"why\n<{_DSML_MARK}DSML{_DSML_MARK}thinking>private plan</{_DSML_MARK}DSML{_DSML_MARK}thinking>\nmuch"
+
+
+def _dsml_tool_call_text() -> str:
+    mark = _DSML_MARK
+    lines = [
+        f"<{mark}DSML{mark}tool_calls>",
+        f'<{mark}DSML{mark}invoke name="get_weather">',
+        f'<{mark}DSML{mark}parameter name="city">Moscow</{mark}DSML{mark}parameter>',
+        f"</{mark}DSML{mark}invoke>",
+        f"</{mark}DSML{mark}tool_calls>",
+    ]
+    return "\n".join(lines)
 
 
 def test_build_limited_message_strips_dsml_without_tools():
@@ -864,3 +877,58 @@ async def test_stream_strips_dsml_from_content():
     assert "secret reasoning" not in joined
     assert "Here is the plan." in joined
     assert "All done." in joined
+
+
+def test_build_limited_message_strips_dsml_from_reasoning():
+    message, _finish = qwen_api._build_limited_message(_rec_with(_DSML_REPLY, _DSML_REASONING), False, None, None, None, None)
+    assert "DSML" not in message["reasoning_content"]
+    assert "private plan" not in message["reasoning_content"]
+    assert message["reasoning_content"].startswith("why")
+
+
+def test_build_limited_message_strips_reasoning_in_tool_mode():
+    rec = _rec_with(_dsml_tool_call_text(), _DSML_REASONING)
+    message, finish = qwen_api._build_limited_message(rec, True, TOOL_SCHEMAS, None, None, None)
+    assert finish == "tool_calls"
+    assert "DSML" not in message["reasoning_content"]
+    assert "private plan" not in message["reasoning_content"]
+
+
+def _dsml_think_sse() -> str:
+    created = 'data: {"response.created":{"chat_id":"c1","parent_id":"p0","response_id":"r1"}} \n\n'
+    think = 'data: {"choices": [{"delta": {"content": ' + json.dumps(_DSML_REASONING) + ', "phase": "think"}}], "response_id": "r1"}\n\n'
+    answer = (
+        'data: {"choices": [{"delta": {"role": "assistant", "content": '
+        + json.dumps(_DSML_REPLY)
+        + ', "phase": "answer", "status": "typing"}}], "response_id": "r1"}\n\n'
+    )
+    done = 'data: {"choices": [{"delta": {"content": "", "status": "finished", "phase": "answer"}}], "response_id": "r1"}\n\n'
+    return created + think + answer + done
+
+
+async def test_stream_strips_dsml_from_reasoning():
+    acct = FakeAccount([_dsml_think_sse()])
+    joined = "".join(await _collect(qwen_api.stream_openai(**_args(acct))))
+    assert "DSML" not in joined
+    assert "private plan" not in joined
+    assert "why" in joined
+    assert "All done." in joined
+
+
+def test_collect_image_strips_dsml_from_revised_prompt(monkeypatch):
+    rec = _rec_with(_DSML_REPLY)
+    monkeypatch.setattr(qwen_api, "_collect_response", AsyncMock(return_value=(rec, FakeSession(), "s1", "p", False, None)))
+    result = asyncio.run(
+        qwen_api.collect_image(
+            account=FakeAccount([]),
+            pool=MagicMock(),
+            existing_sid="s1",
+            lock=asyncio.Semaphore(1),
+            prompt="a cat",
+            model="qwen-image-gen",
+            model_id="qwen-image-gen",
+        )
+    )
+    assert "DSML" not in result["revised_prompt"]
+    assert "secret reasoning" not in result["revised_prompt"]
+    assert "All done." in result["revised_prompt"]

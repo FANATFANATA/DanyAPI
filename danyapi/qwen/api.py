@@ -422,14 +422,14 @@ def _build_limited_message(
         text, limit_finish = _apply_limits(toolemu.strip_dsml(rec.content or ""), max_tokens, stop)
         message = {"role": "assistant", "content": text}
         if rec.reasoning:
-            message["reasoning_content"] = rec.reasoning
+            message["reasoning_content"] = toolemu.strip_dsml(rec.reasoning)
         if limit_finish == "length":
             return message, "length"
         return message, "stop"
     text, limit_finish = _apply_limits(toolemu.strip_dsml(rec.content or ""), max_tokens, stop)
     message = {"role": "assistant", "content": text}
     if rec.reasoning:
-        message["reasoning_content"] = rec.reasoning
+        message["reasoning_content"] = toolemu.strip_dsml(rec.reasoning)
     return message, limit_finish
 
 
@@ -694,12 +694,19 @@ async def stream_openai(
         role_sent = False
         budget = StreamBudget(max_tokens, _trim_to_tokens)
         dsml_filter = toolemu.DsmlFilter()
+        reasoning_filter = toolemu.DsmlFilter()
 
         def content_piece(piece: str | None) -> str:
             return budget.feed(dsml_filter.feed(piece))
 
         def flush_piece() -> str:
             return budget.feed(dsml_filter.flush())
+
+        def reasoning_piece(piece: str | None) -> str:
+            return reasoning_filter.feed(piece)
+
+        def flush_reasoning() -> str:
+            return reasoning_filter.flush()
 
         stop_response_id: str | None = None
         had_cached_session = bool(existing_sid) and account.sessions.get(existing_sid) is not None
@@ -767,6 +774,7 @@ async def stream_openai(
             tool_hidden = False
             stopped = False
             dsml_filter = toolemu.DsmlFilter()
+            reasoning_filter = toolemu.DsmlFilter()
             try:
                 async for chunk in resp.aiter_bytes():
                     for event in incremental.feed(chunk):
@@ -805,7 +813,9 @@ async def stream_openai(
                                 if allowed:
                                     delta["content"] = allowed
                         if r_diff:
-                            delta["reasoning_content"] = r_diff
+                            reason = reasoning_piece(r_diff)
+                            if reason:
+                                delta["reasoning_content"] = reason
                         if delta:
                             yield _sse(
                                 {
@@ -858,7 +868,9 @@ async def stream_openai(
                             if allowed:
                                 delta2["content"] = allowed
                     if r_diff:
-                        delta2["reasoning_content"] = r_diff
+                        reason2 = reasoning_piece(r_diff)
+                        if reason2:
+                            delta2["reasoning_content"] = reason2
                     if delta2:
                         yield _sse(
                             {
@@ -1017,6 +1029,24 @@ async def stream_openai(
                 }
             )
 
+        reason_tail = flush_reasoning()
+        if reason_tail:
+            yield _sse(
+                {
+                    "id": chunk_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"reasoning_content": reason_tail},
+                            "finish_reason": None,
+                        }
+                    ],
+                }
+            )
+
         if not role_sent:
             role_sent = True
             yield _sse(
@@ -1119,7 +1149,7 @@ async def collect_image(
 
         return {
             "image_urls": rec.image_urls,
-            "revised_prompt": rec.content or "",
+            "revised_prompt": toolemu.strip_dsml(rec.content or ""),
             "usage": usage,
             "session_id": session_key,
         }

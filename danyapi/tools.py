@@ -401,7 +401,7 @@ def _replace_dsml_tag(match: re.Match) -> str:
     return " "
 
 
-def _strip_dsml(text: str, keep_tags: bool = True) -> str:
+def _strip_dsml(text: str) -> str:
     if not text:
         return text
     result = text
@@ -419,9 +419,6 @@ def _strip_dsml(text: str, keep_tags: bool = True) -> str:
         result = updated
         if not _DSML_PRESENT.search(result):
             break
-    if not keep_tags:
-        result = _DSML_TAG.sub(" ", result)
-        return _DSML_NAKED.sub(" ", result)
     result = _DSML_XML_NORMALIZE.sub(r"<\1\2>", result)
     result = _DSML_TAG.sub(_replace_dsml_tag, result)
     return _DSML_NAKED.sub(" ", result)
@@ -430,7 +427,7 @@ def _strip_dsml(text: str, keep_tags: bool = True) -> str:
 def strip_dsml(text: str) -> str:
     if not text:
         return text
-    return _strip_dsml(text, keep_tags=False)
+    return _strip_output(text)
 
 
 _DSML_SPACE = " \t\r\n"
@@ -446,6 +443,14 @@ _DSML_MARKER_RE = re.compile(rf"[{re.escape(_DSML_SIGNAL_CHARS)}]|[^\x00-\x7f]")
 _DSML_PARTIAL_RE = re.compile(r"(?:DSM|DSML|DS|D)\Z", re.IGNORECASE)
 _DSML_LT_RE = re.compile(r"<")
 _DSML_TAG_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.:-]*")
+_DSML_PIPE_RUN_RE = rf"[{_DSML_PIPE}]{{1,8}}"
+_DSML_TAIL_RUN_RE = rf"\s*[{_DSML_PIPE}]{{0,8}}"
+_DSML_DANGLING = re.compile(
+    rf"(?:<[/]?\s*{_DSML_PIPE_RUN_RE}(?:\s*(?:DSM|DSML|DS|D))?{_DSML_TAIL_RUN_RE}(?:\s*[A-Za-z0-9_.:-]*)?"
+    rf"|{_DSML_PIPE_RUN_RE}\s*(?:DSM|DSML|DS|D){_DSML_TAIL_RUN_RE})\Z",
+    re.IGNORECASE,
+)
+_DSML_DANGLING_MAX = 40
 _DSML_CLOSE_CACHE: dict[str, re.Pattern[str]] = {}
 _DSML_CLOSE_CACHE_MAX = 64
 
@@ -482,10 +487,7 @@ def _dsml_hold_start(text: str, floor: int = 0) -> int:
     if start == end:
         return end
     for _ in range(_DSML_CHAIN_MAX):
-        probe = start
-        while probe > floor and text[probe - 1] in _DSML_SPACE:
-            probe -= 1
-        lead = _DSML_PARTIAL_RE.search(text, floor, probe)
+        lead = _DSML_PARTIAL_RE.search(text, floor, start)
         if lead is None:
             break
         back = _dsml_run_start(text, lead.start(), floor)
@@ -509,7 +511,7 @@ def _dsml_tag_may_start(text: str, start: int) -> bool:
     return _is_dsml_char(text[index])
 
 
-def _dsml_tag_at(text: str, start: int) -> tuple[int, str, bool] | None:
+def _dsml_tag_at(text: str, start: int) -> tuple[int, str, bool, bool] | None:
     size = len(text)
     index = start + 1
     if index >= size:
@@ -537,17 +539,18 @@ def _dsml_tag_at(text: str, start: int) -> tuple[int, str, bool] | None:
     while index < size and text[index] in _DSML_SPACE:
         index += 1
     if index < size and text[index] == ">":
-        return index + 1, "", closing
+        return index + 1, "", closing, False
     name_start = index
     while index < size and text[index] not in "<>":
         index += 1
     if index >= size or text[index] != ">":
         return None
     name = text[name_start:index].strip()
-    if name.endswith("/"):
+    self_closing = name.endswith("/")
+    if self_closing:
         name = name[:-1].strip()
     found = _DSML_TAG_NAME_RE.match(name)
-    return index + 1, found.group(0).lower() if found else "", closing
+    return index + 1, found.group(0).lower() if found else "", closing, self_closing
 
 
 def _dsml_close_pattern(name: str) -> re.Pattern[str]:
@@ -559,12 +562,29 @@ def _dsml_close_pattern(name: str) -> re.Pattern[str]:
     return pattern
 
 
-def _dsml_close_at(text: str, start: int, name: str) -> int | None:
-    for match in _dsml_close_pattern(name).finditer(text, start):
+def _dsml_matching_close(text: str, start: int, name: str) -> int | None:
+    pattern = _dsml_close_pattern(name)
+    depth = 1
+    pos = start
+    while True:
+        match = pattern.search(text, pos)
+        if match is None:
+            return None
         parsed = _dsml_tag_at(text, match.start())
-        if parsed is not None and parsed[2] and parsed[1] == name:
-            return parsed[0]
-    return None
+        if parsed is None:
+            pos = match.end()
+            continue
+        end, tag_name, closing, self_closing = parsed
+        if tag_name != name:
+            pos = end
+            continue
+        if closing:
+            depth -= 1
+            if depth == 0:
+                return end
+        elif not self_closing:
+            depth += 1
+        pos = end
 
 
 def _dsml_scan_cut(text: str, final: bool) -> int:
@@ -582,9 +602,9 @@ def _dsml_scan_cut(text: str, final: bool) -> int:
                 return index
             pos = index + 1
             continue
-        end, name, closing = parsed
-        if not closing and name in _DSML_HIDDEN_NAME_SET:
-            close = _dsml_close_at(text, end, name)
+        end, name, closing, self_closing = parsed
+        if not closing and not self_closing and name in _DSML_HIDDEN_NAME_SET:
+            close = _dsml_matching_close(text, end, name)
             if close is None:
                 if not final:
                     return index
@@ -592,6 +612,80 @@ def _dsml_scan_cut(text: str, final: bool) -> int:
         pos = end
         floor = end
     return size if final else _dsml_hold_start(text, floor)
+
+
+def _hidden_spans(text: str) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    pos = 0
+    size = len(text)
+    while pos < size:
+        found = _DSML_LT_RE.search(text, pos)
+        if found is None:
+            break
+        index = found.start()
+        parsed = _dsml_tag_at(text, index)
+        if parsed is None:
+            pos = index + 1
+            continue
+        end, name, closing, self_closing = parsed
+        if closing or self_closing or name not in _DSML_HIDDEN_NAME_SET:
+            pos = end
+            continue
+        close = _dsml_matching_close(text, end, name)
+        if close is None:
+            spans.append((index, size))
+            return spans
+        spans.append((index, close))
+        pos = close
+    return spans
+
+
+def _drop_spans(text: str, spans: list[tuple[int, int]]) -> str:
+    if not spans:
+        return text
+    parts: list[str] = []
+    cursor = 0
+    for start, end in spans:
+        if start > cursor:
+            parts.append(text[cursor:start])
+        parts.append(" ")
+        cursor = end
+    parts.append(text[cursor:])
+    return "".join(parts)
+
+
+def _drop_dangling(text: str) -> str:
+    look = len(text) - _DSML_DANGLING_MAX
+    if look <= 0:
+        return _DSML_DANGLING.sub(" ", text)
+    if _DSML_DANGLING.search(text, look) is None:
+        return text
+    return text[:look] + _DSML_DANGLING.sub(" ", text[look:])
+
+
+def _strip_output(text: str, drop_tail: bool = True) -> str:
+    if not text:
+        return text
+    if not _DSML_PRESENT.search(text):
+        return _drop_dangling(text) if drop_tail else text
+    result = text
+    for _ in range(10):
+        updated = _drop_spans(result, _hidden_spans(result))
+        updated = _DSML_BLOCK.sub(" ", updated)
+        updated = _DSML_WRAP.sub(" ", updated)
+        for pattern in _DSML_HIDDEN_PATS:
+            updated = pattern.sub(" ", updated)
+        for pattern in _DSML_HIDDEN_NAKED_PATS:
+            updated = pattern.sub(" ", updated)
+        if updated == result:
+            break
+        result = updated
+        if not _DSML_PRESENT.search(result):
+            break
+    if drop_tail:
+        result = _drop_dangling(result)
+    result = _DSML_TAG.sub(" ", result)
+    return _DSML_NAKED.sub(" ", result)
 
 
 class DsmlFilter:
@@ -609,14 +703,14 @@ class DsmlFilter:
             return ""
         head = self._buf[:cut]
         self._buf = self._buf[cut:]
-        return _strip_dsml(head, keep_tags=False)
+        return _strip_output(head, drop_tail=False)
 
     def flush(self) -> str:
         text = self._buf
         self._buf = ""
         if not text:
             return ""
-        return _strip_dsml(text, keep_tags=False)
+        return _strip_output(text)
 
 
 TOOL_STREAM_TAGS = (
@@ -2899,7 +2993,7 @@ def format_tool_message(tool_calls: list[ToolCall], text: str, reasoning: str | 
         for call in tool_calls
     ]
     if reasoning:
-        message["reasoning_content"] = reasoning
+        message["reasoning_content"] = strip_dsml(reasoning)
     return message
 
 

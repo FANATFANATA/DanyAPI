@@ -22,6 +22,7 @@ from danyapi.tools import (
     _parse_xml_tool_calls,
     _render_tool_call_mention,
     _strip_dsml,
+    _strip_output,
     _tail_after_last_user,
     _tool_function,
     build_prompt,
@@ -2699,6 +2700,87 @@ def test_dsml_filter_unterminated_thinking_block_keeps_text_consistent():
     assert "answer" in out
 
 
+def test_strip_dsml_drops_unterminated_hidden_block():
+    text = f"visible <{_DSML}DSML{_DSML}thinking>private plan that never ends"
+    assert strip_dsml(text) == "visible  "
+
+
+def test_strip_dsml_nested_hidden_blocks_are_depth_aware():
+    mark = f"<{_DSML}DSML{_DSML}thinking>"
+    end = f"</{_DSML}DSML{_DSML}thinking>"
+    text = f"a{mark}outer {mark}inner{end} still hidden{end}b"
+    assert strip_dsml(text) == "a b"
+
+
+def test_strip_dsml_triple_nested_hidden_blocks():
+    mark = f"<{_DSML}DSML{_DSML}thinking>"
+    end = f"</{_DSML}DSML{_DSML}thinking>"
+    text = f"{mark}a{mark}b{mark}c{end}d{end}e{end}ok"
+    assert strip_dsml(text) == " ok"
+
+
+def test_strip_dsml_sibling_hidden_blocks_keep_gap():
+    mark = f"<{_DSML}DSML{_DSML}thinking>"
+    end = f"</{_DSML}DSML{_DSML}thinking>"
+    assert strip_dsml(f"{mark}a{end}mid{mark}b{end}tail") == " mid tail"
+
+
+def test_strip_dsml_drops_truncated_trailing_marker():
+    assert strip_dsml(f"text<{_DSML}DSM") == "text "
+    assert strip_dsml(f"text<{_DSML}DSML{_DSML}") == "text "
+    assert strip_dsml(f"{_DSML}{_DSML}DS") == " "
+    assert strip_dsml("plain text") == "plain text"
+    assert strip_dsml("3 <") == "3 <"
+    assert strip_dsml("a < b") == "a < b"
+    assert strip_dsml(f"plain text {_DSML}{_DSML}DSML{_DSML}") == "plain text  "
+
+
+def test_strip_dsml_handles_spaced_markers():
+    text = f"a< {_DSML} DSML {_DSML} thinking >hidden</ {_DSML} DSML {_DSML} thinking >b"
+    assert strip_dsml(text) == "a b"
+
+
+def test_strip_dsml_ignores_nested_other_hidden_name():
+    mark = f"<{_DSML}DSML{_DSML}thinking>"
+    other = f"<{_DSML}DSML{_DSML}reasoning>inner</{_DSML}DSML{_DSML}reasoning>"
+    end = f"</{_DSML}DSML{_DSML}thinking>"
+    assert strip_dsml(f"a{mark}{other}rest{end}b") == "a b"
+
+
+def test_strip_dsml_skips_similar_tag_names_inside_hidden_block():
+    mark = f"<{_DSML}DSML{_DSML}thinking>"
+    similar = f"<{_DSML}DSML{_DSML}thinking-x>note</{_DSML}DSML{_DSML}thinking-x>"
+    end = f"</{_DSML}DSML{_DSML}thinking>"
+    assert strip_dsml(f"a{mark}{similar}rest{end}b") == "a b"
+
+
+def test_strip_output_handles_empty_text():
+    assert _strip_output("") == ""
+    assert _strip_output("plain", drop_tail=False) == "plain"
+
+
+def test_dsml_filter_matches_direct_strip_for_truncated_and_nested():
+    cases = [
+        f"visible <{_DSML}DSML{_DSML}thinking>never closed",
+        f"a<{_DSML}DSML{_DSML}thinking>outer <{_DSML}DSML{_DSML}thinking>inner</{_DSML}DSML{_DSML}thinking> rest</{_DSML}DSML{_DSML}thinking>b",
+        f"tail<{_DSML}DSM",
+    ]
+    for text in cases:
+        for size in (1, 2, 3, 7):
+            flt = DsmlFilter()
+            out = "".join(flt.feed(text[index : index + size]) for index in range(0, len(text), size)) + flt.flush()
+            assert out == strip_dsml(text), text
+
+
+def test_format_tool_message_strips_dsml_from_reasoning():
+    calls = [ToolCall.create("f", {})]
+    message = format_tool_message(calls, "text", f"why <{_DSML}DSML{_DSML}thinking>private</{_DSML}DSML{_DSML}thinking>")
+    assert "private" not in message["reasoning_content"]
+    assert "DSML" not in message["reasoning_content"]
+    assert message["reasoning_content"].startswith("why")
+    assert "reasoning_content" not in format_tool_message(calls, "text")
+
+
 def test_dsml_hold_start_rules():
     assert _dsml_hold_start("hello") == 5
     assert _dsml_hold_start(" world") == 6
@@ -2741,14 +2823,21 @@ def test_dsml_filter_self_closing_hidden_tag_keeps_content():
 def test_dsml_tag_at_parsing():
     parsed = _dsml_tag_at(f'<{_DSML}DSML{_DSML}invoke name="bash">', 0)
     assert parsed is not None
-    end, name, closing = parsed
+    end, name, closing, self_closing = parsed
     assert name == "invoke"
     assert closing is False
+    assert self_closing is False
     assert end == len(f'<{_DSML}DSML{_DSML}invoke name="bash">')
     closing_tag = _dsml_tag_at(f"</{_DSML}DSML{_DSML}thinking>", 0)
     assert closing_tag is not None
     assert closing_tag[1] == "thinking"
     assert closing_tag[2] is True
+    assert closing_tag[3] is False
+    empty_tag = _dsml_tag_at(f"<{_DSML}DSML{_DSML}thinking/>", 0)
+    assert empty_tag is not None
+    assert empty_tag[1] == "thinking"
+    assert empty_tag[2] is False
+    assert empty_tag[3] is True
     assert _dsml_tag_at("<div>", 0) is None
     assert _dsml_tag_at(f"<{_DSML}DSML{_DSML}trunc", 0) is None
     assert _dsml_tag_at("no tag", 0) is None

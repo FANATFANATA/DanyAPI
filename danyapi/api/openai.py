@@ -2951,7 +2951,7 @@ def _build_assistant_message(
                 return toolemu.format_tool_message(tool_calls, tool_text, reasoning), "tool_calls"
     message = {"role": "assistant", "content": toolemu.strip_dsml(content)}
     if reasoning:
-        message["reasoning_content"] = reasoning
+        message["reasoning_content"] = toolemu.strip_dsml(reasoning)
     return message, "stop"
 
 
@@ -2980,7 +2980,7 @@ def _build_limited_message(
     text, limit_finish = _apply_limits(toolemu.strip_dsml(content or ""), max_tokens, stop)
     message = {"role": "assistant", "content": text}
     if reasoning:
-        message["reasoning_content"] = reasoning
+        message["reasoning_content"] = toolemu.strip_dsml(reasoning)
     if limit_finish == "length":
         return message, "length"
     return message, _finish_reason(provider_finish)
@@ -3503,6 +3503,16 @@ async def _stream_openai(
         stop_filter = _StreamStopFilter(stop_markers) if stop_markers else None
         stop_hit = False
         dsml_filter = toolemu.DsmlFilter()
+        reasoning_filter = toolemu.DsmlFilter()
+
+        def reasoning_piece(piece: str | None, *, final: bool = False) -> str:
+            if stop_hit:
+                return ""
+            if final:
+                return reasoning_filter.flush()
+            if piece is None:
+                return ""
+            return reasoning_filter.feed(piece)
 
         def content_piece(piece: str | None, *, final: bool = False) -> str:
             nonlocal stop_hit
@@ -3634,7 +3644,9 @@ async def _stream_openai(
                                 if allowed:
                                     delta["content"] = allowed
                         if r_diff:
-                            delta["reasoning_content"] = r_diff
+                            reason = reasoning_piece(r_diff)
+                            if reason:
+                                delta["reasoning_content"] = reason
                         if delta:
                             yield _sse(
                                 {
@@ -3691,7 +3703,9 @@ async def _stream_openai(
                             if allowed:
                                 delta2["content"] = allowed
                     if r_diff:
-                        delta2["reasoning_content"] = r_diff
+                        reason2 = reasoning_piece(r_diff)
+                        if reason2:
+                            delta2["reasoning_content"] = reason2
                     if delta2:
                         yield _sse(
                             {
@@ -3750,6 +3764,7 @@ async def _stream_openai(
                     role_sent = False
                     stop_hit = False
                     dsml_filter = toolemu.DsmlFilter()
+                    reasoning_filter = toolemu.DsmlFilter()
                     continue
             if not _is_input_exceeds_limit(rec) and (_is_retryable_hint(rec) or _is_fake_context_hint(rec)) and attempt < MAX_RETRIES:
                 attempt += 1
@@ -3852,15 +3867,18 @@ async def _stream_openai(
                                 ],
                             }
                         )
-                    yield _sse(
-                        {
-                            "id": chunk_id,
-                            "object": "chat.completion.chunk",
-                            "created": created,
-                            "model": model,
-                            "choices": [{"index": 0, "delta": {"reasoning_content": cont_rec.reasoning}, "finish_reason": None}],
-                        }
-                    )
+                if cont_rec.reasoning:
+                    cont_reason = reasoning_piece(cont_rec.reasoning)
+                    if cont_reason:
+                        yield _sse(
+                            {
+                                "id": chunk_id,
+                                "object": "chat.completion.chunk",
+                                "created": created,
+                                "model": model,
+                                "choices": [{"index": 0, "delta": {"reasoning_content": cont_reason}, "finish_reason": None}],
+                            }
+                        )
                 if not _is_input_exceeds_limit(cont_rec):
                     incomplete_message = None
                     break
@@ -3943,15 +3961,17 @@ async def _stream_openai(
                                         ],
                                     }
                                 )
-                            yield _sse(
-                                {
-                                    "id": chunk_id,
-                                    "object": "chat.completion.chunk",
-                                    "created": created,
-                                    "model": model,
-                                    "choices": [{"index": 0, "delta": {"reasoning_content": rec.reasoning}, "finish_reason": None}],
-                                }
-                            )
+                            reduced_reason = reasoning_piece(rec.reasoning)
+                            if reduced_reason:
+                                yield _sse(
+                                    {
+                                        "id": chunk_id,
+                                        "object": "chat.completion.chunk",
+                                        "created": created,
+                                        "model": model,
+                                        "choices": [{"index": 0, "delta": {"reasoning_content": reduced_reason}, "finish_reason": None}],
+                                    }
+                                )
         if incomplete_message is not None and reduced_notice is None:
             log.warning("deepseek response incomplete: %s", incomplete_message)
             for line in _stream_error_sse(chunk_id, created, model, incomplete_message, session_key, RESPONSE_INCOMPLETE, RESPONSE_INCOMPLETE):
@@ -4072,6 +4092,18 @@ async def _stream_openai(
                     "created": created,
                     "model": model,
                     "choices": [{"index": 0, "delta": {"content": tail_text}, "finish_reason": None}],
+                }
+            )
+
+        tail_reason = reasoning_piece(None, final=True)
+        if tail_reason:
+            yield _sse(
+                {
+                    "id": chunk_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model,
+                    "choices": [{"index": 0, "delta": {"reasoning_content": tail_reason}, "finish_reason": None}],
                 }
             )
 
