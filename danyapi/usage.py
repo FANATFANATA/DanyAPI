@@ -166,17 +166,25 @@ class UsageTracker:
                     "session_id": session_id,
                 }
             )
+            usage_payload: dict[str, Any] | None = None
+            recent_payload: list[dict[str, Any]] | None = None
             if self._store is not None:
-                try:
-                    now = time.time()
-                    if not _loop_active() or now - self._last_usage_persist >= self._USAGE_PERSIST_INTERVAL:
-                        self._last_usage_persist = now
-                        self._store.set("usage", self._serialize())
-                    if now - self._last_recent_persist >= self._RECENT_PERSIST_INTERVAL:
-                        self._last_recent_persist = now
-                        self._store.set("usage_recent", list(self._recent))
-                except Exception as exc:
-                    log.debug("usage store write failed: %s", exc)
+                now = time.time()
+                if not _loop_active() or now - self._last_usage_persist >= self._USAGE_PERSIST_INTERVAL:
+                    self._last_usage_persist = now
+                    usage_payload = self._serialize()
+                if now - self._last_recent_persist >= self._RECENT_PERSIST_INTERVAL:
+                    self._last_recent_persist = now
+                    recent_payload = list(self._recent)
+        store = self._store
+        if store is not None and (usage_payload is not None or recent_payload is not None):
+            try:
+                if usage_payload is not None:
+                    store.set("usage", usage_payload)
+                if recent_payload is not None:
+                    store.set("usage_recent", recent_payload)
+            except Exception as exc:
+                log.debug("usage store write failed: %s", exc)
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
