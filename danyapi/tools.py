@@ -662,6 +662,10 @@ TOOL_CALL_INSTRUCTION = (
     "Use only argument values that are real and present in the conversation; never guess or fabricate a value.\n"
     "If no listed function fits or a required value is unknown, reply with normal text instead of calling a function.\n"
     "Put independent calls in separate sibling <invoke> elements.\n"
+    "Argument values must be JSON-compatible: numbers without quotes, true or false without quotes, objects and arrays as JSON.\n"
+    "If you already tried to call a function but received no tool result, do not repeat the same broken output. "
+    "Look at the format above and re-emit the tool call exactly in that format.\n"
+    "If your previous reply was empty or cut off, re-emit the full tool call in the format above.\n"
     "No text before or after the <tool_calls> block.\n"
     "{choice}"
 )
@@ -669,6 +673,13 @@ TOOL_CALL_INSTRUCTION = (
 TOOL_TAIL_REMINDER = (
     "Continue the conversation and provide the final answer based on the tool results.\n"
     "If another function call is needed, reply with only the <tool_calls> XML block in the defined format.\n"
+    "The format is exactly:\n"
+    "<tool_calls>\n"
+    '<invoke name="FN">\n'
+    '<parameter name="ARG">value</parameter>\n'
+    "</invoke>\n"
+    "</tool_calls>\n"
+    "If a previous attempt to call a function produced no result, look at the format and re-emit the call in it. Do not invent a different format.\n"
     "If not, reply with your final answer."
 )
 
@@ -677,7 +688,9 @@ CHOICE_INSTRUCTIONS = {
     "function": "You MUST call a function from the list above. Call no function that is not in the list.",
 }
 
-JSON_MODE_INSTRUCTION = "You must reply with ONLY a valid JSON object.{constraints}"
+JSON_MODE_INSTRUCTION = (
+    "You must reply with ONLY a valid JSON object.{constraints}\nDo not wrap the JSON in markdown fences. Do not add any text before or after the JSON object."
+)
 
 
 @dataclass
@@ -1665,6 +1678,296 @@ def tool_schema_map(tools: list[Any] | None) -> dict[str, dict[str, Any]]:
     return result
 
 
+_FIX_MODES = frozenset({"report", "safe", "full"})
+_FIX_FUZZY_PARAM_MIN = 4
+_FIX_FUZZY_PARAM_CUTOFF = 0.85
+_FIX_FUZZY_ENUM_MIN = 2
+_FIX_FUZZY_ENUM_CUTOFF = 0.85
+
+
+def tool_schema_detail(tools: list[Any] | None) -> dict[str, dict[str, Any]]:
+    if not tools or not isinstance(tools, list):
+        return {}
+    result: dict[str, dict[str, Any]] = {}
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        fn = _tool_function(tool)
+        if not fn or not isinstance(fn, dict):
+            continue
+        name = fn.get("name")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        name = name.strip()
+        params = fn.get("parameters")
+        if isinstance(params, str):
+            try:
+                params = json.loads(params)
+            except (ValueError, TypeError, AttributeError):
+                params = None
+        types: dict[str, Any] = {}
+        enums: dict[str, list[Any]] = {}
+        defaults: dict[str, Any] = {}
+        bounds: dict[str, dict[str, Any]] = {}
+        param_aliases: dict[str, list[str]] = {}
+        required: list[str] = []
+        if isinstance(params, dict):
+            req = params.get("required")
+            if isinstance(req, list):
+                required = [str(item) for item in req if isinstance(item, str) and item]
+            properties = params.get("properties")
+            if isinstance(properties, dict):
+                for prop, spec in properties.items():
+                    if not isinstance(prop, str) or not isinstance(spec, dict):
+                        continue
+                    typ = spec.get("type")
+                    if isinstance(typ, list):
+                        for candidate in ("integer", "number", "boolean", "null", "string"):
+                            if candidate in typ:
+                                typ = candidate
+                                break
+                    if typ:
+                        types[prop] = typ
+                    enum_values = spec.get("enum")
+                    if isinstance(enum_values, list) and enum_values:
+                        enums[prop] = list(enum_values)
+                    if "default" in spec:
+                        defaults[prop] = spec["default"]
+                    entry: dict[str, Any] = {}
+                    low = spec.get("minimum")
+                    high = spec.get("maximum")
+                    if isinstance(low, (int, float)) and not isinstance(low, bool):
+                        entry["minimum"] = low
+                    if isinstance(high, (int, float)) and not isinstance(high, bool):
+                        entry["maximum"] = high
+                    if entry:
+                        bounds[prop] = entry
+                    aliases = spec.get("aliases")
+                    if isinstance(aliases, (list, tuple)):
+                        cleaned = [a for a in aliases if isinstance(a, str) and a.strip()]
+                        if cleaned:
+                            param_aliases[prop] = cleaned
+        name_aliases: list[str] = []
+        raw_aliases = fn.get("aliases")
+        if isinstance(raw_aliases, (list, tuple)):
+            name_aliases = [a for a in raw_aliases if isinstance(a, str) and a.strip()]
+        result[name] = {
+            "types": types,
+            "required": required,
+            "enums": enums,
+            "defaults": defaults,
+            "bounds": bounds,
+            "param_aliases": param_aliases,
+            "name_aliases": name_aliases,
+        }
+    return result
+
+
+def _resolve_arg_key(
+    key: str,
+    known_props: tuple[str, ...],
+    param_aliases: dict[str, Any],
+) -> tuple[str | None, str]:
+    if key in known_props:
+        return key, "exact"
+    if not known_props:
+        return None, "unknown"
+    folded_map = _folded_names(known_props)
+    hit = folded_map.get(_casefold(key))
+    if hit is not None:
+        return hit, "casefold"
+    compact_map = _compact_names(known_props)
+    hit = compact_map.get(_name_key(key))
+    if hit is not None:
+        return hit, "compact"
+    folded = _casefold(key)
+    compact = _name_key(key)
+    for prop, aliases in param_aliases.items():
+        for alias in aliases:
+            if _casefold(alias) == folded or _name_key(alias) == compact:
+                return prop, "alias"
+    if len(compact) >= _FIX_FUZZY_PARAM_MIN:
+        matches = get_close_matches(compact, tuple(compact_map), n=2, cutoff=_FIX_FUZZY_PARAM_CUTOFF)
+        if len(matches) == 1:
+            return compact_map[matches[0]], "fuzzy"
+    return None, "unknown"
+
+
+def _match_enum(value: Any, enum_values: list[Any]) -> tuple[Any, str] | None:
+    try:
+        if value in enum_values:
+            return value, "exact"
+    except TypeError:
+        pass
+    if isinstance(value, str):
+        folded = _casefold(value)
+        for item in enum_values:
+            if isinstance(item, str) and _casefold(item) == folded:
+                return item, "casefold"
+        str_values = [item for item in enum_values if isinstance(item, str)]
+        if str_values and len(value) >= _FIX_FUZZY_ENUM_MIN:
+            matches = get_close_matches(value, str_values, n=2, cutoff=_FIX_FUZZY_ENUM_CUTOFF)
+            if len(matches) == 1:
+                return matches[0], "fuzzy"
+    return None
+
+
+def _coerce_by_type(value: Any, json_type: Any) -> tuple[Any, bool]:
+    if json_type is None:
+        return value, False
+    if json_type == "string":
+        if isinstance(value, str):
+            return value, False
+        if isinstance(value, (dict, list)):
+            return json.dumps(value, ensure_ascii=False), True
+        if value is None:
+            return "", True
+        return json.dumps(value, ensure_ascii=False), True
+    if json_type in ("integer", "number"):
+        if isinstance(value, bool):
+            return value, False
+        if isinstance(value, (int, float)):
+            if json_type == "integer" and isinstance(value, float) and value.is_integer():
+                return int(value), True
+            return value, False
+        if isinstance(value, str):
+            coerced = _coerce_scalar(value, json_type)
+            if isinstance(coerced, (int, float)) and not isinstance(coerced, bool):
+                return coerced, True
+        return value, False
+    if json_type == "boolean":
+        if isinstance(value, bool):
+            return value, False
+        if isinstance(value, str):
+            low = value.strip().lower()
+            if low == "true":
+                return True, True
+            if low == "false":
+                return False, True
+        return value, False
+    if json_type == "null":
+        if value is None:
+            return value, False
+        if isinstance(value, str) and value.strip().lower() in ("null", "none", "~"):
+            return None, True
+        return value, False
+    return value, False
+
+
+def fix_tool_calls(
+    calls: list[ToolCall],
+    tool_schemas: dict[str, dict[str, Any]] | None,
+    tool_details: dict[str, dict[str, Any]] | None = None,
+    mode: str = "report",
+    report: dict[str, Any] | None = None,
+) -> list[ToolCall]:
+    if not calls:
+        return calls
+    if mode not in _FIX_MODES:
+        mode = "report"
+    schemas = tool_schemas if isinstance(tool_schemas, dict) else {}
+    details = tool_details if isinstance(tool_details, dict) else {}
+    fixes: list[dict[str, Any]] = []
+    warnings: list[dict[str, Any]] = []
+    result: list[ToolCall] = []
+    apply_fixes = mode in ("safe", "full")
+    drop_unknown = mode == "full"
+    for call in calls:
+        spec = details.get(call.name)
+        if not isinstance(spec, dict):
+            if schemas and _schema_for_name(schemas, call.name) is None:
+                warnings.append({"call_id": call.id, "kind": "unknown_tool", "name": call.name})
+                result.append(call)
+                continue
+            spec = {}
+        raw_types = spec.get("types")
+        types: dict[str, Any] = raw_types if isinstance(raw_types, dict) else {}
+        raw_enums = spec.get("enums")
+        enums: dict[str, Any] = raw_enums if isinstance(raw_enums, dict) else {}
+        raw_defaults = spec.get("defaults")
+        defaults: dict[str, Any] = raw_defaults if isinstance(raw_defaults, dict) else {}
+        raw_bounds = spec.get("bounds")
+        bounds: dict[str, Any] = raw_bounds if isinstance(raw_bounds, dict) else {}
+        raw_param_aliases = spec.get("param_aliases")
+        param_aliases: dict[str, Any] = raw_param_aliases if isinstance(raw_param_aliases, dict) else {}
+        raw_required = spec.get("required")
+        required: list[Any] = raw_required if isinstance(raw_required, list) else []
+        try:
+            parsed = _loads_lenient(call.arguments) if call.arguments and call.arguments.strip() else {}
+        except ValueError:
+            result.append(call)
+            continue
+        if not isinstance(parsed, dict):
+            result.append(call)
+            continue
+        known_props = tuple(types)
+        rebuilt: dict[str, Any] = {}
+        unknowns: list[str] = []
+        for key, value in parsed.items():
+            resolved_key, how = _resolve_arg_key(key, known_props, param_aliases)
+            if resolved_key is None:
+                unknowns.append(key)
+                rebuilt[key] = value
+                continue
+            if resolved_key in rebuilt:
+                continue
+            if resolved_key != key:
+                fixes.append({"call_id": call.id, "kind": "rename", "from": key, "to": resolved_key, "confidence": how})
+            rebuilt[resolved_key] = value
+        coerced: dict[str, Any] = {}
+        for key, value in rebuilt.items():
+            new_value, changed = _coerce_by_type(value, types.get(key))
+            if changed:
+                fixes.append({"call_id": call.id, "kind": "coerce", "param": key, "from": value, "to": new_value})
+            enum_values = enums.get(key)
+            if isinstance(enum_values, list) and enum_values:
+                match = _match_enum(new_value, enum_values)
+                if match is not None:
+                    if match[0] != new_value:
+                        fixes.append({"call_id": call.id, "kind": "enum", "param": key, "from": new_value, "to": match[0]})
+                        new_value = match[0]
+                else:
+                    warnings.append({"call_id": call.id, "kind": "enum_mismatch", "param": key, "value": new_value})
+            bound = bounds.get(key)
+            if isinstance(bound, dict) and isinstance(new_value, (int, float)) and not isinstance(new_value, bool):
+                low = bound.get("minimum")
+                high = bound.get("maximum")
+                if isinstance(low, (int, float)) and new_value < low:
+                    warnings.append({"call_id": call.id, "kind": "out_of_range", "param": key, "value": new_value, "minimum": low})
+                if isinstance(high, (int, float)) and new_value > high:
+                    warnings.append({"call_id": call.id, "kind": "out_of_range", "param": key, "value": new_value, "maximum": high})
+            coerced[key] = new_value
+        for key, default_value in defaults.items():
+            if key not in coerced:
+                coerced[key] = default_value
+                fixes.append({"call_id": call.id, "kind": "default", "param": key, "to": default_value})
+        for name in required:
+            if name not in coerced:
+                warnings.append({"call_id": call.id, "kind": "missing_required", "param": name})
+        for key in unknowns:
+            warnings.append({"call_id": call.id, "kind": "unknown_param", "param": key})
+        if apply_fixes:
+            if drop_unknown:
+                for key in unknowns:
+                    coerced.pop(key, None)
+            new_arguments = json.dumps(coerced, ensure_ascii=False)
+        else:
+            new_arguments = call.arguments
+        result.append(ToolCall(call.id, call.name, new_arguments))
+    if report is not None:
+        existing_fixes = report.get("fixes")
+        if isinstance(existing_fixes, list):
+            existing_fixes.extend(fixes)
+        else:
+            report["fixes"] = fixes
+        existing_warnings = report.get("warnings")
+        if isinstance(existing_warnings, list):
+            existing_warnings.extend(warnings)
+        else:
+            report["warnings"] = warnings
+    return result
+
+
 def _xml_set_param(params: dict[str, Any], key: str, value: Any) -> None:
     if key in params:
         existing = params[key]
@@ -2335,15 +2638,27 @@ def _parse_tool_calls_impl(
     return None
 
 
-def parse_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | None = None) -> tuple[list[ToolCall], str] | None:
+def parse_tool_calls(
+    text: str,
+    tool_schemas: dict[str, dict[str, Any]] | None = None,
+    tool_details: dict[str, dict[str, Any]] | None = None,
+    fix_mode: str | None = None,
+) -> tuple[list[ToolCall], str] | None:
     result = _parse_tool_calls_impl(text, tool_schemas, None)
     if result is None:
         return None
     calls, wrapper = result
-    return [ToolCall(call.id, _normalize_call_name(call.name, tool_schemas), call.arguments) for call in calls], wrapper
+    normalized = [ToolCall(call.id, _normalize_call_name(call.name, tool_schemas), call.arguments) for call in calls]
+    if fix_mode:
+        normalized = fix_tool_calls(normalized, tool_schemas, tool_details, fix_mode)
+    return normalized, wrapper
 
 
-def parse_tool_calls_debug(text: str, tool_schemas: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
+def parse_tool_calls_debug(
+    text: str,
+    tool_schemas: dict[str, dict[str, Any]] | None = None,
+    tool_details: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     stripped = _strip_fences(_strip_dsml(text))
     report: dict[str, Any] = {
         "text": text,
@@ -2354,15 +2669,20 @@ def parse_tool_calls_debug(text: str, tool_schemas: dict[str, dict[str, Any]] | 
         "renamed": [],
         "wrapper": "",
         "unrecognized": stripped,
+        "fixes": [],
+        "warnings": [],
     }
     result = _parse_tool_calls_impl(text, tool_schemas, report)
     if result is not None:
         calls, wrapper = result
         normalized = [(call, _normalize_call_name(call.name, tool_schemas)) for call in calls]
         renamed = [{"from": call.name, "to": name} for call, name in normalized if call.name != name]
+        applied = [ToolCall(call.id, name, call.arguments) for call, name in normalized]
+        if tool_details is not None:
+            applied = fix_tool_calls(applied, tool_schemas, tool_details, "report", report)
         report["parsed"] = True
         report["renamed"] = renamed
-        report["calls"] = [{"id": call.id, "name": name, "arguments": call.arguments} for call, name in normalized]
+        report["calls"] = [{"id": call.id, "name": call.name, "arguments": call.arguments} for call in applied]
         report["wrapper"] = wrapper
         report["unrecognized"] = wrapper
     return report
