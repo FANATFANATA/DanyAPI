@@ -26,6 +26,7 @@ _DSML_WRAP = re.compile(
 _DSML_XML_NORMALIZE = re.compile(rf"<\s*(/?)\s*{_DSML_MARKER}\s*([a-zA-Z_][^<>]*)>", re.IGNORECASE)
 _DSML_TAG = re.compile(rf"<\s*/?\s*{_DSML_MARKER}\s*[^<>]*>", re.IGNORECASE)
 _DSML_NAKED = re.compile(rf"{_DSML_MARKER}", re.IGNORECASE)
+_DSML_PRESENT = re.compile(r"dsml", re.IGNORECASE)
 
 _DSML_TOOL_CALLS_BLOCK = re.compile(
     rf"<{_DSML_MARKER}\s*tool_calls\b[^<>]*>(.*?)</{_DSML_MARKER}\s*tool_calls\s*>",
@@ -404,7 +405,7 @@ def _strip_dsml(text: str) -> str:
     if not text:
         return text
     result = text
-    if "dsml" not in result.casefold():
+    if not _DSML_PRESENT.search(result):
         return result
     for _ in range(10):
         updated = _DSML_BLOCK.sub(" ", result)
@@ -416,7 +417,7 @@ def _strip_dsml(text: str) -> str:
         if updated == result:
             break
         result = updated
-        if "dsml" not in result.casefold():
+        if not _DSML_PRESENT.search(result):
             break
     result = _DSML_XML_NORMALIZE.sub(r"<\1\2>", result)
     result = _DSML_TAG.sub(_replace_dsml_tag, result)
@@ -515,8 +516,8 @@ def _literal_hold(text: str, start: int) -> int:
 
 
 def _json_hold(text: str, start: int) -> int:
-    brace = text.rfind("{")
-    if brace < start or "}" in text[brace:]:
+    brace = text.rfind("{", start)
+    if brace == -1 or "}" in text[brace:]:
         return -1
     body = text[brace + 1 :].lstrip()
     if not body:
@@ -530,8 +531,8 @@ def _json_hold(text: str, start: int) -> int:
 
 
 def _tag_hold(text: str, start: int, names: tuple[str, ...]) -> int:
-    lt = text.rfind("<")
-    if lt < start:
+    lt = text.rfind("<", start)
+    if lt == -1:
         return -1
     tail = text[lt:]
     if ">" in tail:
@@ -573,8 +574,8 @@ def _tag_hold(text: str, start: int, names: tuple[str, ...]) -> int:
 
 
 def _array_hold(text: str, start: int) -> int:
-    bracket = text.rfind("[")
-    if bracket < start or "]" in text[bracket:]:
+    bracket = text.rfind("[", start)
+    if bracket == -1 or "]" in text[bracket:]:
         return -1
     if not text[bracket + 1 :].strip():
         return bracket
@@ -607,7 +608,8 @@ def tool_call_boundary(
     cached = _boundary_cache.get(names)
     if cached is not None:
         old_text, old_best, old_complete = cached
-        if old_complete and old_best != -1 and start <= old_best and text.startswith(old_text):
+        prefix_ok = len(text) >= len(old_text) and text[: len(old_text)] == old_text
+        if old_complete and old_best != -1 and start <= old_best and prefix_ok:
             hold = _boundary_hold(text, start, names)
             if hold != -1 and hold < old_best:
                 return hold, False
@@ -619,7 +621,7 @@ def tool_call_boundary(
         if match is not None and (best == -1 or match.start() < best):
             best = match.start()
             complete = True
-    if "dsml" in text.casefold():
+    if _DSML_PRESENT.search(text, start):
         match = _DSML_STREAM_START.search(text, start)
         if match is not None and (best == -1 or match.start() < best):
             best = match.start()
@@ -633,7 +635,7 @@ def tool_call_boundary(
     if hold != -1 and (best == -1 or hold < best):
         return hold, False
     if best != -1 and (not _boundary_cache or len(_boundary_cache) < _BOUNDARY_CACHE_MAX):
-        _boundary_cache[names] = (text, best, complete)
+        _boundary_cache[names] = (text[:256], best, complete)
     return best, complete
 
 

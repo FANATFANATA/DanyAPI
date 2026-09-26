@@ -3493,7 +3493,6 @@ async def _stream_openai(
         rec: MessageReconstructor | None = None
         response_message_id = None
         stop_message_id: str | None = None
-        content_parts: list[str] = []
         content_buf = ""
         content_shown_len = 0
         tool_hidden = False
@@ -3615,8 +3614,7 @@ async def _stream_openai(
                         delta: dict = {}
                         if c_diff:
                             if tool_mode:
-                                content_parts.append(c_diff)
-                                content_buf = "".join(content_parts)
+                                content_buf += c_diff
                                 visible, content_shown_len, tool_hidden = toolemu.tool_visible(content_buf, content_shown_len, tool_hidden, tool_schemas)
                                 allowed = content_piece(visible)
                                 if allowed:
@@ -3673,8 +3671,7 @@ async def _stream_openai(
                     delta2: dict = {}
                     if c_diff:
                         if tool_mode:
-                            content_parts.append(c_diff)
-                            content_buf = "".join(content_parts)
+                            content_buf += c_diff
                             visible, content_shown_len, tool_hidden = toolemu.tool_visible(content_buf, content_shown_len, tool_hidden, tool_schemas)
                             allowed = content_piece(visible)
                             if allowed:
@@ -3737,7 +3734,6 @@ async def _stream_openai(
                     session, session_key, parent_message_id = await _prepare_session(account, pool, existing_sid, context_seq)
                     stop_message_id = None
                     response_message_id = None
-                    content_parts = []
                     content_buf = ""
                     content_shown_len = 0
                     tool_hidden = False
@@ -3802,8 +3798,7 @@ async def _stream_openai(
                             }
                         )
                     if tool_mode:
-                        content_parts.append(cont_rec.content)
-                        content_buf = "".join(content_parts)
+                        content_buf += cont_rec.content
                         c_visible, content_shown_len, tool_hidden = toolemu.tool_visible(content_buf, content_shown_len, tool_hidden, tool_schemas)
                         allowed = content_piece(c_visible)
                         if allowed:
@@ -3894,8 +3889,7 @@ async def _stream_openai(
                                     }
                                 )
                             if tool_mode:
-                                content_parts.append(rec.content)
-                                content_buf = "".join(content_parts)
+                                content_buf += rec.content
                                 r_visible, content_shown_len, tool_hidden = toolemu.tool_visible(content_buf, content_shown_len, tool_hidden, tool_schemas)
                                 allowed = content_piece(r_visible)
                                 if allowed:
