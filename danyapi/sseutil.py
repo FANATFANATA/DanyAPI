@@ -65,10 +65,10 @@ class IncrementalSSE:
                 idx = self._buffer.find(b"\r\n\r\n", self._pos)
                 if idx == -1:
                     break
-                block = bytes(self._buffer[self._pos : idx]).decode("utf-8", errors="replace")
+                block = self._buffer[self._pos : idx].decode("utf-8", errors="replace")
                 self._pos = idx + 4
             else:
-                block = bytes(self._buffer[self._pos : idx]).decode("utf-8", errors="replace")
+                block = self._buffer[self._pos : idx].decode("utf-8", errors="replace")
                 self._pos = idx + 2
             yield from parse_sse(block)
         if self._pos and (self._pos >= _COMPACT_THRESHOLD or self._pos == len(self._buffer)):
@@ -76,7 +76,7 @@ class IncrementalSSE:
             self._pos = 0
 
     def finish(self) -> Iterator[SSEEvent]:
-        tail = bytes(self._buffer[self._pos :])
+        tail = self._buffer[self._pos :]
         if tail.strip():
             yield from parse_sse(tail.decode("utf-8", errors="replace"))
         self._buffer = bytearray()
