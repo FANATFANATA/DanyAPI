@@ -12,6 +12,7 @@ venv/
 .pyright/
 .coverage
 .coverage.*
+.coverage_*
 coverage.xml
 htmlcov/
 *.exe
