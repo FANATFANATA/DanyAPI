@@ -196,6 +196,66 @@ def test_double_quoted_comma_in_string_preserved() -> None:
     assert json.loads(calls[0].arguments)["text"] == "hi,}"
 
 
+_DSML_MARK = "\uff5c\uff5c"
+_DSML_PIECES = [
+    "plain text ",
+    "more plain text ",
+    "\n",
+    f"<{_DSML_MARK}DSML{_DSML_MARK}thinking>hidden plan</{_DSML_MARK}DSML{_DSML_MARK}thinking>",
+    f"<{_DSML_MARK}DSML{_DSML_MARK}>",
+    f"{_DSML_MARK}DSML{_DSML_MARK}",
+    f'<{_DSML_MARK}DSML{_DSML_MARK}invoke name="bash">',
+    f'<{_DSML_MARK}DSML{_DSML_MARK}parameter name="cmd">ls -la</{_DSML_MARK}DSML{_DSML_MARK}parameter>',
+    f"</{_DSML_MARK}DSML{_DSML_MARK}invoke>",
+    "tail text ",
+    "1 < 2 and 3 > 2",
+    "<div>html</div>",
+    "\u041f\u0440\u0438\u0432\u0435\u0442, \u043c\u0438\u0440!",
+    "\u4f60\u597d, \u4e16\u754c.",
+]
+
+
+@settings(max_examples=40, deadline=None)
+@given(pieces=st.lists(st.sampled_from(_DSML_PIECES), max_size=8), size=st.integers(min_value=1, max_value=9))
+def test_dsml_filter_matches_strip_dsml_for_any_chunking(pieces: list[str], size: int) -> None:
+    text = "".join(pieces)
+    flt = toolemu.DsmlFilter()
+    emitted: list[str] = []
+    for index in range(0, len(text), size):
+        emitted.append(flt.feed(text[index : index + size]))
+    emitted.append(flt.flush())
+    streamed = "".join(emitted)
+    assert streamed == toolemu.strip_dsml(text)
+    assert f"<{_DSML_MARK}DSML" not in streamed
+    assert f"</{_DSML_MARK}DSML" not in streamed
+
+
+@settings(max_examples=40, deadline=None)
+@given(pieces=st.lists(st.sampled_from(_DSML_PIECES), max_size=8), size=st.integers(min_value=1, max_value=9))
+def test_dsml_filter_never_drops_plain_text(pieces: list[str], size: int) -> None:
+    text = "".join(pieces)
+    plain = toolemu.strip_dsml(text)
+    flt = toolemu.DsmlFilter()
+    emitted: list[str] = []
+    for index in range(0, len(text), size):
+        emitted.append(flt.feed(text[index : index + size]))
+    emitted.append(flt.flush())
+    assert "".join(emitted) == plain
+
+
+@settings(max_examples=30, deadline=None)
+@given(text=st.text(max_size=200))
+def test_dsml_filter_keeps_content_without_markers(text: str) -> None:
+    if "DSML" in text or "dsml" in text:
+        return
+    if "\uff5c" in text or "|" in text or "<" in text:
+        return
+    flt = toolemu.DsmlFilter()
+    emitted = [flt.feed(text[index : index + 3]) for index in range(0, len(text), 3)]
+    emitted.append(flt.flush())
+    assert "".join(emitted) == text
+
+
 if __name__ == "__main__":
     import pytest
 

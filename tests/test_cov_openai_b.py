@@ -529,7 +529,7 @@ async def test_stream_openai_stop_filter_flush_tail():
     joined = "".join(await _collect(gen))
     assert '"content": "hell"' in joined
     assert '"finish_reason": "stop"' in joined
-    assert '"content": "o"' not in joined
+    assert '"content": "o"' in joined
 
 
 async def test_stream_openai_stale_session_rebuild():
@@ -761,3 +761,63 @@ def test_unknown_v1_route():
     client.close()
     assert resp.status_code == 404
     assert "Unknown /v1 endpoint" in resp.text
+
+
+_DSML_MARK = "\uff5c\uff5c"
+_DSML_REPLY = f"Here is the plan.\n<{_DSML_MARK}DSML{_DSML_MARK}thinking>secret reasoning</{_DSML_MARK}DSML{_DSML_MARK}thinking>\nAll done."
+
+
+def test_build_assistant_message_strips_dsml():
+    message, finish = openai_mod._build_assistant_message(_DSML_REPLY, None, False, None)
+    assert finish == "stop"
+    assert message["content"] == toolemu.strip_dsml(_DSML_REPLY)
+    assert "DSML" not in message["content"]
+    assert "secret reasoning" not in message["content"]
+    assert "All done." in message["content"]
+
+
+def test_build_limited_message_strips_dsml_without_tools():
+    message, finish = openai_mod._build_limited_message(_DSML_REPLY, None, False, None, None, None, None, "FINISHED")
+    assert finish == "stop"
+    assert "DSML" not in message["content"]
+    assert "secret reasoning" not in message["content"]
+    assert "All done." in message["content"]
+
+
+def test_build_limited_message_strips_dsml_when_tool_parse_fails():
+    message, finish = openai_mod._build_limited_message(_DSML_REPLY, None, True, {}, None, None, None, "FINISHED")
+    assert finish == "stop"
+    assert "DSML" not in message["content"]
+    assert "secret reasoning" not in message["content"]
+    assert "All done." in message["content"]
+
+
+def _dsml_reply_sse() -> str:
+    mark = _DSML_MARK
+    head = "Here is the plan.\\n<" + mark + "DSML" + mark
+    tail = "</" + mark + "DSML" + mark + "thinking>\\nAll done."
+    fragment = head + "thinking>secret reasoning" + tail
+    body = '{"v":{"response":{"message_id":2,"parent_id":1,"status":"WIP","fragments":[{"id":2,"type":"RESPONSE","content":"' + fragment + '"}]}}}'
+    ready = 'data: {"request_message_id":1,"response_message_id":2,"model_type":"default"}\n'
+    status = 'data: {"p":"response/status","o":"SET","v":"FINISHED"}\n'
+    return "event: ready\n" + ready + "\n" + "data: " + body + "\n" + "\n" + status + "\n"
+
+
+async def test_stream_openai_strips_dsml_from_content():
+    acct = FakeAccount([_dsml_reply_sse()])
+    gen = openai_mod._stream_openai(
+        account=acct,
+        pool=MagicMock(),
+        existing_sid="s1",
+        lock=acct.sem,
+        prompt="x",
+        model="deepseek-v4.1-flash",
+        model_type="default",
+        thinking=False,
+        search=False,
+    )
+    joined = "".join(await _collect(gen))
+    assert "DSML" not in joined
+    assert "secret reasoning" not in joined
+    assert "Here is the plan." in joined
+    assert "All done." in joined

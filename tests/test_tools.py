@@ -4,9 +4,13 @@ from typing import Any
 import pytest
 
 from danyapi.tools import (
+    DsmlFilter,
     ToolCall,
     _coerce_scalar,
     _content_text,
+    _dsml_hold_start,
+    _dsml_scan_cut,
+    _dsml_tag_at,
     _extract_calls,
     _extract_one_call,
     _fix_unbalanced_json,
@@ -30,6 +34,7 @@ from danyapi.tools import (
     render_json_mode,
     render_message,
     render_tool_schema,
+    strip_dsml,
     tool_call_deltas,
     tool_schema_map,
 )
@@ -2589,3 +2594,176 @@ def test_render_tool_schema_argument_summary_edge_cases():
     schema = render_tool_schema([tool])
     assert schema is not None
     assert "arguments: x (integer, optional)" in schema
+
+
+_DSML = "\uff5c\uff5c"
+_DSML_ANSWER = (
+    "Here is the result.\n"
+    f"<{_DSML}DSML{_DSML}thinking>internal plan</{_DSML}DSML{_DSML}thinking>\n"
+    f'<{_DSML}DSML{_DSML}invoke name="bash">\n'
+    f'<{_DSML}DSML{_DSML}parameter name="command">ls -la</{_DSML}DSML{_DSML}parameter>\n'
+    f"</{_DSML}DSML{_DSML}invoke>\n"
+    "All done."
+)
+
+
+def test_strip_dsml_removes_every_marker():
+    cleaned = strip_dsml(_DSML_ANSWER)
+    assert "DSML" not in cleaned
+    assert "\uff5c" not in cleaned
+    assert "internal plan" not in cleaned
+    assert "Here is the result." in cleaned
+    assert "All done." in cleaned
+    assert "<" not in cleaned
+
+
+def test_strip_dsml_keeps_naked_markers_removed():
+    assert strip_dsml("||DSML||done") == " done"
+    assert strip_dsml("\u2551DSML\u2551done") == " done"
+
+
+def test_strip_dsml_no_marker_returns_unchanged():
+    text = "a < b and c > d"
+    assert strip_dsml(text) == text
+    assert strip_dsml("") == ""
+
+
+def test_strip_dsml_normalizes_for_tool_parsing_but_not_for_output():
+    text = f"<{_DSML}DSML{_DSML}tool_calls>x</{_DSML}DSML{_DSML}tool_calls>"
+    assert _strip_dsml(text) == "<tool_calls>x</tool_calls>"
+    assert strip_dsml(text) == " x "
+
+
+@pytest.mark.parametrize("size", [1, 2, 3, 5, 8, 13, 64])
+def test_dsml_filter_matches_direct_strip_for_every_chunking(size):
+    flt = DsmlFilter()
+    parts = [flt.feed(_DSML_ANSWER[index : index + size]) for index in range(0, len(_DSML_ANSWER), size)]
+    parts.append(flt.flush())
+    streamed = "".join(parts)
+    assert streamed == strip_dsml(_DSML_ANSWER)
+    assert "DSML" not in streamed
+    assert "internal plan" not in streamed
+
+
+def test_dsml_filter_char_by_char_hides_thinking_block():
+    flt = DsmlFilter()
+    out = "".join(flt.feed(char) for char in _DSML_ANSWER) + flt.flush()
+    assert "internal plan" not in out
+    assert "DSML" not in out
+    assert "All done." in out
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "plain ascii text",
+        "1 < 2 and 3 > 2",
+        '<div class="x">text</div>',
+        "```python\nif a < b:\n    pass\n```",
+        "\u041f\u0440\u0438\u0432\u0435\u0442, \u043c\u0438\u0440! \u2014 \u0445\u043e\u043b\u043e\u0434\u043d\u043e.",
+        "\u4f60\u597d\uff0c\u4e16\u754c\u3002",
+        "trailing ds",
+        "mixed <b>bold</b> and dsml text",
+    ],
+)
+def test_dsml_filter_passes_plain_text_through(text):
+    flt = DsmlFilter()
+    out = "".join(flt.feed(text[index : index + 3]) for index in range(0, len(text), 3)) + flt.flush()
+    assert out == strip_dsml(text)
+
+
+def test_dsml_filter_never_drops_plain_content():
+    text = "a < b" * 50
+    flt = DsmlFilter()
+    out = "".join(flt.feed(text[index : index + 4]) for index in range(0, len(text), 4)) + flt.flush()
+    assert out == text
+
+
+def test_dsml_filter_empty_inputs():
+    flt = DsmlFilter()
+    assert flt.feed(None) == ""
+    assert flt.feed("") == ""
+    assert flt.flush() == ""
+    assert flt.feed("ok") == "ok"
+    assert flt.flush() == ""
+    assert flt.flush() == ""
+
+
+def test_dsml_filter_unterminated_thinking_block_keeps_text_consistent():
+    text = f"answer <{_DSML}DSML{_DSML}thinking>never closed"
+    flt = DsmlFilter()
+    out = "".join(flt.feed(text[index : index + 4]) for index in range(0, len(text), 4)) + flt.flush()
+    assert out == strip_dsml(text)
+    assert "DSML" not in out
+    assert "<" not in out
+    assert "answer" in out
+
+
+def test_dsml_hold_start_rules():
+    assert _dsml_hold_start("hello") == 5
+    assert _dsml_hold_start(" world") == 6
+    assert _dsml_hold_start("word") == 4
+    assert _dsml_hold_start("mirror ds") == 9
+    assert _dsml_hold_start("") == 0
+    assert _dsml_hold_start("\u041f\u0440\u0438") == 3
+    assert _dsml_hold_start("a <") == 1
+    assert _dsml_hold_start("a <|D") == 1
+    assert _dsml_hold_start("a <|DSML") == 1
+    assert _dsml_hold_start("a |") == 1
+    assert _dsml_hold_start(f"a {_DSML}{_DSML}DSM") == 1
+    assert _dsml_hold_start(f"{_DSML}{_DSML}DSML") == 0
+
+
+def test_dsml_filter_closing_tag_ends_hidden_block():
+    text = f"a<{_DSML}DSML{_DSML}thinking>x</{_DSML}DSML{_DSML}thinking>b"
+    flt = DsmlFilter()
+    out = "".join(flt.feed(char) for char in text) + flt.flush()
+    assert "x" not in out
+    assert out == "a b"
+
+
+def test_dsml_filter_plain_close_tag_does_not_end_hidden_block():
+    text = f"<{_DSML}DSML{_DSML}thinking>see <thinking> docs </thinking> here</{_DSML}DSML{_DSML}thinking>ok"
+    flt = DsmlFilter()
+    out = "".join(flt.feed(char) for char in text) + flt.flush()
+    assert "docs" not in out
+    assert "here" not in out
+    assert out.endswith("ok")
+
+
+def test_dsml_filter_self_closing_hidden_tag_keeps_content():
+    text = f"a<{_DSML}DSML{_DSML}thinking/>b"
+    flt = DsmlFilter()
+    out = "".join(flt.feed(char) for char in text) + flt.flush()
+    assert out == "a b"
+
+
+def test_dsml_tag_at_parsing():
+    parsed = _dsml_tag_at(f'<{_DSML}DSML{_DSML}invoke name="bash">', 0)
+    assert parsed is not None
+    end, name, closing = parsed
+    assert name == "invoke"
+    assert closing is False
+    assert end == len(f'<{_DSML}DSML{_DSML}invoke name="bash">')
+    closing_tag = _dsml_tag_at(f"</{_DSML}DSML{_DSML}thinking>", 0)
+    assert closing_tag is not None
+    assert closing_tag[1] == "thinking"
+    assert closing_tag[2] is True
+    assert _dsml_tag_at("<div>", 0) is None
+    assert _dsml_tag_at(f"<{_DSML}DSML{_DSML}trunc", 0) is None
+    assert _dsml_tag_at("no tag", 0) is None
+    bare = _dsml_tag_at(f"<{_DSML}DSML{_DSML}>", 0)
+    assert bare is not None
+    assert bare[1] == ""
+    assert bare[2] is False
+
+
+def test_dsml_scan_cut_final_releases_everything():
+    text = f"<{_DSML}DSML{_DSML}thinking>unfinished"
+    assert _dsml_scan_cut(text, False) == 0
+    assert _dsml_scan_cut(text, True) == len(text)
+
+
+def test_dsml_scan_cut_skips_foreign_tags():
+    text = '<div class="x">hi</div>'
+    assert _dsml_scan_cut(text, False) == len(text)

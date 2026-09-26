@@ -401,7 +401,7 @@ def _replace_dsml_tag(match: re.Match) -> str:
     return " "
 
 
-def _strip_dsml(text: str) -> str:
+def _strip_dsml(text: str, keep_tags: bool = True) -> str:
     if not text:
         return text
     result = text
@@ -419,9 +419,204 @@ def _strip_dsml(text: str) -> str:
         result = updated
         if not _DSML_PRESENT.search(result):
             break
+    if not keep_tags:
+        result = _DSML_TAG.sub(" ", result)
+        return _DSML_NAKED.sub(" ", result)
     result = _DSML_XML_NORMALIZE.sub(r"<\1\2>", result)
     result = _DSML_TAG.sub(_replace_dsml_tag, result)
     return _DSML_NAKED.sub(" ", result)
+
+
+def strip_dsml(text: str) -> str:
+    if not text:
+        return text
+    return _strip_dsml(text, keep_tags=False)
+
+
+_DSML_SPACE = " \t\r\n"
+_DSML_PIPE_RUN = "|\u00a6\u01c0\u01c1\u05c0\u2016\u2223\u2502\u2551\u2758\ufe31\uff5c"
+_DSML_RUN_CHARS = _DSML_SPACE + "<>/" + _DSML_PIPE_RUN
+_DSML_SIGNAL_CHARS = "<" + _DSML_PIPE_RUN
+_DSML_RUN_MAX = 8
+_DSML_CHAIN_MAX = 4
+_DSML_RUN_SET = frozenset(_DSML_RUN_CHARS)
+_DSML_HIDDEN_NAME_SET = frozenset(_DSML_HIDDEN_NAMES.split("|"))
+_DSML_SIGNAL_RE = re.compile(rf"[{re.escape(_DSML_SIGNAL_CHARS)}]")
+_DSML_MARKER_RE = re.compile(rf"[{re.escape(_DSML_SIGNAL_CHARS)}]|[^\x00-\x7f]")
+_DSML_PARTIAL_RE = re.compile(r"(?:DSM|DSML|DS|D)\Z", re.IGNORECASE)
+_DSML_LT_RE = re.compile(r"<")
+_DSML_TAG_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.:-]*")
+_DSML_CLOSE_CACHE: dict[str, re.Pattern[str]] = {}
+_DSML_CLOSE_CACHE_MAX = 64
+
+
+def _is_dsml_char(char: str) -> bool:
+    return char == "|" or ord(char) > 127
+
+
+def _in_dsml_run(char: str) -> bool:
+    return char in _DSML_RUN_SET or not char.isascii()
+
+
+def _dsml_run_start(text: str, end: int, floor: int) -> int:
+    limit = max(floor, end - _DSML_RUN_MAX)
+    start = end
+    while start > limit and _in_dsml_run(text[start - 1]):
+        start -= 1
+    return start
+
+
+def _dsml_hold_start(text: str, floor: int = 0) -> int:
+    size = len(text)
+    if size <= floor:
+        return size
+    end = size
+    signal = _DSML_SIGNAL_RE
+    partial = _DSML_PARTIAL_RE.search(text, floor)
+    if partial is not None:
+        end = partial.start()
+        signal = _DSML_MARKER_RE
+        if signal.search(text, floor, end) is None:
+            return size
+    start = _dsml_run_start(text, end, floor)
+    if start == end:
+        return end
+    for _ in range(_DSML_CHAIN_MAX):
+        probe = start
+        while probe > floor and text[probe - 1] in _DSML_SPACE:
+            probe -= 1
+        lead = _DSML_PARTIAL_RE.search(text, floor, probe)
+        if lead is None:
+            break
+        back = _dsml_run_start(text, lead.start(), floor)
+        if back >= lead.start() or _DSML_MARKER_RE.search(text, back, lead.start()) is None:
+            break
+        start = back
+    if signal.search(text, start, end) is None:
+        return end
+    return start
+
+
+def _dsml_tag_may_start(text: str, start: int) -> bool:
+    size = len(text)
+    index = start + 1
+    if index < size and text[index] == "/":
+        index += 1
+    while index < size and text[index] in _DSML_SPACE:
+        index += 1
+    if index >= size:
+        return False
+    return _is_dsml_char(text[index])
+
+
+def _dsml_tag_at(text: str, start: int) -> tuple[int, str, bool] | None:
+    size = len(text)
+    index = start + 1
+    if index >= size:
+        return None
+    closing = False
+    if text[index] == "/":
+        closing = True
+        index += 1
+    while index < size and text[index] in _DSML_SPACE:
+        index += 1
+    run = index
+    while index < size and _is_dsml_char(text[index]):
+        index += 1
+    if index == run:
+        return None
+    while index < size and text[index] in _DSML_SPACE:
+        index += 1
+    if text[index : index + 4].upper() != "DSML":
+        return None
+    index += 4
+    while index < size and text[index] in _DSML_SPACE:
+        index += 1
+    while index < size and _is_dsml_char(text[index]):
+        index += 1
+    while index < size and text[index] in _DSML_SPACE:
+        index += 1
+    if index < size and text[index] == ">":
+        return index + 1, "", closing
+    name_start = index
+    while index < size and text[index] not in "<>":
+        index += 1
+    if index >= size or text[index] != ">":
+        return None
+    name = text[name_start:index].strip()
+    if name.endswith("/"):
+        name = name[:-1].strip()
+    found = _DSML_TAG_NAME_RE.match(name)
+    return index + 1, found.group(0).lower() if found else "", closing
+
+
+def _dsml_close_pattern(name: str) -> re.Pattern[str]:
+    pattern = _DSML_CLOSE_CACHE.get(name)
+    if pattern is None:
+        pattern = re.compile(rf"<\s*[^<>]*?\b{re.escape(name)}\b[^<>]*>", re.IGNORECASE)
+        if len(_DSML_CLOSE_CACHE) < _DSML_CLOSE_CACHE_MAX:
+            _DSML_CLOSE_CACHE[name] = pattern
+    return pattern
+
+
+def _dsml_close_at(text: str, start: int, name: str) -> int | None:
+    for match in _dsml_close_pattern(name).finditer(text, start):
+        parsed = _dsml_tag_at(text, match.start())
+        if parsed is not None and parsed[2] and parsed[1] == name:
+            return parsed[0]
+    return None
+
+
+def _dsml_scan_cut(text: str, final: bool) -> int:
+    size = len(text)
+    pos = 0
+    floor = 0
+    while pos < size:
+        found = _DSML_LT_RE.search(text, pos)
+        if found is None:
+            break
+        index = found.start()
+        parsed = _dsml_tag_at(text, index)
+        if parsed is None:
+            if not final and _dsml_tag_may_start(text, index):
+                return index
+            pos = index + 1
+            continue
+        end, name, closing = parsed
+        if not closing and name in _DSML_HIDDEN_NAME_SET:
+            close = _dsml_close_at(text, end, name)
+            if close is None:
+                if not final:
+                    return index
+                end = size
+        pos = end
+        floor = end
+    return size if final else _dsml_hold_start(text, floor)
+
+
+class DsmlFilter:
+    __slots__ = ("_buf",)
+
+    def __init__(self) -> None:
+        self._buf = ""
+
+    def feed(self, text: str | None) -> str:
+        if not text:
+            return ""
+        self._buf += text
+        cut = _dsml_scan_cut(self._buf, False)
+        if cut <= 0:
+            return ""
+        head = self._buf[:cut]
+        self._buf = self._buf[cut:]
+        return _strip_dsml(head, keep_tags=False)
+
+    def flush(self) -> str:
+        text = self._buf
+        self._buf = ""
+        if not text:
+            return ""
+        return _strip_dsml(text, keep_tags=False)
 
 
 TOOL_STREAM_TAGS = (

@@ -419,14 +419,14 @@ def _build_limited_message(
                     message["content"] = _trim_to_tokens(tail, max_tokens)
                     return message, "length"
                 return message, "tool_calls"
-        text, limit_finish = _apply_limits(rec.content or "", max_tokens, stop)
+        text, limit_finish = _apply_limits(toolemu.strip_dsml(rec.content or ""), max_tokens, stop)
         message = {"role": "assistant", "content": text}
         if rec.reasoning:
             message["reasoning_content"] = rec.reasoning
         if limit_finish == "length":
             return message, "length"
         return message, "stop"
-    text, limit_finish = _apply_limits(rec.content or "", max_tokens, stop)
+    text, limit_finish = _apply_limits(toolemu.strip_dsml(rec.content or ""), max_tokens, stop)
     message = {"role": "assistant", "content": text}
     if rec.reasoning:
         message["reasoning_content"] = rec.reasoning
@@ -693,9 +693,13 @@ async def stream_openai(
         tool_hidden = False
         role_sent = False
         budget = StreamBudget(max_tokens, _trim_to_tokens)
+        dsml_filter = toolemu.DsmlFilter()
 
         def content_piece(piece: str | None) -> str:
-            return budget.feed(piece)
+            return budget.feed(dsml_filter.feed(piece))
+
+        def flush_piece() -> str:
+            return budget.feed(dsml_filter.flush())
 
         stop_response_id: str | None = None
         had_cached_session = bool(existing_sid) and account.sessions.get(existing_sid) is not None
@@ -762,6 +766,7 @@ async def stream_openai(
             content_shown_len = 0
             tool_hidden = False
             stopped = False
+            dsml_filter = toolemu.DsmlFilter()
             try:
                 async for chunk in resp.aiter_bytes():
                     for event in incremental.feed(chunk):
@@ -993,6 +998,24 @@ async def stream_openai(
                 finish = "length" if budget.done else "stop"
         else:
             finish = "length" if budget.done else "stop"
+
+        remainder = flush_piece()
+        if remainder:
+            yield _sse(
+                {
+                    "id": chunk_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"content": remainder},
+                            "finish_reason": None,
+                        }
+                    ],
+                }
+            )
 
         if not role_sent:
             role_sent = True

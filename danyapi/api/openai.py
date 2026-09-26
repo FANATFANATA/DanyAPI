@@ -2949,7 +2949,7 @@ def _build_assistant_message(
                 if max_calls is not None:
                     tool_calls = tool_calls[:max_calls]
                 return toolemu.format_tool_message(tool_calls, tool_text, reasoning), "tool_calls"
-    message = {"role": "assistant", "content": content}
+    message = {"role": "assistant", "content": toolemu.strip_dsml(content)}
     if reasoning:
         message["reasoning_content"] = reasoning
     return message, "stop"
@@ -2977,7 +2977,7 @@ def _build_limited_message(
         if limit_finish == "length":
             return message, "length"
         return message, _finish_reason(provider_finish)
-    text, limit_finish = _apply_limits(content or "", max_tokens, stop)
+    text, limit_finish = _apply_limits(toolemu.strip_dsml(content or ""), max_tokens, stop)
     message = {"role": "assistant", "content": text}
     if reasoning:
         message["reasoning_content"] = reasoning
@@ -3502,17 +3502,27 @@ async def _stream_openai(
         stop_markers = _split_stop(stop)
         stop_filter = _StreamStopFilter(stop_markers) if stop_markers else None
         stop_hit = False
+        dsml_filter = toolemu.DsmlFilter()
 
-        def content_piece(piece: str | None) -> str:
+        def content_piece(piece: str | None, *, final: bool = False) -> str:
             nonlocal stop_hit
-            if piece is None or stop_hit:
+            if stop_hit:
                 return ""
+            if final:
+                text = dsml_filter.flush()
+            else:
+                if piece is None:
+                    return ""
+                text = dsml_filter.feed(piece)
             if stop_filter is None:
-                return budget.feed(piece)
-            filtered, hit = stop_filter.feed(piece)
+                return budget.feed(text)
+            filtered, hit = stop_filter.feed(text)
             if hit:
                 stop_hit = True
-            return budget.feed(filtered)
+            out = budget.feed(filtered)
+            if final and not stop_hit:
+                out += budget.feed(stop_filter.flush())
+            return out
 
         had_cached_session = bool(existing_sid) and account.sessions.get(existing_sid) is not None
         stale_rebuilt = False
@@ -3739,6 +3749,7 @@ async def _stream_openai(
                     tool_hidden = False
                     role_sent = False
                     stop_hit = False
+                    dsml_filter = toolemu.DsmlFilter()
                     continue
             if not _is_input_exceeds_limit(rec) and (_is_retryable_hint(rec) or _is_fake_context_hint(rec)) and attempt < MAX_RETRIES:
                 attempt += 1
@@ -3978,19 +3989,6 @@ async def _stream_openai(
         )
         log.info("deepseek completion success (%.0fms)", (time.monotonic() - started) * 1000)
 
-        if stop_filter is not None and not stop_hit:
-            tail_text = content_piece(stop_filter.flush())
-            if tail_text:
-                yield _sse(
-                    {
-                        "id": chunk_id,
-                        "object": "chat.completion.chunk",
-                        "created": created,
-                        "model": model,
-                        "choices": [{"index": 0, "delta": {"content": tail_text}, "finish_reason": None}],
-                    }
-                )
-
         if tool_mode:
             parsed = toolemu.parse_tool_calls(content_buf or rec.content, tool_schemas)
             if parsed is not None:
@@ -4064,6 +4062,18 @@ async def _stream_openai(
                 finish = "stop" if stop_hit else ("length" if budget.done else _finish_reason(rec.status))
         else:
             finish = "stop" if stop_hit else ("length" if budget.done else _finish_reason(rec.status))
+
+        tail_text = content_piece(None, final=True)
+        if tail_text:
+            yield _sse(
+                {
+                    "id": chunk_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model,
+                    "choices": [{"index": 0, "delta": {"content": tail_text}, "finish_reason": None}],
+                }
+            )
 
         if not role_sent:
             role_sent = True

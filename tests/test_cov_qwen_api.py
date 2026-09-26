@@ -826,3 +826,41 @@ async def test_collect_image_stream_error():
     with pytest.raises(qwen_api.HTTPException) as excinfo:
         await qwen_api.collect_image(**args)
     assert excinfo.value.status_code == 502
+
+
+_DSML_MARK = "\uff5c\uff5c"
+_DSML_REPLY = f"Here is the plan.\n<{_DSML_MARK}DSML{_DSML_MARK}thinking>secret reasoning</{_DSML_MARK}DSML{_DSML_MARK}thinking>\nAll done."
+
+
+def test_build_limited_message_strips_dsml_without_tools():
+    message, _finish = qwen_api._build_limited_message(_rec_with(_DSML_REPLY), False, None, None, None, None)
+    assert "DSML" not in message["content"]
+    assert "secret reasoning" not in message["content"]
+    assert "All done." in message["content"]
+
+
+def test_build_limited_message_strips_dsml_when_tool_parse_fails():
+    message, _finish = qwen_api._build_limited_message(_rec_with(_DSML_REPLY), True, None, None, None, None)
+    assert "DSML" not in message["content"]
+    assert "secret reasoning" not in message["content"]
+    assert "All done." in message["content"]
+
+
+def _dsml_reply_sse() -> str:
+    mark = _DSML_MARK
+    content = "Here is the plan.\\n<" + mark + "DSML" + mark + "thinking>secret reasoning</" + mark + "DSML" + mark + "thinking>\\nAll done."
+    created = 'data: {"response.created":{"chat_id":"c1","parent_id":"p0","response_id":"r1"}} \n\n'
+    typing = (
+        'data: {"choices": [{"delta": {"role": "assistant", "content": "' + content + '", "phase": "answer", "status": "typing"}}], "response_id": "r1"}\n\n'
+    )
+    done = 'data: {"choices": [{"delta": {"content": "", "role": "assistant", "status": "finished", "phase": "answer"}}], "response_id": "r1"}\n\n'
+    return created + typing + done
+
+
+async def test_stream_strips_dsml_from_content():
+    acct = FakeAccount([_dsml_reply_sse()])
+    joined = "".join(await _collect(qwen_api.stream_openai(**_args(acct))))
+    assert "DSML" not in joined
+    assert "secret reasoning" not in joined
+    assert "Here is the plan." in joined
+    assert "All done." in joined
