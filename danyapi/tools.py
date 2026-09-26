@@ -1892,6 +1892,17 @@ def _parse_xml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | N
             calls.append(ToolCall.create(tool_name, arguments))
             consumed.add(element_start, element_end)
             block_calls += 1
+        if not block_calls and not any(_scan_xml_pairs(inner, _TOOL_TAG_NAMES)):
+            bare_params: dict[str, Any] = {}
+            for param in _XML_PARAM_RE.finditer(inner):
+                key = param.group(2).strip()
+                _xml_set_param(bare_params, key, _xml_value(param.group(3), None))
+            if bare_params:
+                inferred = _infer_tool_name_from_schemas(set(bare_params), tool_schemas)
+                if inferred is not None:
+                    calls.append(ToolCall.create(inferred, bare_params))
+                    consumed.add(start, end)
+                    block_calls += 1
         if block_calls:
             blank(start, end)
             consumed.add(start, end)
