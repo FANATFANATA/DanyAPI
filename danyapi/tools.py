@@ -404,19 +404,20 @@ def _strip_dsml(text: str) -> str:
     if not text:
         return text
     result = text
-    if "dsml" in result.casefold():
-        for _ in range(10):
-            updated = _DSML_BLOCK.sub(" ", result)
-            updated = _DSML_WRAP.sub(" ", updated)
-            for pattern in _DSML_HIDDEN_PATS:
-                updated = pattern.sub(" ", updated)
-            for pattern in _DSML_HIDDEN_NAKED_PATS:
-                updated = pattern.sub(" ", updated)
-            if updated == result:
-                break
-            result = updated
-            if "dsml" not in result.casefold():
-                break
+    if "dsml" not in result.casefold():
+        return result
+    for _ in range(10):
+        updated = _DSML_BLOCK.sub(" ", result)
+        updated = _DSML_WRAP.sub(" ", updated)
+        for pattern in _DSML_HIDDEN_PATS:
+            updated = pattern.sub(" ", updated)
+        for pattern in _DSML_HIDDEN_NAKED_PATS:
+            updated = pattern.sub(" ", updated)
+        if updated == result:
+            break
+        result = updated
+        if "dsml" not in result.casefold():
+            break
     result = _DSML_XML_NORMALIZE.sub(r"<\1\2>", result)
     result = _DSML_TAG.sub(_replace_dsml_tag, result)
     return _DSML_NAKED.sub(" ", result)
@@ -457,6 +458,8 @@ TOOL_STREAM_JSON_KEYS = (
 TOOL_STREAM_MARKERS = tuple([f'{{"{key}"' for key in TOOL_STREAM_JSON_KEYS] + [f"<{tag}" for tag in TOOL_STREAM_TAGS] + ["tool_calls:", "[{"])
 
 TOOL_STREAM_MARKER_MAX = max(len(marker) for marker in TOOL_STREAM_MARKERS)
+
+_MARKER_PREFIXES = frozenset(marker[:size] for marker in TOOL_STREAM_MARKERS for size in range(1, len(marker) + 1))
 
 _TOOL_STREAM_TAG_RE = re.compile(
     r"<\s*/?\s*(?:" + "|".join(TOOL_STREAM_TAGS) + r")\b[^<>]*>",
@@ -503,11 +506,11 @@ def _stream_names_keys(keys: tuple[Any, ...]) -> tuple[str, ...]:
 
 
 def _literal_hold(text: str, start: int) -> int:
-    tail_from = max(start, len(text) - TOOL_STREAM_MARKER_MAX + 1)
-    for index in range(tail_from, len(text)):
-        suffix = text[index:]
-        if any(marker.startswith(suffix) for marker in TOOL_STREAM_MARKERS):
-            return index
+    length = len(text)
+    max_size = min(TOOL_STREAM_MARKER_MAX - 1, length - start)
+    for size in range(max_size, 0, -1):
+        if text[length - size :] in _MARKER_PREFIXES:
+            return length - size
     return -1
 
 
