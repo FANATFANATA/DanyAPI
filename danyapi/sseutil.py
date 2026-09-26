@@ -229,6 +229,28 @@ def _diff_suffix(previous: str, current: str, prefix_ok: bool) -> str:
     return current.removeprefix(previous)
 
 
+def _touches_aggregated_fragment(op: str, path: str, value: Any, frag_idx: int) -> bool:
+    if op == "BATCH":
+        values = value if isinstance(value, list) else []
+        for sub in values:
+            if not isinstance(sub, dict):
+                continue
+            sub_path = sub.get("p", "")
+            if sub_path and path and not sub_path.startswith("response/"):
+                sub_path = f"{path}/{sub_path}"
+            if _touches_aggregated_fragment(sub.get("o", "SET"), sub_path, sub.get("v"), frag_idx):
+                return True
+        return False
+    parts = [p for p in (path or "").split("/") if p]
+    if len(parts) < 3 or parts[0] != "response" or parts[1] != "fragments":
+        return False
+    try:
+        idx = int(parts[2])
+    except ValueError:
+        return False
+    return idx < frag_idx
+
+
 class MessageReconstructor:
     __slots__ = (
         "_agg_fragments",
@@ -294,6 +316,8 @@ class MessageReconstructor:
         self._aggregate_dirty = True
         if self._fast_append_tail(op, path, data["v"]):
             self._aggregate_dirty = False
+        elif self._frag_idx and _touches_aggregated_fragment(op, path, data["v"], self._frag_idx):
+            self._agg_fragments = None
 
     def _fast_append_tail(self, op: str, path: str, value: Any) -> bool:
         if op != "APPEND" or not isinstance(value, str):

@@ -20,7 +20,20 @@ def _delta_text(delta: dict, key: str) -> str:
     return value if isinstance(value, str) else ""
 
 
-def _extract_image_urls(text: str) -> list[str]:
+def _trailing_open_url(text: str) -> int | None:
+    match = _IMAGE_URL_RE.search(text)
+    start: int | None = None
+    for match in _IMAGE_URL_RE.finditer(text):
+        if match.group(1) is None and match.end() == len(text) and text[-1] not in _TRAILING_PUNCT:
+            start = match.start()
+    return start
+
+
+def _extract_image_urls(text: str, final: bool = False) -> list[str]:
+    if not final:
+        start = _trailing_open_url(text)
+        if start is not None:
+            text = text[:start]
     urls: list[str] = []
     for match in _IMAGE_URL_RE.finditer(text):
         url = (match.group(1) or match.group(2) or "").rstrip(_TRAILING_PUNCT)
@@ -32,14 +45,12 @@ def _extract_image_urls(text: str) -> list[str]:
 def _incomplete_tail(window: str) -> str:
     if len(window) > _IMAGE_TAIL_LIMIT:
         window = window[-_IMAGE_TAIL_LIMIT:]
-    scan_from = 0
-    for match in _IMAGE_URL_RE.finditer(window):
-        scan_from = match.end()
-    tail_index = len(window)
+    start = _trailing_open_url(window)
+    tail_index = start if start is not None else len(window)
     for marker in ("![", "http"):
-        start = window.rfind(marker, scan_from)
-        if start != -1 and start < tail_index:
-            tail_index = start
+        found = window.rfind(marker, 0, tail_index)
+        if found != -1 and found < tail_index:
+            tail_index = found
     return window[tail_index:] if tail_index < len(window) else ""
 
 
@@ -96,6 +107,17 @@ class QwenStreamReconstructor:
                 self.image_urls.append(url)
                 self._nonempty = True
         self._image_scan_tail = _incomplete_tail(window)
+
+    def finalize(self) -> None:
+        tail = self._image_scan_tail
+        self._image_scan_tail = ""
+        if not tail:
+            return
+        for url in _extract_image_urls(tail, final=True):
+            if url not in self._seen_image_urls:
+                self._seen_image_urls.add(url)
+                self.image_urls.append(url)
+                self._nonempty = True
 
     def handle(self, event: SSEEvent) -> None:
         data = event.data

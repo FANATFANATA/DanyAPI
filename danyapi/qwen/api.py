@@ -315,8 +315,8 @@ def _accumulate_usage(session, rec: QwenStreamReconstructor, prompt: str = "", c
     prev_output = int(getattr(session, "accumulated_output_tokens", 0) or 0)
     prompt_tokens = max(0, current_input - prev_input)
     completion_tokens = max(0, current_output - prev_output)
-    session.accumulated_input_tokens = current_input
-    session.accumulated_output_tokens = current_output
+    session.accumulated_input_tokens = max(prev_input, current_input)
+    session.accumulated_output_tokens = max(prev_output, current_output)
     if not completion_tokens and completion_text:
         completion_tokens = estimate_tokens(completion_text)
         prompt_tokens = max(prompt_tokens, estimate_tokens(prompt) if prompt else estimate_tokens(completion_text))
@@ -517,6 +517,7 @@ async def _collect_response(
                         rec.handle(event)
                 for event in incremental.finish():
                     rec.handle(event)
+                rec.finalize()
             except (httpx.HTTPError, RuntimeError) as exc:
                 if rec.response_id:
                     stop_response_id = rec.response_id
@@ -529,7 +530,6 @@ async def _collect_response(
                     await resp.aclose()
                 except Exception as exc:
                     log.debug("response close failed: %s", exc)
-                    await _try_stop_stream(account.client, session.id, stop_response_id)
             if _is_retryable_error(rec) and attempt < MAX_RETRIES:
                 attempt += 1
                 delay = _retry_delay(attempt)
