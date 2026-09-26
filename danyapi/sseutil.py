@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
+from functools import lru_cache
 from typing import Any
 
 
@@ -83,11 +84,16 @@ class IncrementalSSE:
         self._pos = 0
 
 
+@lru_cache(maxsize=2048)
+def _path_parts(path: str) -> tuple[str, ...]:
+    return tuple(part for part in path.split("/") if part)
+
+
 def _normalise_key(key: str) -> str:
     return "id" if key == "message_id" else key
 
 
-def _navigate(node: Any, parts: list[str]) -> Any:
+def _navigate(node: Any, parts: Sequence[str]) -> Any:
     cur: Any = node
     for raw_part in parts:
         part = _normalise_key(raw_part)
@@ -106,7 +112,7 @@ def _navigate(node: Any, parts: list[str]) -> Any:
     return cur
 
 
-def _set_path(target: dict, parts: list[str], value: Any) -> None:
+def _set_path(target: dict, parts: Sequence[str], value: Any) -> None:
     node: Any = target
     for i, raw_part in enumerate(parts):
         part = _normalise_key(raw_part)
@@ -159,7 +165,7 @@ def _apply_delta(message: dict, op: str, path: str, value: Any) -> None:
             _apply_delta(message, sub_op, sub_path, sub.get("v"))
         return
 
-    parts = [p for p in (path or "").split("/") if p]
+    parts = _path_parts(path or "")
     if not parts:
         _init_message(message, value)
         return
@@ -241,7 +247,7 @@ def _touches_aggregated_fragment(op: str, path: str, value: Any, frag_idx: int) 
             if _touches_aggregated_fragment(sub.get("o", "SET"), sub_path, sub.get("v"), frag_idx):
                 return True
         return False
-    parts = [p for p in (path or "").split("/") if p]
+    parts = _path_parts(path or "")
     if len(parts) < 3 or parts[0] != "response" or parts[1] != "fragments":
         return False
     try:
@@ -327,7 +333,7 @@ class MessageReconstructor:
             return False
         if self._frag_idx != len(frags):
             return False
-        parts = [p for p in path.split("/") if p]
+        parts = _path_parts(path)
         if len(parts) != 4 or parts[0] != "response" or parts[1] != "fragments" or parts[3] != "content":
             return False
         try:
