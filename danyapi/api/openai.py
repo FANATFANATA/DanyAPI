@@ -1406,6 +1406,10 @@ RETRY_BACKOFF_MAX_SEC = 8.0
 
 DEEPSEEK_AUTH_ERROR_CODES = {40001, 40002, 40003, 40012, 40029}
 
+MESSAGE_TOO_FREQUENT_MARKERS = ("messagetoofrequent", "messagetofrequent")
+MESSAGE_TOO_FREQUENT_WAIT_SEC = 60.0
+MESSAGE_TOO_FREQUENT_MAX_RETRIES = 5
+
 
 async def _human_delay() -> None:
     delay = random.uniform(settings.human_delay_min, settings.human_delay_max)
@@ -2616,7 +2620,10 @@ async def _send_completion(
             pow_headers=pow_headers,
         )
     except httpx.HTTPStatusError as exc:
-        raise HTTPException(exc.response.status_code, exc.response.text[:500]) from exc
+        body = exc.response.text[:500]
+        if _message_too_frequent_text(body) is not None:
+            raise HTTPException(429, body) from exc
+        raise HTTPException(exc.response.status_code, body) from exc
     except httpx.HTTPError as exc:
         raise HTTPException(502, f"DeepSeek request failed: {exc}") from exc
 
@@ -2626,7 +2633,10 @@ async def _send_completion(
     if resp.status_code != 200:
         body = await resp.aread()
         await resp.aclose()
-        raise HTTPException(resp.status_code, body[:500].decode("utf-8", errors="replace"))
+        text = body[:500].decode("utf-8", errors="replace")
+        if _message_too_frequent_text(text) is not None:
+            raise HTTPException(429, text)
+        raise HTTPException(resp.status_code, text)
 
     content_type = resp.headers.get("content-type", "")
     if "text/event-stream" not in content_type:
@@ -2635,19 +2645,25 @@ async def _send_completion(
         try:
             payload = json.loads(body)
         except json.JSONDecodeError as exc:
-            raise HTTPException(502, body[:500].decode("utf-8", errors="replace")) from exc
+            text = body[:500].decode("utf-8", errors="replace")
+            if _message_too_frequent_text(text) is not None:
+                raise HTTPException(429, text) from exc
+            raise HTTPException(502, text) from exc
         data = payload.get("data") or {}
         if data.get("biz_code"):
             code = data["biz_code"]
+            detail = f"DeepSeek error {code}: {data.get('biz_msg')}"
             status = 401 if code in DEEPSEEK_AUTH_ERROR_CODES else 502
-            raise HTTPException(status, f"DeepSeek error {code}: {data.get('biz_msg')}")
+            if _message_too_frequent_text(detail) is not None:
+                status = 429
+            raise HTTPException(status, detail)
         if payload.get("code"):
             code = payload["code"]
+            detail = f"DeepSeek error {code}: {payload.get('msg') or payload.get('message')}"
             status = 401 if code in DEEPSEEK_AUTH_ERROR_CODES else 502
-            raise HTTPException(
-                status,
-                f"DeepSeek error {code}: {payload.get('msg') or payload.get('message')}",
-            )
+            if _message_too_frequent_text(detail) is not None:
+                status = 429
+            raise HTTPException(status, detail)
         raise HTTPException(502, "unexpected non-stream response")
     return resp
 
@@ -2676,6 +2692,53 @@ STALE_SESSION_STATUSES = {400, 404}
 
 def _retry_delay(attempt: int) -> float:
     return min(RETRY_BACKOFF_SEC * (2 ** (attempt - 1)), RETRY_BACKOFF_MAX_SEC)
+
+
+def _compact_error_text(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    return "".join(ch for ch in value.casefold() if ch.isalnum())
+
+
+def _error_text(detail: Any) -> str:
+    if isinstance(detail, str):
+        return detail
+    try:
+        return json.dumps(detail, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return str(detail)
+
+
+def _message_too_frequent_text(*values: Any) -> str | None:
+    for value in values:
+        compact = _compact_error_text(value)
+        if not compact:
+            continue
+        if any(marker in compact for marker in MESSAGE_TOO_FREQUENT_MARKERS):
+            return value
+    return None
+
+
+def _is_message_too_frequent_http(exc: HTTPException) -> bool:
+    return _message_too_frequent_text(_error_text(exc.detail)) is not None
+
+
+def _is_message_too_frequent_hint(rec: MessageReconstructor) -> bool:
+    hint = rec.hint_error
+    if not hint:
+        return False
+    return _message_too_frequent_text(hint.get("message"), hint.get("finish_reason")) is not None
+
+
+async def _wait_message_too_frequent(stage: str, attempt: int) -> None:
+    log.warning(
+        "deepseek message too frequent (%s), retry %d/%d in %.0fs",
+        stage,
+        attempt,
+        MESSAGE_TOO_FREQUENT_MAX_RETRIES,
+        MESSAGE_TOO_FREQUENT_WAIT_SEC,
+    )
+    await asyncio.sleep(MESSAGE_TOO_FREQUENT_WAIT_SEC)
 
 
 def _is_retryable_http(exc: HTTPException) -> bool:
@@ -2949,6 +3012,7 @@ async def _collect_continuation(
     ref_file_ids=None,
 ) -> MessageReconstructor | None:
     attempt = 0
+    rate_attempt = 0
     while True:
         try:
             rec, _response_message_id, _stop_message_id = await _send_deepseek_stream(
@@ -2964,6 +3028,10 @@ async def _collect_continuation(
         except DeepSeekStreamError as exc:
             raise HTTPException(502, str(exc)) from exc
         except HTTPException as exc:
+            if _is_message_too_frequent_http(exc) and rate_attempt < MESSAGE_TOO_FREQUENT_MAX_RETRIES:
+                rate_attempt += 1
+                await _wait_message_too_frequent("continuation request", rate_attempt)
+                continue
             if _is_retryable_http(exc) and attempt < MAX_RETRIES:
                 attempt += 1
                 delay = _retry_delay(attempt)
@@ -2977,6 +3045,15 @@ async def _collect_continuation(
                 await asyncio.sleep(delay)
                 continue
             return None
+        if (
+            not (rec.content or rec.reasoning)
+            and not _is_input_exceeds_limit(rec)
+            and _is_message_too_frequent_hint(rec)
+            and rate_attempt < MESSAGE_TOO_FREQUENT_MAX_RETRIES
+        ):
+            rate_attempt += 1
+            await _wait_message_too_frequent("continuation hint", rate_attempt)
+            continue
         if (
             not (rec.content or rec.reasoning)
             and not _is_input_exceeds_limit(rec)
@@ -3113,6 +3190,7 @@ async def _collect_non_stream(
         rec: MessageReconstructor | None = None
         response_message_id = None
         attempt = 0
+        rate_attempt = 0
 
         try:
             while True:
@@ -3148,6 +3226,10 @@ async def _collect_non_stream(
                         stop_message_id = None
                         response_message_id = None
                         continue
+                    if _is_message_too_frequent_http(exc) and rate_attempt < MESSAGE_TOO_FREQUENT_MAX_RETRIES:
+                        rate_attempt += 1
+                        await _wait_message_too_frequent("request", rate_attempt)
+                        continue
                     if _is_retryable_http(exc) and attempt < MAX_RETRIES:
                         attempt += 1
                         delay = _retry_delay(attempt)
@@ -3161,6 +3243,15 @@ async def _collect_non_stream(
                         await asyncio.sleep(delay)
                         continue
                     raise
+                if (
+                    not (rec.content or rec.reasoning)
+                    and not _is_input_exceeds_limit(rec)
+                    and _is_message_too_frequent_hint(rec)
+                    and rate_attempt < MESSAGE_TOO_FREQUENT_MAX_RETRIES
+                ):
+                    rate_attempt += 1
+                    await _wait_message_too_frequent("stream hint", rate_attempt)
+                    continue
                 if (
                     not (rec.content or rec.reasoning)
                     and not _is_input_exceeds_limit(rec)
@@ -3320,6 +3411,7 @@ async def _stream_openai(
         had_cached_session = bool(existing_sid) and account.sessions.get(existing_sid) is not None
         stale_rebuilt = False
         attempt = 0
+        rate_attempt = 0
         while True:
             try:
                 pow_headers = await _fresh_pow_headers(account)
@@ -3356,6 +3448,10 @@ async def _stream_openai(
                     session, session_key, parent_message_id = await _prepare_session(account, pool, existing_sid, context_seq)
                     stop_message_id = None
                     response_message_id = None
+                    continue
+                if _is_message_too_frequent_http(exc) and rate_attempt < MESSAGE_TOO_FREQUENT_MAX_RETRIES:
+                    rate_attempt += 1
+                    await _wait_message_too_frequent("request", rate_attempt)
                     continue
                 if _is_retryable_http(exc) and attempt < MAX_RETRIES:
                     attempt += 1
@@ -3514,6 +3610,10 @@ async def _stream_openai(
                         await _try_stop_stream(account.client, session.id, stop_message_id)
             if got_content:
                 break
+            if not _is_input_exceeds_limit(rec) and _is_message_too_frequent_hint(rec) and rate_attempt < MESSAGE_TOO_FREQUENT_MAX_RETRIES:
+                rate_attempt += 1
+                await _wait_message_too_frequent("stream hint", rate_attempt)
+                continue
             if not _is_input_exceeds_limit(rec) and (_is_retryable_hint(rec) or _is_fake_context_hint(rec)) and attempt < MAX_RETRIES:
                 attempt += 1
                 delay = _retry_delay(attempt)

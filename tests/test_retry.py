@@ -53,6 +53,28 @@ FAKE_CTX_SSE = (
 )
 
 
+TOO_FREQUENT_SSE = (
+    "event: ready\n"
+    'data: {"request_message_id":1,"response_message_id":2,"model_type":"default"}\n'
+    "\n"
+    "event: toast\n"
+    'data: {"type":"error","content":"Message too frequent, please try again later."}\n'
+    "\n"
+)
+
+TOO_FREQUENT_HINT_SSE = (
+    "event: ready\n"
+    'data: {"request_message_id":1,"response_message_id":2,"model_type":"default"}\n'
+    "\n"
+    "event: hint\n"
+    'data: {"type":"error","content":"message_too_frequent","finish_reason":"rate_limited"}\n'
+    "\n"
+    "event: close\n"
+    'data: {"click_behavior":"retry","auto_resume":false}\n'
+    "\n"
+)
+
+
 class FakeSession:
     def __init__(self, sid: str = "c1", last_message_id: str | None = None) -> None:
         self.id = sid
@@ -103,6 +125,14 @@ def zero_backoff():
     openai_mod.RETRY_BACKOFF_SEC = orig
 
 
+@pytest.fixture
+def fast_rate_limit():
+    orig = openai_mod.MESSAGE_TOO_FREQUENT_WAIT_SEC
+    openai_mod.MESSAGE_TOO_FREQUENT_WAIT_SEC = 0.0
+    yield
+    openai_mod.MESSAGE_TOO_FREQUENT_WAIT_SEC = orig
+
+
 def _args(acct, pool=None, existing_sid: str | None = "s1"):
     return {
         "account": acct,
@@ -140,6 +170,97 @@ async def test_stream_retries_fake_context_hint_then_success():
     assert '"content": "При"' in joined
     assert '"finish_reason": "stop"' in joined
     assert acct.client.completion.await_count == 2
+
+
+async def test_non_stream_retries_message_too_frequent_then_success(fast_rate_limit):
+    acct = FakeAccount([TOO_FREQUENT_SSE, OK_SSE])
+    result = await _collect_non_stream(**_args(acct))
+    assert result["choices"][0]["message"]["content"] == "Привет"
+    assert acct.client.completion.await_count == 2
+
+
+async def test_non_stream_retries_message_too_frequent_hint_then_success(fast_rate_limit):
+    acct = FakeAccount([TOO_FREQUENT_HINT_SSE, OK_SSE])
+    result = await _collect_non_stream(**_args(acct))
+    assert result["choices"][0]["message"]["content"] == "Привет"
+    assert acct.client.completion.await_count == 2
+
+
+async def test_stream_retries_message_too_frequent_then_success(fast_rate_limit):
+    acct = FakeAccount([TOO_FREQUENT_SSE, OK_SSE])
+    gen = _stream_openai(**_args(acct))
+    lines = list(await _collect(gen))
+    joined = "".join(lines)
+    assert '"content": "При"' in joined
+    assert '"finish_reason": "stop"' in joined
+    assert acct.client.completion.await_count == 2
+
+
+async def test_non_stream_raises_429_after_five_too_frequent_cycles(fast_rate_limit):
+    acct = FakeAccount([TOO_FREQUENT_SSE] * (openai_mod.MESSAGE_TOO_FREQUENT_MAX_RETRIES + 1))
+    with pytest.raises(Exception) as excinfo:
+        await _collect_non_stream(**_args(acct))
+    exc = excinfo.value
+    assert isinstance(exc, openai_mod.HTTPException)
+    assert exc.status_code == 429
+    assert "Message too frequent" in exc.detail
+    assert acct.client.completion.await_count == openai_mod.MESSAGE_TOO_FREQUENT_MAX_RETRIES + 1
+
+
+async def test_stream_emits_error_after_five_too_frequent_cycles(fast_rate_limit):
+    acct = FakeAccount([TOO_FREQUENT_SSE] * (openai_mod.MESSAGE_TOO_FREQUENT_MAX_RETRIES + 1))
+    gen = _stream_openai(**_args(acct))
+    lines = list(await _collect(gen))
+    joined = "".join(lines)
+    assert acct.client.completion.await_count == openai_mod.MESSAGE_TOO_FREQUENT_MAX_RETRIES + 1
+    assert '"error"' in joined
+    assert "Message too frequent" in joined
+    assert joined.rstrip().endswith("data: [DONE]")
+
+
+async def test_non_stream_retries_too_frequent_http_error_then_success(fast_rate_limit):
+    acct = FakeAccount([])
+    acct.client.completion = AsyncMock(
+        side_effect=[
+            openai_mod.HTTPException(502, "DeepSeek error 40042: Message too frequent"),
+            FakeResp(OK_SSE),
+        ]
+    )
+    result = await _collect_non_stream(**_args(acct))
+    assert result["choices"][0]["message"]["content"] == "Привет"
+    assert acct.client.completion.await_count == 2
+
+
+async def test_send_completion_maps_too_frequent_body_to_429():
+    class TooFreqResp(FakeResp):
+        def __init__(self, body: str):
+            super().__init__(body)
+            self.status_code = 429
+            self.headers = {"content-type": "application/json"}
+
+    client = MagicMock()
+    client.completion = AsyncMock(return_value=TooFreqResp('{"code":40042,"msg":"Message too frequent"}'))
+    with pytest.raises(Exception) as excinfo:
+        await openai_mod._send_completion(client, {}, "c1", None, "p", "default", False, False)
+    exc = excinfo.value
+    assert isinstance(exc, openai_mod.HTTPException)
+    assert exc.status_code == 429
+    assert openai_mod._is_message_too_frequent_http(exc)
+
+
+def test_message_too_frequent_markers():
+    assert openai_mod._message_too_frequent_text("Message too frequent, retry later")
+    assert openai_mod._message_too_frequent_text("message_too_frequent")
+    assert openai_mod._message_too_frequent_text("MESSAGE TOO FREQUENT")
+    assert openai_mod._message_too_frequent_text("DeepSeek error 40042: Message to frequent")
+    assert openai_mod._message_too_frequent_text(None) is None
+    assert openai_mod._message_too_frequent_text("Server is busy") is None
+    assert openai_mod._message_too_frequent_text(12345) is None
+
+
+def test_message_too_frequent_defaults():
+    assert openai_mod.MESSAGE_TOO_FREQUENT_WAIT_SEC == 60.0
+    assert openai_mod.MESSAGE_TOO_FREQUENT_MAX_RETRIES == 5
 
 
 async def test_non_stream_reports_502_after_fake_context_hint_retries():
