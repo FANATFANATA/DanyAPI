@@ -2772,6 +2772,21 @@ def test_dsml_filter_matches_direct_strip_for_truncated_and_nested():
             assert out == strip_dsml(text), text
 
 
+def test_dsml_filter_never_splits_a_marker_across_the_cut():
+    cases = [
+        f"{_DSML}DSML{_DSML}\n\u041f\u0440\u0438\u0432\u0435\u0442, \u043c\u0438\u0440!",
+        f"{_DSML}DSML{_DSML}" * 3,
+        f"text {_DSML}DSML{_DSML} more text",
+        f"a<{_DSML}DSML{_DSML}thinking>hidden</{_DSML}DSML{_DSML}thinking>{_DSML}DSML{_DSML} tail",
+    ]
+    for text in cases:
+        for size in (1, 2, 3, 5, 8):
+            flt = DsmlFilter()
+            out = "".join(flt.feed(text[index : index + size]) for index in range(0, len(text), size)) + flt.flush()
+            assert out == strip_dsml(text), (ascii(text), size)
+            assert f"{_DSML}DSML" not in out, (ascii(text), size)
+
+
 def test_format_tool_message_strips_dsml_from_reasoning():
     calls = [ToolCall.create("f", {})]
     message = format_tool_message(calls, "text", f"why <{_DSML}DSML{_DSML}thinking>private</{_DSML}DSML{_DSML}thinking>")
