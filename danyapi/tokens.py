@@ -1,15 +1,18 @@
 from __future__ import annotations
 
-import re
 from collections.abc import Callable
+from itertools import chain
 from typing import Any
 
-_CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3040-\u30ff\uac00-\ud7af]")
+_CJK_RANGES = ((0x3400, 0x4DBF), (0x4E00, 0x9FFF), (0xF900, 0xFAFF), (0x3040, 0x30FF), (0xAC00, 0xD7AF))
+_CJK_TABLE = dict.fromkeys(chain.from_iterable(range(lo, hi + 1) for lo, hi in _CJK_RANGES))
 _IMAGE_TOKEN_COST = 85
 
 
 def _cjk_count(text: str) -> int:
-    return len(_CJK_RE.findall(text))
+    if text.isascii():
+        return 0
+    return len(text) - len(text.translate(_CJK_TABLE))
 
 
 def _units(cjk: int, other: int) -> int:
@@ -26,6 +29,11 @@ def estimate_tokens(text: str | None) -> int:
 
 
 def _head_length(word: str, budget: int) -> int:
+    if budget <= 0:
+        return 0
+    size = len(word)
+    if not _cjk_count(word):
+        return min(size, budget * 4 + 3)
     cjk = 0
     length = 0
     for char in word:

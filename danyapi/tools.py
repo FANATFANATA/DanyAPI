@@ -32,6 +32,15 @@ _DSML_TAG = re.compile(rf"<\s*/?\s*{_DSML_MARKER}\s*[^<>]*>", re.IGNORECASE)
 _DSML_NAKED = re.compile(rf"{_DSML_MARKER}", re.IGNORECASE)
 _DSML_PRESENT = re.compile(r"dsml", re.IGNORECASE)
 
+
+def _dsml_present(text: str) -> bool:
+    if "dsml" in text:
+        return True
+    if text.isascii():
+        return "dsml" in text.lower()
+    return _DSML_PRESENT.search(text) is not None
+
+
 _DSML_TOOL_CALLS_BLOCK = re.compile(
     rf"<{_DSML_MARKER}\s*tool_calls\b[^<>]*>(.*?)</{_DSML_MARKER}\s*tool_calls\s*>",
     re.DOTALL | re.IGNORECASE,
@@ -90,31 +99,21 @@ _DSML_LAX_PARAMETER = re.compile(
     rf"(?:</?{_DSML_LAX_MARKER}\s*parameter\s*>|/?\s*parameter\s*>|</?parameter\s*>|/?parameter\s*>)",
     re.DOTALL | re.IGNORECASE,
 )
-_XML_SELFCLOSE = re.compile(r"<([a-zA-Z_][a-zA-Z0-9_-]*)\b([^>]*?)/>", re.DOTALL | re.IGNORECASE)
-_XML_OPEN_TAG_SCAN = re.compile(r"<\s*([a-zA-Z_][a-zA-Z0-9_-]*)\b([^>]*)>", re.IGNORECASE)
+_XML_SELFCLOSE = re.compile(r"<([a-zA-Z_][a-zA-Z0-9_-]*)\b([^<>]*?)/>", re.DOTALL | re.IGNORECASE)
+_XML_OPEN_TAG_SCAN = re.compile(r"<\s*([a-zA-Z_][a-zA-Z0-9_-]*)\b([^<>]*)>", re.IGNORECASE)
+
+
+@lru_cache(maxsize=256)
+def _xml_close_pattern(name: str, name_space: bool, tail_space: bool) -> re.Pattern[str]:
+    gap = r"[ \t\r\n]*"
+    return re.compile(rf"</{gap if name_space else ''}{re.escape(name.lower())}{gap if tail_space else ''}>", re.IGNORECASE)
 
 
 def _find_xml_close(text: str, name: str, start: int, name_space: bool, tail_space: bool) -> tuple[int, int] | None:
-    signature = name.lower()
-    signature_len = len(signature)
-    found = start
-    length = len(text)
-    while True:
-        lt = text.find("</", found)
-        if lt == -1:
-            return None
-        j = lt + 2
-        if name_space:
-            while j < length and text[j] in " \t\r\n":
-                j += 1
-        if text[j : j + signature_len].lower() == signature:
-            k = j + signature_len
-            if tail_space:
-                while k < length and text[k] in " \t\r\n":
-                    k += 1
-            if k < length and text[k] == ">":
-                return lt, k + 1
-        found = lt + 1
+    match = _xml_close_pattern(name, name_space, tail_space).search(text, start)
+    if match is None:
+        return None
+    return match.start(), match.end()
 
 
 def _scan_xml_pairs(
@@ -125,6 +124,8 @@ def _scan_xml_pairs(
 ) -> Iterator[tuple[int, int, str, str, str]]:
     pos = 0
     length = len(text)
+    last_lt = -1
+    last_gt = -1
     while pos < length:
         open_match = _XML_OPEN_TAG_SCAN.search(text, pos)
         if open_match is None:
@@ -133,7 +134,8 @@ def _scan_xml_pairs(
         if name_filter is not None and name.lower() not in name_filter:
             pos = open_match.end()
             continue
-        if open_match.group(2).rstrip().endswith("/"):
+        attrs = open_match.group(2)
+        if (attrs if not attrs[-1:].isspace() else attrs.rstrip()).endswith("/"):
             pos = open_match.end()
             continue
         close = _find_xml_close(text, name, open_match.end(), name_space, tail_space)
@@ -142,7 +144,11 @@ def _scan_xml_pairs(
             if name_filter is None:
                 pos = body_start
                 continue
-            if text.rfind("<", body_start) > text.rfind(">", body_start):
+            if last_lt < body_start:
+                last_lt = text.rfind("<", body_start)
+            if last_gt < body_start:
+                last_gt = text.rfind(">", body_start)
+            if last_lt > last_gt:
                 pos = body_start
                 continue
             wrapper_close = _XML_WRAPPER_CLOSE_RE.search(text, body_start)
@@ -152,7 +158,7 @@ def _scan_xml_pairs(
                 continue
             close = (trunc, trunc)
         close_start, end = close
-        yield open_match.start(), end, name, open_match.group(2), text[open_match.end() : close_start]
+        yield open_match.start(), end, name, attrs, text[open_match.end() : close_start]
         pos = end
 
 
@@ -186,6 +192,8 @@ class _IntervalSet:
 
 
 def _blanked(text: str, mask: bytearray) -> str:
+    if 1 not in mask:
+        return text
     parts: list[str] = []
     cursor = 0
     i = 0
@@ -414,7 +422,7 @@ def _strip_dsml(text: str) -> str:
     if not text:
         return text
     result = text
-    if not _DSML_PRESENT.search(result):
+    if not _dsml_present(result):
         return result
     for _ in range(10):
         updated = _DSML_BLOCK.sub(" ", result)
@@ -426,7 +434,7 @@ def _strip_dsml(text: str) -> str:
         if updated == result:
             break
         result = updated
-        if not _DSML_PRESENT.search(result):
+        if not _dsml_present(result):
             break
     result = _DSML_XML_NORMALIZE.sub(r"<\1\2>", result)
     result = _DSML_TAG.sub(_replace_dsml_tag, result)
@@ -450,8 +458,7 @@ _DSML_HIDDEN_NAME_SET = frozenset(_DSML_HIDDEN_NAMES.split("|"))
 _DSML_SIGNAL_RE = re.compile(rf"[{re.escape(_DSML_SIGNAL_CHARS)}]")
 _DSML_MARKER_RE = re.compile(rf"[{re.escape(_DSML_SIGNAL_CHARS)}]|[^\x00-\x7f]")
 _DSML_PARTIAL_RE = re.compile(r"(?:DSM|DSML|DS|D)\Z", re.IGNORECASE)
-_DSML_PARTIAL_ANY_RE = re.compile(r"DSML|DSM|DS|D", re.IGNORECASE)
-_DSML_LT_RE = re.compile(r"<")
+_DSML_PARTIAL_LAST = frozenset("DdMmSsLl")
 _DSML_TAG_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.:-]*")
 _DSML_PIPE_RUN_RE = rf"[{_DSML_PIPE}]{{1,8}}"
 _DSML_TAIL_RUN_RE = rf"\s*[{_DSML_PIPE}]{{0,8}}"
@@ -464,10 +471,6 @@ _DSML_DANGLING = re.compile(
 _DSML_DANGLING_MAX = 40
 _DSML_CLOSE_CACHE: dict[str, re.Pattern[str]] = {}
 _DSML_CLOSE_CACHE_MAX = 64
-
-
-def _is_dsml_char(char: str) -> bool:
-    return char == "|" or ord(char) > 127
 
 
 def _in_dsml_run(char: str) -> bool:
@@ -501,12 +504,13 @@ def _dsml_hold_start(text: str, floor: int = 0) -> int:
         return size
     end = size
     signal = _DSML_SIGNAL_RE
-    partial = _DSML_PARTIAL_RE.search(text, floor)
-    if partial is not None:
-        end = partial.start()
-        signal = _DSML_MARKER_RE
-        if signal.search(text, floor, end) is None:
-            return size
+    if text[size - 1] in _DSML_PARTIAL_LAST:
+        partial = _DSML_PARTIAL_RE.search(text, floor)
+        if partial is not None:
+            end = partial.start()
+            signal = _DSML_MARKER_RE
+            if signal.search(text, floor, end) is None:
+                return size
     start = _dsml_run_start(text, end, floor)
     if start == end:
         return end
@@ -532,7 +536,7 @@ def _dsml_tag_may_start(text: str, start: int) -> bool:
         index += 1
     if index >= size:
         return False
-    return _is_dsml_char(text[index])
+    return text[index] == "|" or text[index] > "\x7f"
 
 
 def _dsml_tag_pending(text: str, start: int) -> bool:
@@ -544,9 +548,9 @@ def _dsml_tag_pending(text: str, start: int) -> bool:
         index += 1
     if index >= size:
         return True
-    if not _is_dsml_char(text[index]):
+    if text[index] != "|" and text[index] <= "\x7f":
         return False
-    while index < size and _is_dsml_char(text[index]):
+    while index < size and (text[index] == "|" or text[index] > "\x7f"):
         index += 1
     if index >= size:
         return True
@@ -577,7 +581,7 @@ def _dsml_tag_at(text: str, start: int) -> tuple[int, str, bool, bool] | None:
     while index < size and text[index] in _DSML_SPACE:
         index += 1
     run = index
-    while index < size and _is_dsml_char(text[index]):
+    while index < size and (text[index] == "|" or text[index] > "\x7f"):
         index += 1
     if index == run:
         return None
@@ -588,7 +592,7 @@ def _dsml_tag_at(text: str, start: int) -> tuple[int, str, bool, bool] | None:
     index += 4
     while index < size and text[index] in _DSML_SPACE:
         index += 1
-    while index < size and _is_dsml_char(text[index]):
+    while index < size and (text[index] == "|" or text[index] > "\x7f"):
         index += 1
     while index < size and text[index] in _DSML_SPACE:
         index += 1
@@ -647,10 +651,10 @@ def _dsml_scan_cut(text: str, final: bool) -> int:
     pos = 0
     floor = 0
     while pos < size:
-        found = _DSML_LT_RE.search(text, pos)
-        if found is None:
+        found = text.find("<", pos)
+        if found == -1:
             break
-        index = found.start()
+        index = found
         parsed = _dsml_tag_at(text, index)
         if parsed is None:
             if not final and _dsml_tag_may_start(text, index) and (_dsml_tag_pending(text, index) or _dsml_dangling_pending(text, index)):
@@ -674,10 +678,10 @@ def _hidden_spans(text: str) -> list[tuple[int, int]]:
     pos = 0
     size = len(text)
     while pos < size:
-        found = _DSML_LT_RE.search(text, pos)
-        if found is None:
+        found = text.find("<", pos)
+        if found == -1:
             break
-        index = found.start()
+        index = found
         parsed = _dsml_tag_at(text, index)
         if parsed is None:
             pos = index + 1
@@ -721,7 +725,7 @@ def _drop_dangling(text: str) -> str:
 def _strip_output(text: str, drop_tail: bool = True) -> str:
     if not text:
         return text
-    if not _DSML_PRESENT.search(text):
+    if not _dsml_present(text):
         return _drop_dangling(text) if drop_tail else text
     result = text
     for _ in range(10):
@@ -735,7 +739,7 @@ def _strip_output(text: str, drop_tail: bool = True) -> str:
         if updated == result:
             break
         result = updated
-        if not _DSML_PRESENT.search(result):
+        if not _dsml_present(result):
             break
     if drop_tail:
         result = _drop_dangling(result)
@@ -805,6 +809,7 @@ TOOL_STREAM_MARKERS = tuple([f'{{"{key}"' for key in TOOL_STREAM_JSON_KEYS] + [f
 TOOL_STREAM_MARKER_MAX = max(len(marker) for marker in TOOL_STREAM_MARKERS)
 
 _MARKER_PREFIXES = frozenset(marker[:size] for marker in TOOL_STREAM_MARKERS for size in range(1, len(marker) + 1))
+_JSON_KEY_PREFIXES = frozenset(key[:size] for key in TOOL_STREAM_JSON_KEYS for size in range(1, len(key) + 1))
 
 _TOOL_STREAM_TAG_RE = re.compile(
     r"<\s*/?\s*(?:" + "|".join(TOOL_STREAM_TAGS) + r")\b[^<>]*>",
@@ -812,7 +817,7 @@ _TOOL_STREAM_TAG_RE = re.compile(
 )
 _TOOL_STREAM_JSON_RE = re.compile(r"\{\s*['\"]?(?:" + "|".join(TOOL_STREAM_JSON_KEYS) + r")['\"]?\s*:")
 _TOOL_STREAM_ARRAY_RE = re.compile(r"\[\s*\{")
-_TOOL_STREAM_YAML_RE = re.compile(r"(?m)^[ \t]*tool_calls\s*:")
+_TOOL_STREAM_YAML_RE = re.compile(r"tool_calls\s*:")
 _TOOL_STREAM_NAME_ATTR_RE = re.compile(
     r"<\s*/?\s*(?!(?:" + "|".join(sorted(_XML_HTML_TAGS)) + r")\b)[A-Za-z_][A-Za-z0-9_.-]*[^<>]*\bname\s*=",
     re.IGNORECASE,
@@ -821,6 +826,17 @@ _DSML_STREAM_START = re.compile(
     r"<\s*/?\s*(?:[|]|[^\x00-\x7f]){1,8}\s*DSML\s*(?:[|]|[^\x00-\x7f]){1,8}",
     re.IGNORECASE | re.DOTALL,
 )
+_BOUNDARY_SCAN_RE = re.compile(r"[{\[<>\n]")
+_TAG_NAME_RUN_RE = re.compile(r"[A-Za-z0-9_.-]{1,256}")
+_TAG_HOLD_PREFIXES = frozenset(tag[:size] for tag in TOOL_STREAM_TAGS for size in range(1, len(tag) + 1))
+_MARKER_GROUPS: dict[str, tuple[str, ...]] = {}
+for _marker in TOOL_STREAM_MARKERS:
+    _MARKER_GROUPS[_marker[0]] = (*_MARKER_GROUPS.get(_marker[0], ()), _marker)
+_PREFIX_BY_LEN: dict[int, tuple[str, ...]] = {}
+for _size in range(1, TOOL_STREAM_MARKER_MAX + 1):
+    _found = tuple(sorted(prefix for prefix in _MARKER_PREFIXES if len(prefix) == _size))
+    if _found:
+        _PREFIX_BY_LEN[_size] = _found
 
 
 @lru_cache(maxsize=64)
@@ -829,14 +845,49 @@ def _stream_patterns(names: tuple[str, ...]) -> tuple[re.Pattern[str], ...]:
         _TOOL_STREAM_TAG_RE,
         _TOOL_STREAM_JSON_RE,
         _TOOL_STREAM_ARRAY_RE,
-        _TOOL_STREAM_YAML_RE,
         _TOOL_STREAM_NAME_ATTR_RE,
     ]
     if names:
         escaped = "|".join(re.escape(name) for name in names)
         patterns.append(re.compile(rf"<\s*/?\s*(?:{escaped})\b", re.IGNORECASE))
-        patterns.append(re.compile(rf"(?m)^[ \t]*(?:{escaped})[ \t]*\(", re.IGNORECASE))
     return tuple(patterns)
+
+
+def _line_head(text: str, pos: int) -> int:
+    while pos > 0 and text[pos - 1] in " \t":
+        pos -= 1
+    return pos if pos == 0 or text[pos - 1] == "\n" else -1
+
+
+def _yaml_marker(text: str, start: int) -> int:
+    pos = start
+    while True:
+        match = _TOOL_STREAM_YAML_RE.search(text, pos)
+        if match is None:
+            return -1
+        head = _line_head(text, match.start())
+        if head != -1:
+            return head
+        pos = match.end()
+
+
+def _call_marker(text: str, start: int, names: tuple[str, ...]) -> int:
+    best = -1
+    size = len(text)
+    for name in names:
+        at = text.find(name, start)
+        while at != -1:
+            head = _line_head(text, at)
+            if head != -1:
+                after = at + len(name)
+                while after < size and text[after] in " \t":
+                    after += 1
+                if after < size and text[after] == "(":
+                    if best == -1 or head < best:
+                        best = head
+                    break
+            at = text.find(name, at + 1)
+    return best
 
 
 def _stream_names(tool_schemas: dict[str, dict[str, Any]] | None) -> tuple[str, ...]:
@@ -853,8 +904,11 @@ def _stream_names_keys(keys: tuple[Any, ...]) -> tuple[str, ...]:
 def _literal_hold(text: str, start: int) -> int:
     length = len(text)
     max_size = min(TOOL_STREAM_MARKER_MAX - 1, length - start)
-    for size in range(max_size, 0, -1):
-        if text[length - size :] in _MARKER_PREFIXES:
+    if max_size <= 0:
+        return -1
+    tail = text[length - max_size :]
+    for size in range(len(tail), 0, -1):
+        if tail.endswith(_PREFIX_BY_LEN[size]):
             return length - size
     return -1
 
@@ -863,13 +917,13 @@ def _json_hold(text: str, start: int) -> int:
     brace = text.rfind("{", start)
     if brace == -1 or "}" in text[brace:]:
         return -1
-    body = text[brace + 1 :].lstrip()
+    body = text[brace + 1 : brace + 24].lstrip()
     if not body:
         return brace
     if body[0] in "'\"":
         body = body[1:]
     key = body.lower()
-    if any(candidate.startswith(key) for candidate in TOOL_STREAM_JSON_KEYS):
+    if key in _JSON_KEY_PREFIXES:
         return brace
     return -1
 
@@ -887,25 +941,16 @@ def _tag_hold(text: str, start: int, names: tuple[str, ...]) -> int:
     if not body:
         return lt
     first = body[0]
-    if first == "|" or ord(first) > 127:
+    if first == "|" or first > "\x7f":
         return lt
-    chars: list[str] = []
-    for char in body:
-        if char.isascii() and (char.isalnum() or char in "_-."):
-            chars.append(char)
-        else:
-            break
-    name = "".join(chars).lower()
+    name_match = _TAG_NAME_RUN_RE.match(body)
+    name = name_match.group(0).lower() if name_match is not None else ""
     if not name:
         return -1
     if name in _XML_HTML_TAGS:
         return -1
-    for candidate in TOOL_STREAM_TAGS:
-        if candidate.startswith(name):
-            return lt
-    for candidate in names:
-        if candidate.startswith(name):
-            return lt
+    if name in _TAG_HOLD_PREFIXES or any(candidate.startswith(name) for candidate in names):
+        return lt
     lowered = body.lower()
     for suffix in ("name", "nam", "na", "n"):
         if lowered.endswith(suffix):
@@ -944,6 +989,18 @@ def _boundary_hold(text: str, start: int, names: tuple[str, ...]) -> int:
     return hold
 
 
+def _boundary_may_start(text: str, start: int, names: tuple[str, ...]) -> bool:
+    if _BOUNDARY_SCAN_RE.search(text, start) is not None:
+        return True
+    if start > 0 and text[start - 1] != "\n":
+        return False
+    head = text[start : start + 24].lstrip(" \t")
+    if not head:
+        return bool(text[start : start + 1])
+    first = head[0].lower()
+    return first == "t" or any(name.startswith(first) for name in names)
+
+
 def tool_call_boundary(
     text: str,
     start: int = 0,
@@ -953,12 +1010,15 @@ def tool_call_boundary(
     cached = _boundary_cache.get(names)
     if cached is not None:
         old_text, old_best, old_complete = cached
-        prefix_ok = len(text) >= len(old_text) and text[: len(old_text)] == old_text
+        prefix_ok = len(text) >= len(old_text) and text.startswith(old_text)
         if old_complete and 0 <= old_best < len(old_text) and start <= old_best and prefix_ok:
             hold = _boundary_hold(text, start, names)
             if hold != -1 and hold < old_best:
                 return hold, False
             return old_best, True
+    if not _boundary_may_start(text, start, names):
+        hold = _boundary_hold(text, start, names)
+        return (hold, False) if hold != -1 else (-1, False)
     best = -1
     complete = False
     for pattern in _stream_patterns(names):
@@ -966,16 +1026,34 @@ def tool_call_boundary(
         if match is not None and (best == -1 or match.start() < best):
             best = match.start()
             complete = True
-    if _DSML_PRESENT.search(text, start):
-        match = _DSML_STREAM_START.search(text, start)
-        if match is not None and (best == -1 or match.start() < best):
-            best = match.start()
+    if best == start:
+        return best, True
+    head = _yaml_marker(text, start)
+    if head != -1 and (best == -1 or head < best):
+        best = head
+        complete = True
+    if names:
+        head = _call_marker(text, start, names)
+        if head != -1 and (best == -1 or head < best):
+            best = head
             complete = True
-    for marker in TOOL_STREAM_MARKERS:
-        pos = text.find(marker, start)
-        if pos != -1 and (best == -1 or pos < best):
-            best = pos
-            complete = True
+    match = _DSML_STREAM_START.search(text, start)
+    if match is not None and (best == -1 or match.start() < best):
+        best = match.start()
+        complete = True
+    for char, group in _MARKER_GROUPS.items():
+        at = text.find(char, start)
+        if at == -1 or (best != -1 and at > best):
+            continue
+        for marker in group:
+            pos = text.find(marker, start)
+            if pos != -1 and (best == -1 or pos < best):
+                best = pos
+                complete = True
+                if best == start:
+                    break
+        if best == start:
+            break
     hold = _boundary_hold(text, start, names)
     if hold != -1 and (best == -1 or hold < best):
         return hold, False
@@ -2432,7 +2510,7 @@ def _parse_xml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | N
     consumed = _IntervalSet()
 
     def blank(start: int, end: int) -> None:
-        mask[start:end] = b" " * (end - start)
+        mask[start:end] = b"\x01" * (end - start)
 
     for start, end, _tag, attrs_text, element_body in _scan_xml_pairs(text, _TOOL_TAG_NAMES, tail_space=True):
         body = element_body
@@ -2823,7 +2901,7 @@ def _parse_yaml_calls(text: str) -> list[ToolCall] | None:
 
 
 def _parse_dsml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | None = None) -> tuple[list[ToolCall], str] | None:
-    if "dsml" not in text.casefold():
+    if not _dsml_present(text):
         return None
     blocks = list(_DSML_TOOL_CALLS_BLOCK.finditer(text))
     if not blocks:
@@ -3001,7 +3079,7 @@ def _parse_tool_calls_impl(
         found = _extract_calls(obj)
         if found:
             calls.extend(found)
-            removed[start : end + 1] = b" " * (end - start + 1)
+            removed[start : end + 1] = b"\x01" * (end - start + 1)
     if calls:
         wrapper = _blanked(stripped, removed)
         if report is not None:

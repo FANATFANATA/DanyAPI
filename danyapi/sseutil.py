@@ -307,14 +307,19 @@ class MessageReconstructor:
     __slots__ = (
         "_agg_fragments",
         "_aggregate_dirty",
-        "_content",
+        "_append_only",
+        "_content_base",
+        "_content_parts",
         "_diffs_revision",
         "_frag_idx",
         "_last_op",
         "_last_path",
         "_prev_content",
         "_prev_reasoning",
-        "_reasoning",
+        "_reasoning_base",
+        "_reasoning_parts",
+        "_reported_c",
+        "_reported_r",
         "_revision",
         "hint_error",
         "message",
@@ -332,10 +337,61 @@ class MessageReconstructor:
         self._revision = 0
         self._agg_fragments: Any = None
         self._frag_idx = 0
-        self._content = ""
-        self._reasoning = ""
+        self._content_base = ""
+        self._reasoning_base = ""
+        self._content_parts: list[str] = []
+        self._reasoning_parts: list[str] = []
+        self._reported_c = 0
+        self._reported_r = 0
+        self._append_only = True
         self._aggregate_dirty = True
         self._diffs_revision = -1
+
+    @property
+    def _content(self) -> str:
+        parts = self._content_parts
+        if not parts:
+            return self._content_base
+        base = self._content_base
+        reported = self._reported_c
+        if reported:
+            self._prev_content = base + "".join(parts[:reported])
+            self._reported_c = 0
+            base = self._prev_content
+        if len(parts) > reported:
+            base = base + "".join(parts[reported:])
+        self._content_base = base
+        parts.clear()
+        return base
+
+    @_content.setter
+    def _content(self, value: str) -> None:
+        self._content_base = value
+        self._content_parts.clear()
+        self._reported_c = 0
+
+    @property
+    def _reasoning(self) -> str:
+        parts = self._reasoning_parts
+        if not parts:
+            return self._reasoning_base
+        base = self._reasoning_base
+        reported = self._reported_r
+        if reported:
+            self._prev_reasoning = base + "".join(parts[:reported])
+            self._reported_r = 0
+            base = self._prev_reasoning
+        if len(parts) > reported:
+            base = base + "".join(parts[reported:])
+        self._reasoning_base = base
+        parts.clear()
+        return base
+
+    @_reasoning.setter
+    def _reasoning(self, value: str) -> None:
+        self._reasoning_base = value
+        self._reasoning_parts.clear()
+        self._reported_r = 0
 
     def handle(self, event: SSEEvent) -> None:
         if event.event == "ready":
@@ -366,8 +422,10 @@ class MessageReconstructor:
         self._aggregate_dirty = True
         if self._fast_append_tail(op, path, data["v"]):
             self._aggregate_dirty = False
-        elif self._frag_idx and _touches_aggregated_fragment(op, path, data["v"], self._frag_idx):
-            self._agg_fragments = None
+        else:
+            self._append_only = False
+            if self._frag_idx and _touches_aggregated_fragment(op, path, data["v"], self._frag_idx):
+                self._agg_fragments = None
 
     def _fast_append_tail(self, op: str, path: str, value: Any) -> bool:
         if op != "APPEND" or not isinstance(value, str):
@@ -391,9 +449,9 @@ class MessageReconstructor:
             return False
         frag_type = tail.get("type")
         if frag_type in MAIN_RESPONSE_TYPES:
-            self._content += value
+            self._content_parts.append(value)
         elif frag_type in THINK_TYPES:
-            self._reasoning += value
+            self._reasoning_parts.append(value)
         else:
             return False
         return True
@@ -408,31 +466,31 @@ class MessageReconstructor:
                 if isinstance(frag, dict):
                     frag_type = frag.get("type")
                     if frag_type in MAIN_RESPONSE_TYPES:
-                        self._content += _fragment_text(frag)
+                        self._content_parts.append(_fragment_text(frag))
                     elif frag_type in THINK_TYPES:
-                        self._reasoning += _fragment_text(frag)
+                        self._reasoning_parts.append(_fragment_text(frag))
             self._frag_idx = len(frags)
             self._aggregate_dirty = False
             return self._content, self._reasoning
         if isinstance(frags, list):
-            content = ""
-            reasoning = ""
+            content_parts: list[str] = []
+            reasoning_parts: list[str] = []
             for frag in frags:
                 if isinstance(frag, dict):
                     frag_type = frag.get("type")
                     if frag_type in MAIN_RESPONSE_TYPES:
-                        content += _fragment_text(frag)
+                        content_parts.append(_fragment_text(frag))
                     elif frag_type in THINK_TYPES:
-                        reasoning += _fragment_text(frag)
+                        reasoning_parts.append(_fragment_text(frag))
         else:
-            content = ""
-            reasoning = ""
-        self._content = content
-        self._reasoning = reasoning
+            content_parts = []
+            reasoning_parts = []
+        self._content = "".join(content_parts)
+        self._reasoning = "".join(reasoning_parts)
         self._frag_idx = len(frags) if isinstance(frags, list) else 0
         self._agg_fragments = frags
         self._aggregate_dirty = False
-        return content, reasoning
+        return self._content, self._reasoning
 
     @property
     def content(self) -> str:
@@ -445,11 +503,23 @@ class MessageReconstructor:
     def take_diffs(self) -> tuple[str, str]:
         if self._revision == self._diffs_revision:
             return "", ""
+        self._diffs_revision = self._revision
+        frags = self.message.get("fragments")
+        if self._append_only and frags is self._agg_fragments and not self._aggregate_dirty:
+            c_parts = self._content_parts
+            reported_c = self._reported_c
+            c_new = c_parts[reported_c:] if len(c_parts) != reported_c else ()
+            self._reported_c = len(c_parts)
+            r_parts = self._reasoning_parts
+            reported_r = self._reported_r
+            r_new = r_parts[reported_r:] if len(r_parts) != reported_r else ()
+            self._reported_r = len(r_parts)
+            return "".join(c_new), "".join(r_new)
+        self._append_only = True
         content, reasoning = self._aggregates()
         c_diff = _diff_suffix(self._prev_content, content)
         r_diff = _diff_suffix(self._prev_reasoning, reasoning)
         self._prev_content, self._prev_reasoning = content, reasoning
-        self._diffs_revision = self._revision
         return c_diff, r_diff
 
     def extend_with(self, other: MessageReconstructor) -> None:

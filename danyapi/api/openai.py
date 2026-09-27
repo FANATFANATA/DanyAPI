@@ -10,7 +10,7 @@ import re
 import time
 import uuid
 import weakref
-from collections.abc import AsyncIterator
+from collections.abc import Iterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from functools import partial
@@ -2396,8 +2396,17 @@ def _advance_session_usage(session, accumulated_total: int) -> int:
     return max(0, current - prev)
 
 
+_JSON_ENCODE = json.JSONEncoder(ensure_ascii=False).encode
+
+
 def _sse(data: dict) -> str:
-    return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+    return f"data: {_JSON_ENCODE(data)}\n\n"
+
+
+def _delta_json(delta: dict, finish: str | None) -> str:
+    if finish is None:
+        return f'{{"index":0,"delta":{_JSON_ENCODE(delta)}}}'
+    return f'{{"index":0,"delta":{_JSON_ENCODE(delta)},"finish_reason":{_JSON_ENCODE(finish)}}}'
 
 
 def _stream_error_sse(
@@ -3504,7 +3513,11 @@ async def _stream_openai(
                 out += budget.feed(stop_filter.flush())
             return out
 
+        chunk_head = f'data: {{"id":{_JSON_ENCODE(chunk_id)},"object":"chat.completion.chunk","created":{created},"model":{_JSON_ENCODE(model)},"choices":['
+
         def _chunk(delta: dict, finish: str | None = None, *, index: int = 0, session_id: Any = _UNSET) -> str:
+            if index == 0 and session_id is _UNSET:
+                return chunk_head + _delta_json(delta, finish) + "]}\n\n"
             payload: dict[str, Any] = {
                 "id": chunk_id,
                 "object": "chat.completion.chunk",
@@ -3537,7 +3550,7 @@ async def _stream_openai(
         def _done_finish(status: Any) -> str:
             return "stop" if stop_hit else ("length" if budget.done else _finish_reason(status))
 
-        async def _drain_event(reconstructor: MessageReconstructor, event) -> AsyncIterator[str]:
+        def _drain_event(reconstructor: MessageReconstructor, event) -> Iterator[str]:
             nonlocal response_message_id, stop_message_id, got_content
             if event.event == "ready" and isinstance(event.data, dict):
                 response_message_id = event.data.get("response_message_id")
@@ -3634,10 +3647,10 @@ async def _stream_openai(
             try:
                 async for chunk in resp.aiter_bytes():
                     for event in incremental.feed(chunk):
-                        async for line in _drain_event(rec, event):
+                        for line in _drain_event(rec, event):
                             yield line
                 for event in incremental.finish():
-                    async for line in _drain_event(rec, event):
+                    for line in _drain_event(rec, event):
                         yield line
             except BaseException:
                 stopped = True
@@ -3864,9 +3877,10 @@ async def _stream_openai(
             )
         else:
             yield _chunk({}, finish, session_id=session_key)
+            tail = budget.text
             for extra_index in range(1, _bounded_choices(n)):
-                if budget.text:
-                    yield _chunk({"content": budget.text}, index=extra_index, session_id=session_key)
+                if tail:
+                    yield _chunk({"content": tail}, index=extra_index, session_id=session_key)
                 yield _chunk({}, finish, index=extra_index, session_id=session_key)
         if include_usage:
             yield _sse(
