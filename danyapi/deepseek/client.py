@@ -69,6 +69,21 @@ class DeepSeekClient:
     async def aclose(self) -> None:
         await self.http.aclose()
 
+    async def _request_json(self, method: str, path: str, json_error: str, **kwargs) -> dict:
+        send = self.http.post if method == "POST" else self.http.get
+        try:
+            resp = await send(path, **kwargs)
+        except httpx.HTTPError as exc:
+            raise DeepSeekError(-1, f"http request failed: {exc}") from exc
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise DeepSeekError(exc.response.status_code, exc.response.text[:300]) from exc
+        try:
+            return resp.json()
+        except ValueError as exc:
+            raise DeepSeekError(-1, json_error) from exc
+
     async def _post(self, path: str, json_body: dict | None = None) -> dict:
         try:
             resp = await self.http.post(path, json=json_body)
@@ -161,22 +176,13 @@ class DeepSeekClient:
         }
         if pow_headers:
             headers.update(pow_headers)
-        try:
-            resp = await self.http.post(
-                "/api/v0/file/upload_file",
-                files={"file": (filename, data, content_type)},
-                headers=headers,
-            )
-        except httpx.HTTPError as exc:
-            raise DeepSeekError(-1, f"http request failed: {exc}") from exc
-        try:
-            resp.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            raise DeepSeekError(exc.response.status_code, exc.response.text[:300]) from exc
-        try:
-            payload = resp.json()
-        except ValueError as exc:
-            raise DeepSeekError(-1, "invalid JSON from file upload") from exc
+        payload = await self._request_json(
+            "POST",
+            "/api/v0/file/upload_file",
+            "invalid JSON from file upload",
+            files={"file": (filename, data, content_type)},
+            headers=headers,
+        )
         biz = self._biz(payload)
         if not biz.get("id"):
             raise DeepSeekError(-1, "file upload failed: no file id in response")
@@ -186,38 +192,22 @@ class DeepSeekClient:
     async def fetch_files(self, file_ids: list[str]) -> list[dict]:
         if not file_ids:
             return []
-        try:
-            resp = await self.http.get(
-                "/api/v0/file/fetch_files",
-                params={"file_ids": ",".join(file_ids)},
-            )
-        except httpx.HTTPError as exc:
-            raise DeepSeekError(-1, f"http request failed: {exc}") from exc
-        try:
-            resp.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            raise DeepSeekError(exc.response.status_code, exc.response.text[:300]) from exc
-        try:
-            payload = resp.json()
-        except ValueError as exc:
-            raise DeepSeekError(-1, "invalid JSON from fetch_files") from exc
+        payload = await self._request_json(
+            "GET",
+            "/api/v0/file/fetch_files",
+            "invalid JSON from fetch_files",
+            params={"file_ids": ",".join(file_ids)},
+        )
         files = self._biz(payload).get("files")
         return files if isinstance(files, list) else []
 
     async def history_messages(self, chat_session_id: str) -> list[dict]:
-        try:
-            resp = await self.http.get(
-                "/api/v0/chat/history_messages",
-                params={"chat_session_id": chat_session_id},
-            )
-            resp.raise_for_status()
-            payload = resp.json()
-        except httpx.HTTPStatusError as exc:
-            raise DeepSeekError(exc.response.status_code, exc.response.text[:300]) from exc
-        except httpx.HTTPError as exc:
-            raise DeepSeekError(-1, f"http request failed: {exc}") from exc
-        except ValueError as exc:
-            raise DeepSeekError(-1, "invalid JSON from history_messages") from exc
+        payload = await self._request_json(
+            "GET",
+            "/api/v0/chat/history_messages",
+            "invalid JSON from history_messages",
+            params={"chat_session_id": chat_session_id},
+        )
         messages = self._biz(payload).get("chat_messages")
         return messages if isinstance(messages, list) else []
 
