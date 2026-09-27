@@ -27,7 +27,7 @@ from ..config import settings
 from ..deepseek.stream import IncrementalSSE
 from ..sseutil import StreamStopFilter, split_stop
 from ..tokens import StreamBudget, estimate_tokens, trim_to_tokens
-from ..usage import record_usage
+from ..usage import record_usage_dict
 from .client import QwenClient, QwenError
 from .stream import QwenStreamReconstructor, error_code
 
@@ -322,6 +322,13 @@ def _accumulate_usage(session, rec: QwenStreamReconstructor, prompt: str = "", c
     }
 
 
+def _commit_usage(account, session, session_key: str, rec: QwenStreamReconstructor, model: str, prompt: str, user) -> dict:
+    usage = _accumulate_usage(session, rec, prompt, completion_text=rec.content or rec.reasoning)
+    account.sessions.touch_last_message(session_key, rec.response_id)
+    record_usage_dict("qwen", model, usage, user=user, session_id=session_key)
+    return usage
+
+
 def _build_limited_message(
     rec: QwenStreamReconstructor,
     tool_mode: bool,
@@ -536,17 +543,7 @@ async def collect_non_stream(
                 400,
                 "context length exceeded: conversation too long, start a new conversation",
             )
-        usage = _accumulate_usage(session, rec, prompt, completion_text=rec.content or rec.reasoning)
-        account.sessions.touch_last_message(session_key, rec.response_id)
-        record_usage(
-            "qwen",
-            model,
-            usage["prompt_tokens"],
-            usage["completion_tokens"],
-            usage["total_tokens"],
-            user=user,
-            session_id=session_key,
-        )
+        usage = _commit_usage(account, session, session_key, rec, model, prompt, user)
 
         if not rec.has_content and rec.error:
             raise HTTPException(_error_status(error_code(rec.error)), _error_detail(rec))
@@ -850,17 +847,7 @@ async def stream_openai(
             for line in _stream_context_limit_lines(chunk_id, created, model, session_key):
                 yield line
             return
-        usage = _accumulate_usage(session, rec, prompt, completion_text=rec.content or rec.reasoning)
-        account.sessions.touch_last_message(session_key, rec.response_id)
-        record_usage(
-            "qwen",
-            model,
-            usage["prompt_tokens"],
-            usage["completion_tokens"],
-            usage["total_tokens"],
-            user=user,
-            session_id=session_key,
-        )
+        usage = _commit_usage(account, session, session_key, rec, model, prompt, user)
 
         if not rec.has_content and rec.error:
             err = rec.error
@@ -969,17 +956,7 @@ async def collect_image(
                 400,
                 "context length exceeded: conversation too long, start a new conversation",
             )
-        usage = _accumulate_usage(session, rec, prompt, completion_text=rec.content or rec.reasoning)
-        account.sessions.touch_last_message(session_key, rec.response_id)
-        record_usage(
-            "qwen",
-            model,
-            usage["prompt_tokens"],
-            usage["completion_tokens"],
-            usage["total_tokens"],
-            user=user,
-            session_id=session_key,
-        )
+        usage = _commit_usage(account, session, session_key, rec, model, prompt, user)
 
         if not rec.has_content and rec.error:
             raise HTTPException(_error_status(error_code(rec.error)), _error_detail(rec))

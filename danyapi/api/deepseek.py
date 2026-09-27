@@ -18,7 +18,7 @@ from ..deepseek.client import DeepSeekError, DeepSeekSession
 from ..deepseek.stream import IncrementalSSE, MessageReconstructor
 from ..sseutil import StreamStopFilter, split_stop
 from ..tokens import StreamBudget, estimate_tokens, trim_to_tokens
-from ..usage import record_usage
+from ..usage import record_usage_dict
 from .attachments import _upload_attachments
 from .core import _error_detail
 from .models import _finish_reason, _output_truncated
@@ -303,6 +303,14 @@ FAKE_CONTEXT_HINT_ERROR_MESSAGE = "DeepSeek returned an unexpected length-limit 
 
 def _fake_context_error_body() -> dict:
     return _error_detail(FAKE_CONTEXT_HINT_ERROR_MESSAGE, "server_error")
+
+
+def _commit_usage(account, session, session_key: str, rec: MessageReconstructor, response_message_id: str | None, model: str, prompt: str, user) -> dict:
+    request_tokens = _advance_session_usage(session, rec.accumulated_tokens)
+    usage = _deepseek_usage(request_tokens, prompt, rec.usage, completion_text=rec.content or rec.reasoning)
+    account.sessions.touch_last_message(session_key, rec.id or response_message_id)
+    record_usage_dict("deepseek", model, usage, user=user, session_id=session_key)
+    return usage
 
 
 def _build_assistant_message(
@@ -801,18 +809,7 @@ async def _collect_non_stream(
                 log.warning("deepseek fake context-length hint after retries")
                 raise HTTPException(502, _fake_context_error_body())
             raise HTTPException(429, _busy_error_body(rec))
-        request_tokens = _advance_session_usage(session, rec.accumulated_tokens)
-        usage = _deepseek_usage(request_tokens, prompt, rec.usage, completion_text=rec.content or rec.reasoning)
-        account.sessions.touch_last_message(session_key, rec.id or response_message_id)
-        record_usage(
-            "deepseek",
-            model,
-            usage["prompt_tokens"],
-            usage["completion_tokens"],
-            usage["total_tokens"],
-            user=user,
-            session_id=session_key,
-        )
+        usage = _commit_usage(account, session, session_key, rec, response_message_id, model, prompt, user)
         log.info("deepseek completion success (%.0fms)", (time.monotonic() - started) * 1000)
         message, finish = _build_limited_message(content, reasoning, tool_mode, tool_schemas, max_tokens, stop, parallel_tool_calls, rec.status)
         reasoning_tokens = estimate_tokens(reasoning) if reasoning else 0
@@ -1223,18 +1220,7 @@ async def _stream_openai(
                 yield line
             return
 
-        request_tokens = _advance_session_usage(session, rec.accumulated_tokens)
-        usage = _deepseek_usage(request_tokens, prompt, rec.usage, completion_text=rec.content or rec.reasoning)
-        account.sessions.touch_last_message(session_key, rec.id or response_message_id)
-        record_usage(
-            "deepseek",
-            model,
-            usage["prompt_tokens"],
-            usage["completion_tokens"],
-            usage["total_tokens"],
-            user=user,
-            session_id=session_key,
-        )
+        usage = _commit_usage(account, session, session_key, rec, response_message_id, model, prompt, user)
         log.info("deepseek completion success (%.0fms)", (time.monotonic() - started) * 1000)
 
         finish = _done_finish(rec.status)

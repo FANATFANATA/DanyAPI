@@ -64,6 +64,24 @@ def record_usage(
         tracker.record(provider, model, prompt_tokens, completion_tokens, total_tokens, user=user, session_id=session_id)
 
 
+def record_usage_dict(
+    provider: str,
+    model: str,
+    usage: dict,
+    user: str | None = None,
+    session_id: str | None = None,
+) -> None:
+    record_usage(
+        provider,
+        model,
+        usage["prompt_tokens"],
+        usage["completion_tokens"],
+        usage["total_tokens"],
+        user=user,
+        session_id=session_id,
+    )
+
+
 class UsageTracker:
     _USAGE_PERSIST_INTERVAL = 5.0
     _RECENT_PERSIST_INTERVAL = 5.0
