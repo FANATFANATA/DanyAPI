@@ -36,16 +36,6 @@ def test_dotenv_missing_fallback():
     assert sys.modules["danyapi.config"].settings is orig_settings
 
 
-def test_human_delay_min_parse():
-    assert _settings({"DANYAPI_HUMAN_DELAY_MIN": "bad"}).human_delay_min == 0.5
-    assert _settings({"DANYAPI_HUMAN_DELAY_MIN": "1.5"}).human_delay_min == 1.5
-
-
-def test_human_delay_max_parse():
-    assert _settings({"DANYAPI_HUMAN_DELAY_MAX": "bad"}).human_delay_max == 3.0
-    assert _settings({"DANYAPI_HUMAN_DELAY_MAX": "7"}).human_delay_max == 7.0
-
-
 def test_cache_root_mkdir_error(tmp_path, monkeypatch):
     monkeypatch.setattr(store_mod.settings, "cache_dir", str(tmp_path))
     blocker = Path(tmp_path) / "blocker"

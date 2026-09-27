@@ -102,8 +102,6 @@ Server:
 | `DANYAPI_PORT` | `8000` | Port the server listens on |
 | `DANYAPI_TIMEOUT` | `60` | Upstream request timeout in seconds |
 | `DANYAPI_ACQUIRE_TIMEOUT` | empty | Seconds to wait for a free account, empty means wait forever |
-| `DANYAPI_HUMAN_DELAY_MIN` | `0.5` | Minimum delay in seconds before a request is sent |
-| `DANYAPI_HUMAN_DELAY_MAX` | `3.0` | Maximum delay in seconds |
 | `DANYAPI_CORS_ORIGINS` | empty | Comma-separated extra browser origins allowed to call the API |
 | `DANYAPI_AUTO_UPDATE` | `1` | `docs/start.py` updates to the latest GitHub release before starting |
 

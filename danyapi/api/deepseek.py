@@ -33,7 +33,6 @@ from .powauth import (
 from .retry import (
     MAX_RETRIES,
     STALE_SESSION_STATUSES,
-    _human_delay,
     _is_retryable_http,
     _retry_delay,
     _try_stop_stream,
@@ -584,7 +583,6 @@ async def _collect_reduced(
     search,
     ref_file_ids=None,
 ):
-    await _human_delay()
     for prompt, variant_tool_mode, variant_tool_schemas in reduced_prompts:
         session_key = None
         try:
@@ -637,7 +635,6 @@ async def _collect_non_stream(
     parallel_tool_calls: bool | None = None,
     cached_session=None,
 ):
-    await _human_delay()
     async with account_lock(lock, settings.acquire_timeout):
         if attachments:
             ref_file_ids = await _upload_attachments(account, attachments, model_type, thinking)
@@ -855,7 +852,6 @@ async def _stream_openai(
     chunk_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
 
-    await _human_delay()
     async with account_lock(lock, settings.acquire_timeout):
         if attachments:
             try:

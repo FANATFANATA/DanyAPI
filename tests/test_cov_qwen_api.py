@@ -400,18 +400,6 @@ async def test_try_stop_stream_error():
     await qwen_api._try_stop_stream(client, "c1", "r1")
 
 
-async def test_human_delay_sleeps(monkeypatch):
-    monkeypatch.setattr(retry_mod.random, "uniform", lambda a, b: 1.0)
-    slept = []
-
-    async def fake_sleep(value):
-        slept.append(value)
-
-    monkeypatch.setattr(retry_mod.asyncio, "sleep", fake_sleep)
-    await qwen_api._human_delay()
-    assert slept == [1.0]
-
-
 def test_split_stop_variants():
     assert qwen_api.split_stop(None) == []
     assert qwen_api.split_stop("x") == ["x"]

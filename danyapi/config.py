@@ -116,10 +116,6 @@ class Settings:
         self.cache_dir = _env_str("DANYAPI_CACHE_DIR")
         self.cache_enabled = not _env_on("DANYAPI_CACHE_DISABLED", "")
         self.byok_auth_ttl = _env_float("DANYAPI_BYOK_AUTH_TTL_SECONDS", 300.0)
-        self.human_delay_min = _env_float("DANYAPI_HUMAN_DELAY_MIN", 0.5)
-        self.human_delay_max = _env_float("DANYAPI_HUMAN_DELAY_MAX", 3.0)
-        if self.human_delay_max < self.human_delay_min:
-            self.human_delay_max = self.human_delay_min
         self.usage_enabled = not _env_off("DANYAPI_USAGE_ENABLED", "1")
         self.usage_max_records = _env_int("DANYAPI_USAGE_MAX_RECORDS", 1000, 1)
         self.auto_update = not _env_off("DANYAPI_AUTO_UPDATE", "1")

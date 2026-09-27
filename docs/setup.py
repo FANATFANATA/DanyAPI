@@ -86,16 +86,6 @@ GROUPS = [
         "Request behaviour",
         [
             (
-                "DANYAPI_HUMAN_DELAY_MIN",
-                "Minimum delay in seconds before sending a request",
-                "float",
-            ),
-            (
-                "DANYAPI_HUMAN_DELAY_MAX",
-                "Maximum delay in seconds (0/0 disables)",
-                "float",
-            ),
-            (
                 "DANYAPI_AUTO_UPDATE",
                 "Auto-update to the latest GitHub release on start (1/0)",
                 "flag",

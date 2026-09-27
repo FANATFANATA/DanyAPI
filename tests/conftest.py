@@ -2,8 +2,6 @@ import os
 
 import pytest
 
-os.environ["DANYAPI_HUMAN_DELAY_MIN"] = "0"
-os.environ["DANYAPI_HUMAN_DELAY_MAX"] = "0"
 os.environ["BYOK"] = "0"
 os.environ["BYOK_MODE"] = "0"
 os.environ["DANYAPI_BYOK_MODE"] = "0"

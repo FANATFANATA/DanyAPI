@@ -1592,21 +1592,6 @@ async def test_stream_without_max_tokens_keeps_full_content():
     assert '"finish_reason": "length"' not in joined
 
 
-async def test_deepseek_human_delay_sleeps():
-    from danyapi.api.openai import _human_delay
-
-    with patch.object(settings, "human_delay_min", 0.01), patch.object(settings, "human_delay_max", 0.02):
-        await _human_delay()
-
-
-async def test_qwen_human_delay_sleeps():
-    from danyapi.qwen.api import _human_delay as qwen_delay
-    from danyapi.qwen.api import settings as qwen_settings
-
-    with patch.object(qwen_settings, "human_delay_min", 0.01), patch.object(qwen_settings, "human_delay_max", 0.02):
-        await qwen_delay()
-
-
 async def _collect_agen(agen):
     out = []
     async for item in agen:

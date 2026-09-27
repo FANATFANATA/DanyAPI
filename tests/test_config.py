@@ -103,18 +103,6 @@ def test_empty_tokens(settings_for):
     assert s.qwen_tokens == []
 
 
-def test_human_delay_bounds(settings_for):
-    s = settings_for({"DANYAPI_HUMAN_DELAY_MIN": "1.5", "DANYAPI_HUMAN_DELAY_MAX": "4"})
-    assert s.human_delay_min == 1.5
-    assert s.human_delay_max == 4.0
-
-
-def test_inverted_human_delay_bounds_are_normalised(settings_for):
-    s = settings_for({"DANYAPI_HUMAN_DELAY_MIN": "5", "DANYAPI_HUMAN_DELAY_MAX": "1"})
-    assert s.human_delay_min == 5.0
-    assert s.human_delay_max == 5.0
-
-
 def test_dotenv_fallback_warns_and_returns_false(caplog):
     from danyapi import config as config_mod
 

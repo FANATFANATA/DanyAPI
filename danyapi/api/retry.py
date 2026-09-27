@@ -1,12 +1,8 @@
 from __future__ import annotations
 
-import asyncio
 import logging
-import random
 
 from fastapi import HTTPException
-
-from ..config import settings
 
 log = logging.getLogger("danyapi.api")
 
@@ -24,12 +20,6 @@ def _retry_delay(attempt: int) -> float:
 
 def _is_retryable_http(exc: HTTPException) -> bool:
     return exc.status_code in RETRYABLE_HTTP_STATUSES
-
-
-async def _human_delay() -> None:
-    delay = random.uniform(settings.human_delay_min, settings.human_delay_max)
-    if delay > 0:
-        await asyncio.sleep(delay)
 
 
 async def _try_stop_stream(client, session_id: str, message_id: str | None) -> None:

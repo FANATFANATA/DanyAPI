@@ -17,7 +17,6 @@ from ..accounts import account_lock
 from ..api.retry import (
     MAX_RETRIES,
     STALE_SESSION_STATUSES,
-    _human_delay,
     _is_retryable_http,
     _retry_delay,
     _try_stop_stream,
@@ -506,7 +505,6 @@ async def collect_non_stream(
     parallel_tool_calls: bool | None = None,
     cached_session=None,
 ):
-    await _human_delay()
     async with account_lock(lock, settings.acquire_timeout):
         had_cached_session = bool(existing_sid) and account.sessions.get(existing_sid) is not None
         session, session_key = await _prepare_session(account, pool, existing_sid, model_id, context_seq)
@@ -594,7 +592,6 @@ async def stream_openai(
     chunk_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
 
-    await _human_delay()
     async with account_lock(lock, settings.acquire_timeout):
         had_cached_session = bool(existing_sid) and account.sessions.get(existing_sid) is not None
         try:
@@ -925,7 +922,6 @@ async def collect_image(
     context_seq: tuple[str, ...] | None = None,
     user=None,
 ):
-    await _human_delay()
     async with account_lock(lock, settings.acquire_timeout):
         session, session_key = await _prepare_session(account, pool, existing_sid, model_id, context_seq)
         had_cached_session = bool(existing_sid) and account.sessions.get(existing_sid) is not None
