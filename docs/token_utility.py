@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 token_utility.py - Extract DeepSeek & Qwen tokens for DanyAPI.
 
@@ -31,10 +30,6 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
-# Windows consoles often default to cp1252 which can't render emoji/box glyphs.
-# getattr() + str() instead of direct attribute access: pylint cannot infer
-# members on the sys.stdout TextIO wrapper (E1101 false positive), and a
-# missing/None/empty encoding must skip the re-wrap, exactly as before.
 stdout_encoding = str(getattr(sys.stdout, "encoding", "") or "")
 if stdout_encoding and stdout_encoding.lower() not in ("utf-8", "utf8"):
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
@@ -45,20 +40,11 @@ RESULT_PORT = 8765
 DEEPSEEK_URL = "https://chat.deepseek.com/"
 QWEN_URL = "https://chat.qwen.ai/auth?action=signin"
 
-# ----------------------------------------------------------------------------
-# Visible text (edit here - no need to dig into the HTML below)
-#
-# Strings used inside the static HTML go through __KEY__ placeholders; strings
-# used by the page's JavaScript are injected as JSON and read via t("key").
-# ----------------------------------------------------------------------------
-
 TEXTS: dict[str, str] = {
-    # --- Wizard page -----------------------------------------------------
     "page_title": "DanyAPI - Token Utils",
     "header_title": "Token Utilities",
     "header_sub": "DanyAPI uses the internal APIs of DeepSeek and Qwen's free web clients, so it needs your auth tokens."
     "<br>This tool simply helps you to retrieve them.",
-    # Step 0 - bookmarklet
     "step0_heading": "One-time: add the token utility bookmarklet",
     "step0_intro": "<b>Drag</b> this button onto your browser's <b>bookmarks bar</b>,<br>(press Ctrl+Shift+B if you don't see the bar):",
     "bookmarklet_label": "Run DanyAPI token utility",
@@ -67,7 +53,6 @@ TEXTS: dict[str, str] = {
     " extracting tokens exist, they are <b>not browser-agnostic</b>. This bookmarklet will execute JavaScript in the"
     " context of the provider's page (<i>deepseek.com</i> or <i>qwen.ai</i>), extract your token, and send it to this page.",
     "step0_next": "I added the bookmarklet - Next →",
-    # Step 1 - DeepSeek
     "step1_heading": "DeepSeek token",
     "step1_p1": "<b>1.</b> Open DeepSeek by clicking the button below.",
     "step1_p2": "<b>2.</b> Sign in to your account if needed.",
@@ -77,7 +62,6 @@ TEXTS: dict[str, str] = {
     " appear, and you can click the button below to try again.",
     "step1_button": "Open DeepSeek →",
     "step1_waiting": "Waiting for the DeepSeek token...",
-    # Step 2 - Qwen
     "step2_heading": "Qwen token",
     "step2_p1": "<b>1.</b> Open Qwen by clicking the button below.",
     "step2_p2": "<b>2.</b> Sign in to your account if needed.",
@@ -87,17 +71,14 @@ TEXTS: dict[str, str] = {
     " appear, and you can click the button below to try again.",
     "step2_button": "Open Qwen →",
     "step2_waiting": "Waiting for the Qwen token...",
-    # Step 3 - done
     "step3_heading": "Tokens successfully extracted!",
     "step3_text": "Redirecting to your tokens...",
-    # Footer
     "footer_public_instance": "Public Instance",
     "footer_docs": "Docs",
     "footer_github": "GitHub",
     "footer_public_url": "https://danyapi.cloudpub.ru",
     "footer_docs_url": "https://danyapi.cloudpub.ru/docs/",
     "footer_github_url": "https://github.com/FANATFANATA/DanyAPI",
-    # --- Wizard page JS --------------------------------------------------
     "js_title_wizard": "DanyAPI token utilities",
     "js_title_step1": "Step 1 of 2 - DeepSeek",
     "js_title_step2": "Step 2 of 2 - Qwen",
@@ -107,7 +88,6 @@ TEXTS: dict[str, str] = {
     "js_ok_deepseek": "DeepSeek token received. Moving on to Qwen shortly...",
     "js_ok_qwen": "Qwen token received. Moving to your tokens shortly...",
     "js_fail": "No token found - you are probably not logged in. Log in on {provider}, then try again.",
-    # --- Results page ----------------------------------------------------
     "results_page_title": "DanyAPI - Your tokens",
     "results_title": "Your Tokens",
     "results_sub": "Tokens for DeepSeek &amp; Qwen were successfully extracted. Use them in your <code>.env</code> when"
@@ -122,14 +102,9 @@ TEXTS: dict[str, str] = {
     "results_footer_again": "Run utility again",
     "results_footer_docs": "Docs",
     "results_footer_github": "GitHub",
-    # --- Popup page (shown in the provider tab after collection) --------
     "popup_title": "Token received",
     "popup_message": "Token received - you can close this tab and return to the DanyAPI page.",
 }
-
-# ----------------------------------------------------------------------------
-# Shared state
-# ----------------------------------------------------------------------------
 
 STATE: dict[str, Any] = {
     "deepseek": None,
@@ -138,16 +113,6 @@ STATE: dict[str, Any] = {
     "qwen_failed": False,
 }
 
-# ----------------------------------------------------------------------------
-# Shared HTML assets
-#
-# The setup page and the results page are visually identical shells, so these
-# assets are defined once and injected through the same __key__ placeholder
-# machinery used for TEXTS (see _apply_texts). All three are plain URL/URI
-# strings; the setup/results templates embed them verbatim.
-# ----------------------------------------------------------------------------
-
-# Inline SVG favicon (DanyAPI hexagon logo) as a data: URI, URL-encoded.
 FAVICON_DATA_URI = (
     "data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2040%2040'%3E"
     "%3Cdefs%3E%3ClinearGradient%20id='g'%20x1='0'%20y1='0'%20x2='1'%20y2='1'%3E"
@@ -162,7 +127,6 @@ FAVICON_DATA_URI = (
     "%3Ccircle%20cx='27.5'%20cy='26.5'%20r='3'%20fill='url(%23g)'/%3E%3C/svg%3E"
 )
 
-# Single Google Fonts request covering all families/weights used by both pages.
 FONTS_CSS_URL = (
     "https://fonts.googleapis.com/css2?"
     "family=Unbounded:wght@500;700;900"
@@ -171,21 +135,12 @@ FONTS_CSS_URL = (
     "&display=swap"
 )
 
-# Inline SVG feTurbulence noise overlay as a data: URI, URL-encoded.
 NOISE_DATA_URI = (
     "url(\"data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='120'%20height='120'%3E"
     "%3Cfilter%20id='n'%3E%3CfeTurbulence%20type='fractalNoise'%20baseFrequency='0.9'%20numOctaves='2'/%3E"
     "%3C/filter%3E%3Crect%20width='120'%20height='120'%20filter='url(%23n)'/%3E%3C/svg%3E"
     '")'
 )
-
-# ----------------------------------------------------------------------------
-# Bookmarklet (runs on chat.deepseek.com / chat.qwen.ai, sends token to us)
-#
-# IMPORTANT: this source gets collapsed into ONE line by build_bookmarklet(),
-# so it must contain NO '//' comments and every statement must end with ';'
-# (automatic-semicolon-insertion disappears when newlines are removed).
-# ----------------------------------------------------------------------------
 
 BOOKMARKLET_SOURCE = r"""
 (function () {
@@ -201,18 +156,12 @@ BOOKMARKLET_SOURCE = r"""
     if (typeof raw !== "string") return null;
     var v = raw.trim();
     if (!v) return null;
-    // Only accept values that actually look like auth tokens (JWT or hex),
-    // never random storage junk: a logged-out page must NOT produce a
-    // "success". Same rules are enforced server-side in register_token().
     if (/^eyJ[A-Za-z0-9._-]{20,}/.test(v) || /^[a-f0-9]{32,}$/i.test(v)) return v;
     if (depth >= 4) return null;
     try {
       var j = JSON.parse(v);
       if (typeof j === "string") return pt(j, depth + 1);
       if (typeof j === "object" && j !== null) {
-        // Recursively unwrap ANY JSON shape ({"value":"..."},
-        // {"token":{"value":"..."}}, ...) and return the first
-        // token-shaped string found.
         for (var key in j) {
           var t = pt(j[key], depth + 1);
           if (t) return t;
@@ -227,9 +176,6 @@ BOOKMARKLET_SOURCE = r"""
       var t = pt(st.getItem(ks[a]), 0);
       if (t) return t;
     }
-    // Fallback scan: only entries whose KEY name mentions "token". Without
-    // this guard, unrelated IDs (device ids, analytics ids...) that happen to
-    // be 32+ hex chars get grabbed on logged-out pages and fake a success.
     for (var b = 0; b < st.length; b++) {
       var k = st.key(b);
       if (!/token/i.test(k)) continue;
@@ -238,9 +184,6 @@ BOOKMARKLET_SOURCE = r"""
     }
     return null;
   }
-  // The providers store auth as a known key, but may wrap refreshed values
-  // several times (for example {"value":"{\\"token\\":\\"...\\"}"}).
-  // Unwrap only those known auth records; do not inspect unrelated storage.
   function opaqueValue(raw, depth) {
     if (typeof raw !== "string") return null;
     var value = raw.trim();
@@ -271,12 +214,6 @@ BOOKMARKLET_SOURCE = r"""
     return null;
   }
   var token = find();
-  // Always report back, even with no token: the local server marks the
-  // attempt as failed and the wizard shows a red hint instead of a green
-  // checkmark, so a logged-out click can never look like a success.
-  // Deliver via top-level navigation, NOT fetch/sendBeacon: browsers gate
-  // cross-site requests to 127.0.0.1 behind a "local network / device
-  // services" permission prompt, but plain navigations are always allowed.
   location.href = "http://127.0.0.1:__PORT__/collect?p=" + encodeURIComponent(p) +
     "&t=" + encodeURIComponent(token || "");
 })()
@@ -289,8 +226,6 @@ def build_bookmarklet(port: int) -> str:
     lines = [ln.strip() for ln in src.strip().splitlines()]
     lines = [ln for ln in lines if ln and not ln.startswith("//")]
     one_line = "javascript:" + " ".join(lines)
-    # Safety net: a stray '//' would comment out everything after it once the
-    # code is on a single line ("http://" is the only legitimate use).
     assert "http://" in one_line
     assert "//" not in one_line.replace("http://", ""), "bookmarklet source contains a // comment - it would break on one line"
     return one_line
@@ -299,10 +234,6 @@ def build_bookmarklet(port: int) -> str:
 def html_escape(s: str) -> str:
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
-
-# ----------------------------------------------------------------------------
-# Guided wizard page (step by step)
-# ----------------------------------------------------------------------------
 
 SETUP_PAGE = r"""<!DOCTYPE html>
 <html lang="en">
@@ -699,10 +630,6 @@ if (!syncFromServer()) poll();
 </html>
 """
 
-# ----------------------------------------------------------------------------
-# Results page
-# ----------------------------------------------------------------------------
-
 RESULTS_PAGE = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -976,11 +903,6 @@ def render_results_page() -> str:
     )
 
 
-# ----------------------------------------------------------------------------
-# Local HTTP server
-# ----------------------------------------------------------------------------
-
-
 SUCCESS_PAGE = r"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>__popup_title__</title></head>
 <body style="background:#06070c;color:#9aa3b5;font-family:-apple-system,'Segoe UI',Roboto,sans-serif;margin:0;padding:24px;font-size:13px">
@@ -1010,10 +932,6 @@ def register_token(provider: str, token: str) -> bool:
     """
     if provider not in ("deepseek", "qwen"):
         return False
-    # The provider can rotate from JWT/hex to an opaque bearer value and may
-    # use characters outside the URL-safe subset. The bookmarklet only sends
-    # values from the provider's known auth record, so validate shape here
-    # without imposing a token alphabet.
     if token and re.fullmatch(r"\S{16,4096}", token):
         STATE[provider] = token
         STATE[provider + "_failed"] = False
@@ -1025,69 +943,117 @@ def register_token(provider: str, token: str) -> bool:
 
 
 class Handler(BaseHTTPRequestHandler):
-    # Port the setup page's bookmarklet should call back to. Kept as a class
-    # attribute (set by serve()) so the handler needs no module-global state.
     serve_port: int = RESULT_PORT
+    timeout = 15
+    max_body = 65536
+    allowed_origins = frozenset({"https://chat.deepseek.com", "https://chat.qwen.ai"})
+    local_hosts = frozenset({"127.0.0.1", "localhost", "::1"})
+
+    def parse_request(self) -> bool:
+        try:
+            if not super().parse_request():
+                return False
+            if not self._host_allowed():
+                self._send(b"bad host", 400, "text/plain; charset=utf-8")
+                return False
+        except OSError:
+            self.close_connection = True
+            return False
+        return True
+
+    def _host_allowed(self) -> bool:
+        host = self.headers.get("Host") or ""
+        if host.startswith("["):
+            host = host[1:].split("]", 1)[0]
+        name = host.rsplit(":", 1)[0] if ":" in host else host
+        return name in self.local_hosts or host in self.local_hosts
+
+    def _own_origins(self) -> set[str]:
+        port = self.serve_port
+        return {f"http://127.0.0.1:{port}", f"http://localhost:{port}", f"http://[::1]:{port}"}
+
+    def _send_cors(self) -> None:
+        origin = self.headers.get("Origin")
+        if not origin or origin not in self.allowed_origins | self._own_origins():
+            return
+        self.send_header("Access-Control-Allow-Origin", origin)
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "*")
+        self.send_header("Vary", "Origin")
+        if self.headers.get("Access-Control-Request-Private-Network"):
+            self.send_header("Access-Control-Allow-Private-Network", "true")
 
     def _send(self, body: bytes, status: int = 200, ctype: str = "text/html; charset=utf-8") -> None:
-        self.send_response(status)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        # CORS + Private Network Access: requests arriving here come from
-        # https://chat.deepseek.com etc. Chrome requires these headers or it
-        # silently drops the request (PNA preflight).
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "*")
-        if self.headers.get("Access-Control-Request-Private-Network"):
-            self.send_header("Access-Control-Allow-Private-Network", "true")
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self._send_cors()
+            self.end_headers()
+            self.wfile.write(body)
+        except OSError:
+            self.close_connection = True
 
     def do_OPTIONS(self) -> None:
-        self.send_response(204)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "*")
-        if self.headers.get("Access-Control-Request-Private-Network"):
-            self.send_header("Access-Control-Allow-Private-Network", "true")
-        self.send_header("Content-Length", "0")
-        self.end_headers()
+        self._send(b"", 204, "text/plain; charset=utf-8")
 
     def do_GET(self) -> None:
         from urllib.parse import parse_qs, urlsplit
 
         parts = urlsplit(self.path)
-        path = parts.path
-        if path == "/status":
-            self._send(json.dumps({k: v for k, v in STATE.items() if not k.endswith("_failed") or v}).encode(), ctype="application/json")
-        elif path == "/results":
-            self._send(render_results_page().encode())
-        elif path == "/collect":
-            # Top-level navigation fallback: /collect?p=deepseek&t=TOKEN
-            qs = parse_qs(parts.query)
-            provider = (qs.get("p") or [""])[0]
-            token = (qs.get("t") or [""])[0].strip()
-            register_token(provider, token)
-            self._send(_SUCCESS_PAGE_STATIC.encode())
-        else:  # "/" and anything else -> setup page
-            self._send(render_setup_page(port=self.serve_port).encode())
+        try:
+            if parts.path == "/status":
+                status = {p: bool(STATE[p]) for p in ("deepseek", "qwen")}
+                status.update({p + "_failed": bool(STATE[p + "_failed"]) for p in ("deepseek", "qwen")})
+                self._send(json.dumps(status).encode(), ctype="application/json")
+            elif parts.path == "/results":
+                self._send(render_results_page().encode())
+            elif parts.path == "/collect":
+                qs = parse_qs(parts.query)
+                provider = (qs.get("p") or [""])[0]
+                token = (qs.get("t") or [""])[0].strip()
+                if provider not in ("deepseek", "qwen"):
+                    self._send(b"unknown provider", 400, "text/plain; charset=utf-8")
+                    return
+                register_token(provider, token)
+                self._send(_SUCCESS_PAGE_STATIC.encode())
+            else:
+                self._send(render_setup_page(port=self.serve_port).encode())
+        except OSError:
+            self.close_connection = True
+        except Exception:
+            self._send(b"internal error", 500, "text/plain; charset=utf-8")
 
     def do_POST(self) -> None:
-        if self.path.split("?")[0] != "/collect":
-            self._send(b"not found", 404)
+        from urllib.parse import urlsplit
+
+        if urlsplit(self.path).path != "/collect":
+            self._send(b"not found", 404, "text/plain; charset=utf-8")
             return
         try:
             length = int(self.headers.get("Content-Length") or 0)
-            raw = self.rfile.read(length).decode("utf-8", errors="replace")
-            # sendBeacon may send text/plain; strip junk before parsing
-            data = json.loads(raw)
-            if register_token(data.get("provider") or "", (data.get("token") or "").strip()):
-                self._send(b'{"ok":true}', ctype="application/json")
-            else:
-                self._send(b'{"ok":false}', 400, ctype="application/json")
-        except Exception:
+        except ValueError:
+            self._send(b'{"ok":false}', 400, ctype="application/json")
+            return
+        if length < 0 or length > self.max_body:
+            self._send(b'{"ok":false}', 413, ctype="application/json")
+            return
+        try:
+            raw = self.rfile.read(length)
+            data = json.loads(raw.decode("utf-8", errors="replace")) if raw else None
+        except (OSError, ValueError):
+            data = None
+        provider = data.get("provider") if isinstance(data, dict) else None
+        token = data.get("token") if isinstance(data, dict) else None
+        if not isinstance(provider, str) or not isinstance(token, str):
+            self._send(b'{"ok":false}', 400, ctype="application/json")
+            return
+        if register_token(provider, token.strip()):
+            self._send(b'{"ok":true}', ctype="application/json")
+        else:
             self._send(b'{"ok":false}', 400, ctype="application/json")
 
     def log_message(self, format: str, *args: Any) -> None:
@@ -1096,7 +1062,12 @@ class Handler(BaseHTTPRequestHandler):
 
 def serve(port: int = RESULT_PORT, open_browser: bool = True) -> None:
     Handler.serve_port = port
-    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    try:
+        server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    except OSError as exc:
+        print(f"  Cannot listen on 127.0.0.1:{port}: {exc}")
+        print("  Close whatever is using that port, or start with --port <free port>.")
+        raise SystemExit(1) from exc
     url = f"http://127.0.0.1:{port}"
     print(f"  Local page: {url}")
     print("  (Ctrl+C in this window to stop when you're done.)\n")
@@ -1109,11 +1080,6 @@ def serve(port: int = RESULT_PORT, open_browser: bool = True) -> None:
         pass
     finally:
         server.server_close()
-
-
-# ----------------------------------------------------------------------------
-# Main
-# ----------------------------------------------------------------------------
 
 
 def main() -> None:
