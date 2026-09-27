@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import random
 import time
 import uuid
 from collections.abc import Iterator
@@ -30,6 +29,14 @@ from .powauth import (
     _drop_session,
     _fresh_pow_headers,
     _handle_account_error,
+)
+from .retry import (
+    MAX_RETRIES,
+    STALE_SESSION_STATUSES,
+    _human_delay,
+    _is_retryable_http,
+    _retry_delay,
+    _try_stop_stream,
 )
 from .schemas import DeepSeekStreamError
 from .shaping import (
@@ -78,20 +85,11 @@ RETRYABLE_FINISH_REASONS = {
     "server_busy",
     "busy",
 }
-MAX_RETRIES = 5
-RETRY_BACKOFF_SEC = 1.0
-RETRY_BACKOFF_MAX_SEC = 8.0
 
 
 MESSAGE_TOO_FREQUENT_MARKERS = ("messagetoofrequent", "messagetofrequent")
 MESSAGE_TOO_FREQUENT_WAIT_SEC = 60.0
 MESSAGE_TOO_FREQUENT_MAX_RETRIES = 5
-
-
-async def _human_delay() -> None:
-    delay = random.uniform(settings.human_delay_min, settings.human_delay_max)
-    if delay > 0:
-        await asyncio.sleep(delay)
 
 
 async def _prepare_session(
@@ -195,14 +193,6 @@ def _is_fake_context_hint(rec: MessageReconstructor) -> bool:
     return any(marker in message.casefold() for marker in FAKE_CONTEXT_HINT_MARKERS)
 
 
-RETRYABLE_HTTP_STATUSES = {408, 425, 429, 500, 502, 503, 504}
-STALE_SESSION_STATUSES = {400, 404}
-
-
-def _retry_delay(attempt: int) -> float:
-    return min(RETRY_BACKOFF_SEC * (2 ** (attempt - 1)), RETRY_BACKOFF_MAX_SEC)
-
-
 def _compact_error_text(value: Any) -> str:
     if not isinstance(value, str):
         return ""
@@ -248,10 +238,6 @@ async def _wait_message_too_frequent(stage: str, attempt: int) -> None:
         MESSAGE_TOO_FREQUENT_WAIT_SEC,
     )
     await asyncio.sleep(MESSAGE_TOO_FREQUENT_WAIT_SEC)
-
-
-def _is_retryable_http(exc: HTTPException) -> bool:
-    return exc.status_code in RETRYABLE_HTTP_STATUSES
 
 
 def _is_context_limit(rec: MessageReconstructor) -> bool:
@@ -317,15 +303,6 @@ FAKE_CONTEXT_HINT_ERROR_MESSAGE = "DeepSeek returned an unexpected length-limit 
 
 def _fake_context_error_body() -> dict:
     return _error_detail(FAKE_CONTEXT_HINT_ERROR_MESSAGE, "server_error")
-
-
-async def _try_stop_stream(client, session_id: str, message_id: str | None) -> None:
-    if not session_id or not message_id:
-        return
-    try:
-        await client.stop_stream(session_id, message_id)
-    except Exception as exc:
-        log.debug("stop_stream failed for %s: %s", session_id, exc)
 
 
 def _build_assistant_message(

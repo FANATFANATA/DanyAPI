@@ -8,6 +8,7 @@ import pytest
 import danyapi.api.chats as chats_mod
 import danyapi.api.deepseek as deepseek_mod
 import danyapi.api.openai as openai_mod
+import danyapi.api.retry as retry_mod
 from danyapi.api.openai import ChatMessage, _collect_non_stream, _stream_openai
 
 BUSY_SSE = (
@@ -122,10 +123,10 @@ class FakeAccount:
 
 @pytest.fixture(autouse=True)
 def zero_backoff():
-    orig = openai_mod.RETRY_BACKOFF_SEC
-    deepseek_mod.RETRY_BACKOFF_SEC = 0.0
+    orig = retry_mod.RETRY_BACKOFF_SEC
+    retry_mod.RETRY_BACKOFF_SEC = 0.0
     yield
-    deepseek_mod.RETRY_BACKOFF_SEC = orig
+    retry_mod.RETRY_BACKOFF_SEC = orig
 
 
 @pytest.fixture

@@ -5,8 +5,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-import danyapi.api.deepseek as deepseek_mod
 import danyapi.api.openai as openai_mod
+import danyapi.api.retry as retry_mod
 import danyapi.qwen.api as qwen_api
 
 TOOL_JSON = '{"tool_calls": [{"name": "get_weather", "arguments": {"city": "Moscow"}}]}'
@@ -130,13 +130,10 @@ class FakeAccount:
 
 @pytest.fixture(autouse=True)
 def zero_backoff():
-    orig_ds = openai_mod.RETRY_BACKOFF_SEC
-    orig_qwen = qwen_api.RETRY_BACKOFF_SEC
-    deepseek_mod.RETRY_BACKOFF_SEC = 0.0
-    qwen_api.RETRY_BACKOFF_SEC = 0.0
+    orig = retry_mod.RETRY_BACKOFF_SEC
+    retry_mod.RETRY_BACKOFF_SEC = 0.0
     yield
-    deepseek_mod.RETRY_BACKOFF_SEC = orig_ds
-    qwen_api.RETRY_BACKOFF_SEC = orig_qwen
+    retry_mod.RETRY_BACKOFF_SEC = orig
 
 
 async def collect_stream(gen):

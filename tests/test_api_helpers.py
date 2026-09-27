@@ -15,6 +15,7 @@ import danyapi.api.envtokens as envtokens_mod
 import danyapi.api.images as images_mod
 import danyapi.api.models as models_mod
 import danyapi.api.openai as openai_mod
+import danyapi.api.retry as retry_mod
 from danyapi import tools as toolemu
 from danyapi.accounts import AccountPoolBusy
 from danyapi.api.openai import app, settings
@@ -61,10 +62,10 @@ def clean_state():
 
 @pytest.fixture(autouse=True)
 def zero_backoff():
-    orig = openai_mod.RETRY_BACKOFF_SEC
-    deepseek_mod.RETRY_BACKOFF_SEC = 0.0
+    orig = retry_mod.RETRY_BACKOFF_SEC
+    retry_mod.RETRY_BACKOFF_SEC = 0.0
     yield
-    deepseek_mod.RETRY_BACKOFF_SEC = orig
+    retry_mod.RETRY_BACKOFF_SEC = orig
 
 
 @pytest.fixture

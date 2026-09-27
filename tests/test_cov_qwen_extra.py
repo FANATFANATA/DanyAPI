@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+import danyapi.api.retry as retry_mod
 import danyapi.qwen.api as qwen_api
 from danyapi.qwen.stream import QwenStreamReconstructor
 
@@ -110,10 +111,10 @@ class _ImgMsg:
 
 @pytest.fixture(autouse=True)
 def zero_backoff():
-    orig = qwen_api.RETRY_BACKOFF_SEC
-    qwen_api.RETRY_BACKOFF_SEC = 0.0
+    orig = retry_mod.RETRY_BACKOFF_SEC
+    retry_mod.RETRY_BACKOFF_SEC = 0.0
     yield
-    qwen_api.RETRY_BACKOFF_SEC = orig
+    retry_mod.RETRY_BACKOFF_SEC = orig
 
 
 def _args(acct, pool=None, existing_sid="s1", tool_mode=False, tool_schemas=None, **extra):

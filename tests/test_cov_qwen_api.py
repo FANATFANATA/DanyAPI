@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pytest
 
+import danyapi.api.retry as retry_mod
 import danyapi.qwen.api as qwen_api
 from danyapi.api import shaping
 from danyapi.qwen.client import QwenError
@@ -160,10 +161,10 @@ class _ImgMsg:
 
 @pytest.fixture(autouse=True)
 def zero_backoff():
-    orig = qwen_api.RETRY_BACKOFF_SEC
-    qwen_api.RETRY_BACKOFF_SEC = 0.0
+    orig = retry_mod.RETRY_BACKOFF_SEC
+    retry_mod.RETRY_BACKOFF_SEC = 0.0
     yield
-    qwen_api.RETRY_BACKOFF_SEC = orig
+    retry_mod.RETRY_BACKOFF_SEC = orig
 
 
 def _args(acct, pool=None, existing_sid="s1", tool_mode=False, tool_schemas=None, **extra):
@@ -203,13 +204,13 @@ def _rec_with(text, reasoning=None):
 
 
 def test_retry_delay_variants():
-    orig = qwen_api.RETRY_BACKOFF_SEC
-    qwen_api.RETRY_BACKOFF_SEC = 1.0
+    orig = retry_mod.RETRY_BACKOFF_SEC
+    retry_mod.RETRY_BACKOFF_SEC = 1.0
     try:
         assert qwen_api._retry_delay(1) == 1.0
         assert qwen_api._retry_delay(10) == 8.0
     finally:
-        qwen_api.RETRY_BACKOFF_SEC = orig
+        retry_mod.RETRY_BACKOFF_SEC = orig
 
 
 def test_is_retryable_http_variants():
@@ -400,13 +401,13 @@ async def test_try_stop_stream_error():
 
 
 async def test_human_delay_sleeps(monkeypatch):
-    monkeypatch.setattr(qwen_api.random, "uniform", lambda a, b: 1.0)
+    monkeypatch.setattr(retry_mod.random, "uniform", lambda a, b: 1.0)
     slept = []
 
     async def fake_sleep(value):
         slept.append(value)
 
-    monkeypatch.setattr(qwen_api.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(retry_mod.asyncio, "sleep", fake_sleep)
     await qwen_api._human_delay()
     assert slept == [1.0]
 

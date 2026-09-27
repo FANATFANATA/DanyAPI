@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import random
 import re
 import time
 import uuid
@@ -15,6 +14,14 @@ from fastapi import HTTPException
 
 from .. import tools as toolemu
 from ..accounts import account_lock
+from ..api.retry import (
+    MAX_RETRIES,
+    STALE_SESSION_STATUSES,
+    _human_delay,
+    _is_retryable_http,
+    _retry_delay,
+    _try_stop_stream,
+)
 from ..api.shaping import _apply_limits, _bounded_choices, _max_calls, _usage_with_details
 from ..config import settings
 from ..deepseek.stream import IncrementalSSE
@@ -26,22 +33,7 @@ from .stream import QwenStreamReconstructor, error_code
 
 log = logging.getLogger("danyapi.qwen.api")
 
-MAX_RETRIES = 5
-RETRY_BACKOFF_SEC = 1.0
-RETRY_BACKOFF_MAX_SEC = 8.0
-
-RETRYABLE_HTTP_STATUSES = {408, 425, 429, 500, 502, 503, 504}
-STALE_SESSION_STATUSES = {400, 404}
 AUTH_HTTP_STATUSES = {401, 403}
-
-
-def _retry_delay(attempt: int) -> float:
-    return min(RETRY_BACKOFF_SEC * (2 ** (attempt - 1)), RETRY_BACKOFF_MAX_SEC)
-
-
-def _is_retryable_http(exc: HTTPException) -> bool:
-    return exc.status_code in RETRYABLE_HTTP_STATUSES
-
 
 RETRYABLE_ERROR_CODES = {
     "Too_Many_Requests",
@@ -308,21 +300,6 @@ def _stream_context_limit_lines(chunk_id: str, created: int, model: str, session
         "context_length_exceeded",
         "length",
     )
-
-
-async def _try_stop_stream(client, session_id: str, message_id: str | None) -> None:
-    if not session_id or not message_id:
-        return
-    try:
-        await client.stop_stream(session_id, message_id)
-    except Exception as exc:
-        log.debug("stop_stream failed for %s: %s", session_id, exc)
-
-
-async def _human_delay() -> None:
-    delay = random.uniform(settings.human_delay_min, settings.human_delay_max)
-    if delay > 0:
-        await asyncio.sleep(delay)
 
 
 def _accumulate_usage(session, rec: QwenStreamReconstructor, prompt: str = "", completion_text: str | None = None) -> dict:
