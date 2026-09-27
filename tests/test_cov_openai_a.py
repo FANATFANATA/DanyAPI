@@ -10,6 +10,11 @@ from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.testclient import TestClient
 
+import danyapi.api.byok as byok_mod
+import danyapi.api.chats as chats_mod
+import danyapi.api.core as core_mod
+import danyapi.api.deepseek as deepseek_mod
+import danyapi.api.envtokens as envtokens_mod
 import danyapi.api.openai as openai_mod
 from danyapi.accounts import AccountPoolBusy
 from danyapi.api.openai import ChatMessage, app, settings
@@ -116,9 +121,9 @@ def clean_state():
 @pytest.fixture(autouse=True)
 def zero_backoff():
     orig = openai_mod.RETRY_BACKOFF_SEC
-    openai_mod.RETRY_BACKOFF_SEC = 0.0
+    deepseek_mod.RETRY_BACKOFF_SEC = 0.0
     yield
-    openai_mod.RETRY_BACKOFF_SEC = orig
+    deepseek_mod.RETRY_BACKOFF_SEC = orig
 
 
 @pytest.fixture
@@ -278,21 +283,21 @@ def test_unquote_env_value():
 
 
 def test_read_env_tokens_sync_no_file(tmp_path, monkeypatch):
-    monkeypatch.setattr(openai_mod, "_env_path", lambda: tmp_path / "missing.env")
+    monkeypatch.setattr(envtokens_mod, "_env_path", lambda: tmp_path / "missing.env")
     assert openai_mod._read_env_tokens_sync() == ([], [])
 
 
 def test_read_env_tokens_sync_parses(tmp_path, monkeypatch):
     path = tmp_path / "t.env"
     path.write_text("DEEPSEEK_TOKENS=\"a,b\"\nQWEN_TOKENS='c'\n", encoding="utf-8")
-    monkeypatch.setattr(openai_mod, "_env_path", lambda: path)
+    monkeypatch.setattr(envtokens_mod, "_env_path", lambda: path)
     assert openai_mod._read_env_tokens_sync() == (["a", "b"], ["c"])
 
 
 def test_write_env_tokens_sync(tmp_path, monkeypatch):
     path = tmp_path / "t.env"
     path.write_text("DEEPSEEK_TOKENS=old\nOTHER=1\n", encoding="utf-8")
-    monkeypatch.setattr(openai_mod, "_env_path", lambda: path)
+    monkeypatch.setattr(envtokens_mod, "_env_path", lambda: path)
     openai_mod._write_env_tokens_sync(["a"], ["b"])
     text = path.read_text(encoding="utf-8")
     assert "DEEPSEEK_TOKENS=a" in text
@@ -316,7 +321,7 @@ def test_add_tokens_reactivates_deepseek(monkeypatch):
     acct = SimpleNamespace(stable_id=openai_mod._token_stable_id(token), broken=True, broken_at=1, client=MagicMock())
     acct.client.check_auth = AsyncMock(return_value=True)
     app.state.pool = SimpleNamespace(accounts=[acct])
-    monkeypatch.setattr(openai_mod, "_read_env_tokens", AsyncMock(return_value=([token], [])))
+    monkeypatch.setattr(envtokens_mod, "_read_env_tokens", AsyncMock(return_value=([token], [])))
     client = TestClient(app)
     resp = client.post("/v1/tokens", headers=ADMIN_HEADERS, json={"deepseek_tokens": [token]})
     client.close()
@@ -330,7 +335,7 @@ def test_add_tokens_reactivate_check_raises(monkeypatch):
     acct = SimpleNamespace(stable_id=openai_mod._token_stable_id(token), broken=True, client=MagicMock())
     acct.client.check_auth = AsyncMock(side_effect=RuntimeError("x"))
     app.state.pool = SimpleNamespace(accounts=[acct])
-    monkeypatch.setattr(openai_mod, "_read_env_tokens", AsyncMock(return_value=([token], [])))
+    monkeypatch.setattr(envtokens_mod, "_read_env_tokens", AsyncMock(return_value=([token], [])))
     client = TestClient(app)
     resp = client.post("/v1/tokens", headers=ADMIN_HEADERS, json={"deepseek_tokens": [token]})
     client.close()
@@ -342,7 +347,7 @@ def test_add_tokens_reactivate_not_valid(monkeypatch):
     acct = SimpleNamespace(stable_id=openai_mod._token_stable_id(token), broken=True, client=MagicMock())
     acct.client.check_auth = AsyncMock(return_value=False)
     app.state.pool = SimpleNamespace(accounts=[acct])
-    monkeypatch.setattr(openai_mod, "_read_env_tokens", AsyncMock(return_value=([token], [])))
+    monkeypatch.setattr(envtokens_mod, "_read_env_tokens", AsyncMock(return_value=([token], [])))
     client = TestClient(app)
     resp = client.post("/v1/tokens", headers=ADMIN_HEADERS, json={"deepseek_tokens": [token]})
     client.close()
@@ -354,7 +359,7 @@ def test_add_tokens_reactivates_qwen(monkeypatch):
     acct = SimpleNamespace(stable_id=openai_mod._token_stable_id(token), broken=True, broken_at=1, client=MagicMock())
     acct.client.check_auth = AsyncMock(return_value=True)
     app.state.qwen_pool = SimpleNamespace(accounts=[acct])
-    monkeypatch.setattr(openai_mod, "_read_env_tokens", AsyncMock(return_value=([], [token])))
+    monkeypatch.setattr(envtokens_mod, "_read_env_tokens", AsyncMock(return_value=([], [token])))
     client = TestClient(app)
     resp = client.post("/v1/tokens", headers=ADMIN_HEADERS, json={"qwen_tokens": [token]})
     client.close()
@@ -363,21 +368,21 @@ def test_add_tokens_reactivates_qwen(monkeypatch):
 
 
 def test_add_tokens_hot_adds_both(monkeypatch):
-    monkeypatch.setattr(openai_mod, "_write_env_tokens", AsyncMock())
-    monkeypatch.setattr(openai_mod, "_read_env_tokens", AsyncMock(return_value=([], [])))
+    monkeypatch.setattr(envtokens_mod, "_write_env_tokens", AsyncMock())
+    monkeypatch.setattr(envtokens_mod, "_read_env_tokens", AsyncMock(return_value=([], [])))
     ds_client = MagicMock()
     ds_client.check_auth = AsyncMock(return_value=True)
     qw_client = MagicMock()
     qw_client.check_auth = AsyncMock(return_value=True)
-    monkeypatch.setattr(openai_mod, "DeepSeekClient", MagicMock(return_value=ds_client))
-    monkeypatch.setattr(openai_mod, "QwenClient", MagicMock(return_value=qw_client))
+    monkeypatch.setattr(envtokens_mod, "DeepSeekClient", MagicMock(return_value=ds_client))
+    monkeypatch.setattr(envtokens_mod, "QwenClient", MagicMock(return_value=qw_client))
     pool = MagicMock()
     pool.accounts = []
     qwen_pool = MagicMock()
     qwen_pool.accounts = []
     app.state.pool = pool
     app.state.qwen_pool = qwen_pool
-    monkeypatch.setattr(openai_mod, "_fetch_qwen_models", AsyncMock(side_effect=RuntimeError("boom")))
+    monkeypatch.setattr(envtokens_mod, "_fetch_qwen_models", AsyncMock(side_effect=RuntimeError("boom")))
     client = TestClient(app)
     resp = client.post("/v1/tokens", headers=ADMIN_HEADERS, json={"deepseek_tokens": ["d"], "qwen_tokens": ["q"]})
     client.close()
@@ -387,16 +392,16 @@ def test_add_tokens_hot_adds_both(monkeypatch):
 
 
 def test_add_tokens_skips_invalid(monkeypatch):
-    monkeypatch.setattr(openai_mod, "_write_env_tokens", AsyncMock())
-    monkeypatch.setattr(openai_mod, "_read_env_tokens", AsyncMock(return_value=([], [])))
+    monkeypatch.setattr(envtokens_mod, "_write_env_tokens", AsyncMock())
+    monkeypatch.setattr(envtokens_mod, "_read_env_tokens", AsyncMock(return_value=([], [])))
     ds_client = MagicMock()
     ds_client.check_auth = AsyncMock(return_value=False)
     ds_client.aclose = AsyncMock()
     qw_client = MagicMock()
     qw_client.check_auth = AsyncMock(return_value=False)
     qw_client.aclose = AsyncMock()
-    monkeypatch.setattr(openai_mod, "DeepSeekClient", MagicMock(return_value=ds_client))
-    monkeypatch.setattr(openai_mod, "QwenClient", MagicMock(return_value=qw_client))
+    monkeypatch.setattr(envtokens_mod, "DeepSeekClient", MagicMock(return_value=ds_client))
+    monkeypatch.setattr(envtokens_mod, "QwenClient", MagicMock(return_value=qw_client))
     app.state.pool = None
     app.state.qwen_pool = None
     client = TestClient(app)
@@ -409,7 +414,7 @@ def test_add_tokens_skips_invalid(monkeypatch):
 def test_add_tokens_all_exist(monkeypatch):
     app.state.pool = None
     app.state.qwen_pool = None
-    monkeypatch.setattr(openai_mod, "_read_env_tokens", AsyncMock(return_value=(["a"], ["b"])))
+    monkeypatch.setattr(envtokens_mod, "_read_env_tokens", AsyncMock(return_value=(["a"], ["b"])))
     client = TestClient(app)
     resp = client.post("/v1/tokens", headers=ADMIN_HEADERS, json={"deepseek_tokens": ["a"], "qwen_tokens": ["b"]})
     client.close()
@@ -497,7 +502,7 @@ async def test_extract_request_body_generic_error():
 
 
 async def test_extract_request_body_http_exception(monkeypatch):
-    monkeypatch.setattr(openai_mod, "MAX_REQUEST_BODY", 5)
+    monkeypatch.setattr(core_mod, "MAX_REQUEST_BODY", 5)
     req = FakeRequest(headers={"content-length": "7"}, method="POST", body=b"x" * 7)
     with pytest.raises(HTTPException) as excinfo:
         await openai_mod._extract_request_body(req)
@@ -651,7 +656,7 @@ def test_cached_auth_variants():
 
 
 def test_evict_auth(monkeypatch):
-    monkeypatch.setattr(openai_mod, "BYOK_AUTH_LIMIT", 1)
+    monkeypatch.setattr(byok_mod, "BYOK_AUTH_LIMIT", 1)
     store = {"a": 1, "b": 2}
     openai_mod._evict_auth(store)
     assert len(store) == 1
@@ -712,7 +717,7 @@ async def test_close_pool_busy_defers(monkeypatch):
     pool = SimpleNamespace(accounts=[acct])
     pool.flush = None
     called = []
-    monkeypatch.setattr(openai_mod, "_close_busy_client", AsyncMock(side_effect=lambda *a: called.append(a)))
+    monkeypatch.setattr(byok_mod, "_close_busy_client", AsyncMock(side_effect=lambda *a: called.append(a)))
     await openai_mod._close_pool(pool)
     await asyncio.sleep(0)
     assert called
@@ -788,7 +793,7 @@ async def test_byok_pool_rebuilds_unhealthy(monkeypatch):
     monkeypatch.setattr(app.state, "byok_auth", {"deepseek": {}, "qwen": {}}, raising=False)
     client = MagicMock()
     client.check_auth = AsyncMock(return_value=True)
-    monkeypatch.setattr(openai_mod, "DeepSeekClient", MagicMock(return_value=client))
+    monkeypatch.setattr(byok_mod, "DeepSeekClient", MagicMock(return_value=client))
     pool = await openai_mod._byok_pool("deepseek", tokens)
     assert pool.accounts
 
@@ -796,14 +801,14 @@ async def test_byok_pool_rebuilds_unhealthy(monkeypatch):
 async def test_byok_pool_evicts(monkeypatch):
     monkeypatch.setattr(settings, "cache_enabled", False)
     monkeypatch.setattr(settings, "byok_auth_ttl", 0.0)
-    monkeypatch.setattr(openai_mod, "BYOK_POOL_LIMIT", 0)
+    monkeypatch.setattr(byok_mod, "BYOK_POOL_LIMIT", 0)
     monkeypatch.setattr(app.state, "byok_pools", {"deepseek": {}, "qwen": {}}, raising=False)
     monkeypatch.setattr(app.state, "byok_locks", {"deepseek": asyncio.Lock(), "qwen": asyncio.Lock()}, raising=False)
     monkeypatch.setattr(app.state, "byok_auth", {"deepseek": {}, "qwen": {}}, raising=False)
     client = MagicMock()
     client.check_auth = AsyncMock(return_value=True)
     client.aclose = AsyncMock()
-    monkeypatch.setattr(openai_mod, "DeepSeekClient", MagicMock(return_value=client))
+    monkeypatch.setattr(byok_mod, "DeepSeekClient", MagicMock(return_value=client))
     pool = await openai_mod._byok_pool("deepseek", ["t1"])
     assert pool.accounts
 
@@ -817,7 +822,7 @@ async def test_byok_pool_qwen_invalid(monkeypatch):
     client = MagicMock()
     client.check_auth = AsyncMock(return_value=False)
     client.aclose = AsyncMock()
-    monkeypatch.setattr(openai_mod, "QwenClient", MagicMock(return_value=client))
+    monkeypatch.setattr(byok_mod, "QwenClient", MagicMock(return_value=client))
     with pytest.raises(HTTPException) as excinfo:
         await openai_mod._byok_pool("qwen", ["t1"])
     assert excinfo.value.status_code == 401
@@ -825,12 +830,12 @@ async def test_byok_pool_qwen_invalid(monkeypatch):
 
 async def test_dispatch_chat_byok(monkeypatch):
     monkeypatch.setattr(app.state, "byok", True, raising=False)
-    monkeypatch.setattr(openai_mod, "_byok_pool_for", AsyncMock(return_value=MagicMock()))
-    monkeypatch.setattr(openai_mod, "_chat_completions_deepseek", AsyncMock(return_value={"ok": 1}))
-    monkeypatch.setattr(openai_mod, "_chat_completions_qwen", AsyncMock(return_value={"q": 1}))
-    out_ds = await openai_mod._dispatch_chat(SimpleNamespace(model="deepseek-v4.1-flash"), SimpleNamespace())
+    monkeypatch.setattr(chats_mod, "_byok_pool_for", AsyncMock(return_value=MagicMock()))
+    monkeypatch.setattr(chats_mod, "_chat_completions_deepseek", AsyncMock(return_value={"ok": 1}))
+    monkeypatch.setattr(chats_mod, "_chat_completions_qwen", AsyncMock(return_value={"q": 1}))
+    out_ds = await chats_mod._dispatch_chat(SimpleNamespace(model="deepseek-v4.1-flash"), SimpleNamespace())
     assert out_ds == {"ok": 1}
-    out_qw = await openai_mod._dispatch_chat(SimpleNamespace(model="qwen3.8-max"), SimpleNamespace())
+    out_qw = await chats_mod._dispatch_chat(SimpleNamespace(model="qwen3.8-max"), SimpleNamespace())
     assert out_qw == {"q": 1}
 
 
@@ -997,8 +1002,8 @@ async def test_chat_dispatcher_picks_deepseek():
 
 async def test_chat_dispatcher_byok_binds_pool(monkeypatch):
     pool = MagicMock()
-    monkeypatch.setattr(openai_mod, "_byok_mode", lambda: True)
-    monkeypatch.setattr(openai_mod, "_byok_pool_for", AsyncMock(return_value=pool))
+    monkeypatch.setattr(chats_mod, "_byok_mode", lambda: True)
+    monkeypatch.setattr(chats_mod, "_byok_pool_for", AsyncMock(return_value=pool))
     call = await openai_mod._chat_dispatcher("deepseek-v4.1-flash", SimpleNamespace())
     assert call.func is openai_mod._chat_completions_deepseek
     assert call.keywords == {"pool": pool}
@@ -1454,7 +1459,7 @@ def test_add_tokens_absent_in_byok_mode(monkeypatch):
 
 
 def test_add_tokens_accepts_x_api_key(monkeypatch):
-    monkeypatch.setattr(openai_mod, "_read_env_tokens", AsyncMock(return_value=(["tok"], [])))
+    monkeypatch.setattr(envtokens_mod, "_read_env_tokens", AsyncMock(return_value=(["tok"], [])))
     client = TestClient(app)
     resp = client.post("/v1/tokens", headers={"x-api-key": "test-admin-token"}, json={"deepseek_tokens": ["tok"]})
     client.close()
@@ -1465,7 +1470,7 @@ def test_add_tokens_accepts_x_api_key(monkeypatch):
 def test_write_env_tokens_is_atomic(monkeypatch, tmp_path):
     env_file = tmp_path / ".env"
     env_file.write_text("A=1\nDEEPSEEK_TOKENS=old\n", encoding="utf-8")
-    monkeypatch.setattr(openai_mod, "_env_path", lambda: env_file)
+    monkeypatch.setattr(envtokens_mod, "_env_path", lambda: env_file)
     openai_mod._write_env_tokens_sync(["new"], ["q"])
     text = env_file.read_text(encoding="utf-8")
     assert "DEEPSEEK_TOKENS=new" in text

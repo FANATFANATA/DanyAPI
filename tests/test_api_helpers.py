@@ -9,6 +9,11 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+import danyapi.api.chats as chats_mod
+import danyapi.api.deepseek as deepseek_mod
+import danyapi.api.envtokens as envtokens_mod
+import danyapi.api.images as images_mod
+import danyapi.api.models as models_mod
 import danyapi.api.openai as openai_mod
 from danyapi import tools as toolemu
 from danyapi.accounts import AccountPoolBusy
@@ -57,9 +62,9 @@ def clean_state():
 @pytest.fixture(autouse=True)
 def zero_backoff():
     orig = openai_mod.RETRY_BACKOFF_SEC
-    openai_mod.RETRY_BACKOFF_SEC = 0.0
+    deepseek_mod.RETRY_BACKOFF_SEC = 0.0
     yield
-    openai_mod.RETRY_BACKOFF_SEC = orig
+    deepseek_mod.RETRY_BACKOFF_SEC = orig
 
 
 @pytest.fixture
@@ -1632,7 +1637,7 @@ async def test_chat_deepseek_busy_non_stream():
     pool, _ = make_pool()
     app.state.pool = pool
     client = TestClient(app)
-    with patch("danyapi.api.openai.account_lock", side_effect=AccountPoolBusy()):
+    with patch("danyapi.api.deepseek.account_lock", side_effect=AccountPoolBusy()):
         resp = client.post(
             "/v1/chat/completions",
             json={"model": "deepseek-v4.1-flash", "messages": [{"role": "user", "content": "hi"}]},
@@ -2235,7 +2240,7 @@ async def test_add_tokens_skips_invalid_without_persisting(monkeypatch, tmp_path
     monkeypatch.setattr(store_mod.settings, "cache_dir", str(tmp_path))
     env_file = tmp_path / ".env"
     env_file.write_text("", encoding="utf-8")
-    monkeypatch.setattr(openai_mod, "_env_path", lambda: env_file)
+    monkeypatch.setattr(envtokens_mod, "_env_path", lambda: env_file)
     monkeypatch.setattr(openai_mod.DeepSeekClient, "check_auth", AsyncMock(return_value=False))
     monkeypatch.setattr(openai_mod.DeepSeekClient, "aclose", AsyncMock())
     saved = _save_store_state()
@@ -2254,7 +2259,7 @@ async def test_add_tokens_persists_only_accepted(monkeypatch, tmp_path):
     monkeypatch.setattr(store_mod.settings, "cache_dir", str(tmp_path))
     env_file = tmp_path / ".env"
     env_file.write_text("DEEPSEEK_TOKENS=existing\nQWEN_TOKENS=\n", encoding="utf-8")
-    monkeypatch.setattr(openai_mod, "_env_path", lambda: env_file)
+    monkeypatch.setattr(envtokens_mod, "_env_path", lambda: env_file)
     monkeypatch.setattr(openai_mod.DeepSeekClient, "check_auth", AsyncMock(side_effect=[True, False]))
     monkeypatch.setattr(openai_mod.DeepSeekClient, "aclose", AsyncMock())
     saved = _save_store_state()
@@ -2277,7 +2282,7 @@ async def test_add_tokens_deduplicates_within_request(monkeypatch, tmp_path):
     monkeypatch.setattr(store_mod.settings, "cache_dir", str(tmp_path))
     env_file = tmp_path / ".env"
     env_file.write_text("", encoding="utf-8")
-    monkeypatch.setattr(openai_mod, "_env_path", lambda: env_file)
+    monkeypatch.setattr(envtokens_mod, "_env_path", lambda: env_file)
     monkeypatch.setattr(openai_mod.DeepSeekClient, "check_auth", AsyncMock(return_value=True))
     monkeypatch.setattr(openai_mod.DeepSeekClient, "aclose", AsyncMock())
     saved = _save_store_state()
@@ -2297,7 +2302,7 @@ async def test_add_tokens_qwen_hot_add(monkeypatch, tmp_path):
     monkeypatch.setattr(store_mod.settings, "cache_dir", str(tmp_path))
     env_file = tmp_path / ".env"
     env_file.write_text("", encoding="utf-8")
-    monkeypatch.setattr(openai_mod, "_env_path", lambda: env_file)
+    monkeypatch.setattr(envtokens_mod, "_env_path", lambda: env_file)
     monkeypatch.setattr(openai_mod.QwenClient, "check_auth", AsyncMock(return_value=True))
     monkeypatch.setattr(
         openai_mod.QwenClient,
@@ -2397,7 +2402,7 @@ async def test_add_tokens_reactivates_broken_account(monkeypatch, tmp_path):
     monkeypatch.setattr(store_mod.settings, "cache_dir", str(tmp_path))
     env_file = tmp_path / ".env"
     env_file.write_text(f"DEEPSEEK_TOKENS={token}\nQWEN_TOKENS=\n", encoding="utf-8")
-    monkeypatch.setattr(openai_mod, "_env_path", lambda: env_file)
+    monkeypatch.setattr(envtokens_mod, "_env_path", lambda: env_file)
     client = MagicMock()
     client.check_auth = AsyncMock(return_value=True)
     client.aclose = AsyncMock()
@@ -2598,11 +2603,11 @@ async def test_non_stream_rebuilds_when_cached_session_was_evicted():
         messages=[openai_mod.ChatMessage(role="user", content="alpha"), openai_mod.ChatMessage(role="user", content="beta")],
     )
     app.state.pool = pool
-    openai_mod._collect_non_stream = fake_collect
+    chats_mod._collect_non_stream = fake_collect
     try:
         await openai_mod._chat_completions_deepseek(req)
     finally:
-        openai_mod._collect_non_stream = orig
+        chats_mod._collect_non_stream = orig
     assert captured["existing_sid"] == "s1"
     assert captured["cached_session"] is fresh
 
@@ -2618,7 +2623,7 @@ async def test_collect_non_stream_rebuilds_on_evicted_session():
 
     fresh = FakeSession(sid="fresh")
     acct.sessions.obtain = AsyncMock(return_value=(fresh, "s1"))
-    openai_mod._send_deepseek_stream = capture_send
+    deepseek_mod._send_deepseek_stream = capture_send
     try:
         result = await openai_mod._collect_non_stream(
             account=acct,
@@ -2634,7 +2639,7 @@ async def test_collect_non_stream_rebuilds_on_evicted_session():
             cached_session=FakeSession(sid="other"),
         )
     finally:
-        openai_mod._send_deepseek_stream = orig_send
+        deepseek_mod._send_deepseek_stream = orig_send
     assert result["choices"][0]["message"]["content"] == "Hi"
     assert prompts == ["alpha"]
 
@@ -2650,7 +2655,7 @@ async def test_collect_non_stream_keeps_delta_prompt_for_same_cached_session():
 
     cached = FakeSession(sid="s1")
     acct.sessions.obtain = AsyncMock(return_value=(cached, "s1"))
-    openai_mod._send_deepseek_stream = capture_send
+    deepseek_mod._send_deepseek_stream = capture_send
     try:
         result = await openai_mod._collect_non_stream(
             account=acct,
@@ -2666,7 +2671,7 @@ async def test_collect_non_stream_keeps_delta_prompt_for_same_cached_session():
             cached_session=cached,
         )
     finally:
-        openai_mod._send_deepseek_stream = orig_send
+        deepseek_mod._send_deepseek_stream = orig_send
     assert result["choices"][0]["message"]["content"] == "Hi"
     assert prompts == ["delta only"]
 
@@ -2750,8 +2755,8 @@ async def test_non_stream_continuation_deadline_stops_rounds(monkeypatch):
         calls.append(args[7])
         return None
 
-    monkeypatch.setattr(openai_mod, "_collect_continuation", fake_continuation)
-    monkeypatch.setattr(openai_mod, "CONTINUE_DEADLINE_SEC", -1.0)
+    monkeypatch.setattr(deepseek_mod, "_collect_continuation", fake_continuation)
+    monkeypatch.setattr(deepseek_mod, "CONTINUE_DEADLINE_SEC", -1.0)
 
     with pytest.raises(openai_mod.HTTPException) as excinfo:
         await openai_mod._collect_non_stream(
@@ -2773,8 +2778,8 @@ async def test_non_stream_reduced_variant_without_tools_resets_tool_mode(monkeyp
     acct = FakeAccount([INPUT_SSE])
     rec = MessageReconstructor()
     rec.message = {"fragments": [{"type": "RESPONSE", "content": '{"tool_calls": [{"name": "get_weather", "arguments": {}}]}'}]}
-    monkeypatch.setattr(openai_mod, "_collect_continuation", AsyncMock(return_value=None))
-    monkeypatch.setattr(openai_mod, "_collect_reduced", AsyncMock(return_value=(rec, FakeSession(), "s1", False, {})))
+    monkeypatch.setattr(deepseek_mod, "_collect_continuation", AsyncMock(return_value=None))
+    monkeypatch.setattr(deepseek_mod, "_collect_reduced", AsyncMock(return_value=(rec, FakeSession(), "s1", False, {})))
     result = await openai_mod._collect_non_stream(
         account=acct,
         pool=MagicMock(),
@@ -2809,7 +2814,7 @@ def test_cancel_finished_response_409():
 
 
 def test_list_models_uses_all_models(monkeypatch):
-    monkeypatch.setattr(openai_mod, "_all_models", MagicMock(return_value=[{"id": "m"}]))
+    monkeypatch.setattr(models_mod, "_all_models", MagicMock(return_value=[{"id": "m"}]))
     client = TestClient(app)
     payload = client.get("/v1/models").json()
     client.close()
@@ -2818,14 +2823,14 @@ def test_list_models_uses_all_models(monkeypatch):
 
 async def test_image_generations_route_uses_image_pool(monkeypatch):
     pool = MagicMock()
-    monkeypatch.setattr(openai_mod, "_image_pool", AsyncMock(return_value=pool))
+    monkeypatch.setattr(images_mod, "_image_pool", AsyncMock(return_value=pool))
     captured = {}
 
     async def fake_image_generations(req, resolved):
         captured["pool"] = resolved
         return {"created": 1, "data": []}
 
-    monkeypatch.setattr(openai_mod, "_image_generations", fake_image_generations)
+    monkeypatch.setattr(images_mod, "_image_generations", fake_image_generations)
     client = TestClient(app)
     payload = client.post("/v1/images/generations", json={"model": "qwen-image-gen", "prompt": "dog"}).json()
     client.close()

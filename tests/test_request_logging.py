@@ -2,6 +2,7 @@ import logging
 
 from fastapi.testclient import TestClient
 
+import danyapi.api.core as core_mod
 import danyapi.api.openai as openai_mod
 from danyapi.api.openai import app
 
@@ -132,7 +133,7 @@ def test_log_requests_failure_via_client(caplog):
 
 
 def test_oversized_body_returns_413_and_is_logged(caplog, monkeypatch):
-    monkeypatch.setattr(openai_mod, "MAX_REQUEST_BODY", 32)
+    monkeypatch.setattr(core_mod, "MAX_REQUEST_BODY", 32)
     app.state.pool = None
     app.state.qwen_pool = None
     with caplog.at_level(logging.WARNING, logger="danyapi.api"):

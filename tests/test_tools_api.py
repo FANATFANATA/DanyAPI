@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+import danyapi.api.deepseek as deepseek_mod
 import danyapi.api.openai as openai_mod
 import danyapi.qwen.api as qwen_api
 
@@ -131,10 +132,10 @@ class FakeAccount:
 def zero_backoff():
     orig_ds = openai_mod.RETRY_BACKOFF_SEC
     orig_qwen = qwen_api.RETRY_BACKOFF_SEC
-    openai_mod.RETRY_BACKOFF_SEC = 0.0
+    deepseek_mod.RETRY_BACKOFF_SEC = 0.0
     qwen_api.RETRY_BACKOFF_SEC = 0.0
     yield
-    openai_mod.RETRY_BACKOFF_SEC = orig_ds
+    deepseek_mod.RETRY_BACKOFF_SEC = orig_ds
     qwen_api.RETRY_BACKOFF_SEC = orig_qwen
 
 

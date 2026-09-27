@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+import danyapi.api.chats as chats_mod
 import danyapi.api.openai as openai_mod
 import danyapi.qwen.api as qwen_api
 from danyapi.accounts import AccountPool, DeepSeekAccount
@@ -500,7 +501,7 @@ def test_deepseek_stateless_request_resolves_cached_session():
         captured.update(kwargs)
         return {"ok": True}
 
-    openai_mod._collect_non_stream = fake_collect
+    chats_mod._collect_non_stream = fake_collect
     try:
         pool = MagicMock()
         pool.acquire = AsyncMock(return_value=(MagicMock(), "sess-a"))
@@ -522,7 +523,7 @@ def test_deepseek_stateless_request_resolves_cached_session():
         pool.resolve_context.assert_called_once()
         assert captured["existing_sid"] == "sess-a"
     finally:
-        openai_mod._collect_non_stream = orig
+        chats_mod._collect_non_stream = orig
 
 
 def test_deepseek_cached_missing_session_renders_full_history():
@@ -533,7 +534,7 @@ def test_deepseek_cached_missing_session_renders_full_history():
         captured.update(kwargs)
         return {"ok": True}
 
-    openai_mod._collect_non_stream = fake_collect
+    chats_mod._collect_non_stream = fake_collect
     try:
         account = MagicMock()
         account.sessions.get.return_value = None
@@ -563,7 +564,7 @@ def test_deepseek_cached_missing_session_renders_full_history():
         assert "alpha noted" in captured["prompt"]
         assert "what did I ask you to remember?" in captured["prompt"]
     finally:
-        openai_mod._collect_non_stream = orig
+        chats_mod._collect_non_stream = orig
 
 
 def test_deepseek_explicit_session_bypasses_context_resolution():
@@ -574,7 +575,7 @@ def test_deepseek_explicit_session_bypasses_context_resolution():
         captured.update(kwargs)
         return {"ok": True}
 
-    openai_mod._collect_non_stream = fake_collect
+    chats_mod._collect_non_stream = fake_collect
     try:
         pool = MagicMock()
         pool.acquire = AsyncMock(return_value=(MagicMock(), "explicit-1"))
@@ -597,7 +598,7 @@ def test_deepseek_explicit_session_bypasses_context_resolution():
         pool.resolve_context.assert_not_called()
         assert captured["existing_sid"] == "explicit-1"
     finally:
-        openai_mod._collect_non_stream = orig
+        chats_mod._collect_non_stream = orig
 
 
 def test_qwen_stateless_request_resolves_cached_session():
@@ -710,7 +711,7 @@ def test_deepseek_sequential_single_message_session_accumulates():
         captured.append(dict(kwargs))
         return {"ok": True}
 
-    openai_mod._collect_non_stream = fake_collect
+    chats_mod._collect_non_stream = fake_collect
     try:
         client = FakeDeepSeekCreateClient()
         account = DeepSeekAccount(0, client)
@@ -738,7 +739,7 @@ def test_deepseek_sequential_single_message_session_accumulates():
         assert captured[1]["prompt"] == "What is my name?"
         assert client.counter == 1
     finally:
-        openai_mod._collect_non_stream = orig
+        chats_mod._collect_non_stream = orig
 
 
 def test_deepseek_cached_session_hit_sends_only_delta():
@@ -749,7 +750,7 @@ def test_deepseek_cached_session_hit_sends_only_delta():
         captured.append(dict(kwargs))
         return {"ok": True}
 
-    openai_mod._collect_non_stream = fake_collect
+    chats_mod._collect_non_stream = fake_collect
     try:
         client = FakeDeepSeekCreateClient()
         account = DeepSeekAccount(0, client)
@@ -778,7 +779,7 @@ def test_deepseek_cached_session_hit_sends_only_delta():
         assert captured[0]["prompt"] == "what did I ask you to remember?"
         assert client.counter == 1
     finally:
-        openai_mod._collect_non_stream = orig
+        chats_mod._collect_non_stream = orig
 
 
 def test_qwen_sequential_single_message_session_accumulates():

@@ -7,6 +7,8 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pytest
 
+import danyapi.api.chats as chats_mod
+import danyapi.api.deepseek as deepseek_mod
 import danyapi.api.openai as openai_mod
 from danyapi import tools as toolemu
 from danyapi.api.openai import Attachment, ChatMessage, app
@@ -242,12 +244,12 @@ def test_build_limited_message_length_branches():
 
 async def test_chat_qwen_rejects_non_image_attachment(monkeypatch):
     monkeypatch.setattr(
-        openai_mod,
+        chats_mod,
         "_acquire_and_build",
         AsyncMock(return_value=(MagicMock(), None, (), "prompt", False, None)),
     )
     monkeypatch.setattr(
-        openai_mod,
+        chats_mod,
         "_collect_attachments",
         lambda req, allow_remote=False: [Attachment(b"a", "a.txt", "text/plain", False)],
     )
@@ -263,7 +265,7 @@ async def test_chat_qwen_rejects_non_image_attachment(monkeypatch):
         session_id=None,
     )
     with pytest.raises(openai_mod.HTTPException) as excinfo:
-        await openai_mod._chat_completions_qwen(req, pool=MagicMock())
+        await chats_mod._chat_completions_qwen(req, pool=MagicMock())
     assert excinfo.value.status_code == 400
 
 
@@ -364,7 +366,7 @@ async def test_send_deepseek_stream_close_failure_stops():
 
 
 async def test_collect_continuation_rate_limit_http(monkeypatch):
-    monkeypatch.setattr(openai_mod, "MESSAGE_TOO_FREQUENT_WAIT_SEC", 0.0)
+    monkeypatch.setattr(deepseek_mod, "MESSAGE_TOO_FREQUENT_WAIT_SEC", 0.0)
     acct = FakeAccount()
     acct.client.completion = AsyncMock(
         side_effect=[
@@ -378,7 +380,7 @@ async def test_collect_continuation_rate_limit_http(monkeypatch):
 
 
 async def test_collect_continuation_hint_rate_limit(monkeypatch):
-    monkeypatch.setattr(openai_mod, "MESSAGE_TOO_FREQUENT_WAIT_SEC", 0.0)
+    monkeypatch.setattr(deepseek_mod, "MESSAGE_TOO_FREQUENT_WAIT_SEC", 0.0)
     acct = FakeAccount([TOO_FREQUENT_SSE, OK_SSE])
     rec = await openai_mod._collect_continuation(acct, FakeSession(), None, "default", False, False)
     assert rec is not None
@@ -433,9 +435,9 @@ async def test_collect_non_stream_reduced_tool_mode(monkeypatch):
     session = FakeSession()
     rec = MessageReconstructor()
     rec.message = {"fragments": [{"type": "RESPONSE", "content": "Reduced"}]}
-    monkeypatch.setattr(openai_mod, "_collect_continuation", AsyncMock(return_value=None))
-    monkeypatch.setattr(openai_mod, "_reduced_prompt_variants", lambda *a, **k: [("p", True, {})])
-    monkeypatch.setattr(openai_mod, "_collect_reduced", AsyncMock(return_value=(rec, session, "s1", True, {"get_weather": {}})))
+    monkeypatch.setattr(deepseek_mod, "_collect_continuation", AsyncMock(return_value=None))
+    monkeypatch.setattr(deepseek_mod, "_reduced_prompt_variants", lambda *a, **k: [("p", True, {})])
+    monkeypatch.setattr(deepseek_mod, "_collect_reduced", AsyncMock(return_value=(rec, session, "s1", True, {"get_weather": {}})))
     result = await openai_mod._collect_non_stream(
         account=acct,
         pool=MagicMock(),
@@ -589,7 +591,7 @@ async def test_stream_openai_stale_session_rebuild():
 
 
 async def test_stream_openai_rate_limit_http(monkeypatch):
-    monkeypatch.setattr(openai_mod, "MESSAGE_TOO_FREQUENT_WAIT_SEC", 0.0)
+    monkeypatch.setattr(deepseek_mod, "MESSAGE_TOO_FREQUENT_WAIT_SEC", 0.0)
     acct = FakeAccount()
     acct.client.completion = AsyncMock(
         side_effect=[
@@ -699,9 +701,9 @@ async def test_stream_openai_reduced_tool_mode(monkeypatch):
     session = FakeSession()
     rec = MessageReconstructor()
     rec.message = {"fragments": [{"type": "RESPONSE", "content": "Reduced"}]}
-    monkeypatch.setattr(openai_mod, "_collect_continuation", AsyncMock(return_value=None))
-    monkeypatch.setattr(openai_mod, "_reduced_prompt_variants", lambda *a, **k: [("p", True, {})])
-    monkeypatch.setattr(openai_mod, "_collect_reduced", AsyncMock(return_value=(rec, session, "s1", True, {"get_weather": {}})))
+    monkeypatch.setattr(deepseek_mod, "_collect_continuation", AsyncMock(return_value=None))
+    monkeypatch.setattr(deepseek_mod, "_reduced_prompt_variants", lambda *a, **k: [("p", True, {})])
+    monkeypatch.setattr(deepseek_mod, "_collect_reduced", AsyncMock(return_value=(rec, session, "s1", True, {"get_weather": {}})))
     gen = openai_mod._stream_openai(
         account=acct,
         pool=MagicMock(),
@@ -1012,8 +1014,8 @@ async def test_stream_reduced_variant_without_tools_resets_tool_mode(monkeypatch
     acct = FakeAccount([INPUT_SSE])
     rec = MessageReconstructor()
     rec.message = {"fragments": [{"type": "RESPONSE", "content": '{"tool_calls": [{"name": "get_weather", "arguments": {}}]}'}]}
-    monkeypatch.setattr(openai_mod, "_collect_continuation", AsyncMock(return_value=None))
-    monkeypatch.setattr(openai_mod, "_collect_reduced", AsyncMock(return_value=(rec, FakeSession(), "s1", False, {})))
+    monkeypatch.setattr(deepseek_mod, "_collect_continuation", AsyncMock(return_value=None))
+    monkeypatch.setattr(deepseek_mod, "_collect_reduced", AsyncMock(return_value=(rec, FakeSession(), "s1", False, {})))
     gen = openai_mod._stream_openai(
         account=acct,
         pool=MagicMock(),
@@ -1042,8 +1044,8 @@ async def test_stream_continuation_deadline_stops_rounds(monkeypatch):
         calls.append(args[7])
         return None
 
-    monkeypatch.setattr(openai_mod, "_collect_continuation", fake_continuation)
-    monkeypatch.setattr(openai_mod, "CONTINUE_DEADLINE_SEC", -1.0)
+    monkeypatch.setattr(deepseek_mod, "_collect_continuation", fake_continuation)
+    monkeypatch.setattr(deepseek_mod, "CONTINUE_DEADLINE_SEC", -1.0)
     gen = openai_mod._stream_openai(
         account=acct,
         pool=MagicMock(),
@@ -1068,7 +1070,7 @@ async def test_stream_continuation_receives_deadline(monkeypatch):
         calls.append(args[7])
         return None
 
-    monkeypatch.setattr(openai_mod, "_collect_continuation", fake_continuation)
+    monkeypatch.setattr(deepseek_mod, "_collect_continuation", fake_continuation)
     gen = openai_mod._stream_openai(
         account=acct,
         pool=MagicMock(),

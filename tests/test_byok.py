@@ -6,6 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.requests import Request
 
+import danyapi.api.images as images_mod
 import danyapi.api.openai as openai_mod
 from danyapi.api.openai import app, settings
 
@@ -320,7 +321,7 @@ def test_image_edits_byok_auth_from_api_key_field(monkeypatch):
         captured["pool"] = resolved_pool
         return {"created": 1, "data": [], "usage": None, "session_id": None}
 
-    monkeypatch.setattr(openai_mod, "_image_generations", fake_image_generations)
+    monkeypatch.setattr(images_mod, "_image_generations", fake_image_generations)
     client = TestClient(app)
     response = client.post(
         "/v1/images/edits",

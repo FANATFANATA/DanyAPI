@@ -5,6 +5,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+import danyapi.api.chats as chats_mod
+import danyapi.api.deepseek as deepseek_mod
 import danyapi.api.openai as openai_mod
 from danyapi.api.openai import ChatMessage, _collect_non_stream, _stream_openai
 
@@ -121,17 +123,17 @@ class FakeAccount:
 @pytest.fixture(autouse=True)
 def zero_backoff():
     orig = openai_mod.RETRY_BACKOFF_SEC
-    openai_mod.RETRY_BACKOFF_SEC = 0.0
+    deepseek_mod.RETRY_BACKOFF_SEC = 0.0
     yield
-    openai_mod.RETRY_BACKOFF_SEC = orig
+    deepseek_mod.RETRY_BACKOFF_SEC = orig
 
 
 @pytest.fixture
 def fast_rate_limit():
     orig = openai_mod.MESSAGE_TOO_FREQUENT_WAIT_SEC
-    openai_mod.MESSAGE_TOO_FREQUENT_WAIT_SEC = 0.0
+    deepseek_mod.MESSAGE_TOO_FREQUENT_WAIT_SEC = 0.0
     yield
-    openai_mod.MESSAGE_TOO_FREQUENT_WAIT_SEC = orig
+    deepseek_mod.MESSAGE_TOO_FREQUENT_WAIT_SEC = orig
 
 
 def _args(acct, pool=None, existing_sid: str | None = "s1"):
@@ -559,7 +561,7 @@ async def test_search_and_thinking_allowed():
         captured.update(kwargs)
         return {"ok": True}
 
-    openai_mod._collect_non_stream = fake_collect
+    chats_mod._collect_non_stream = fake_collect
     try:
         pool = MagicMock()
         pool.acquire = AsyncMock(return_value=(FakeAccount([OK_SSE]), None))
@@ -592,7 +594,7 @@ async def test_search_and_thinking_allowed():
         assert captured["search"] is False
         assert captured["thinking"] is True
     finally:
-        openai_mod._collect_non_stream = orig
+        chats_mod._collect_non_stream = orig
 
 
 def test_accepts_files():

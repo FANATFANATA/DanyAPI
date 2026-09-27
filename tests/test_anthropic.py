@@ -4,6 +4,7 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
+import danyapi.api.deepseek as deepseek_mod
 import danyapi.api.openai as openai_mod
 from danyapi.api import anthropic as ant
 from danyapi.api.openai import app
@@ -154,9 +155,9 @@ def clean_state():
 @pytest.fixture(autouse=True)
 def zero_backoff():
     orig = openai_mod.RETRY_BACKOFF_SEC
-    openai_mod.RETRY_BACKOFF_SEC = 0.0
+    deepseek_mod.RETRY_BACKOFF_SEC = 0.0
     yield
-    openai_mod.RETRY_BACKOFF_SEC = orig
+    deepseek_mod.RETRY_BACKOFF_SEC = orig
 
 
 def _info(model="claude-sonnet-4-5"):
