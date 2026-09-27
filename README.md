@@ -30,6 +30,13 @@ curl -X POST https://danyapi.cloudpub.ru/v1/chat/completions \
   }'
 ```
 
+### Endpoints
+
+- `POST /v1/chat/completions` and `POST /v1/completions`: OpenAI compatible
+- `POST /v1/responses`: OpenAI Responses API
+- `POST /v1/messages` and `POST /v1/messages/count_tokens`: Anthropic Messages API
+- `GET /v1/models`, `GET /health`, `GET /v1/usage`
+
 ## Install & Upgrade
 
 Requires Python 3.10+.

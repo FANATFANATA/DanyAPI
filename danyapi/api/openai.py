@@ -35,8 +35,9 @@ from ..qwen.accounts import QwenAccount
 from ..qwen.client import QwenClient, QwenError
 from ..sseutil import StreamStopFilter, split_stop
 from ..store import JsonStore
-from ..tokens import StreamBudget, count_messages_tokens, estimate_tokens, trim_to_tokens
+from ..tokens import StreamBudget, count_message_tokens, count_messages_tokens, estimate_tokens, trim_to_tokens
 from ..usage import init_tracker, record_usage
+from . import anthropic as anthropic_api
 from . import responses as responses_api
 
 log = logging.getLogger("danyapi.api")
@@ -1995,6 +1996,79 @@ async def create_response(req: ResponsesRequest, request: Request) -> Any:
         stored_conversation = conversation + responses_api.messages_from_output(result.get("output"))
         store.set(response_id, {"public": result, "conversation": stored_conversation})
     return result
+
+
+def _anthropic_model(body: dict) -> str:
+    model = body.get("model")
+    if not isinstance(model, str) or not model.strip():
+        raise HTTPException(400, "model is required")
+    _resolve_model(model)
+    return model
+
+
+def _anthropic_error(exc: anthropic_api.AnthropicInputError) -> JSONResponse:
+    return JSONResponse(status_code=400, content=anthropic_api.error_body("invalid_request_error", str(exc)))
+
+
+@app.post("/v1/messages")
+async def anthropic_messages(body: dict, request: Request) -> Any:
+    if not isinstance(body, dict):
+        raise HTTPException(400, "request body must be a JSON object")
+    try:
+        model = _anthropic_model(body)
+    except HTTPException as exc:
+        error_type = "not_found_error" if exc.status_code == 404 else "invalid_request_error"
+        return JSONResponse(status_code=exc.status_code, content=anthropic_api.error_body(error_type, str(exc.detail)))
+    try:
+        chat_payload = anthropic_api.build_chat_request(body, model)
+    except anthropic_api.AnthropicInputError as exc:
+        return _anthropic_error(exc)
+    chat_req = ChatCompletionRequest(**chat_payload)
+    info = anthropic_api.RequestInfo(
+        model=model,
+        upstream_model=_resolve_model(model),
+        max_tokens=chat_req.max_tokens or anthropic_api.DEFAULT_MAX_TOKENS,
+        prompt_tokens=anthropic_api.count_input_tokens(chat_req.messages, anthropic_api.normalize_system(body.get("system"))),
+        metadata=body.get("metadata"),
+        system_present=bool(anthropic_api.normalize_system(body.get("system"))),
+    )
+    message_id = f"msg_{uuid.uuid4().hex}"
+    provider_call = await _chat_dispatcher(model, request)
+
+    if chat_req.stream:
+        chat_req.stream_options = {"include_usage": True}
+        chat_resp = await provider_call(chat_req)
+        return StreamingResponse(
+            anthropic_api.translate_stream(chat_resp.body_iterator, info, message_id),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    chat_dict = await provider_call(chat_req)
+    if isinstance(chat_dict, dict) and isinstance(chat_dict.get("error"), dict):
+        error = chat_dict["error"]
+        message = error.get("message") if isinstance(error.get("message"), str) else "upstream request failed"
+        return JSONResponse(status_code=502, content=anthropic_api.error_body("api_error", message))
+    return anthropic_api.build_message(info, message_id, chat_dict)
+
+
+@app.post("/v1/messages/count_tokens")
+async def anthropic_count_tokens(body: dict) -> Any:
+    if not isinstance(body, dict):
+        raise HTTPException(400, "request body must be a JSON object")
+    try:
+        messages = anthropic_api.normalize_messages(body.get("messages"))
+        system = anthropic_api.normalize_system(body.get("system"))
+    except anthropic_api.AnthropicInputError as exc:
+        return _anthropic_error(exc)
+    tools = anthropic_api.convert_tools(body.get("tools"))
+    total = anthropic_api.count_input_tokens(messages, system)
+    if tools:
+        for tool in tools:
+            function = tool.get("function") if isinstance(tool, dict) else None
+            if isinstance(function, dict):
+                total += count_message_tokens({"role": "system", "content": str(function.get("description") or "")})
+    return {"input_tokens": total}
 
 
 @app.get("/v1/responses/{response_id}")
