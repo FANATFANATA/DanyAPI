@@ -7,6 +7,7 @@ import logging
 import time
 import uuid
 import weakref
+from collections.abc import Iterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -46,6 +47,19 @@ _STATE_STORE_ATTRS = (
 )
 
 
+def _iter_pools() -> Iterator[Any]:
+    for attr in ("pool", "qwen_pool"):
+        pool_obj = getattr(app.state, attr, None)
+        if pool_obj is not None:
+            yield pool_obj
+    byok_pools = getattr(app.state, "byok_pools", None)
+    if not isinstance(byok_pools, dict):
+        return
+    for entries in byok_pools.values():
+        if isinstance(entries, dict):
+            yield from entries.values()
+
+
 def _flush_state_stores() -> None:
     tracker = getattr(app.state, "usage", None)
     if tracker is not None:
@@ -61,18 +75,8 @@ def _flush_state_stores() -> None:
             store.flush()
         except Exception as exc:
             log.debug("store flush failed for %s: %s", attr, exc)
-    pools: list[Any] = []
-    for attr in ("pool", "qwen_pool"):
-        pool_obj = getattr(app.state, attr, None)
-        if pool_obj is not None:
-            pools.append(pool_obj)
-    byok_pools = getattr(app.state, "byok_pools", None)
-    if isinstance(byok_pools, dict):
-        for cache in byok_pools.values():
-            if isinstance(cache, dict):
-                pools.extend(cache.values())
     seen_pools: set[int] = set()
-    for pool_obj in pools:
+    for pool_obj in _iter_pools():
         if id(pool_obj) in seen_pools:
             continue
         seen_pools.add(id(pool_obj))
@@ -211,18 +215,8 @@ async def lifespan(app: FastAPI):
         if http_client is not None:
             await http_client.aclose()
         all_accounts: list[Any] = accounts + qwen_accounts
-        for pool_obj in (getattr(app.state, "pool", None), getattr(app.state, "qwen_pool", None)):
-            if pool_obj is not None:
-                all_accounts.extend(pool_obj.accounts)
-        byok_pools = getattr(app.state, "byok_pools", None)
-        if byok_pools is not None:
-            cached: list[Any] = []
-            for provider in ("deepseek", "qwen"):
-                entries = byok_pools.get(provider) if hasattr(byok_pools, "get") else None
-                if isinstance(entries, dict):
-                    cached.extend(entries.values())
-            for pool_obj in cached:
-                all_accounts.extend(pool_obj.accounts)
+        for pool_obj in _iter_pools():
+            all_accounts.extend(pool_obj.accounts)
         _close_pow_managers(all_accounts)
         await asyncio.to_thread(_flush_state_stores)
         seen: set[int] = set()
