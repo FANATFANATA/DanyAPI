@@ -204,7 +204,7 @@ async def test_non_stream_raises_429_after_five_too_frequent_cycles(fast_rate_li
     exc = excinfo.value
     assert isinstance(exc, openai_mod.HTTPException)
     assert exc.status_code == 429
-    assert "Message too frequent" in exc.detail
+    assert "Message too frequent" in exc.detail["error"]["message"]
     assert acct.client.completion.await_count == openai_mod.MESSAGE_TOO_FREQUENT_MAX_RETRIES + 1
 
 
@@ -255,8 +255,8 @@ async def test_non_stream_input_exceeds_nested_envelope_then_continuation():
     with pytest.raises(openai_mod.HTTPException) as excinfo:
         await _collect_non_stream(**_args(acct))
     assert excinfo.value.status_code == 502
-    assert "Content is too long" in excinfo.value.detail
-    assert "response_incomplete" in excinfo.value.detail
+    assert excinfo.value.detail["error"]["message"] == "Content is too long"
+    assert excinfo.value.detail["error"]["finish_reason"] == "response_incomplete"
     assert acct.client.completion.await_count == 2
 
 
@@ -322,8 +322,7 @@ async def test_non_stream_reports_502_after_fake_context_hint_retries():
     exc = excinfo.value
     assert isinstance(exc, openai_mod.HTTPException)
     assert exc.status_code == 502
-    assert "Length limit reached" not in exc.detail
-    assert "unexpected length-limit hint" in exc.detail
+    assert "unexpected length-limit hint" in exc.detail["error"]["message"]
 
 
 async def test_stream_reports_error_after_fake_context_hint_retries():
@@ -344,7 +343,7 @@ async def test_non_stream_raises_429_after_retries():
     exc = excinfo.value
     assert isinstance(exc, openai_mod.HTTPException)
     assert exc.status_code == 429
-    assert "busy" in exc.detail.lower()
+    assert "busy" in exc.detail["error"]["message"].lower()
 
 
 async def test_stream_emits_error_event_after_retries():

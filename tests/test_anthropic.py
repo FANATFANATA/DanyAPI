@@ -15,6 +15,7 @@ class FakeSession:
     def __init__(self, sid="c1", last_message_id=None):
         self.id = sid
         self.last_message_id = last_message_id
+        self.last_response_id = None
         self.accumulated_tokens = 0
 
 
@@ -598,3 +599,87 @@ def test_count_tokens_endpoint_rejects_bad_messages():
     client.close()
     assert r.status_code == 400
     assert r.json()["error"]["type"] == "invalid_request_error"
+
+
+def test_endpoint_accepts_qwen_model():
+    app.state.qwen_pool = make_pool("")
+    app.state.qwen_models = [{"id": "qwen3.8-max", "name": "Qwen3.8-Max", "owned_by": "qwen", "model_type": "chat"}]
+    client = TestClient(app)
+    r = client.post(
+        "/v1/messages",
+        json={"model": "qwen3.8-max", "max_tokens": 8, "messages": [{"role": "user", "content": "hi"}]},
+    )
+    client.close()
+    assert r.status_code == 200, r.text
+    assert r.json()["model"] == "qwen3.8-max"
+
+
+def test_endpoint_unknown_model_is_anthropic_error():
+    client = TestClient(app)
+    r = client.post("/v1/messages", json={"model": "nope", "max_tokens": 8, "messages": [{"role": "user", "content": "hi"}]})
+    client.close()
+    assert r.status_code == 404
+    assert r.json() == {"type": "error", "error": {"type": "not_found_error", "message": "Unknown model: nope"}}
+
+
+def test_endpoint_upstream_http_error_is_anthropic_error():
+    from unittest.mock import AsyncMock
+
+    from danyapi.accounts import AccountPoolBusy
+
+    app.state.pool = make_pool("")
+    app.state.pool.acquire = AsyncMock(side_effect=AccountPoolBusy())
+    client = TestClient(app)
+    r = client.post(
+        "/v1/messages",
+        json={"model": "deepseek-v4.1-flash", "max_tokens": 8, "messages": [{"role": "user", "content": "hi"}]},
+    )
+    client.close()
+    assert r.status_code == 429
+    assert r.json() == {"type": "error", "error": {"type": "rate_limit_error", "message": "all accounts are busy, try again later"}}
+
+
+def test_translate_stream_closes_thinking_before_text():
+    text = _chat_sse(reasoning="think", content="answer")
+
+    async def run():
+        stream = ant.translate_stream(_agen_chunks(text), _info(), "msg_1")
+        return [line async for line in stream]
+
+    frames = _frames("".join(asyncio.run(run())))
+    order = [(event, payload.get("index")) for event, payload in frames if event in ("content_block_start", "content_block_stop")]
+    assert order == [
+        ("content_block_start", 0),
+        ("content_block_stop", 0),
+        ("content_block_start", 1),
+        ("content_block_stop", 1),
+    ]
+
+
+def test_translate_stream_closes_text_before_tool_use():
+    calls = [{"index": 0, "id": "c1", "function": {"name": "f", "arguments": "{}"}}]
+    text = _chat_sse(reasoning="think", content="answer", tool_calls=calls, finish="tool_calls")
+
+    async def run():
+        stream = ant.translate_stream(_agen_chunks(text), _info(), "msg_1")
+        return [line async for line in stream]
+
+    frames = _frames("".join(asyncio.run(run())))
+    types = [payload["content_block"]["type"] for event, payload in frames if event == "content_block_start"]
+    assert types == ["thinking", "text", "tool_use"]
+    stopped = [payload["index"] for event, payload in frames if event == "content_block_stop"]
+    assert stopped[:2] == [0, 1]
+
+
+def test_translate_stream_keeps_known_input_tokens():
+    chunk = json.dumps({"choices": [{"index": 0, "delta": {"content": "hi"}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 0, "completion_tokens": 5}})
+    info = ant.RequestInfo(model="claude-sonnet-4-5", upstream_model="default", max_tokens=100, prompt_tokens=17)
+
+    async def run():
+        stream = ant.translate_stream(_agen_chunks(f"data: {chunk}\n\n"), info, "msg_1")
+        return [line async for line in stream]
+
+    frames = _frames("".join(asyncio.run(run())))
+    usage = _named(frames, "message_delta")[0]["usage"]
+    assert usage["input_tokens"] == 17
+    assert usage["output_tokens"] == 5

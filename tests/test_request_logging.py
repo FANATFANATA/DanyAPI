@@ -129,3 +129,18 @@ def test_log_requests_failure_via_client(caplog):
     assert logged
     assert "status=404" in logged[0].getMessage()
     assert "failed" in logged[0].getMessage()
+
+
+def test_oversized_body_returns_413_and_is_logged(caplog, monkeypatch):
+    monkeypatch.setattr(openai_mod, "MAX_REQUEST_BODY", 32)
+    app.state.pool = None
+    app.state.qwen_pool = None
+    with caplog.at_level(logging.WARNING, logger="danyapi.api"):
+        client = TestClient(app)
+        resp = client.post("/v1/chat/completions", json={"model": "deepseek-v4.1-flash", "messages": [{"role": "user", "content": "x" * 200}]})
+        client.close()
+    assert resp.status_code == 413
+    assert resp.json()["error"]["type"] == "request_too_large"
+    logged = [r for r in caplog.records if r.name == "danyapi.api" and r.getMessage().startswith("POST /v1/chat/completions ")]
+    assert logged
+    assert "status=413" in logged[0].getMessage()

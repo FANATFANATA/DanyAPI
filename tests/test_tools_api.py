@@ -46,6 +46,17 @@ DS_XML_SSE = (
     "\n"
 )
 
+QWEN_TOOL_TAIL_SSE = (
+    'data: {"response.created":{"chat_id":"c1","parent_id":"p0","response_id":"r1","response_index":"0"}} \n'
+    "\n"
+    'data: {"choices": [{"delta": {"role": "assistant", "content": '
+    + json.dumps("checking <" + TOOL_JSON)
+    + ', "phase": "answer", "status": "typing"}}], "response_id": "r1"}\n'
+    "\n"
+    'data: {"choices": [{"delta": {"content": "", "role": "assistant", "status": "finished", "phase": "answer"}}], "response_id": "r1"}\n'
+    "\n"
+)
+
 QWEN_TOOL_SSE = (
     'data: {"response.created":{"chat_id":"c1","parent_id":"p0","response_id":"r1","response_index":"0"}} \n'
     "\n"
@@ -54,6 +65,21 @@ QWEN_TOOL_SSE = (
     + ', "phase": "answer", "status": "typing"}}], "response_id": "r1"}\n'
     "\n"
     'data: {"choices": [{"delta": {"content": "", "role": "assistant", "status": "finished", "phase": "answer"}}], "response_id": "r1"}\n'
+    "\n"
+)
+
+
+DS_TOOL_TAIL_SSE = (
+    "event: ready\n"
+    'data: {"request_message_id":1,"response_message_id":2,"model_type":"default"}\n'
+    "\n"
+    'data: {"v":{"response":{"message_id":2,"parent_id":1,"status":"WIP","fragments":['
+    '{"id":2,"type":"RESPONSE","content":"checking <{\\"tool_calls\\": [{\\"name\\": \\"get_weather\\","}]}}}\n'
+    "\n"
+    'data: {"p":"response/fragments/-1/content","o":"APPEND","v":"\\"arguments\\": '
+    '{\\"city\\": \\"Moscow\\"}}]}"}\n'
+    "\n"
+    'data: {"p":"response/status","o":"SET","v":"FINISHED"}\n'
     "\n"
 )
 
@@ -116,8 +142,8 @@ async def collect_stream(gen):
     return [line async for line in gen]
 
 
-def _deepseek_args(acct, tool_mode=True):
-    return {
+def _deepseek_args(acct, tool_mode=True, **extra):
+    args = {
         "account": acct,
         "pool": MagicMock(),
         "existing_sid": "s1",
@@ -129,10 +155,12 @@ def _deepseek_args(acct, tool_mode=True):
         "search": False,
         "tool_mode": tool_mode,
     }
+    args.update(extra)
+    return args
 
 
-def _qwen_args(acct, tool_mode=True):
-    return {
+def _qwen_args(acct, tool_mode=True, **extra):
+    args = {
         "account": acct,
         "pool": MagicMock(),
         "existing_sid": "s1",
@@ -144,6 +172,8 @@ def _qwen_args(acct, tool_mode=True):
         "search": False,
         "tool_mode": tool_mode,
     }
+    args.update(extra)
+    return args
 
 
 DS_TOOL_REASONING_SSE = (
@@ -302,3 +332,66 @@ async def test_image_generations_n_returns_multiple():
     assert ci.await_count == 2
     assert ci.await_args.kwargs["existing_sid"] is None
     assert [item["url"] for item in out["data"]] == ["u1", "u2"]
+
+
+def _choice_deltas(lines, index: int) -> list[dict]:
+    found: list[dict] = []
+    for line in lines:
+        if not line.startswith("data: ") or line.startswith("data: [DONE]"):
+            continue
+        payload = json.loads(line[6:])
+        for chunk in payload.get("choices") or []:
+            if chunk.get("index", 0) == index:
+                found.append(chunk)
+    return found
+
+
+async def test_stream_sends_no_text_delta_after_tool_calls():
+    acct = FakeAccount([DS_TOOL_TAIL_SSE])
+    gen = openai_mod._stream_openai(**_deepseek_args(acct))
+    lines = await collect_stream(gen)
+    chunks = _choice_deltas(lines, 0)
+    seen_tool_call = False
+    for chunk in chunks:
+        delta = chunk.get("delta") or {}
+        if delta.get("tool_calls"):
+            seen_tool_call = True
+        if seen_tool_call:
+            assert not delta.get("content")
+    assert any((chunk.get("delta") or {}).get("content") for chunk in chunks)
+
+
+async def test_qwen_stream_sends_no_text_delta_after_tool_calls():
+    acct = FakeAccount([QWEN_TOOL_TAIL_SSE])
+    gen = qwen_api.stream_openai(**_qwen_args(acct))
+    lines = await collect_stream(gen)
+    chunks = _choice_deltas(lines, 0)
+    seen_tool_call = False
+    for chunk in chunks:
+        delta = chunk.get("delta") or {}
+        if delta.get("tool_calls"):
+            seen_tool_call = True
+        if seen_tool_call:
+            assert not delta.get("content")
+
+
+async def test_stream_repeats_tool_calls_for_extra_choices():
+    acct = FakeAccount([DS_TOOL_SSE])
+    gen = openai_mod._stream_openai(**_deepseek_args(acct, n=2))
+    lines = await collect_stream(gen)
+    for index in (0, 1):
+        names = [tc.get("function", {}).get("name") for chunk in _choice_deltas(lines, index) for tc in (chunk.get("delta") or {}).get("tool_calls") or []]
+        assert "get_weather" in names
+    finishes = {chunk.get("finish_reason") for chunk in _choice_deltas(lines, 1) if chunk.get("finish_reason")}
+    assert finishes == {"tool_calls"}
+
+
+async def test_qwen_stream_repeats_tool_calls_for_extra_choices():
+    acct = FakeAccount([QWEN_TOOL_SSE])
+    gen = qwen_api.stream_openai(**_qwen_args(acct, n=2))
+    lines = await collect_stream(gen)
+    for index in (0, 1):
+        names = [tc.get("function", {}).get("name") for chunk in _choice_deltas(lines, index) for tc in (chunk.get("delta") or {}).get("tool_calls") or []]
+        assert "get_weather" in names
+    finishes = {chunk.get("finish_reason") for chunk in _choice_deltas(lines, 1) if chunk.get("finish_reason")}
+    assert finishes == {"tool_calls"}

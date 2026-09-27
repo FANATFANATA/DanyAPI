@@ -14,6 +14,8 @@ import danyapi.api.openai as openai_mod
 from danyapi.accounts import AccountPoolBusy
 from danyapi.api.openai import ChatMessage, app, settings
 
+ADMIN_HEADERS = {"authorization": "Bearer test-admin-token"}
+
 OK_SSE = (
     "event: ready\n"
     'data: {"request_message_id":1,"response_message_id":2,"model_type":"default"}\n'
@@ -316,7 +318,7 @@ def test_add_tokens_reactivates_deepseek(monkeypatch):
     app.state.pool = SimpleNamespace(accounts=[acct])
     monkeypatch.setattr(openai_mod, "_read_env_tokens", AsyncMock(return_value=([token], [])))
     client = TestClient(app)
-    resp = client.post("/v1/tokens", json={"deepseek_tokens": [token]})
+    resp = client.post("/v1/tokens", headers=ADMIN_HEADERS, json={"deepseek_tokens": [token]})
     client.close()
     assert resp.status_code == 200
     assert resp.json()["reactivated"]["deepseek"] == 1
@@ -330,7 +332,7 @@ def test_add_tokens_reactivate_check_raises(monkeypatch):
     app.state.pool = SimpleNamespace(accounts=[acct])
     monkeypatch.setattr(openai_mod, "_read_env_tokens", AsyncMock(return_value=([token], [])))
     client = TestClient(app)
-    resp = client.post("/v1/tokens", json={"deepseek_tokens": [token]})
+    resp = client.post("/v1/tokens", headers=ADMIN_HEADERS, json={"deepseek_tokens": [token]})
     client.close()
     assert resp.status_code == 400
 
@@ -342,7 +344,7 @@ def test_add_tokens_reactivate_not_valid(monkeypatch):
     app.state.pool = SimpleNamespace(accounts=[acct])
     monkeypatch.setattr(openai_mod, "_read_env_tokens", AsyncMock(return_value=([token], [])))
     client = TestClient(app)
-    resp = client.post("/v1/tokens", json={"deepseek_tokens": [token]})
+    resp = client.post("/v1/tokens", headers=ADMIN_HEADERS, json={"deepseek_tokens": [token]})
     client.close()
     assert resp.status_code == 400
 
@@ -354,7 +356,7 @@ def test_add_tokens_reactivates_qwen(monkeypatch):
     app.state.qwen_pool = SimpleNamespace(accounts=[acct])
     monkeypatch.setattr(openai_mod, "_read_env_tokens", AsyncMock(return_value=([], [token])))
     client = TestClient(app)
-    resp = client.post("/v1/tokens", json={"qwen_tokens": [token]})
+    resp = client.post("/v1/tokens", headers=ADMIN_HEADERS, json={"qwen_tokens": [token]})
     client.close()
     assert resp.status_code == 200
     assert resp.json()["reactivated"]["qwen"] == 1
@@ -377,7 +379,7 @@ def test_add_tokens_hot_adds_both(monkeypatch):
     app.state.qwen_pool = qwen_pool
     monkeypatch.setattr(openai_mod, "_fetch_qwen_models", AsyncMock(side_effect=RuntimeError("boom")))
     client = TestClient(app)
-    resp = client.post("/v1/tokens", json={"deepseek_tokens": ["d"], "qwen_tokens": ["q"]})
+    resp = client.post("/v1/tokens", headers=ADMIN_HEADERS, json={"deepseek_tokens": ["d"], "qwen_tokens": ["q"]})
     client.close()
     assert resp.status_code == 200
     pool.add_account.assert_called_once()
@@ -398,7 +400,7 @@ def test_add_tokens_skips_invalid(monkeypatch):
     app.state.pool = None
     app.state.qwen_pool = None
     client = TestClient(app)
-    resp = client.post("/v1/tokens", json={"deepseek_tokens": ["d"], "qwen_tokens": ["q"]})
+    resp = client.post("/v1/tokens", headers=ADMIN_HEADERS, json={"deepseek_tokens": ["d"], "qwen_tokens": ["q"]})
     client.close()
     assert resp.status_code == 200
     assert resp.json()["skipped"] == {"deepseek": 1, "qwen": 1}
@@ -409,28 +411,28 @@ def test_add_tokens_all_exist(monkeypatch):
     app.state.qwen_pool = None
     monkeypatch.setattr(openai_mod, "_read_env_tokens", AsyncMock(return_value=(["a"], ["b"])))
     client = TestClient(app)
-    resp = client.post("/v1/tokens", json={"deepseek_tokens": ["a"], "qwen_tokens": ["b"]})
+    resp = client.post("/v1/tokens", headers=ADMIN_HEADERS, json={"deepseek_tokens": ["a"], "qwen_tokens": ["b"]})
     client.close()
     assert resp.status_code == 400
 
 
 def test_add_tokens_no_tokens():
     client = TestClient(app)
-    resp = client.post("/v1/tokens", json={})
+    resp = client.post("/v1/tokens", headers=ADMIN_HEADERS, json={})
     client.close()
     assert resp.status_code == 400
 
 
 def test_add_tokens_non_list():
     client = TestClient(app)
-    resp = client.post("/v1/tokens", json={"deepseek_tokens": "x"})
+    resp = client.post("/v1/tokens", headers=ADMIN_HEADERS, json={"deepseek_tokens": "x"})
     client.close()
     assert resp.status_code == 400
 
 
 def test_add_tokens_bad_item():
     client = TestClient(app)
-    resp = client.post("/v1/tokens", json={"deepseek_tokens": [42]})
+    resp = client.post("/v1/tokens", headers=ADMIN_HEADERS, json={"deepseek_tokens": [42]})
     client.close()
     assert resp.status_code == 400
 
@@ -513,8 +515,8 @@ def test_error_type_for_status():
 
 
 def test_exception_message():
-    assert openai_mod._exception_message(RuntimeError("")) == "An unexpected error occurred"
-    assert openai_mod._exception_message(RuntimeError("boom")) == "boom"
+    assert openai_mod._exception_message(RuntimeError("")) == "internal server error"
+    assert openai_mod._exception_message(RuntimeError("boom")) == "internal server error"
 
 
 def test_request_id_header():
@@ -1359,7 +1361,7 @@ def test_incomplete_message_helpers():
     assert openai_mod._incomplete_message(rec) == "custom"
     rec2 = SimpleNamespace(hint_error={})
     assert openai_mod._incomplete_message(rec2) == openai_mod.RESPONSE_INCOMPLETE_MESSAGE
-    assert openai_mod.RESPONSE_INCOMPLETE in openai_mod._incomplete_error_body("m")
+    assert openai_mod._incomplete_error_body("m")["error"]["finish_reason"] == openai_mod.RESPONSE_INCOMPLETE
 
 
 def test_retry_delay():
@@ -1418,3 +1420,82 @@ def test_parse_image_size():
         openai_mod._parse_image_size("bad")
     with pytest.raises(HTTPException):
         openai_mod._parse_image_size("1x1")
+
+
+def test_add_tokens_requires_admin_token():
+    client = TestClient(app)
+    resp = client.post("/v1/tokens", json={"deepseek_tokens": ["x"]})
+    client.close()
+    assert resp.status_code == 401
+    assert resp.json()["error"]["type"] == "authentication_error"
+
+
+def test_add_tokens_rejects_wrong_admin_token():
+    client = TestClient(app)
+    resp = client.post("/v1/tokens", headers={"authorization": "Bearer nope"}, json={"deepseek_tokens": ["x"]})
+    client.close()
+    assert resp.status_code == 401
+
+
+def test_add_tokens_disabled_without_configured_token(monkeypatch):
+    monkeypatch.setattr(settings, "admin_token", "", raising=False)
+    client = TestClient(app)
+    resp = client.post("/v1/tokens", headers=ADMIN_HEADERS, json={"deepseek_tokens": ["x"]})
+    client.close()
+    assert resp.status_code == 404
+
+
+def test_add_tokens_absent_in_byok_mode(monkeypatch):
+    monkeypatch.setattr(app.state, "byok", True, raising=False)
+    client = TestClient(app)
+    resp = client.post("/v1/tokens", headers=ADMIN_HEADERS, json={"deepseek_tokens": ["x"]})
+    client.close()
+    assert resp.status_code == 404
+
+
+def test_add_tokens_accepts_x_api_key(monkeypatch):
+    monkeypatch.setattr(openai_mod, "_read_env_tokens", AsyncMock(return_value=(["tok"], [])))
+    client = TestClient(app)
+    resp = client.post("/v1/tokens", headers={"x-api-key": "test-admin-token"}, json={"deepseek_tokens": ["tok"]})
+    client.close()
+    assert resp.status_code == 400
+    assert resp.json()["error"]["message"] == "all provided tokens already exist"
+
+
+def test_write_env_tokens_is_atomic(monkeypatch, tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("A=1\nDEEPSEEK_TOKENS=old\n", encoding="utf-8")
+    monkeypatch.setattr(openai_mod, "_env_path", lambda: env_file)
+    openai_mod._write_env_tokens_sync(["new"], ["q"])
+    text = env_file.read_text(encoding="utf-8")
+    assert "DEEPSEEK_TOKENS=new" in text
+    assert "QWEN_TOKENS=q" in text
+    assert "A=1" in text
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+async def test_fetch_qwen_models_survives_network_error():
+    client = SimpleNamespace(fetch_models=AsyncMock(side_effect=RuntimeError("connection reset")))
+    assert await openai_mod._fetch_qwen_models(client) == openai_mod.QWEN_DEFAULT_MODELS
+
+
+async def test_image_http_client_is_shared():
+    app.state.http_client = None
+    first, second = await asyncio.gather(openai_mod._image_http_client(), openai_mod._image_http_client())
+    assert first is second
+    await first.aclose()
+    app.state.http_client = None
+
+
+async def test_close_pool_removes_scoped_store_files(monkeypatch, tmp_path):
+    removed: list[str] = []
+
+    class FakeStore:
+        def remove(self):
+            removed.append("gone")
+
+    acct = SimpleNamespace(label="a", client=SimpleNamespace(aclose=AsyncMock()), sessions=SimpleNamespace(close_all=lambda: None))
+    pool = SimpleNamespace(accounts=[acct], flush=lambda: None)
+    await openai_mod._close_pool(pool, [FakeStore()])
+    assert removed == ["gone"]
+    acct.client.aclose.assert_awaited_once()

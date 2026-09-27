@@ -1,5 +1,4 @@
 import asyncio
-import json
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
@@ -117,7 +116,7 @@ async def test_collect_image_auth_error_raises_401():
         await qwen_api.collect_image(**_args(acct))
     assert isinstance(excinfo.value, qwen_api.HTTPException)
     assert excinfo.value.status_code == 401
-    body = json.loads(excinfo.value.detail)
+    body = excinfo.value.detail
     assert body["error"]["code"] == "unauthorized"
 
 

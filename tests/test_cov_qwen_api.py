@@ -370,14 +370,14 @@ async def test_send_completion_non_dict_payload():
     assert excinfo.value.status_code == 502
 
 
-def test_error_body_variants():
+def test_error_detail_variants():
     rec = MagicMock()
     rec.error = {"code": "x", "details": "boom"}
-    body = json.loads(qwen_api._error_body(rec))
+    body = qwen_api._error_detail(rec)
     assert body["error"]["message"] == "boom"
     rec2 = MagicMock()
     rec2.error = {}
-    body2 = json.loads(qwen_api._error_body(rec2))
+    body2 = qwen_api._error_detail(rec2)
     assert body2["error"]["code"] is None
 
 

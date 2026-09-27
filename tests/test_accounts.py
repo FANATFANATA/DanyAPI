@@ -366,6 +366,17 @@ def test_account_for_session_expired():
     assert "s1" not in pool._by_session
 
 
+def test_affinity_lookup_marks_session_recent_without_ttl():
+    pool = AccountPool([make_acct(0), make_acct(1)])
+    for i in range(_MAX_AFFINITY):
+        pool._by_session[f"s{i}"] = (0, time.monotonic())
+    assert pool.account_for_session("s0") is not None
+    pool.register(0, "new")
+    assert "s1" not in pool._by_session
+    assert "s0" in pool._by_session
+    assert list(pool._by_session)[-1] == "new"
+
+
 def test_account_for_session_broken():
     a0 = make_acct(0)
     a0.broken = True

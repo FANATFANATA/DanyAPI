@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -248,7 +249,7 @@ async def test_chat_qwen_rejects_non_image_attachment(monkeypatch):
     monkeypatch.setattr(
         openai_mod,
         "_collect_attachments",
-        lambda req: [Attachment(b"a", "a.txt", "text/plain", False)],
+        lambda req, allow_remote=False: [Attachment(b"a", "a.txt", "text/plain", False)],
     )
     req = SimpleNamespace(
         model="qwen3.8-max",
@@ -264,6 +265,35 @@ async def test_chat_qwen_rejects_non_image_attachment(monkeypatch):
     with pytest.raises(openai_mod.HTTPException) as excinfo:
         await openai_mod._chat_completions_qwen(req, pool=MagicMock())
     assert excinfo.value.status_code == 400
+
+
+def test_collect_attachments_allows_remote_urls_for_qwen():
+    req = SimpleNamespace(
+        messages=[
+            SimpleNamespace(
+                content=[
+                    {"type": "text", "text": "look"},
+                    {"type": "image_url", "image_url": {"url": "https://example.com/a.png"}},
+                ]
+            )
+        ],
+        files=None,
+    )
+    assert openai_mod._collect_attachments(req, allow_remote=True) == []
+    with pytest.raises(openai_mod.HTTPException) as excinfo:
+        openai_mod._collect_attachments(req)
+    assert excinfo.value.status_code == 400
+
+
+def test_collect_attachments_keeps_data_uris():
+    payload = base64.b64encode(b"png").decode()
+    req = SimpleNamespace(
+        messages=[SimpleNamespace(content=[{"type": "image_url", "image_url": f"data:image/png;base64,{payload}"}])],
+        files=None,
+    )
+    found = openai_mod._collect_attachments(req, allow_remote=True)
+    assert [att.name for att in found] == ["image_0.png"]
+    assert found[0].data == b"png"
 
 
 async def test_send_completion_status_error_is_generic_failure():

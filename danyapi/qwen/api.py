@@ -257,17 +257,14 @@ def _is_retryable_error(rec: QwenStreamReconstructor) -> bool:
     return bool(rec.error and error_code(rec.error) in RETRYABLE_ERROR_CODES and not rec.has_content)
 
 
-def _error_body(rec: QwenStreamReconstructor) -> str:
+def _error_detail(rec: QwenStreamReconstructor) -> dict:
     err = rec.error or {}
-    return json.dumps(
-        {
-            "error": {
-                "message": err.get("details") or err.get("message") or "Qwen server error, try again later",
-                "code": err.get("code"),
-            }
-        },
-        ensure_ascii=False,
-    )
+    return {
+        "error": {
+            "message": err.get("details") or err.get("message") or "Qwen server error, try again later",
+            "code": err.get("code"),
+        }
+    }
 
 
 def _sse(data: dict) -> str:
@@ -559,17 +556,18 @@ async def collect_non_stream(
     stop: Any = None,
     n: int | None = None,
     parallel_tool_calls: bool | None = None,
+    cached_session=None,
 ):
     await _human_delay()
     async with account_lock(lock, settings.acquire_timeout):
+        had_cached_session = bool(existing_sid) and account.sessions.get(existing_sid) is not None
         session, session_key = await _prepare_session(account, pool, existing_sid, model_id, context_seq)
-        if session_key != existing_sid and messages is not None:
+        if (session_key != existing_sid or session is not cached_session) and messages is not None:
             try:
                 prompt, tool_mode = toolemu.build_prompt(messages, tools, tool_choice, False, response_format)
             except ValueError:
                 pass
             tool_schemas = toolemu.tool_schema_map(tools)
-        had_cached_session = bool(existing_sid) and account.sessions.get(existing_sid) is not None
         rec, session, session_key, prompt, tool_mode, tool_schemas = await _collect_response(
             account,
             pool,
@@ -610,7 +608,7 @@ async def collect_non_stream(
         )
 
         if not rec.has_content and rec.error:
-            raise HTTPException(_error_status(error_code(rec.error)), _error_body(rec))
+            raise HTTPException(_error_status(error_code(rec.error)), _error_detail(rec))
 
         message, finish = _build_limited_message(rec, tool_mode, tool_schemas, max_tokens, stop, parallel_tool_calls)
         response = {
@@ -653,12 +651,14 @@ async def stream_openai(
     stop: Any = None,
     n: int | None = None,
     parallel_tool_calls: bool | None = None,
+    cached_session=None,
 ):
     chunk_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
 
     await _human_delay()
     async with account_lock(lock, settings.acquire_timeout):
+        had_cached_session = bool(existing_sid) and account.sessions.get(existing_sid) is not None
         try:
             session, session_key = await _prepare_session(account, pool, existing_sid, model_id, context_seq)
         except HTTPException as exc:
@@ -667,7 +667,7 @@ async def stream_openai(
                 yield line
             return
 
-        if session_key != existing_sid and messages is not None:
+        if (session_key != existing_sid or session is not cached_session) and messages is not None:
             try:
                 prompt, tool_mode = toolemu.build_prompt(messages, tools, tool_choice, False, response_format)
             except ValueError:
@@ -757,9 +757,12 @@ async def stream_openai(
                 payload["session_id"] = session_key
             return _sse(payload)
 
-        def extra_choice_lines(finish: str, count: int) -> Iterator[str]:
+        def extra_choice_lines(finish: str, count: int, tool_deltas: list[dict]) -> Iterator[str]:
             for extra_index in range(1, count):
-                if budget.text:
+                if tool_deltas:
+                    for delta in tool_deltas:
+                        yield delta_line(delta, extra_index)
+                elif budget.text:
                     yield delta_line({"content": budget.text}, extra_index)
                 yield finish_line(finish, extra_index)
 
@@ -794,7 +797,6 @@ async def stream_openai(
                     yield delta_line(delta)
 
         stop_response_id: str | None = None
-        had_cached_session = bool(existing_sid) and account.sessions.get(existing_sid) is not None
         stale_rebuilt = False
         attempt = 0
         prompt_with_images = _append_image_markdown(prompt, messages)
@@ -934,13 +936,15 @@ async def stream_openai(
                 yield line
             return
 
+        tool_deltas: list[dict] = []
         if tool_mode:
             parsed = toolemu.parse_tool_calls(content_buf, tool_schemas)
             tool_calls = parsed[0] if parsed is not None else []
             if tool_calls:
                 if _max_calls(parallel_tool_calls) is not None:
                     tool_calls = tool_calls[: _max_calls(parallel_tool_calls)]
-                for delta in toolemu.tool_call_deltas(tool_calls):
+                tool_deltas = toolemu.tool_call_deltas(tool_calls)
+                for delta in tool_deltas:
                     yield delta_line(delta)
                 finish = "tool_calls"
             else:
@@ -951,9 +955,10 @@ async def stream_openai(
         else:
             finish = done_finish()
 
-        remainder = flush_piece()
-        if remainder:
-            yield delta_line({"content": remainder})
+        if not tool_deltas:
+            remainder = flush_piece()
+            if remainder:
+                yield delta_line({"content": remainder})
 
         reason_tail = flush_reasoning()
         if reason_tail:
@@ -964,7 +969,7 @@ async def stream_openai(
             yield role_line()
 
         yield finish_line(finish)
-        for line in extra_choice_lines(finish, _choice_count(n)):
+        for line in extra_choice_lines(finish, _choice_count(n), tool_deltas):
             yield line
         if include_usage:
             usage_payload = {
@@ -1036,7 +1041,7 @@ async def collect_image(
         )
 
         if not rec.has_content and rec.error:
-            raise HTTPException(_error_status(error_code(rec.error)), _error_body(rec))
+            raise HTTPException(_error_status(error_code(rec.error)), _error_detail(rec))
 
         return {
             "image_urls": rec.image_urls,

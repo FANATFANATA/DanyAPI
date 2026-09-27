@@ -221,6 +221,20 @@ class JsonStore:
             self._data.clear()
         self._note_changed()
 
+    def remove(self) -> None:
+        if self._path is None:
+            return
+        self.flush()
+        with self._lock:
+            self._data.clear()
+            self._dirty = False
+            self._pending = False
+            self._idle.set()
+        try:
+            self._path.unlink(missing_ok=True)
+        except OSError as exc:
+            log.warning("cache file delete failed for %s: %s", self._path, exc)
+
     def items(self) -> list[tuple[str, Any]]:
         with self._lock:
             return list(self._data.items())

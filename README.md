@@ -92,6 +92,7 @@ Credentials:
 | `DEEPSEEK_TOKENS` | empty | Comma-separated DeepSeek web tokens. Required unless only Qwen is used |
 | `QWEN_TOKENS` | empty | Comma-separated Qwen web tokens. Required unless only DeepSeek is used |
 | `BYOK` / `BYOK_MODE` / `DANYAPI_BYOK_MODE` | empty | `1` runs in bring-your-own-key mode: every request supplies its own provider token instead of using the pools above |
+| `DANYAPI_ADMIN_TOKEN` | empty | Bearer token required by `POST /v1/tokens`, empty keeps that endpoint disabled |
 
 Server:
 

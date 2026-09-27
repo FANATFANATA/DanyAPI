@@ -495,12 +495,18 @@ class _StreamState:
             yield self.emit("content_block_stop", {"index": index})
         self.tool_index.clear()
 
+    def close_for_tool(self) -> Iterator[str]:
+        yield from self.close_thinking()
+        yield from self.close_text()
+
     def close_all(self) -> Iterator[str]:
         yield from self.close_thinking()
         yield from self.close_text()
         yield from self.close_tools()
 
     def thinking_delta(self, text: str) -> Iterator[str]:
+        if self.text_open:
+            yield from self.close_text()
         if not self.thinking_open:
             self.thinking_open = True
             self.thinking_index = self._take_index()
@@ -511,6 +517,8 @@ class _StreamState:
         yield self.emit("content_block_delta", {"index": self.thinking_index, "delta": {"type": "thinking_delta", "thinking": text}})
 
     def text_delta(self, text: str) -> Iterator[str]:
+        if self.thinking_open:
+            yield from self.close_thinking()
         if not self.text_open:
             self.text_open = True
             self.text_index = self._take_index()
@@ -569,8 +577,8 @@ async def translate_stream(
                     continue
                 usage = _usage(payload.get("usage"))
                 if usage["output_tokens"]:
-                    state.usage = usage
-                elif usage["input_tokens"]:
+                    state.usage["output_tokens"] = usage["output_tokens"]
+                if usage["input_tokens"]:
                     state.usage["input_tokens"] = usage["input_tokens"]
                 choices = payload.get("choices")
                 if not isinstance(choices, list):
@@ -596,6 +604,8 @@ async def translate_stream(
                                 function = call.get("function")
                                 if not isinstance(function, dict):
                                     function = call
+                                for line in state.close_for_tool():
+                                    yield line
                                 index = state.tool_start(slot, call)
                                 if call.get("id"):
                                     yield state.emit(

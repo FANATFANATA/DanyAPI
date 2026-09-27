@@ -125,6 +125,7 @@ class Settings:
         self.auto_update = not _env_off("DANYAPI_AUTO_UPDATE", "1")
         self.cors_origins = _env_list("DANYAPI_CORS_ORIGINS")
         self.responses_max_records = _env_int("DANYAPI_RESPONSES_MAX_RECORDS", 1024, 1)
+        self.admin_token = _env_str("DANYAPI_ADMIN_TOKEN")
 
 
 settings = Settings()

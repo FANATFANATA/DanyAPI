@@ -290,12 +290,14 @@ def test_drop_session():
 def test_busy_error_body():
     rec = MagicMock()
     rec.hint_error = {"message": "busy", "finish_reason": "server_busy"}
-    body = json.loads(openai_mod._busy_error_body(rec))
+    body = openai_mod._busy_error_body(rec)
     assert body["error"]["message"] == "busy"
+    assert body["error"]["finish_reason"] == "server_busy"
     rec = MagicMock()
     rec.hint_error = {}
-    body = json.loads(openai_mod._busy_error_body(rec))
+    body = openai_mod._busy_error_body(rec)
     assert "busy" in body["error"]["message"]
+    assert body["error"]["finish_reason"] is None
 
 
 async def test_send_with_auth_marks_broken():
@@ -334,14 +336,16 @@ async def test_existing_session_reused():
     pool.register.assert_called_once_with(0, "s1")
 
 
-async def test_swapped_session_forgets_old():
+async def test_prepare_session_registers_returned_key():
     acct = FakeAccount()
     pool = MagicMock()
     acct.sessions.obtain = AsyncMock(return_value=(FakeSession(sid="new1"), "new1"))
-    await openai_mod._prepare_session(acct, pool, "old1", ("u1",))
-    pool.forget.assert_called_once_with("old1")
-    pool.forget_context.assert_called_once_with("old1")
-    acct.sessions.forget.assert_called_once_with("old1")
+    session, session_key, _parent_message_id = await openai_mod._prepare_session(acct, pool, "old1", ("u1",))
+    assert session.id == "new1"
+    assert session_key == "new1"
+    pool.register.assert_called_once_with(0, "new1")
+    pool.index_context.assert_called_once_with("new1", ("u1",))
+    pool.forget.assert_not_called()
 
 
 async def test_acquire_and_build_with_session():
@@ -1174,8 +1178,8 @@ async def test_non_stream_input_exceeds_http_continuation_none():
             search=False,
         )
     assert excinfo.value.status_code == 502
-    assert "Content is too long" in excinfo.value.detail
-    assert "response_incomplete" in excinfo.value.detail
+    assert "Content is too long" in excinfo.value.detail["error"]["message"]
+    assert excinfo.value.detail["error"]["finish_reason"] == "response_incomplete"
 
 
 async def test_stream_input_exceeds_http_continuation_none():
@@ -1398,8 +1402,8 @@ async def test_non_stream_input_exceeds_reduced_retry_fails():
             reduced_prompts=[("short prompt", False, {})],
         )
     assert excinfo.value.status_code == 502
-    assert "Content is too long" in excinfo.value.detail
-    assert "response_incomplete" in excinfo.value.detail
+    assert "Content is too long" in excinfo.value.detail["error"]["message"]
+    assert excinfo.value.detail["error"]["finish_reason"] == "response_incomplete"
 
 
 async def test_stream_input_exceeds_reduced_retry_fails():
@@ -1920,7 +1924,7 @@ async def test_non_stream_input_exceeds_continuation_none():
             search=False,
         )
     assert excinfo.value.status_code == 502
-    assert "response_incomplete" in excinfo.value.detail
+    assert excinfo.value.detail["error"]["finish_reason"] == "response_incomplete"
 
 
 async def test_stream_input_exceeds_tool_mode_continuation():
@@ -2070,7 +2074,7 @@ async def test_non_stream_continuation_rounds_exhausted():
             search=False,
         )
     assert excinfo.value.status_code == 502
-    assert "response_incomplete" in excinfo.value.detail
+    assert excinfo.value.detail["error"]["finish_reason"] == "response_incomplete"
     assert acct.client.completion.await_count == 1 + openai_mod.MAX_CONTINUE_ROUNDS
 
 

@@ -22,7 +22,7 @@ except ModuleNotFoundError:
 
 ROOT = Path(__file__).resolve().parent
 PYTHON_DIRS = ["danyapi", "tests", "docs"]
-BANDIT_SKIPS = "B101,B104,B112,B311,B404,B603"
+BANDIT_SKIPS = "B101,B104,B112,B311"
 PYLINT_DISABLES = "import-error,unsubscriptable-object,not-an-iterable"
 C_SOURCES = ["danyapi/deepseek/pow_solver.c"]
 CLANG_TIDY_CHECKS = (
@@ -227,7 +227,7 @@ def build_steps(pytest_args: list[str]) -> list[tuple[str, StepRunner]]:
         ),
         (
             "bandit",
-            [sys.executable, "-m", "bandit", "-q", "-r", "danyapi", "-s", BANDIT_SKIPS],
+            [sys.executable, "-m", "bandit", "-q", "-r", "danyapi", "-s", BANDIT_SKIPS, "-c", "bandit.toml"],
         ),
         ("vulture", [sys.executable, "-m", "vulture"]),
         ("clang-format", ["clang-format", "--dry-run", *C_SOURCES]),

@@ -3,14 +3,17 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import hmac
 import json
 import logging
+import os
 import random
 import re
+import tempfile
 import time
 import uuid
 import weakref
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from functools import partial
@@ -18,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
@@ -32,7 +35,7 @@ from ..deepseek.client import DeepSeekClient, DeepSeekError, DeepSeekSession
 from ..deepseek.stream import IncrementalSSE, MessageReconstructor
 from ..qwen import api as qwen_api
 from ..qwen.accounts import QwenAccount
-from ..qwen.client import QwenClient, QwenError
+from ..qwen.client import QwenClient
 from ..sseutil import StreamStopFilter, split_stop
 from ..store import JsonStore
 from ..tokens import StreamBudget, count_message_tokens, count_messages_tokens, estimate_tokens, trim_to_tokens
@@ -464,7 +467,7 @@ async def lifespan(app: FastAPI):
 async def _fetch_qwen_models(client: QwenClient) -> list[dict]:
     try:
         raw = await client.fetch_models()
-    except QwenError as exc:
+    except Exception as exc:
         log.warning("qwen models fetch failed, using defaults: %s", exc)
         return QWEN_DEFAULT_MODELS
     models = []
@@ -552,6 +555,18 @@ def _unquote_env_value(value: str) -> str:
     return value
 
 
+def _atomic_write_text(target: Path, text: str) -> None:
+    handle, tmp_name = tempfile.mkstemp(dir=str(target.parent), suffix=f".{target.name}.tmp")
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as handle_out:
+            handle_out.write(text)
+        os.replace(tmp_path, target)
+    except OSError:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
 def _read_env_tokens_sync() -> tuple[list[str], list[str]]:
     env_file = _env_path()
     if not env_file.exists():
@@ -595,7 +610,7 @@ def _write_env_tokens_sync(ds_tokens: list[str], qw_tokens: list[str]) -> None:
         new_lines.append(ds_line)
     if not qw_set:
         new_lines.append(qw_line)
-    env_file.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    _atomic_write_text(env_file, "\n".join(new_lines) + "\n")
 
 
 async def _write_env_tokens(ds_tokens: list[str], qw_tokens: list[str]) -> None:
@@ -615,6 +630,20 @@ def _env_token_list(value: Any, field: str) -> list[str]:
         if token:
             result.append(token)
     return result
+
+
+def _require_admin_token(request: Request) -> None:
+    if _byok_mode():
+        raise HTTPException(404, "Unknown /v1 endpoint: /v1/tokens")
+    expected = settings.admin_token
+    if not expected:
+        raise HTTPException(404, "token management is disabled, set DANYAPI_ADMIN_TOKEN to enable it")
+    provided = (request.headers.get("x-api-key") or "").strip()
+    authorization = request.headers.get("authorization") or ""
+    if not provided and authorization.lower().startswith("bearer "):
+        provided = authorization[7:].strip()
+    if not provided or not hmac.compare_digest(provided, expected):
+        raise HTTPException(401, "invalid or missing admin token")
 
 
 def _shared_store(attr: str, name: str, *, maxsize: int = 0) -> JsonStore:
@@ -638,7 +667,7 @@ def _pool_account_by_stable(pool: AccountPool | None, stable_id: str) -> Any | N
     return None
 
 
-@app.post("/v1/tokens")
+@app.post("/v1/tokens", dependencies=[Depends(_require_admin_token)])
 async def add_tokens(tokens: dict) -> dict:
     async with _TOKENS_LOCK:
         new_ds = _env_token_list(tokens.get("deepseek_tokens"), "deepseek_tokens")
@@ -956,8 +985,17 @@ def _log_request_success(request: Request, payload: dict[str, Any], duration: fl
 async def _log_requests(request: Request, call_next):
     started = time.monotonic()
     payload: dict[str, Any] = {}
-    if log.isEnabledFor(logging.INFO) or log.isEnabledFor(logging.WARNING):
-        payload = await _extract_request_body(request)
+    try:
+        if log.isEnabledFor(logging.INFO) or log.isEnabledFor(logging.WARNING):
+            payload = await _extract_request_body(request)
+    except HTTPException as exc:
+        _log_request_failure(
+            request,
+            payload,
+            (time.monotonic() - started) * 1000,
+            status=exc.status_code,
+        )
+        return await _on_http_exception(request, exc)
     try:
         response = await call_next(request)
     except Exception as exc:
@@ -1013,11 +1051,16 @@ def _error_code_for_status(status: int) -> str | None:
     return None
 
 
+INTERNAL_ERROR_MESSAGE = "internal server error"
+
+
 def _exception_message(exc: Exception) -> str:
-    text = str(exc).strip()
-    if not text:
-        return "An unexpected error occurred"
-    return text
+    log.exception("unhandled api error: %s", exc)
+    return INTERNAL_ERROR_MESSAGE
+
+
+def _error_detail(message: str, finish_reason: Any = None) -> dict:
+    return {"error": {"message": message, "finish_reason": finish_reason}}
 
 
 def _openai_error_payload(status: int, message: str, request_id: str | None = None) -> dict:
@@ -1057,9 +1100,19 @@ async def _on_http_exception(request: Request, exc: HTTPException) -> JSONRespon
     headers = {"x-request-id": request_id}
     if exc.headers:
         headers.update({str(k): str(v) for k, v in exc.headers.items()})
+    detail = exc.detail
+    if isinstance(detail, dict):
+        inner = detail.get("error")
+        if not isinstance(inner, dict):
+            inner = detail
+        message = inner.get("message")
+        content = _openai_error_payload(exc.status_code, message if isinstance(message, str) else str(detail), request_id)
+        content["error"].update({key: value for key, value in inner.items() if key != "message" and value is not None})
+    else:
+        content = _openai_error_payload(exc.status_code, str(detail), request_id)
     return JSONResponse(
         status_code=exc.status_code,
-        content=_openai_error_payload(exc.status_code, str(exc.detail), request_id),
+        content=content,
         headers=headers,
     )
 
@@ -1181,7 +1234,10 @@ def _split_data_uri(uri: str) -> tuple[str, bytes]:
     return _decode_data_uri(*_data_uri_parts(uri))
 
 
-def _collect_attachments(req: ChatCompletionRequest) -> list[Attachment]:
+REMOTE_IMAGE_SCHEMES = ("http://", "https://")
+
+
+def _collect_attachments(req: ChatCompletionRequest, allow_remote: bool = False) -> list[Attachment]:
     attachments: list[Attachment] = []
     raw_total = 0
     for msg in req.messages:
@@ -1198,6 +1254,8 @@ def _collect_attachments(req: ChatCompletionRequest) -> list[Attachment]:
                     uri = image_url["url"]
                 else:
                     raise HTTPException(400, "invalid image_url value")
+                if allow_remote and uri.startswith(REMOTE_IMAGE_SCHEMES):
+                    continue
                 raw_total += _raw_data_uri_length(uri)
                 if raw_total > MAX_ATTACHMENT_TOTAL_SIZE:
                     raise HTTPException(413, "attachments too large")
@@ -1490,6 +1548,14 @@ async def _byok_auth_state() -> dict[str, dict[str, Any]]:
     return auth
 
 
+async def _byok_stores_state() -> dict[str, dict[str, list[JsonStore]]]:
+    stores = getattr(app.state, "byok_stores", None)
+    if stores is None:
+        stores = {"deepseek": {}, "qwen": {}}
+        app.state.byok_stores = stores
+    return stores
+
+
 def _cached_auth(store: dict[str, Any], stable: str, ttl: float, now: float) -> bool | None:
     if ttl <= 0:
         return None
@@ -1555,7 +1621,7 @@ async def _extract_request_api_key(request: Request) -> str | None:
 _deferred_close_tasks: set[asyncio.Task] = set()
 
 
-async def _close_pool(pool: Any) -> None:
+async def _close_pool(pool: Any, stores: Sequence[JsonStore] | None = None) -> None:
     def _release_stores() -> None:
         for acct in pool.accounts:
             try:
@@ -1568,6 +1634,11 @@ async def _close_pool(pool: Any) -> None:
                 flush()
             except Exception as exc:
                 log.info("pool store flush failed: %s", exc)
+        for store in stores or ():
+            try:
+                store.remove()
+            except Exception as exc:
+                log.info("byok cache file delete failed: %s", exc)
 
     await asyncio.to_thread(_release_stores)
     for acct in pool.accounts:
@@ -1646,14 +1717,18 @@ async def _byok_pool(provider: str, tokens: list[str]) -> AccountPool:
             cache.pop(cache_key)
             cache[cache_key] = pool
             return pool
+        stores = await _byok_stores_state()
+        scoped_stores = stores[provider]
         if pool is not None:
             cache.pop(cache_key, None)
-            await _close_pool(pool)
+            await _close_pool(pool, scoped_stores.pop(cache_key, None))
         scope = ("byok-" + _token_stable_id(cache_key)) if settings.cache_enabled else None
+        created: list[JsonStore] = []
         if provider == "deepseek":
             session_store = JsonStore("deepseek-sessions", scope) if settings.cache_enabled else None
             context_store = JsonStore("deepseek-contexts", scope) if settings.cache_enabled else None
             affinity_store = JsonStore("deepseek-affinities", scope) if settings.cache_enabled else None
+            created = [store for store in (session_store, context_store, affinity_store) if store is not None]
             accounts: list[DeepSeekAccount] = []
             for i, token in enumerate(tokens):
                 ds_client = DeepSeekClient(token=token, timeout=settings.timeout)
@@ -1684,6 +1759,7 @@ async def _byok_pool(provider: str, tokens: list[str]) -> AccountPool:
             session_store = JsonStore("qwen-sessions", scope) if settings.cache_enabled else None
             context_store = JsonStore("qwen-contexts", scope) if settings.cache_enabled else None
             affinity_store = JsonStore("qwen-affinities", scope) if settings.cache_enabled else None
+            created = [store for store in (session_store, context_store, affinity_store) if store is not None]
             qwen_accounts: list[QwenAccount] = []
             for i, token in enumerate(tokens):
                 qw_client = QwenClient(token=token, timeout=settings.timeout)
@@ -1714,10 +1790,11 @@ async def _byok_pool(provider: str, tokens: list[str]) -> AccountPool:
             if not getattr(app.state, "qwen_models", None):
                 app.state.qwen_models = await _fetch_qwen_models(qwen_accounts[0].client)
         cache[cache_key] = pool
+        scoped_stores[cache_key] = created
         while len(cache) > BYOK_POOL_LIMIT:
             oldest_key, oldest_pool = next(iter(cache.items()))
             cache.pop(oldest_key)
-            await _close_pool(oldest_pool)
+            await _close_pool(oldest_pool, scoped_stores.pop(oldest_key, None))
         return pool
 
 
@@ -1998,11 +2075,22 @@ async def create_response(req: ResponsesRequest, request: Request) -> Any:
     return result
 
 
+ANTHROPIC_ERROR_TYPES = {
+    400: "invalid_request_error",
+    401: "authentication_error",
+    403: "permission_error",
+    404: "not_found_error",
+    413: "request_too_large",
+    429: "rate_limit_error",
+    529: "overloaded_error",
+}
+
+
 def _anthropic_model(body: dict) -> str:
     model = body.get("model")
     if not isinstance(model, str) or not model.strip():
         raise HTTPException(400, "model is required")
-    _resolve_model(model)
+    _resolve_provider(model)
     return model
 
 
@@ -2010,8 +2098,29 @@ def _anthropic_error(exc: anthropic_api.AnthropicInputError) -> JSONResponse:
     return JSONResponse(status_code=400, content=anthropic_api.error_body("invalid_request_error", str(exc)))
 
 
+def _anthropic_http_error(exc: HTTPException) -> JSONResponse:
+    detail = exc.detail
+    if isinstance(detail, dict):
+        inner = detail.get("error")
+        detail = inner.get("message") if isinstance(inner, dict) and isinstance(inner.get("message"), str) else str(detail)
+    error_type = ANTHROPIC_ERROR_TYPES.get(exc.status_code, "api_error" if exc.status_code >= 500 else "invalid_request_error")
+    headers = {str(k): str(v) for k, v in exc.headers.items()} if exc.headers else None
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=anthropic_api.error_body(error_type, str(detail)),
+        headers=headers,
+    )
+
+
 @app.post("/v1/messages")
 async def anthropic_messages(body: dict, request: Request) -> Any:
+    try:
+        return await _anthropic_messages(body, request)
+    except HTTPException as exc:
+        return _anthropic_http_error(exc)
+
+
+async def _anthropic_messages(body: dict, request: Request) -> Any:
     if not isinstance(body, dict):
         raise HTTPException(400, "request body must be a JSON object")
     try:
@@ -2024,9 +2133,10 @@ async def anthropic_messages(body: dict, request: Request) -> Any:
     except anthropic_api.AnthropicInputError as exc:
         return _anthropic_error(exc)
     chat_req = ChatCompletionRequest(**chat_payload)
+    provider = _resolve_provider(model)
     info = anthropic_api.RequestInfo(
         model=model,
-        upstream_model=_resolve_model(model),
+        upstream_model=model if provider == "qwen" else _resolve_model(model),
         max_tokens=chat_req.max_tokens or anthropic_api.DEFAULT_MAX_TOKENS,
         prompt_tokens=anthropic_api.count_input_tokens(chat_req.messages, anthropic_api.normalize_system(body.get("system"))),
         metadata=body.get("metadata"),
@@ -2054,6 +2164,13 @@ async def anthropic_messages(body: dict, request: Request) -> Any:
 
 @app.post("/v1/messages/count_tokens")
 async def anthropic_count_tokens(body: dict) -> Any:
+    try:
+        return await _anthropic_count_tokens(body)
+    except HTTPException as exc:
+        return _anthropic_http_error(exc)
+
+
+async def _anthropic_count_tokens(body: dict) -> Any:
     if not isinstance(body, dict):
         raise HTTPException(400, "request body must be a JSON object")
     try:
@@ -2129,11 +2246,18 @@ async def image_generations(req: ImageGenerationRequest, request: Request) -> di
     return await _image_generations(req, await _image_pool(request))
 
 
-def _image_http_client() -> httpx.AsyncClient:
+_image_client_lock = asyncio.Lock()
+
+
+async def _image_http_client() -> httpx.AsyncClient:
     client = getattr(app.state, "http_client", None)
-    if client is None:
-        client = httpx.AsyncClient(follow_redirects=True, timeout=30)
-        app.state.http_client = client
+    if client is not None:
+        return client
+    async with _image_client_lock:
+        client = getattr(app.state, "http_client", None)
+        if client is None:
+            client = httpx.AsyncClient(follow_redirects=True, timeout=30)
+            app.state.http_client = client
     return client
 
 
@@ -2153,7 +2277,7 @@ async def _image_generations(req: ImageGenerationRequest, pool: AccountPool | No
     data: list[dict] = []
     usage = None
     result_sid = existing_sid
-    hc = _image_http_client()
+    hc = await _image_http_client()
     download_sem = asyncio.Semaphore(4)
 
     async def _fetch_image(url: str) -> dict:
@@ -2626,7 +2750,7 @@ async def _chat_completions_qwen(req: ChatCompletionRequest, pool: AccountPool |
     search = bool(req.search)
 
     tools, tool_choice = _materialize_tools(req)
-    account, existing_sid, context_seq, prompt, tool_mode, _cached_session = await _acquire_and_build(
+    account, existing_sid, context_seq, prompt, tool_mode, cached_session = await _acquire_and_build(
         pool,
         req,
         {"model": req.model},
@@ -2634,7 +2758,7 @@ async def _chat_completions_qwen(req: ChatCompletionRequest, pool: AccountPool |
         tool_choice=tool_choice,
     )
 
-    attachments = _collect_attachments(req)
+    attachments = _collect_attachments(req, allow_remote=True)
     if attachments:
         _validate_attachments(attachments)
         for att in attachments:
@@ -2667,6 +2791,7 @@ async def _chat_completions_qwen(req: ChatCompletionRequest, pool: AccountPool |
         "stop": getattr(req, "stop", None),
         "n": _bounded_choices(getattr(req, "n", None)),
         "parallel_tool_calls": getattr(req, "parallel_tool_calls", None),
+        "cached_session": cached_session,
     }
     if req.stream:
         return StreamingResponse(
@@ -2693,10 +2818,6 @@ async def _prepare_session(
         _handle_account_error(account, exc)
         raise HTTPException(_deepseek_status(exc), _deepseek_error_detail(exc)) from exc
     pool.register(account.index, session_key)
-    if existing_sid and session_key != existing_sid:
-        pool.forget(existing_sid)
-        pool.forget_context(existing_sid)
-        account.sessions.forget(existing_sid)
     if context_seq:
         pool.index_context(session_key, context_seq)
     return session, session_key, session.last_message_id
@@ -2865,8 +2986,8 @@ def _incomplete_message(rec: MessageReconstructor) -> str:
     return message if isinstance(message, str) and message else RESPONSE_INCOMPLETE_MESSAGE
 
 
-def _incomplete_error_body(message: str) -> str:
-    return json.dumps({"error": {"message": message, "finish_reason": RESPONSE_INCOMPLETE}}, ensure_ascii=False)
+def _incomplete_error_body(message: str) -> dict:
+    return _error_detail(message, RESPONSE_INCOMPLETE)
 
 
 def _input_exceeds_hint_from_http(exc: HTTPException) -> dict | None:
@@ -2931,27 +3052,16 @@ async def _fresh_pow_headers(account) -> dict:
         raise HTTPException(_deepseek_status(exc), _deepseek_error_detail(exc)) from exc
 
 
-def _busy_error_body(rec: MessageReconstructor) -> str:
+def _busy_error_body(rec: MessageReconstructor) -> dict:
     hint = rec.hint_error or {}
-    return json.dumps(
-        {
-            "error": {
-                "message": hint.get("message") or "DeepSeek server is busy, try again later",
-                "finish_reason": hint.get("finish_reason"),
-            }
-        },
-        ensure_ascii=False,
-    )
+    return _error_detail(hint.get("message") or "DeepSeek server is busy, try again later", hint.get("finish_reason"))
 
 
 FAKE_CONTEXT_HINT_ERROR_MESSAGE = "DeepSeek returned an unexpected length-limit hint and the response is empty"
 
 
-def _fake_context_error_body() -> str:
-    return json.dumps(
-        {"error": {"message": FAKE_CONTEXT_HINT_ERROR_MESSAGE, "finish_reason": "server_error"}},
-        ensure_ascii=False,
-    )
+def _fake_context_error_body() -> dict:
+    return _error_detail(FAKE_CONTEXT_HINT_ERROR_MESSAGE, "server_error")
 
 
 async def _try_stop_stream(client, session_id: str, message_id: str | None) -> None:
@@ -3291,6 +3401,7 @@ async def _collect_non_stream(
     async with account_lock(lock, settings.acquire_timeout):
         if attachments:
             ref_file_ids = await _upload_attachments(account, attachments, model_type, thinking)
+        had_cached_session = bool(existing_sid) and account.sessions.get(existing_sid) is not None
         session, session_key, parent_message_id = await _prepare_session(account, pool, existing_sid, context_seq)
         if (session_key != existing_sid or session is not cached_session) and messages is not None:
             try:
@@ -3301,7 +3412,6 @@ async def _collect_non_stream(
         stop_message_id: str | None = None
         started = time.monotonic()
         deadline = started + CONTINUE_DEADLINE_SEC
-        had_cached_session = bool(existing_sid) and account.sessions.get(existing_sid) is not None
         stale_rebuilt = False
         rec: MessageReconstructor | None = None
         response_message_id = None
@@ -3526,6 +3636,7 @@ async def _stream_openai(
                 for line in _stream_error_sse(chunk_id, created, model, detail):
                     yield line
                 return
+        had_cached_session = bool(existing_sid) and account.sessions.get(existing_sid) is not None
         try:
             session, session_key, parent_message_id = await _prepare_session(account, pool, existing_sid, context_seq)
         except HTTPException as exc:
@@ -3650,7 +3761,6 @@ async def _stream_openai(
             if delta:
                 yield _chunk(delta)
 
-        had_cached_session = bool(existing_sid) and account.sessions.get(existing_sid) is not None
         stale_rebuilt = False
         attempt = 0
         rate_attempt = 0
@@ -3896,6 +4006,7 @@ async def _stream_openai(
         log.info("deepseek completion success (%.0fms)", (time.monotonic() - started) * 1000)
 
         finish = _done_finish(rec.status)
+        tool_call_deltas: list[dict] = []
         if tool_mode:
             parsed = toolemu.parse_tool_calls(content_buf or rec.content, tool_schemas)
             tool_calls = parsed[0] if parsed is not None and parsed[0] else None
@@ -3915,7 +4026,8 @@ async def _stream_openai(
                 max_calls = _max_calls(parallel_tool_calls)
                 if max_calls is not None:
                     tool_calls = tool_calls[:max_calls]
-                for delta in toolemu.tool_call_deltas(tool_calls):
+                tool_call_deltas = toolemu.tool_call_deltas(tool_calls)
+                for delta in tool_call_deltas:
                     yield _chunk(delta)
                 finish = "tool_calls"
             else:
@@ -3925,9 +4037,10 @@ async def _stream_openai(
                     yield _chunk({"content": tail_text})
                 finish = _done_finish(rec.status)
 
-        tail_text = content_piece(None, final=True)
-        if tail_text:
-            yield _chunk({"content": tail_text})
+        if not tool_call_deltas:
+            tail_text = content_piece(None, final=True)
+            if tail_text:
+                yield _chunk({"content": tail_text})
 
         tail_reason = reasoning_piece(None, final=True)
         if tail_reason:
@@ -3953,7 +4066,10 @@ async def _stream_openai(
             yield _chunk({}, finish, session_id=session_key)
             tail = budget.text
             for extra_index in range(1, _bounded_choices(n)):
-                if tail:
+                if tool_call_deltas:
+                    for delta in tool_call_deltas:
+                        yield _chunk(delta, index=extra_index, session_id=session_key)
+                elif tail:
                     yield _chunk({"content": tail}, index=extra_index, session_id=session_key)
                 yield _chunk({}, finish, index=extra_index, session_id=session_key)
         if include_usage:

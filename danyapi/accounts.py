@@ -342,8 +342,9 @@ class AccountPool(Generic[AccountT]):
                 if acct is None or acct.broken:
                     self._by_session.pop(session_id, None)
                     dirty = True
-                elif self._ttl > 0 and now != ts:
-                    self._by_session[session_id] = (idx, now)
+                else:
+                    if now != ts:
+                        self._by_session[session_id] = (idx, now)
                     self._by_session.move_to_end(session_id)
         if dirty:
             self._contexts.forget(session_id)

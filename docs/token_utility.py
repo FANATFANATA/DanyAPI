@@ -37,7 +37,7 @@ TEXTS: dict[str, str] = {
     "step1_p2": "<b>2.</b> Sign in to your account if needed.",
     "step1_p3": '<b>3.</b> On the DeepSeek page, click your <b>"Run DanyAPI token utility"</b> bookmark.',
     "step1_fineprint": "The tab closes automatically after the token is sent. If the token is valid, a green checkmark"
-    " will appear on this page and you will be guided to the next step within a few seconds. Overwise a red cross will"
+    " will appear on this page and you will be guided to the next step within a few seconds. Otherwise a red cross will"
     " appear, and you can click the button below to try again.",
     "step1_button": "Open DeepSeek →",
     "step1_waiting": "Waiting for the DeepSeek token...",
@@ -46,7 +46,7 @@ TEXTS: dict[str, str] = {
     "step2_p2": "<b>2.</b> Sign in to your account if needed.",
     "step2_p3": '<b>3.</b> On the Qwen page, click the <b>"Run DanyAPI token utility"</b> bookmark.',
     "step2_fineprint": "The tab closes automatically after the token is sent. If the token is valid, a green checkmark"
-    " will appear on this page and you will be guided to the next step within a few seconds. Overwise a red cross will"
+    " will appear on this page and you will be guided to the next step within a few seconds. Otherwise a red cross will"
     " appear, and you can click the button below to try again.",
     "step2_button": "Open Qwen →",
     "step2_waiting": "Waiting for the Qwen token...",

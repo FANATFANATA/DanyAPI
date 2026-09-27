@@ -7,7 +7,7 @@ import logging
 import math
 import os
 import struct
-import subprocess
+import subprocess  # nosec B404
 import time
 from contextlib import suppress
 from pathlib import Path
@@ -277,7 +277,7 @@ def _run_solver(script: Path, challenge_hex: str, salt: str, expire_at: int, dif
     }
     cmd = ["node", str(script)] if script.suffix == ".js" else [str(script)]
     try:
-        proc = subprocess.run(
+        proc = subprocess.run(  # nosec B603
             cmd,
             input=json.dumps(payload),
             capture_output=True,

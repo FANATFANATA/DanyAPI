@@ -2674,7 +2674,7 @@ def test_dsml_filter_char_by_char_hides_thinking_block():
         "1 < 2 and 3 > 2",
         '<div class="x">text</div>',
         "```python\nif a < b:\n    pass\n```",
-        "\u041f\u0440\u0438\u0432\u0435\u0442, \u043c\u0438\u0440! \u2014 \u0445\u043e\u043b\u043e\u0434\u043d\u043e.",
+        "\u041f\u0440\u0438\u0432\u0435\u0442, \u043c\u0438\u0440! - \u0445\u043e\u043b\u043e\u0434\u043d\u043e.",
         "\u4f60\u597d\uff0c\u4e16\u754c\u3002",
         "trailing ds",
         "mixed <b>bold</b> and dsml text",

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import re
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
@@ -185,6 +186,42 @@ async def test_non_stream_raises_429_after_retries():
         await qwen_api.collect_non_stream(**_args(acct))
     assert isinstance(excinfo.value, qwen_api.HTTPException)
     assert excinfo.value.status_code == 429
+
+
+async def test_non_stream_rebuilds_prompt_for_replaced_session():
+    acct = FakeAccount([OK_SSE])
+    fresh = FakeSession()
+    acct.sessions.obtain = AsyncMock(return_value=(fresh, "s1"))
+    messages = [
+        SimpleNamespace(role="user", content="earlier turn"),
+        SimpleNamespace(role="assistant", content="earlier answer"),
+        SimpleNamespace(role="user", content="now"),
+    ]
+    result = await qwen_api.collect_non_stream(**_args(acct, messages=messages, tools=None, tool_choice=None, cached_session=FakeSession()))
+    assert result["choices"][0]["message"]["content"] == "Hello world"
+    sent = acct.client.completion.await_args
+    assert "earlier turn" in str(sent)
+
+
+async def test_non_stream_keeps_delta_prompt_for_reused_session():
+    acct = FakeAccount([OK_SSE])
+    reused = FakeSession()
+    acct.sessions.obtain = AsyncMock(return_value=(reused, "s1"))
+    messages = [SimpleNamespace(role="user", content="earlier turn"), SimpleNamespace(role="user", content="now")]
+    await qwen_api.collect_non_stream(**_args(acct, messages=messages, tools=None, tool_choice=None, cached_session=reused))
+    sent = acct.client.completion.await_args
+    assert "earlier turn" not in str(sent)
+
+
+async def test_stream_rebuilds_prompt_for_replaced_session():
+    acct = FakeAccount([OK_SSE])
+    fresh = FakeSession()
+    acct.sessions.obtain = AsyncMock(return_value=(fresh, "s1"))
+    messages = [SimpleNamespace(role="user", content="earlier turn"), SimpleNamespace(role="user", content="now")]
+    gen = qwen_api.stream_openai(**_args(acct, messages=messages, tools=None, tool_choice=None, cached_session=FakeSession()))
+    await _collect(gen)
+    sent = acct.client.completion.await_args
+    assert "earlier turn" in str(sent)
 
 
 async def test_stream_emits_error_event_after_retries():
@@ -446,15 +483,15 @@ def test_is_retryable_error():
     assert not qwen_api._is_retryable_error(rec4)
 
 
-def test_error_body():
+def test_error_detail():
     rec = MagicMock()
     rec.error = {"code": "x", "details": "boom"}
-    body = json.loads(qwen_api._error_body(rec))
+    body = qwen_api._error_detail(rec)
     assert body["error"]["message"] == "boom"
     assert body["error"]["code"] == "x"
     rec2 = MagicMock()
     rec2.error = {}
-    body = json.loads(qwen_api._error_body(rec2))
+    body = qwen_api._error_detail(rec2)
     assert "error" in body["error"]["message"]
 
 
