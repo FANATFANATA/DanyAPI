@@ -15,7 +15,8 @@ from fastapi import HTTPException
 
 from .. import tools as toolemu
 from ..accounts import account_lock
-from ..config import MAX_CHOICES, settings
+from ..api.shaping import _apply_limits, _bounded_choices, _max_calls, _usage_with_details
+from ..config import settings
 from ..deepseek.stream import IncrementalSSE
 from ..sseutil import StreamStopFilter, split_stop
 from ..tokens import StreamBudget, estimate_tokens, trim_to_tokens
@@ -344,43 +345,6 @@ def _accumulate_usage(session, rec: QwenStreamReconstructor, prompt: str = "", c
     }
 
 
-def _usage_details(usage: dict, reasoning_text: str | None = None) -> dict:
-    result = dict(usage)
-    if not isinstance(result.get("prompt_tokens_details"), dict):
-        result["prompt_tokens_details"] = {"cached_tokens": 0}
-    if not isinstance(result.get("completion_tokens_details"), dict):
-        result["completion_tokens_details"] = {"reasoning_tokens": estimate_tokens(reasoning_text or "")}
-    return result
-
-
-def _max_calls(parallel_tool_calls: bool | None) -> int | None:
-    return 1 if parallel_tool_calls is False else None
-
-
-def _choice_count(n: int | None) -> int:
-    if not isinstance(n, int) or n <= 1:
-        return 1
-    return min(n, MAX_CHOICES)
-
-
-def _apply_limits(content: str, max_tokens: int | None, stop: Any) -> tuple[str, str]:
-    text = content or ""
-    finish = "stop"
-    stops = split_stop(stop)
-    if stops:
-        cut = -1
-        for marker in stops:
-            position = text.find(marker)
-            if position != -1 and (cut == -1 or position < cut):
-                cut = position
-        if cut != -1:
-            text = text[:cut]
-    trimmed = trim_to_tokens(text, max_tokens)
-    if trimmed != text:
-        finish = "length"
-    return trimmed, finish
-
-
 def _build_limited_message(
     rec: QwenStreamReconstructor,
     tool_mode: bool,
@@ -618,10 +582,10 @@ async def collect_non_stream(
             "model": model,
             "system_fingerprint": "fp_danyapi",
             "choices": [{"index": 0, "message": message, "finish_reason": finish, "logprobs": None}],
-            "usage": _usage_details(usage, rec.reasoning),
+            "usage": _usage_with_details(usage, rec.reasoning),
             "session_id": session_key,
         }
-        choices = _choice_count(n)
+        choices = _bounded_choices(n)
         if choices > 1:
             template = response["choices"][0]
             response["choices"] = [dict(template) | {"index": i} for i in range(choices)]
@@ -969,7 +933,7 @@ async def stream_openai(
             yield role_line()
 
         yield finish_line(finish)
-        for line in extra_choice_lines(finish, _choice_count(n), tool_deltas):
+        for line in extra_choice_lines(finish, _bounded_choices(n), tool_deltas):
             yield line
         if include_usage:
             usage_payload = {
@@ -977,7 +941,7 @@ async def stream_openai(
                 "object": "chat.completion.chunk",
                 "created": created,
                 "model": model,
-                "usage": _usage_details(usage, rec.reasoning),
+                "usage": _usage_with_details(usage, rec.reasoning),
                 "choices": [],
             }
             if session_key:

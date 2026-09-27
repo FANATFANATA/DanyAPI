@@ -8,6 +8,7 @@ import httpx
 import pytest
 
 import danyapi.qwen.api as qwen_api
+from danyapi.api import shaping
 from danyapi.qwen.client import QwenError, QwenSession
 from danyapi.qwen.stream import QwenStreamReconstructor
 
@@ -836,8 +837,8 @@ async def test_stream_choices_n_expands_index():
 async def test_stream_choices_n_bounded():
     acct = FakeAccount([OK_SSE])
     joined = "".join(await _collect(qwen_api.stream_openai(**_args(acct, n=99))))
-    assert f'"index": {qwen_api.MAX_CHOICES - 1}' in joined
-    assert f'"index": {qwen_api.MAX_CHOICES}' not in joined
+    assert f'"index": {shaping.MAX_STREAM_CHOICES - 1}' in joined
+    assert f'"index": {shaping.MAX_STREAM_CHOICES}' not in joined
 
 
 async def test_stream_choices_n_one_stays_single():

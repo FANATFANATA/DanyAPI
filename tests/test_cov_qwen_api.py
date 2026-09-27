@@ -6,6 +6,7 @@ import httpx
 import pytest
 
 import danyapi.qwen.api as qwen_api
+from danyapi.api import shaping
 from danyapi.qwen.client import QwenError
 from danyapi.qwen.stream import QwenStreamReconstructor
 
@@ -424,13 +425,13 @@ def test_trim_to_tokens_trims():
     assert qwen_api.trim_to_tokens("", 2) == ""
 
 
-def test_choice_count_bounded():
-    assert qwen_api._choice_count(None) == 1
-    assert qwen_api._choice_count(0) == 1
-    assert qwen_api._choice_count(1) == 1
-    assert qwen_api._choice_count(3) == 3
-    assert qwen_api._choice_count(99) == qwen_api.MAX_CHOICES
-    assert qwen_api._choice_count("x") == 1
+def test_bounded_choices():
+    assert qwen_api._bounded_choices(None) == 1
+    assert qwen_api._bounded_choices(0) == 1
+    assert qwen_api._bounded_choices(1) == 1
+    assert qwen_api._bounded_choices(3) == 3
+    assert qwen_api._bounded_choices(99) == shaping.MAX_STREAM_CHOICES
+    assert qwen_api._bounded_choices("x") == 1
 
 
 def test_apply_limits_stop_cut():
