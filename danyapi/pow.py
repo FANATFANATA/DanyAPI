@@ -5,6 +5,7 @@ import base64
 import json
 import logging
 import math
+import os
 import struct
 import subprocess
 from pathlib import Path
@@ -42,9 +43,11 @@ _RC = [
 
 _ROUNDS = 23
 
-_ROUND_CONSTANTS = _RC[1:24]
+_ROUND_CONSTANTS = _RC[1 : _ROUNDS + 1]
 
 _PYTHON_SOLVE_LIMIT = 2_000_000
+
+_SOLVER_TIMEOUT_SEC = 60.0
 
 
 def _parse_number(value):
@@ -212,11 +215,17 @@ _SOLVER_DIR = Path(__file__).resolve().parent / "deepseek"
 _NODE_SOLVER = _SOLVER_DIR / "pow_solver.js"
 
 
+def _native_solver_names() -> tuple[str, ...]:
+    if os.name == "nt":
+        return ("pow_solver.exe", "pow_solver")
+    return ("pow_solver", "pow_solver.exe")
+
+
 def _find_native_solver() -> Path | None:
-    for name in ("pow_solver.exe", "pow_solver"):
-        p = _SOLVER_DIR / name
-        if p.exists():
-            return p
+    for name in _native_solver_names():
+        candidate = _SOLVER_DIR / name
+        if candidate.is_file():
+            return candidate
     return None
 
 
@@ -224,9 +233,11 @@ def solve_python(challenge_hex: str, salt: str, expire_at: int, difficulty: int)
     prefix = f"{salt}_{expire_at}_".encode()
     target = bytes.fromhex(challenge_hex)
     limit = max(0, min(int(difficulty), _PYTHON_SOLVE_LIMIT))
+    if limit == 0:
+        return None
     pfx_len = len(prefix)
-    if limit and pfx_len + len(str(limit - 1)) <= _RATE - 2:
-        max_width = len(str(limit - 1))
+    max_width = len(str(limit - 1))
+    if pfx_len + max_width <= _RATE - 2:
         tails: dict[int, bytes] = {}
         for width in range(1, max_width + 1):
             tails[width] = bytes([0x06]) + b"\x00" * (_RATE - pfx_len - width - 2) + b"\x80"
@@ -245,26 +256,33 @@ def _run_solver(script: Path, challenge_hex: str, salt: str, expire_at: int, dif
     payload = {
         "challenge": challenge_hex,
         "salt": salt,
-        "expire_at": expire_at,
+        "expire_at": str(expire_at),
         "difficulty": int(difficulty),
     }
-    if script.suffix == ".js":
-        cmd = ["node", str(script)]
-    else:
-        cmd = [str(script)]
-    proc = subprocess.run(
-        cmd,
-        input=json.dumps(payload),
-        capture_output=True,
-        text=True,
-        timeout=60,
-        check=False,
-    )
+    cmd = ["node", str(script)] if script.suffix == ".js" else [str(script)]
+    try:
+        proc = subprocess.run(
+            cmd,
+            input=json.dumps(payload),
+            capture_output=True,
+            text=True,
+            timeout=_SOLVER_TIMEOUT_SEC,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"{script.name} timed out after {_SOLVER_TIMEOUT_SEC:g}s") from exc
+    except OSError as exc:
+        raise RuntimeError(f"{script.name} is not executable: {exc}") from exc
     if proc.returncode != 0:
         raise RuntimeError(f"{script.name} failed: {proc.stderr[:300]}")
-    out = json.loads(proc.stdout.strip())
+    try:
+        out = json.loads(proc.stdout.strip())
+    except ValueError as exc:
+        raise RuntimeError(f"{script.name} returned malformed output: {proc.stdout[:300]}") from exc
+    if not isinstance(out, dict):
+        raise RuntimeError(f"{script.name} returned malformed output: {proc.stdout[:300]}")
     if "error" in out:
-        raise RuntimeError(out["error"])
+        raise RuntimeError(str(out["error"]))
     return out.get("answer")
 
 

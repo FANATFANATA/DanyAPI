@@ -114,12 +114,11 @@ class DeepSeekClient:
             payload = resp.json()
         except ValueError:
             return False
-        return payload.get("code") == 0
+        return isinstance(payload, dict) and payload.get("code") == 0
 
     async def get_user(self) -> dict:
         resp = await self._post("/api/v0/users", None)
-        biz = self._biz(resp)
-        return biz if isinstance(biz, dict) else {}
+        return self._biz(resp)
 
     async def create_pow_challenge(self, target_path: str = "/api/v0/chat/completion") -> dict:
         resp = await self._post("/api/v0/chat/create_pow_challenge", {"target_path": target_path})
@@ -144,8 +143,8 @@ class DeepSeekClient:
     async def fetch_page(self, pinned: bool = False, count: int = 20) -> list[dict]:
         body = {"pinned": pinned, "count": count, "mode": "lte"}
         resp = await self._post("/api/v0/chat_session/fetch_page", body)
-        biz = self._biz(resp)
-        return (biz or {}).get("chat_sessions", []) or []
+        sessions = self._biz(resp).get("chat_sessions")
+        return sessions if isinstance(sessions, list) else []
 
     async def upload_file(
         self,
@@ -181,8 +180,7 @@ class DeepSeekClient:
         except ValueError as exc:
             raise DeepSeekError(-1, "invalid JSON from file upload") from exc
         biz = self._biz(payload)
-        file_info = biz.get("id") if isinstance(biz, dict) else None
-        if not isinstance(biz, dict) or not file_info:
+        if not biz.get("id"):
             raise DeepSeekError(-1, "file upload failed: no file id in response")
         log.info("deepseek upload file success: %s (%.0fms)", filename, (time.monotonic() - started) * 1000)
         return biz
@@ -205,8 +203,8 @@ class DeepSeekClient:
             payload = resp.json()
         except ValueError as exc:
             raise DeepSeekError(-1, "invalid JSON from fetch_files") from exc
-        biz = self._biz(payload)
-        return (biz or {}).get("files", []) if isinstance(biz, dict) else []
+        files = self._biz(payload).get("files")
+        return files if isinstance(files, list) else []
 
     async def history_messages(self, chat_session_id: str) -> list[dict]:
         try:
@@ -222,8 +220,8 @@ class DeepSeekClient:
             raise DeepSeekError(-1, f"http request failed: {exc}") from exc
         except ValueError as exc:
             raise DeepSeekError(-1, "invalid JSON from history_messages") from exc
-        biz = self._biz(payload)
-        return biz.get("chat_messages", []) if isinstance(biz, dict) else []
+        messages = self._biz(payload).get("chat_messages")
+        return messages if isinstance(messages, list) else []
 
     async def rename_session(self, chat_session_id: str, title: str) -> None:
         self._biz(

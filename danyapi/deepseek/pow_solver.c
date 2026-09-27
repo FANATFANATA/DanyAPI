@@ -15,7 +15,9 @@
 
 #define RATE 136
 #define ROUNDS 23
-#define MAX_DIGITS 32
+#define MAX_DIGITS 20
+#define MAX_THREADS 1024
+#define MAX_INPUT 8192
 
 #if defined(_MSC_VER)
 #define POW_MEMORY_BARRIER() MemoryBarrier()
@@ -37,6 +39,9 @@ static const uint64_t RC[24] = {
 };
 
 static inline uint64_t rotl64(uint64_t x, int n) {
+  n &= 63;
+  if (n == 0)
+    return x;
   return (x << n) | (x >> (64 - n));
 }
 
@@ -137,11 +142,11 @@ static void absorb_prefix(uint64_t st[25], const uint8_t *prefix, size_t len) {
 }
 
 static int to_digits(uint64_t v, char *buf) {
-  char tmp[MAX_DIGITS + 1];
+  char tmp[MAX_DIGITS];
   int n = 0;
   do {
     if (n >= MAX_DIGITS)
-      break;
+      return -1;
     tmp[n++] = (char)('0' + (int)(v % 10));
     v /= 10;
   } while (v > 0);
@@ -214,6 +219,8 @@ static void run_worker(WorkerArgs *a) {
     return;
   char digits[MAX_DIGITS + 1];
   int dlen = to_digits(a->start, digits);
+  if (dlen < 0)
+    return;
   for (uint64_t c = a->start; c < a->end; c++) {
     if (g_found)
       return;
@@ -313,9 +320,17 @@ static long long find_json_ll(const char *json, const char *key) {
 }
 
 int main(void) {
-  char input[8192];
+  char input[MAX_INPUT];
   size_t n = fread(input, 1, sizeof(input) - 1, stdin);
+  if (ferror(stdin)) {
+    puts("{\"error\":\"stdin read failed\"}");
+    return 1;
+  }
   input[n] = '\0';
+  if (n >= sizeof(input) - 1) {
+    puts("{\"error\":\"input too large\"}");
+    return 1;
+  }
 
   char challenge[128] = {0}, salt[4096] = {0};
   if (!find_json_str(input, "challenge", challenge, sizeof(challenge)) ||
@@ -357,16 +372,21 @@ int main(void) {
   int nthreads = detect_threads();
   const char *env = getenv("POW_SOLVER_THREADS");
   if (env && env[0]) {
-    int v = atoi(env);
-    if (v > 0)
-      nthreads = v;
+    char *end = NULL;
+    long v = strtol(env, &end, 10);
+    if (end != env && end != NULL && *end == '\0' && v > 0 && v <= MAX_THREADS)
+      nthreads = (int)v;
   }
+  if (nthreads > MAX_THREADS)
+    nthreads = MAX_THREADS;
 #if defined(_WIN32)
   if (nthreads > 64)
     nthreads = 64;
 #endif
   if ((uint64_t)nthreads > limit)
     nthreads = (int)limit;
+  if (nthreads < 1)
+    nthreads = 1;
 
   WorkerArgs *args = (WorkerArgs *)calloc((size_t)nthreads, sizeof(WorkerArgs));
   if (!args) {

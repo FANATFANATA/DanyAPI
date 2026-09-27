@@ -7,7 +7,7 @@ import random
 import re
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterable, Iterator
 from typing import Any
 
 import httpx
@@ -15,7 +15,7 @@ from fastapi import HTTPException
 
 from .. import tools as toolemu
 from ..accounts import account_lock
-from ..config import settings
+from ..config import MAX_CHOICES, settings
 from ..deepseek.stream import IncrementalSSE
 from ..tokens import StreamBudget, estimate_tokens
 from ..usage import record_usage
@@ -78,6 +78,7 @@ def _append_image_markdown(prompt: str, messages: list[Any] | None) -> str:
     if not messages:
         return prompt
     appended: list[str] = []
+    seen: set[str] = set()
     for message in messages:
         content = getattr(message, "content", None)
         if not isinstance(content, list):
@@ -94,8 +95,10 @@ def _append_image_markdown(prompt: str, messages: list[Any] | None) -> str:
                 continue
             if uri.startswith("http") or uri.startswith("data:"):
                 tag = f"![image]({uri})"
-                if tag not in prompt and tag not in appended:
-                    appended.append(tag)
+                if tag in seen or tag in prompt:
+                    continue
+                seen.add(tag)
+                appended.append(tag)
     if not appended:
         return prompt
     extra = "\n".join(appended)
@@ -415,9 +418,11 @@ def _build_limited_message(
                     tool_calls = tool_calls[: _max_calls(parallel_tool_calls)]
                 message = toolemu.format_tool_message(tool_calls, tool_text, rec.reasoning)
                 tail = message.get("content")
-                if isinstance(tail, str) and _trim_to_tokens(tail, max_tokens) != tail:
-                    message["content"] = _trim_to_tokens(tail, max_tokens)
-                    return message, "length"
+                if isinstance(tail, str):
+                    trimmed_tail = _trim_to_tokens(tail, max_tokens)
+                    if trimmed_tail != tail:
+                        message["content"] = trimmed_tail
+                        return message, "length"
                 return message, "tool_calls"
         text, limit_finish = _apply_limits(toolemu.strip_dsml(rec.content or ""), max_tokens, stop)
         message = {"role": "assistant", "content": text}
@@ -519,9 +524,6 @@ async def _collect_response(
                     rec.handle(event)
                 rec.finalize()
             except (httpx.HTTPError, RuntimeError) as exc:
-                if rec.response_id:
-                    stop_response_id = rec.response_id
-                await _try_stop_stream(account.client, session.id, stop_response_id)
                 raise HTTPException(502, f"Stream processing failed: {exc}") from exc
             finally:
                 if rec.response_id:
@@ -637,9 +639,9 @@ async def collect_non_stream(
             "usage": _usage_details(usage, rec.reasoning),
             "session_id": session_key,
         }
-        if isinstance(n, int) and n and n > 1:
+        if isinstance(n, int) and n > 1:
             template = response["choices"][0]
-            response["choices"] = [dict(template) | {"index": i} for i in range(n)]
+            response["choices"] = [dict(template) | {"index": i} for i in range(min(n, MAX_CHOICES))]
         return response
 
 
@@ -692,6 +694,7 @@ async def stream_openai(
         content_shown_len = 0
         tool_hidden = False
         role_sent = False
+        got_content = False
         budget = StreamBudget(max_tokens, _trim_to_tokens)
         dsml_filter = toolemu.DsmlFilter()
         reasoning_filter = toolemu.DsmlFilter()
@@ -707,6 +710,58 @@ async def stream_openai(
 
         def flush_reasoning() -> str:
             return reasoning_filter.flush()
+
+        def role_line() -> str:
+            return _sse(
+                {
+                    "id": chunk_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model,
+                    "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
+                }
+            )
+
+        def delta_line(delta: dict) -> str:
+            return _sse(
+                {
+                    "id": chunk_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model,
+                    "choices": [{"index": 0, "delta": delta, "finish_reason": None}],
+                }
+            )
+
+        async def pump(source: QwenStreamReconstructor, events: Iterable[Any]) -> AsyncIterator[str]:
+            nonlocal content_buf, content_shown_len, tool_hidden, got_content, role_sent
+            for event in events:
+                source.handle(event)
+                c_diff, r_diff = source.take_diffs()
+                if not (c_diff or r_diff):
+                    continue
+                got_content = True
+                if not role_sent:
+                    role_sent = True
+                    yield role_line()
+                delta: dict = {}
+                if c_diff:
+                    if tool_mode:
+                        content_buf += c_diff
+                        shown, content_shown_len, tool_hidden = toolemu.tool_visible(content_buf, content_shown_len, tool_hidden, tool_schemas)
+                        allowed = content_piece(shown)
+                        if allowed:
+                            delta["content"] = allowed
+                    else:
+                        allowed = content_piece(c_diff)
+                        if allowed:
+                            delta["content"] = allowed
+                if r_diff:
+                    reason = reasoning_piece(r_diff)
+                    if reason:
+                        delta["reasoning_content"] = reason
+                if delta:
+                    yield delta_line(delta)
 
         stop_response_id: str | None = None
         had_cached_session = bool(existing_sid) and account.sessions.get(existing_sid) is not None
@@ -777,116 +832,11 @@ async def stream_openai(
             reasoning_filter = toolemu.DsmlFilter()
             try:
                 async for chunk in resp.aiter_bytes():
-                    for event in incremental.feed(chunk):
-                        rec.handle(event)
-                        c_diff, r_diff = rec.take_diffs()
-                        if not (c_diff or r_diff):
-                            continue
-                        got_content = True
-                        if not role_sent:
-                            role_sent = True
-                            yield _sse(
-                                {
-                                    "id": chunk_id,
-                                    "object": "chat.completion.chunk",
-                                    "created": created,
-                                    "model": model,
-                                    "choices": [
-                                        {
-                                            "index": 0,
-                                            "delta": {"role": "assistant"},
-                                            "finish_reason": None,
-                                        }
-                                    ],
-                                }
-                            )
-                        delta: dict = {}
-                        if c_diff:
-                            if tool_mode:
-                                content_buf += c_diff
-                                shown, content_shown_len, tool_hidden = toolemu.tool_visible(content_buf, content_shown_len, tool_hidden, tool_schemas)
-                                allowed = content_piece(shown)
-                                if allowed:
-                                    delta["content"] = allowed
-                            else:
-                                allowed = content_piece(c_diff)
-                                if allowed:
-                                    delta["content"] = allowed
-                        if r_diff:
-                            reason = reasoning_piece(r_diff)
-                            if reason:
-                                delta["reasoning_content"] = reason
-                        if delta:
-                            yield _sse(
-                                {
-                                    "id": chunk_id,
-                                    "object": "chat.completion.chunk",
-                                    "created": created,
-                                    "model": model,
-                                    "choices": [
-                                        {
-                                            "index": 0,
-                                            "delta": delta,
-                                            "finish_reason": None,
-                                        }
-                                    ],
-                                }
-                            )
+                    async for line in pump(rec, incremental.feed(chunk)):
+                        yield line
                 for event in incremental.finish():
-                    rec.handle(event)
-                    c_diff, r_diff = rec.take_diffs()
-                    if not (c_diff or r_diff):
-                        continue
-                    got_content = True
-                    if not role_sent:
-                        role_sent = True
-                        yield _sse(
-                            {
-                                "id": chunk_id,
-                                "object": "chat.completion.chunk",
-                                "created": created,
-                                "model": model,
-                                "choices": [
-                                    {
-                                        "index": 0,
-                                        "delta": {"role": "assistant"},
-                                        "finish_reason": None,
-                                    }
-                                ],
-                            }
-                        )
-                    delta2: dict = {}
-                    if c_diff:
-                        if tool_mode:
-                            content_buf += c_diff
-                            shown, content_shown_len, tool_hidden = toolemu.tool_visible(content_buf, content_shown_len, tool_hidden, tool_schemas)
-                            allowed = content_piece(shown)
-                            if allowed:
-                                delta2["content"] = allowed
-                        else:
-                            allowed = content_piece(c_diff)
-                            if allowed:
-                                delta2["content"] = allowed
-                    if r_diff:
-                        reason2 = reasoning_piece(r_diff)
-                        if reason2:
-                            delta2["reasoning_content"] = reason2
-                    if delta2:
-                        yield _sse(
-                            {
-                                "id": chunk_id,
-                                "object": "chat.completion.chunk",
-                                "created": created,
-                                "model": model,
-                                "choices": [
-                                    {
-                                        "index": 0,
-                                        "delta": delta2,
-                                        "finish_reason": None,
-                                    }
-                                ],
-                            }
-                        )
+                    async for line in pump(rec, [event]):
+                        yield line
             except BaseException:
                 stopped = True
                 if rec.response_id:
@@ -954,116 +904,32 @@ async def stream_openai(
 
         if tool_mode:
             parsed = toolemu.parse_tool_calls(content_buf, tool_schemas)
-            if parsed is not None:
-                tool_calls, _ = parsed
-                if tool_calls:
-                    if _max_calls(parallel_tool_calls) is not None:
-                        tool_calls = tool_calls[: _max_calls(parallel_tool_calls)]
-                    for delta in toolemu.tool_call_deltas(tool_calls):
-                        yield _sse(
-                            {
-                                "id": chunk_id,
-                                "object": "chat.completion.chunk",
-                                "created": created,
-                                "model": model,
-                                "choices": [{"index": 0, "delta": delta, "finish_reason": None}],
-                            }
-                        )
-                    finish = "tool_calls"
-                else:
-                    remainder = content_piece(content_buf[content_shown_len:])
-                    if remainder:
-                        yield _sse(
-                            {
-                                "id": chunk_id,
-                                "object": "chat.completion.chunk",
-                                "created": created,
-                                "model": model,
-                                "choices": [
-                                    {
-                                        "index": 0,
-                                        "delta": {"content": remainder},
-                                        "finish_reason": None,
-                                    }
-                                ],
-                            }
-                        )
-                    finish = "length" if budget.done else "stop"
+            tool_calls = parsed[0] if parsed is not None else []
+            if tool_calls:
+                if _max_calls(parallel_tool_calls) is not None:
+                    tool_calls = tool_calls[: _max_calls(parallel_tool_calls)]
+                for delta in toolemu.tool_call_deltas(tool_calls):
+                    yield delta_line(delta)
+                finish = "tool_calls"
             else:
                 remainder = content_piece(content_buf[content_shown_len:])
                 if remainder:
-                    yield _sse(
-                        {
-                            "id": chunk_id,
-                            "object": "chat.completion.chunk",
-                            "created": created,
-                            "model": model,
-                            "choices": [
-                                {
-                                    "index": 0,
-                                    "delta": {"content": remainder},
-                                    "finish_reason": None,
-                                }
-                            ],
-                        }
-                    )
+                    yield delta_line({"content": remainder})
                 finish = "length" if budget.done else "stop"
         else:
             finish = "length" if budget.done else "stop"
 
         remainder = flush_piece()
         if remainder:
-            yield _sse(
-                {
-                    "id": chunk_id,
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": model,
-                    "choices": [
-                        {
-                            "index": 0,
-                            "delta": {"content": remainder},
-                            "finish_reason": None,
-                        }
-                    ],
-                }
-            )
+            yield delta_line({"content": remainder})
 
         reason_tail = flush_reasoning()
         if reason_tail:
-            yield _sse(
-                {
-                    "id": chunk_id,
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": model,
-                    "choices": [
-                        {
-                            "index": 0,
-                            "delta": {"reasoning_content": reason_tail},
-                            "finish_reason": None,
-                        }
-                    ],
-                }
-            )
+            yield delta_line({"reasoning_content": reason_tail})
 
         if not role_sent:
             role_sent = True
-            yield _sse(
-                {
-                    "id": chunk_id,
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": model,
-                    "choices": [
-                        {
-                            "index": 0,
-                            "delta": {"role": "assistant"},
-                            "finish_reason": None,
-                        }
-                    ],
-                }
-            )
+            yield role_line()
 
         finish_payload = {
             "id": chunk_id,

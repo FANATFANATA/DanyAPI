@@ -63,7 +63,8 @@ class QwenSessionRegistry(SessionRegistry):
         session.last_response_id = message_id
 
     async def obtain(self, session_id: str | None = None, model: str | None = None, **kwargs) -> tuple[QwenSession, str]:
-        return await super().obtain(session_id, model=model or "")
+        kwargs["model"] = model or ""
+        return await super().obtain(session_id, **kwargs)
 
 
 class QwenAccount:

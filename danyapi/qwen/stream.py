@@ -13,6 +13,7 @@ SUMMARY_PHASE = "thinking_summary"
 _IMAGE_URL_RE = re.compile(r"!\[[^\]]*\]\((https?://[^\s)>'\"]+)\)|(https?://cdn\.qwenlm\.ai/[^\s)>'\"]+)")
 _IMAGE_TAIL_LIMIT = 4096
 _TRAILING_PUNCT = ".,;:!?"
+_FLOAT_LIMIT = 1e18
 
 
 def _delta_text(delta: dict, key: str) -> str:
@@ -21,7 +22,6 @@ def _delta_text(delta: dict, key: str) -> str:
 
 
 def _trailing_open_url(text: str) -> int | None:
-    match = _IMAGE_URL_RE.search(text)
     start: int | None = None
     for match in _IMAGE_URL_RE.finditer(text):
         if match.group(1) is None and match.end() == len(text) and text[-1] not in _TRAILING_PUNCT:
@@ -63,6 +63,27 @@ def _summary_text(item: Any) -> str:
             if isinstance(value, str) and value:
                 return value
     return ""
+
+
+def _token_int(value: Any) -> int:
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value) if -_FLOAT_LIMIT < value < _FLOAT_LIMIT else 0
+    if not isinstance(value, str):
+        return 0
+    text = value.strip()
+    try:
+        return int(text)
+    except ValueError:
+        pass
+    try:
+        number = float(text)
+    except ValueError:
+        return 0
+    return int(number) if -_FLOAT_LIMIT < number < _FLOAT_LIMIT else 0
 
 
 class QwenStreamReconstructor:
@@ -239,28 +260,10 @@ class QwenStreamReconstructor:
 
     @property
     def usage_tokens(self) -> dict:
-        def _int(value: Any) -> int:
-            if isinstance(value, bool):
-                return 0
-            if isinstance(value, int):
-                return value
-            if isinstance(value, float):
-                return int(value)
-            if not isinstance(value, str):
-                return 0
-            try:
-                return int(value.strip())
-            except (TypeError, ValueError):
-                pass
-            try:
-                return int(float(value.strip()))
-            except (TypeError, ValueError):
-                return 0
-
         return {
-            "prompt_tokens": _int(self.usage.get("input_tokens")),
-            "completion_tokens": _int(self.usage.get("output_tokens")),
-            "total_tokens": _int(self.usage.get("total_tokens")),
+            "prompt_tokens": _token_int(self.usage.get("input_tokens")),
+            "completion_tokens": _token_int(self.usage.get("output_tokens")),
+            "total_tokens": _token_int(self.usage.get("total_tokens")),
         }
 
 
