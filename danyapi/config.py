@@ -5,6 +5,13 @@ import os
 from pathlib import Path
 from typing import Any
 
+_TRUE_VALUES = ("1", "true", "yes", "on")
+_FALSE_VALUES = ("0", "false", "no", "off")
+
+MIN_PORT = 0
+MAX_PORT = 65535
+MAX_CHOICES = 8
+
 
 def _noop_load_dotenv(*args: Any, **kwargs: Any) -> bool:
     return False
@@ -18,64 +25,100 @@ except ImportError:
 load_dotenv(dotenv_path=Path(__file__).resolve().parents[1] / ".env", override=False)
 
 
-def _env_int(key: str, default: int) -> int:
+def _env_int(key: str, default: int, minimum: int | None = None, maximum: int | None = None) -> int:
     try:
-        return int(os.environ.get(key, default))
-    except ValueError:
+        value = int(os.environ.get(key, default))
+    except (TypeError, ValueError):
         return default
+    if minimum is not None and value < minimum:
+        return minimum
+    if maximum is not None and value > maximum:
+        return maximum
+    return value
 
 
-def _env_float(key: str, default: float) -> float:
+def _env_float(key: str, default: float, minimum: float = 0.0) -> float:
     try:
         value = float(os.environ.get(key, default))
-    except ValueError:
+    except (TypeError, ValueError):
         return default
-    return value if math.isfinite(value) else default
+    if not math.isfinite(value):
+        return default
+    return max(value, minimum)
+
+
+def _env_positive_float(key: str, default: float) -> float:
+    try:
+        value = float(os.environ.get(key, default))
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(value) or value <= 0:
+        return default
+    return value
 
 
 def _env_float_opt(key: str) -> float | None:
-    raw = os.environ.get(key, "")
+    raw = os.environ.get(key, "").strip()
+    if not raw:
+        return None
     try:
-        value = float(raw) if raw else None
-    except ValueError:
+        value = float(raw)
+    except (TypeError, ValueError):
         return None
-    if value is None or not math.isfinite(value):
+    if not math.isfinite(value) or value <= 0:
         return None
-    return value if value > 0 else None
+    return value
 
 
 def _env_str(key: str, default: str = "") -> str:
     return os.environ.get(key, default).strip()
 
 
+def _env_list(key: str) -> list[str]:
+    return [item.strip() for item in os.environ.get(key, "").split(",") if item.strip()]
+
+
+def _env_on(key: str, default: str) -> bool:
+    return os.environ.get(key, default).strip().lower() in _TRUE_VALUES
+
+
+def _env_off(key: str, default: str) -> bool:
+    return os.environ.get(key, default).strip().lower() in _FALSE_VALUES
+
+
+def _env_first(*keys: str) -> str:
+    for key in keys:
+        value = os.environ.get(key)
+        if value:
+            return value
+    return ""
+
+
 class Settings:
     def __init__(self) -> None:
-        self.host = os.environ.get("DANYAPI_HOST", "0.0.0.0")
-        self.port = _env_int("DANYAPI_PORT", 8000)
-        tokens = [t.strip() for t in os.environ.get("DEEPSEEK_TOKENS", "").split(",") if t.strip()]
-        self.deepseek_tokens = tokens
-        qwen_tokens = [t.strip() for t in os.environ.get("QWEN_TOKENS", "").split(",") if t.strip()]
-        self.qwen_tokens = qwen_tokens
-        raw_byok = os.environ.get("BYOK") or os.environ.get("BYOK_MODE") or os.environ.get("DANYAPI_BYOK_MODE") or ""
-        self.byok = raw_byok.strip().lower() in ("1", "true", "yes", "on")
-        self.timeout = _env_float("DANYAPI_TIMEOUT", 60.0)
+        self.host = _env_str("DANYAPI_HOST", "0.0.0.0")
+        self.port = _env_int("DANYAPI_PORT", 8000, MIN_PORT, MAX_PORT)
+        self.deepseek_tokens = _env_list("DEEPSEEK_TOKENS")
+        self.qwen_tokens = _env_list("QWEN_TOKENS")
+        self.byok = _env_first("BYOK", "BYOK_MODE", "DANYAPI_BYOK_MODE").strip().lower() in _TRUE_VALUES
+        self.timeout = _env_positive_float("DANYAPI_TIMEOUT", 60.0)
         self.acquire_timeout = _env_float_opt("DANYAPI_ACQUIRE_TIMEOUT")
-        self.session_cache_size = _env_int("DANYAPI_SESSION_CACHE_SIZE", 128)
+        self.session_cache_size = _env_int("DANYAPI_SESSION_CACHE_SIZE", 128, 1)
         self.session_ttl = _env_float("DANYAPI_SESSION_TTL_SECONDS", 3600.0)
         self.log_level = _env_str("DANYAPI_LOG_LEVEL", "INFO") or "INFO"
         self.log_file = _env_str("DANYAPI_LOG_FILE")
-        self.log_max_bytes = _env_int("DANYAPI_LOG_MAX_BYTES", 10 * 1024 * 1024)
-        self.log_backup_count = _env_int("DANYAPI_LOG_BACKUP_COUNT", 3)
+        self.log_max_bytes = _env_int("DANYAPI_LOG_MAX_BYTES", 10 * 1024 * 1024, 1)
+        self.log_backup_count = _env_int("DANYAPI_LOG_BACKUP_COUNT", 3, 0)
         self.cache_dir = _env_str("DANYAPI_CACHE_DIR")
-        self.cache_enabled = os.environ.get("DANYAPI_CACHE_DISABLED", "").strip().lower() not in ("1", "true", "yes", "on")
+        self.cache_enabled = not _env_on("DANYAPI_CACHE_DISABLED", "")
         self.byok_auth_ttl = _env_float("DANYAPI_BYOK_AUTH_TTL_SECONDS", 300.0)
         self.human_delay_min = _env_float("DANYAPI_HUMAN_DELAY_MIN", 0.5)
         self.human_delay_max = _env_float("DANYAPI_HUMAN_DELAY_MAX", 3.0)
-        self.usage_enabled = os.environ.get("DANYAPI_USAGE_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off")
-        self.usage_max_records = _env_int("DANYAPI_USAGE_MAX_RECORDS", 1000)
-        self.auto_update = os.environ.get("DANYAPI_AUTO_UPDATE", "1").strip().lower() not in ("0", "false", "no", "off")
-        self.cors_origins = [o.strip() for o in os.environ.get("DANYAPI_CORS_ORIGINS", "").split(",") if o.strip()]
-        self.responses_max_records = _env_int("DANYAPI_RESPONSES_MAX_RECORDS", 1024)
+        self.usage_enabled = not _env_off("DANYAPI_USAGE_ENABLED", "1")
+        self.usage_max_records = _env_int("DANYAPI_USAGE_MAX_RECORDS", 1000, 1)
+        self.auto_update = not _env_off("DANYAPI_AUTO_UPDATE", "1")
+        self.cors_origins = _env_list("DANYAPI_CORS_ORIGINS")
+        self.responses_max_records = _env_int("DANYAPI_RESPONSES_MAX_RECORDS", 1024, 1)
 
 
 settings = Settings()

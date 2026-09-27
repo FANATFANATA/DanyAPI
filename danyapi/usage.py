@@ -39,6 +39,17 @@ def _loop_active() -> bool:
     return True
 
 
+def _as_count(value: Any) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError, OverflowError):
+        try:
+            number = int(float(value))
+        except (TypeError, ValueError, OverflowError):
+            return 0
+    return max(0, number)
+
+
 def record_usage(
     provider: str,
     model: str,
@@ -80,8 +91,8 @@ class UsageTracker:
         if isinstance(totals, dict):
             merged = {"requests": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
             for key, value in totals.items():
-                if key in merged and isinstance(value, (int, float)):
-                    merged[key] = int(value)
+                if key in merged:
+                    merged[key] = _as_count(value)
             self._totals = merged
         for attr, key in (("_by_model", "by_model"), ("_by_provider", "by_provider"), ("_by_user", "by_user")):
             bucket = data.get(key)
@@ -91,8 +102,8 @@ class UsageTracker:
                     if isinstance(entry, dict):
                         row = {"requests": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
                         for field, value in entry.items():
-                            if field in row and isinstance(value, (int, float)):
-                                row[field] = int(value)
+                            if field in row:
+                                row[field] = _as_count(value)
                         restored[name] = row
                 self._evict_overflow(restored)
                 setattr(self, attr, restored)
@@ -108,9 +119,6 @@ class UsageTracker:
             "by_provider": {key: dict(value) for key, value in self._by_provider.items()},
             "by_user": {key: dict(value) for key, value in self._by_user.items()},
         }
-
-    def _serialize(self) -> dict[str, Any]:
-        return self._snapshot_locked()
 
     @staticmethod
     def _add(bucket: dict[str, dict[str, int]], key: str, prompt_tokens: int, completion_tokens: int, total_tokens: int) -> None:
@@ -137,9 +145,9 @@ class UsageTracker:
         user: str | None = None,
         session_id: str | None = None,
     ) -> None:
-        prompt_tokens = max(0, int(prompt_tokens or 0))
-        completion_tokens = max(0, int(completion_tokens or 0))
-        total_tokens = max(0, int(total_tokens or 0))
+        prompt_tokens = _as_count(prompt_tokens)
+        completion_tokens = _as_count(completion_tokens)
+        total_tokens = _as_count(total_tokens)
         if total_tokens == 0:
             total_tokens = prompt_tokens + completion_tokens
         with self._lock:
@@ -172,7 +180,7 @@ class UsageTracker:
                 now = time.time()
                 if not _loop_active() or now - self._last_usage_persist >= self._USAGE_PERSIST_INTERVAL:
                     self._last_usage_persist = now
-                    usage_payload = self._serialize()
+                    usage_payload = self._snapshot_locked()
                 if now - self._last_recent_persist >= self._RECENT_PERSIST_INTERVAL:
                     self._last_recent_persist = now
                     recent_payload = list(self._recent)
@@ -197,13 +205,13 @@ class UsageTracker:
             return
         try:
             with self._lock:
-                data = self._serialize()
+                data = self._snapshot_locked()
                 recent = list(self._recent)
+                self._last_recent_persist = time.time()
+                self._last_usage_persist = self._last_recent_persist
             self._store.set("usage", data)
             self._store.set("usage_recent", recent)
             self._store.flush()
-            self._last_recent_persist = time.time()
-            self._last_usage_persist = self._last_recent_persist
         except Exception as exc:
             log.debug("usage flush failed: %s", exc)
 
@@ -216,9 +224,9 @@ class UsageTracker:
             self._recent.clear()
             self._last_recent_persist = 0.0
             self._last_usage_persist = 0.0
-            if self._store is not None:
-                try:
-                    self._store.discard("usage")
-                    self._store.discard("usage_recent")
-                except Exception as exc:
-                    log.debug("usage store clear failed: %s", exc)
+        if self._store is not None:
+            try:
+                self._store.discard("usage")
+                self._store.discard("usage_recent")
+            except Exception as exc:
+                log.debug("usage store clear failed: %s", exc)

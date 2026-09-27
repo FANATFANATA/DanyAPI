@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import atexit
 import logging
 import queue
 import re
 import sys
+from contextlib import suppress
 from logging.handlers import QueueHandler, QueueListener, RotatingFileHandler
 from pathlib import Path
 
@@ -216,3 +218,12 @@ def uvicorn_log_config() -> dict:
             "uvicorn.access": {"handlers": [], "level": level, "propagate": True},
         },
     }
+
+
+def shutdown() -> None:
+    while _queue_listeners:
+        with suppress(Exception):
+            _queue_listeners.pop().stop()
+
+
+atexit.register(shutdown)

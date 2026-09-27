@@ -6,6 +6,7 @@ import logging
 import os
 import tempfile
 import threading
+import weakref
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,21 @@ log = logging.getLogger("danyapi.store")
 DEFAULT_CACHE_SUBDIR = "danyapi"
 
 _MAX_AFFINITY = 8192
+
+_FLUSH_WAIT_INTERVAL = 0.5
+
+_PATH_LOCKS: weakref.WeakValueDictionary[str, threading.Lock] = weakref.WeakValueDictionary()
+_PATH_LOCKS_GUARD = threading.Lock()
+
+
+def _path_write_lock(path: Path) -> threading.Lock:
+    key = str(path)
+    with _PATH_LOCKS_GUARD:
+        lock = _PATH_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _PATH_LOCKS[key] = lock
+        return lock
 
 
 def cache_root() -> Path:
@@ -37,7 +53,6 @@ class JsonStore:
         self._maxsize = max(0, int(maxsize))
         self._data: dict[str, Any] = {}
         self._lock = threading.Lock()
-        self._write_lock = threading.Lock()
         self._pending = False
         self._dirty = False
         self._idle = threading.Event()
@@ -57,7 +72,7 @@ class JsonStore:
             return
         try:
             raw = self._path.read_text(encoding="utf-8")
-        except (FileNotFoundError, OSError, UnicodeError):
+        except (OSError, UnicodeError):
             return
         try:
             data = json.loads(raw)
@@ -72,15 +87,16 @@ class JsonStore:
             self._data.pop(next(iter(self._data)))
 
     def _commit(self, data: Any) -> None:
-        if self._path is None:
+        path = self._path
+        if path is None:
             return
-        tmp = self._path.with_name(self._path.name + ".tmp")
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
         try:
-            with self._write_lock:
+            with _path_write_lock(path):
                 tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-                os.replace(tmp, self._path)
+                os.replace(tmp, path)
         except (OSError, TypeError, ValueError) as exc:
-            log.warning("cache write failed for %s: %s", self._path, exc)
+            log.warning("cache write failed for %s: %s", path, exc)
             try:
                 tmp.unlink(missing_ok=True)
             except OSError:
@@ -134,7 +150,7 @@ class JsonStore:
             with self._lock:
                 if not self._pending:
                     return
-            self._idle.wait()
+            self._idle.wait(_FLUSH_WAIT_INTERVAL)
 
     def get(self, key: str, default: Any = None) -> Any:
         with self._lock:
@@ -159,8 +175,9 @@ class JsonStore:
 
     def discard(self, key: str) -> None:
         with self._lock:
-            if key in self._data:
-                self._data.pop(key)
+            if key not in self._data:
+                return
+            self._data.pop(key)
         self._note_changed()
 
     def clear(self) -> None:

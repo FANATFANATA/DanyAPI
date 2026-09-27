@@ -9,6 +9,8 @@ import random
 import re
 import time
 import uuid
+import weakref
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from functools import partial
@@ -25,14 +27,14 @@ from pydantic import BaseModel, Field, field_validator
 
 from .. import tools as toolemu
 from ..accounts import AccountPool, AccountPoolBusy, DeepSeekAccount, account_lock
-from ..config import settings
+from ..config import MAX_CHOICES, settings
 from ..deepseek.client import DeepSeekClient, DeepSeekError, DeepSeekSession
 from ..deepseek.stream import IncrementalSSE, MessageReconstructor
 from ..qwen import api as qwen_api
 from ..qwen.accounts import QwenAccount
 from ..qwen.client import QwenClient, QwenError
 from ..store import JsonStore
-from ..tokens import StreamBudget, count_messages_tokens, estimate_tokens
+from ..tokens import StreamBudget, _cjk_count, count_messages_tokens, estimate_tokens
 from ..usage import init_tracker, record_usage
 from . import responses as responses_api
 
@@ -85,6 +87,7 @@ REDUCED_CONTEXT_MESSAGE = "Response was generated from reduced context because t
 _TOKENS_LOCK = asyncio.Lock()
 SYSTEM_FINGERPRINT = "fp_danyapi"
 MODEL_CREATED_AT = int(time.time())
+_UNSET: Any = object()
 
 
 class DeepSeekStreamError(Exception):
@@ -340,9 +343,13 @@ async def lifespan(app: FastAPI):
             ds_checks = [client.check_auth() for client in ds_clients]
             qw_checks = [client.check_auth() for client in qw_clients]
             if ds_checks or qw_checks:
-                auth_results = await asyncio.gather(*(ds_checks + qw_checks))
-                ds_auth = auth_results[: len(ds_checks)]
-                qw_auth = auth_results[len(ds_checks) :]
+                auth_results = await asyncio.gather(*(ds_checks + qw_checks), return_exceptions=True)
+                for index, outcome in enumerate(auth_results):
+                    if isinstance(outcome, BaseException):
+                        log.warning("auth check #%d failed: %s", index, outcome)
+                auth_flags = [outcome is True for outcome in auth_results]
+                ds_auth = auth_flags[: len(ds_checks)]
+                qw_auth = auth_flags[len(ds_checks) :]
             else:
                 ds_auth = []
                 qw_auth = []
@@ -418,7 +425,12 @@ async def lifespan(app: FastAPI):
                 clients.extend(acct.client for acct in pool_obj.accounts)
         byok_pools = getattr(app.state, "byok_pools", None)
         if byok_pools is not None:
-            for pool_obj in list(byok_pools["deepseek"].values()) + list(byok_pools["qwen"].values()):
+            cached: list[Any] = []
+            for provider in ("deepseek", "qwen"):
+                entries = byok_pools.get(provider) if hasattr(byok_pools, "get") else None
+                if isinstance(entries, dict):
+                    cached.extend(entries.values())
+            for pool_obj in cached:
                 clients.extend(acct.client for acct in pool_obj.accounts)
         for client in clients:
             if id(client) in seen:
@@ -870,7 +882,7 @@ def _request_details(request: Request, payload: dict[str, Any], count_tokens: bo
     parts = []
     user_agent = request.headers.get("user-agent")
     if user_agent:
-        parts.append(f"ua={user_agent[:120].replace('{', '{{').replace('}', '}}')}")
+        parts.append(f"ua={user_agent[:120]}")
     model = payload.get("model")
     if isinstance(model, str) and model:
         parts.append(f"model={model}")
@@ -1059,38 +1071,44 @@ def _account_busy_count(pool: Any) -> int:
     return busy
 
 
-_POOL_RATE_CACHE: dict[int, tuple[float, dict[str, str]]] = {}
+_POOL_RATE_CACHE: dict[int, tuple[float, dict[str, str], weakref.ReferenceType[Any]]] = {}
 _POOL_RATE_TTL = 1.0
+_POOL_RATE_CACHE_MAX = 16
 
 
 def _pool_rate_headers(pool: Any | None) -> dict[str, str]:
     if pool is None or not hasattr(pool, "stats"):
         return {}
     now = time.monotonic()
-    entry = _POOL_RATE_CACHE.get(id(pool))
-    if entry is not None and now - entry[0] < _POOL_RATE_TTL:
+    key = id(pool)
+    entry = _POOL_RATE_CACHE.get(key)
+    if entry is not None and entry[2]() is pool and now - entry[0] < _POOL_RATE_TTL:
         return entry[1]
-    stats = pool.stats()
-    total = int(stats.get("healthy", 0) or 0)
+    try:
+        total = int(pool.stats().get("healthy", 0) or 0)
+    except Exception:
+        return {}
     busy = _account_busy_count(pool)
     headers = {
         "x-ratelimit-limit-requests": str(max(total, 0)),
         "x-ratelimit-remaining-requests": str(max(total - busy, 0)),
         "x-ratelimit-reset-requests": str(int(time.time())),
     }
-    if len(_POOL_RATE_CACHE) > 16:
+    if len(_POOL_RATE_CACHE) > _POOL_RATE_CACHE_MAX:
         _POOL_RATE_CACHE.clear()
-    _POOL_RATE_CACHE[id(pool)] = (now, headers)
+    try:
+        _POOL_RATE_CACHE[key] = (now, headers, weakref.ref(pool))
+    except TypeError:
+        _POOL_RATE_CACHE.pop(key, None)
     return headers
 
 
 @app.middleware("http")
 async def _openai_headers(request: Request, call_next):
-    request_id = _request_id_header(request)
     response = await call_next(request)
     headers = response.headers
     if not headers.get("x-request-id"):
-        headers["x-request-id"] = request_id
+        headers["x-request-id"] = _request_id_header(request)
     if not headers.get("x-ratelimit-limit-requests"):
         for candidate in (getattr(app.state, "pool", None), getattr(app.state, "qwen_pool", None)):
             if candidate is not None:
@@ -1138,14 +1156,17 @@ class Attachment:
     is_image: bool
 
 
-def _split_data_uri(uri: str) -> tuple[str, bytes]:
-    meta, compact = _data_uri_parts(uri)
+def _decode_data_uri(meta: str, compact: str) -> tuple[str, bytes]:
     content_type = meta.split(";", 1)[0] or "application/octet-stream"
     try:
         data = base64.b64decode(compact, validate=True)
     except ValueError as exc:
         raise HTTPException(400, "invalid base64 in image_url") from exc
     return content_type, data
+
+
+def _split_data_uri(uri: str) -> tuple[str, bytes]:
+    return _decode_data_uri(*_data_uri_parts(uri))
 
 
 def _collect_attachments(req: ChatCompletionRequest) -> list[Attachment]:
@@ -1169,11 +1190,7 @@ def _collect_attachments(req: ChatCompletionRequest) -> list[Attachment]:
                 raw_total += _compact_data_uri_length(compact)
                 if raw_total > MAX_ATTACHMENT_TOTAL_SIZE:
                     raise HTTPException(413, "attachments too large")
-                content_type = meta.split(";", 1)[0] or "application/octet-stream"
-                try:
-                    data = base64.b64decode(compact, validate=True)
-                except ValueError as exc:
-                    raise HTTPException(400, "invalid base64 in image_url") from exc
+                content_type, data = _decode_data_uri(meta, compact)
                 name = f"image_{len(attachments)}.{content_type.split('/')[-1] or 'bin'}"
                 attachments.append(Attachment(data, name, content_type, True))
     for f in req.files or []:
@@ -1206,13 +1223,10 @@ async def _fresh_pow_upload_headers(account) -> dict:
 
 
 async def _upload_attachments(account, attachments: list[Attachment], model_type: str, thinking: bool) -> list[str]:
+    if not attachments:
+        return []
+    pow_headers_list = await asyncio.gather(*(_fresh_pow_upload_headers(account) for _ in attachments))
     file_ids: list[str] = []
-    if attachments:
-        pow_headers_list = await asyncio.gather(*(_fresh_pow_upload_headers(account) for _ in attachments))
-    else:
-        pow_headers_list = []
-    if not pow_headers_list:
-        return file_ids
     sem = asyncio.Semaphore(4)
 
     async def _upload_one(att: Attachment, pow_headers) -> str:
@@ -1516,17 +1530,20 @@ _deferred_close_tasks: set[asyncio.Task] = set()
 
 
 async def _close_pool(pool: Any) -> None:
-    for acct in pool.accounts:
-        try:
-            acct.sessions.close_all()
-        except Exception as exc:
-            log.info("session cleanup failed for byok account %r: %s", getattr(acct, "label", acct), exc)
-    flush = getattr(pool, "flush", None)
-    if flush is not None:
-        try:
-            flush()
-        except Exception as exc:
-            log.info("pool store flush failed: %s", exc)
+    def _release_stores() -> None:
+        for acct in pool.accounts:
+            try:
+                acct.sessions.close_all()
+            except Exception as exc:
+                log.info("session cleanup failed for byok account %r: %s", getattr(acct, "label", acct), exc)
+        flush = getattr(pool, "flush", None)
+        if flush is not None:
+            try:
+                flush()
+            except Exception as exc:
+                log.info("pool store flush failed: %s", exc)
+
+    await asyncio.to_thread(_release_stores)
     for acct in pool.accounts:
         sem = getattr(acct, "sem", None)
         if sem is not None and sem.locked():
@@ -1853,8 +1870,9 @@ async def completions(req: CompletionRequest, request: Request) -> Any:
     for prompt_text in prompts:
         chat_req = _completion_chat_request(req, prompt_text, stream=False)
         chat_dict = await _dispatch_chat(chat_req, request)
-        choices.extend(_legacy_choice_from_chat(choice, base_index + i) for i, choice in enumerate(chat_dict.get("choices") or []))
-        base_index += len(chat_dict.get("choices") or [])
+        prompt_choices = chat_dict.get("choices") or []
+        choices.extend(_legacy_choice_from_chat(choice, base_index + i) for i, choice in enumerate(prompt_choices))
+        base_index += len(prompt_choices)
         if not completion_id:
             completion_id = chat_dict.get("id")
         created = chat_dict.get("created", created)
@@ -2034,13 +2052,15 @@ async def get_response_input_items(response_id: str) -> dict:
 
 @app.post("/v1/responses/{response_id}/cancel")
 async def cancel_response(response_id: str) -> dict:
-    record = _responses_store().get(response_id)
+    store = _responses_store()
+    record = store.get(response_id)
     if not isinstance(record, dict):
         raise HTTPException(404, f"response {response_id} not found")
     public = record.get("public")
     if isinstance(public, dict) and public.get("status") in ("in_progress", "queued"):
-        record["public"] = dict(public) | {"status": "cancelled", "incomplete_details": {"reason": "cancelled"}}
-        return record["public"]
+        cancelled = dict(public) | {"status": "cancelled", "incomplete_details": {"reason": "cancelled"}}
+        store.set(response_id, dict(record) | {"public": cancelled})
+        return cancelled
     return {"id": response_id, "object": "response", "status": "cancelled"}
 
 
@@ -2114,8 +2134,9 @@ async def _image_generations(req: ImageGenerationRequest, pool: AccountPool | No
                 user=req.user,
             )
             result_sid = result.get("session_id") or result_sid
-            if result.get("usage"):
-                usage = result.get("usage")
+            step_usage = result.get("usage")
+            if step_usage:
+                usage = _merge_usage(usage, step_usage)
             if result["image_urls"]:
                 data.extend(await asyncio.gather(*(_fetch_image(url) for url in result["image_urls"])))
     except AccountPoolBusy:
@@ -2191,13 +2212,13 @@ async def image_edits(
 ) -> dict:
     pool = await _image_pool(request)
     image_data, image_type = await _read_upload(image)
-    edited = _image_edit_req(prompt, await _image_markdown(image_data, image_type), None)
+    mask_md = None
     if mask is not None:
         mask_data, mask_type = await _read_upload(mask)
-        edited = f"{edited}\n{await _image_markdown(mask_data, mask_type)}"
+        mask_md = await _image_markdown(mask_data, mask_type)
     req = ImageGenerationRequest(
         model=model,
-        prompt=edited,
+        prompt=_image_edit_req(prompt, await _image_markdown(image_data, image_type), mask_md),
         n=n,
         size=size,
         response_format=response_format,
@@ -2277,7 +2298,7 @@ def _materialize_tools(req: ChatCompletionRequest) -> tuple[Any, Any]:
     return tools, tool_choice
 
 
-MAX_STREAM_CHOICES = 8
+MAX_STREAM_CHOICES = MAX_CHOICES
 
 
 def _bounded_choices(n: int | None) -> int:
@@ -2320,9 +2341,13 @@ class _StreamStopFilter:
         if cut != -1:
             self._buf = ""
             return text[:cut], True
-        if self._hold > 0 and len(text) > self._hold:
-            self._buf = text[-self._hold :]
-            return text[: -self._hold], False
+        hold = self._hold
+        if hold <= 0:
+            self._buf = ""
+            return text, False
+        if len(text) > hold:
+            self._buf = text[-hold:]
+            return text[:-hold], False
         self._buf = text
         return "", False
 
@@ -2332,11 +2357,8 @@ class _StreamStopFilter:
         return out
 
 
-_CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3040-\u30ff\uac00-\ud7af]")
-
-
 def _cjk_units(text: str) -> int:
-    return len(_CJK_RE.findall(text))
+    return _cjk_count(text)
 
 
 def _trim_to_tokens(text: str, budget: int | None) -> str:
@@ -2447,6 +2469,21 @@ def _usage_with_details(usage: dict, reasoning_text: str | None = None, reasonin
             reasoning_tokens = estimate_tokens(reasoning_text or "")
         result["completion_tokens_details"] = {"reasoning_tokens": reasoning_tokens}
     return result
+
+
+USAGE_TOTAL_FIELDS = ("prompt_tokens", "completion_tokens", "total_tokens")
+
+
+def _merge_usage(previous: dict | None, current: dict) -> dict:
+    if previous is None:
+        return current
+    merged = dict(previous)
+    for field in USAGE_TOTAL_FIELDS:
+        left = merged.get(field)
+        right = current.get(field)
+        if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+            merged[field] = int(left) + int(right)
+    return merged
 
 
 def _advance_session_usage(session, accumulated_total: int) -> int:
@@ -2563,9 +2600,7 @@ async def _chat_completions_deepseek(req: ChatCompletionRequest, pool: AccountPo
         "attachments": attachments,
         "tool_schemas": toolemu.tool_schema_map(tools),
         "tool_mode": tool_mode,
-        "include_usage": _include_usage(req),
         "context_seq": context_seq,
-        "reduced_prompts": None,
         "messages": req.messages,
         "tools": tools,
         "tool_choice": tool_choice,
@@ -2573,18 +2608,18 @@ async def _chat_completions_deepseek(req: ChatCompletionRequest, pool: AccountPo
         "user": getattr(req, "user", None),
         "max_tokens": max_tokens,
         "stop": getattr(req, "stop", None),
-        "n": getattr(req, "n", None),
+        "n": _bounded_choices(getattr(req, "n", None)),
         "parallel_tool_calls": getattr(req, "parallel_tool_calls", None),
     }
     if req.stream:
         return StreamingResponse(
-            _stream_guard(_stream_openai(lock=account.sem, **common), req.model),
+            _stream_guard(_stream_openai(lock=account.sem, include_usage=_include_usage(req), **common), req.model),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
     try:
-        return await _collect_non_stream(lock=account.sem, **{k: v for k, v in common.items() if k != "include_usage"})
+        return await _collect_non_stream(lock=account.sem, **common)
     except AccountPoolBusy:
         raise HTTPException(429, "all accounts are busy, try again later") from None
 
@@ -2624,7 +2659,6 @@ async def _chat_completions_qwen(req: ChatCompletionRequest, pool: AccountPool |
         "search": search,
         "tool_schemas": toolemu.tool_schema_map(tools),
         "tool_mode": tool_mode,
-        "include_usage": _include_usage(req),
         "context_seq": context_seq,
         "messages": req.messages,
         "tools": tools,
@@ -2633,18 +2667,18 @@ async def _chat_completions_qwen(req: ChatCompletionRequest, pool: AccountPool |
         "user": getattr(req, "user", None),
         "max_tokens": max_tokens,
         "stop": getattr(req, "stop", None),
-        "n": getattr(req, "n", None),
+        "n": _bounded_choices(getattr(req, "n", None)),
         "parallel_tool_calls": getattr(req, "parallel_tool_calls", None),
     }
     if req.stream:
         return StreamingResponse(
-            _stream_guard(qwen_api.stream_openai(lock=account.sem, **common), req.model),
+            _stream_guard(qwen_api.stream_openai(lock=account.sem, include_usage=_include_usage(req), **common), req.model),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
     try:
-        return await qwen_api.collect_non_stream(lock=account.sem, **{k: v for k, v in common.items() if k != "include_usage"})
+        return await qwen_api.collect_non_stream(lock=account.sem, **common)
     except AccountPoolBusy:
         raise HTTPException(429, "all accounts are busy, try again later") from None
 
@@ -3389,7 +3423,7 @@ async def _collect_non_stream(
                     incomplete_message = None
                     break
                 incomplete_message = _incomplete_message(cont_rec)
-                if not cont_rec.content:
+                if not (cont_rec.content or cont_rec.reasoning):
                     break
             if incomplete_message is not None and not (rec.content or rec.reasoning):
                 if reduced_prompts is None and messages is not None:
@@ -3433,7 +3467,7 @@ async def _collect_non_stream(
         response = _build_completion_response(model, message, finish, usage, session_key, reasoning_tokens)
         if isinstance(n, int) and n and n > 1:
             template = response["choices"][0]
-            response["choices"] = [dict(template) | {"index": i} for i in range(n)]
+            response["choices"] = [dict(template) | {"index": i} for i in range(_bounded_choices(n))]
         if reduced_notice is not None:
             log.warning("deepseek response delivered from reduced context (%s)", model)
             response["error"] = {"message": reduced_notice, "finish_reason": RESPONSE_INCOMPLETE}
@@ -3497,6 +3531,7 @@ async def _stream_openai(
         content_shown_len = 0
         tool_hidden = False
         role_sent = False
+        got_content = False
         started = time.monotonic()
         budget = StreamBudget(max_tokens, _trim_to_tokens)
         stop_markers = _split_stop(stop)
@@ -3533,6 +3568,65 @@ async def _stream_openai(
             if final and not stop_hit:
                 out += budget.feed(stop_filter.flush())
             return out
+
+        def _chunk(delta: dict, finish: str | None = None, *, index: int = 0, session_id: Any = _UNSET) -> str:
+            payload: dict[str, Any] = {
+                "id": chunk_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+            }
+            if session_id is not _UNSET:
+                payload["session_id"] = session_id
+            payload["choices"] = [{"index": index, "delta": delta, "finish_reason": finish}]
+            return _sse(payload)
+
+        def _role_chunk() -> str | None:
+            nonlocal role_sent
+            if role_sent:
+                return None
+            role_sent = True
+            return _chunk({"role": "assistant"})
+
+        def _content_text(piece: str) -> str:
+            nonlocal content_buf, content_shown_len, tool_hidden
+            if not tool_mode:
+                return content_piece(piece)
+            content_buf += piece
+            visible, content_shown_len, tool_hidden = toolemu.tool_visible(content_buf, content_shown_len, tool_hidden, tool_schemas)
+            return content_piece(visible)
+
+        def _reasoning_text(piece: str) -> str:
+            return reasoning_piece(piece)
+
+        def _done_finish(status: Any) -> str:
+            return "stop" if stop_hit else ("length" if budget.done else _finish_reason(status))
+
+        async def _drain_event(reconstructor: MessageReconstructor, event) -> AsyncIterator[str]:
+            nonlocal response_message_id, stop_message_id, got_content
+            if event.event == "ready" and isinstance(event.data, dict):
+                response_message_id = event.data.get("response_message_id")
+                if response_message_id:
+                    stop_message_id = response_message_id
+            reconstructor.handle(event)
+            c_diff, r_diff = reconstructor.take_diffs()
+            if not (c_diff or r_diff):
+                return
+            got_content = True
+            role_line = _role_chunk()
+            if role_line:
+                yield role_line
+            delta: dict = {}
+            if c_diff:
+                allowed = _content_text(c_diff)
+                if allowed:
+                    delta["content"] = allowed
+            if r_diff:
+                reason = _reasoning_text(r_diff)
+                if reason:
+                    delta["reasoning_content"] = reason
+            if delta:
+                yield _chunk(delta)
 
         had_cached_session = bool(existing_sid) and account.sessions.get(existing_sid) is not None
         stale_rebuilt = False
@@ -3605,123 +3699,11 @@ async def _stream_openai(
             try:
                 async for chunk in resp.aiter_bytes():
                     for event in incremental.feed(chunk):
-                        if event.event == "ready" and isinstance(event.data, dict):
-                            response_message_id = event.data.get("response_message_id")
-                            if response_message_id:
-                                stop_message_id = response_message_id
-                        rec.handle(event)
-                        c_diff, r_diff = rec.take_diffs()
-                        if not (c_diff or r_diff):
-                            continue
-                        got_content = True
-                        if not role_sent:
-                            role_sent = True
-                            yield _sse(
-                                {
-                                    "id": chunk_id,
-                                    "object": "chat.completion.chunk",
-                                    "created": created,
-                                    "model": model,
-                                    "choices": [
-                                        {
-                                            "index": 0,
-                                            "delta": {"role": "assistant"},
-                                            "finish_reason": None,
-                                        }
-                                    ],
-                                }
-                            )
-                        delta: dict = {}
-                        if c_diff:
-                            if tool_mode:
-                                content_buf += c_diff
-                                visible, content_shown_len, tool_hidden = toolemu.tool_visible(content_buf, content_shown_len, tool_hidden, tool_schemas)
-                                allowed = content_piece(visible)
-                                if allowed:
-                                    delta["content"] = allowed
-                            else:
-                                allowed = content_piece(c_diff)
-                                if allowed:
-                                    delta["content"] = allowed
-                        if r_diff:
-                            reason = reasoning_piece(r_diff)
-                            if reason:
-                                delta["reasoning_content"] = reason
-                        if delta:
-                            yield _sse(
-                                {
-                                    "id": chunk_id,
-                                    "object": "chat.completion.chunk",
-                                    "created": created,
-                                    "model": model,
-                                    "choices": [
-                                        {
-                                            "index": 0,
-                                            "delta": delta,
-                                            "finish_reason": None,
-                                        }
-                                    ],
-                                }
-                            )
+                        async for line in _drain_event(rec, event):
+                            yield line
                 for event in incremental.finish():
-                    if event.event == "ready" and isinstance(event.data, dict):
-                        response_message_id = event.data.get("response_message_id")
-                        if response_message_id:
-                            stop_message_id = response_message_id
-                    rec.handle(event)
-                    c_diff, r_diff = rec.take_diffs()
-                    if not (c_diff or r_diff):
-                        continue
-                    got_content = True
-                    if not role_sent:
-                        role_sent = True
-                        yield _sse(
-                            {
-                                "id": chunk_id,
-                                "object": "chat.completion.chunk",
-                                "created": created,
-                                "model": model,
-                                "choices": [
-                                    {
-                                        "index": 0,
-                                        "delta": {"role": "assistant"},
-                                        "finish_reason": None,
-                                    }
-                                ],
-                            }
-                        )
-                    delta2: dict = {}
-                    if c_diff:
-                        if tool_mode:
-                            content_buf += c_diff
-                            visible, content_shown_len, tool_hidden = toolemu.tool_visible(content_buf, content_shown_len, tool_hidden, tool_schemas)
-                            allowed = content_piece(visible)
-                            if allowed:
-                                delta2["content"] = allowed
-                        else:
-                            allowed = content_piece(c_diff)
-                            if allowed:
-                                delta2["content"] = allowed
-                    if r_diff:
-                        reason2 = reasoning_piece(r_diff)
-                        if reason2:
-                            delta2["reasoning_content"] = reason2
-                    if delta2:
-                        yield _sse(
-                            {
-                                "id": chunk_id,
-                                "object": "chat.completion.chunk",
-                                "created": created,
-                                "model": model,
-                                "choices": [
-                                    {
-                                        "index": 0,
-                                        "delta": delta2,
-                                        "finish_reason": None,
-                                    }
-                                ],
-                            }
-                        )
+                    async for line in _drain_event(rec, event):
+                        yield line
             except BaseException:
                 stopped = True
                 if rec.id:
@@ -3806,79 +3788,19 @@ async def _stream_openai(
                 rec.extend_with(cont_rec)
                 cont_parent = cont_rec.id or cont_parent
                 if cont_rec.content:
-                    if not role_sent:
-                        role_sent = True
-                        yield _sse(
-                            {
-                                "id": chunk_id,
-                                "object": "chat.completion.chunk",
-                                "created": created,
-                                "model": model,
-                                "choices": [
-                                    {
-                                        "index": 0,
-                                        "delta": {"role": "assistant"},
-                                        "finish_reason": None,
-                                    }
-                                ],
-                            }
-                        )
-                    if tool_mode:
-                        content_buf += cont_rec.content
-                        c_visible, content_shown_len, tool_hidden = toolemu.tool_visible(content_buf, content_shown_len, tool_hidden, tool_schemas)
-                        allowed = content_piece(c_visible)
-                        if allowed:
-                            yield _sse(
-                                {
-                                    "id": chunk_id,
-                                    "object": "chat.completion.chunk",
-                                    "created": created,
-                                    "model": model,
-                                    "choices": [{"index": 0, "delta": {"content": allowed}, "finish_reason": None}],
-                                }
-                            )
-                    else:
-                        allowed = content_piece(cont_rec.content)
-                        if allowed:
-                            yield _sse(
-                                {
-                                    "id": chunk_id,
-                                    "object": "chat.completion.chunk",
-                                    "created": created,
-                                    "model": model,
-                                    "choices": [{"index": 0, "delta": {"content": allowed}, "finish_reason": None}],
-                                }
-                            )
+                    role_line = _role_chunk()
+                    if role_line:
+                        yield role_line
+                    allowed = _content_text(cont_rec.content)
+                    if allowed:
+                        yield _chunk({"content": allowed})
                 if cont_rec.reasoning:
-                    if not role_sent:
-                        role_sent = True
-                        yield _sse(
-                            {
-                                "id": chunk_id,
-                                "object": "chat.completion.chunk",
-                                "created": created,
-                                "model": model,
-                                "choices": [
-                                    {
-                                        "index": 0,
-                                        "delta": {"role": "assistant"},
-                                        "finish_reason": None,
-                                    }
-                                ],
-                            }
-                        )
-                if cont_rec.reasoning:
-                    cont_reason = reasoning_piece(cont_rec.reasoning)
+                    role_line = _role_chunk()
+                    if role_line:
+                        yield role_line
+                    cont_reason = _reasoning_text(cont_rec.reasoning)
                     if cont_reason:
-                        yield _sse(
-                            {
-                                "id": chunk_id,
-                                "object": "chat.completion.chunk",
-                                "created": created,
-                                "model": model,
-                                "choices": [{"index": 0, "delta": {"reasoning_content": cont_reason}, "finish_reason": None}],
-                            }
-                        )
+                        yield _chunk({"reasoning_content": cont_reason})
                 if not _is_input_exceeds_limit(cont_rec):
                     incomplete_message = None
                     break
@@ -3900,78 +3822,19 @@ async def _stream_openai(
                         stop_message_id = response_message_id
                         reduced_notice = REDUCED_CONTEXT_MESSAGE
                         if rec.content:
-                            if not role_sent:
-                                role_sent = True
-                                yield _sse(
-                                    {
-                                        "id": chunk_id,
-                                        "object": "chat.completion.chunk",
-                                        "created": created,
-                                        "model": model,
-                                        "choices": [
-                                            {
-                                                "index": 0,
-                                                "delta": {"role": "assistant"},
-                                                "finish_reason": None,
-                                            }
-                                        ],
-                                    }
-                                )
-                            if tool_mode:
-                                content_buf += rec.content
-                                r_visible, content_shown_len, tool_hidden = toolemu.tool_visible(content_buf, content_shown_len, tool_hidden, tool_schemas)
-                                allowed = content_piece(r_visible)
-                                if allowed:
-                                    yield _sse(
-                                        {
-                                            "id": chunk_id,
-                                            "object": "chat.completion.chunk",
-                                            "created": created,
-                                            "model": model,
-                                            "choices": [{"index": 0, "delta": {"content": allowed}, "finish_reason": None}],
-                                        }
-                                    )
-                            else:
-                                allowed = content_piece(rec.content)
-                                if allowed:
-                                    yield _sse(
-                                        {
-                                            "id": chunk_id,
-                                            "object": "chat.completion.chunk",
-                                            "created": created,
-                                            "model": model,
-                                            "choices": [{"index": 0, "delta": {"content": allowed}, "finish_reason": None}],
-                                        }
-                                    )
+                            role_line = _role_chunk()
+                            if role_line:
+                                yield role_line
+                            allowed = _content_text(rec.content)
+                            if allowed:
+                                yield _chunk({"content": allowed})
                         if rec.reasoning:
-                            if not role_sent:
-                                role_sent = True
-                                yield _sse(
-                                    {
-                                        "id": chunk_id,
-                                        "object": "chat.completion.chunk",
-                                        "created": created,
-                                        "model": model,
-                                        "choices": [
-                                            {
-                                                "index": 0,
-                                                "delta": {"role": "assistant"},
-                                                "finish_reason": None,
-                                            }
-                                        ],
-                                    }
-                                )
-                            reduced_reason = reasoning_piece(rec.reasoning)
+                            role_line = _role_chunk()
+                            if role_line:
+                                yield role_line
+                            reduced_reason = _reasoning_text(rec.reasoning)
                             if reduced_reason:
-                                yield _sse(
-                                    {
-                                        "id": chunk_id,
-                                        "object": "chat.completion.chunk",
-                                        "created": created,
-                                        "model": model,
-                                        "choices": [{"index": 0, "delta": {"reasoning_content": reduced_reason}, "finish_reason": None}],
-                                    }
-                                )
+                                yield _chunk({"reasoning_content": reduced_reason})
         if incomplete_message is not None and reduced_notice is None:
             log.warning("deepseek response incomplete: %s", incomplete_message)
             for line in _stream_error_sse(chunk_id, created, model, incomplete_message, session_key, RESPONSE_INCOMPLETE, RESPONSE_INCOMPLETE):
@@ -4009,115 +3872,47 @@ async def _stream_openai(
         )
         log.info("deepseek completion success (%.0fms)", (time.monotonic() - started) * 1000)
 
+        finish = _done_finish(rec.status)
         if tool_mode:
             parsed = toolemu.parse_tool_calls(content_buf or rec.content, tool_schemas)
-            if parsed is not None:
-                tool_calls, _ = parsed
-                if tool_calls:
-                    if budget.done:
-                        finish = "length"
-                        for line in _stream_error_sse(
-                            chunk_id,
-                            created,
-                            model,
-                            "max_tokens reached before the tool call completed",
-                            session_key,
-                            "length",
-                            "length",
-                        ):
-                            yield line
-                        return
-                    if _max_calls(parallel_tool_calls) is not None:
-                        tool_calls = tool_calls[: _max_calls(parallel_tool_calls)]
-                    for delta in toolemu.tool_call_deltas(tool_calls):
-                        yield _sse(
-                            {
-                                "id": chunk_id,
-                                "object": "chat.completion.chunk",
-                                "created": created,
-                                "model": model,
-                                "choices": [{"index": 0, "delta": delta, "finish_reason": None}],
-                            }
-                        )
-                    finish = "tool_calls"
-                else:
-                    raw_tail = (content_buf or rec.content)[content_shown_len:] if (content_buf or rec.content) else ""
-                    tail_text = content_piece(raw_tail)
-                    if tail_text:
-                        yield _sse(
-                            {
-                                "id": chunk_id,
-                                "object": "chat.completion.chunk",
-                                "created": created,
-                                "model": model,
-                                "choices": [
-                                    {
-                                        "index": 0,
-                                        "delta": {"content": tail_text},
-                                        "finish_reason": None,
-                                    }
-                                ],
-                            }
-                        )
-                    finish = "stop" if stop_hit else ("length" if budget.done else _finish_reason(rec.status))
+            tool_calls = parsed[0] if parsed is not None and parsed[0] else None
+            if tool_calls:
+                if budget.done:
+                    for line in _stream_error_sse(
+                        chunk_id,
+                        created,
+                        model,
+                        "max_tokens reached before the tool call completed",
+                        session_key,
+                        "length",
+                        "length",
+                    ):
+                        yield line
+                    return
+                max_calls = _max_calls(parallel_tool_calls)
+                if max_calls is not None:
+                    tool_calls = tool_calls[:max_calls]
+                for delta in toolemu.tool_call_deltas(tool_calls):
+                    yield _chunk(delta)
+                finish = "tool_calls"
             else:
-                raw_tail = (content_buf or rec.content)[content_shown_len:] if (content_buf or rec.content) else ""
-                tail_text = content_piece(raw_tail)
+                shown = content_buf or rec.content
+                tail_text = content_piece(shown[content_shown_len:] if shown else "")
                 if tail_text:
-                    yield _sse(
-                        {
-                            "id": chunk_id,
-                            "object": "chat.completion.chunk",
-                            "created": created,
-                            "model": model,
-                            "choices": [
-                                {
-                                    "index": 0,
-                                    "delta": {"content": tail_text},
-                                    "finish_reason": None,
-                                }
-                            ],
-                        }
-                    )
-                finish = "stop" if stop_hit else ("length" if budget.done else _finish_reason(rec.status))
-        else:
-            finish = "stop" if stop_hit else ("length" if budget.done else _finish_reason(rec.status))
+                    yield _chunk({"content": tail_text})
+                finish = _done_finish(rec.status)
 
         tail_text = content_piece(None, final=True)
         if tail_text:
-            yield _sse(
-                {
-                    "id": chunk_id,
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": model,
-                    "choices": [{"index": 0, "delta": {"content": tail_text}, "finish_reason": None}],
-                }
-            )
+            yield _chunk({"content": tail_text})
 
         tail_reason = reasoning_piece(None, final=True)
         if tail_reason:
-            yield _sse(
-                {
-                    "id": chunk_id,
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": model,
-                    "choices": [{"index": 0, "delta": {"reasoning_content": tail_reason}, "finish_reason": None}],
-                }
-            )
+            yield _chunk({"reasoning_content": tail_reason})
 
-        if not role_sent:
-            role_sent = True
-            yield _sse(
-                {
-                    "id": chunk_id,
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": model,
-                    "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
-                }
-            )
+        role_line = _role_chunk()
+        if role_line:
+            yield role_line
 
         if reduced_notice is not None:
             yield _sse(
@@ -4132,38 +3927,11 @@ async def _stream_openai(
                 }
             )
         else:
-            yield _sse(
-                {
-                    "id": chunk_id,
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": model,
-                    "session_id": session_key,
-                    "choices": [{"index": 0, "delta": {}, "finish_reason": finish}],
-                }
-            )
+            yield _chunk({}, finish, session_id=session_key)
             for extra_index in range(1, _bounded_choices(n)):
                 if budget.text:
-                    yield _sse(
-                        {
-                            "id": chunk_id,
-                            "object": "chat.completion.chunk",
-                            "created": created,
-                            "model": model,
-                            "session_id": session_key,
-                            "choices": [{"index": extra_index, "delta": {"content": budget.text}, "finish_reason": None}],
-                        }
-                    )
-                yield _sse(
-                    {
-                        "id": chunk_id,
-                        "object": "chat.completion.chunk",
-                        "created": created,
-                        "model": model,
-                        "session_id": session_key,
-                        "choices": [{"index": extra_index, "delta": {}, "finish_reason": finish}],
-                    }
-                )
+                    yield _chunk({"content": budget.text}, index=extra_index, session_id=session_key)
+                yield _chunk({}, finish, index=extra_index, session_id=session_key)
         if include_usage:
             yield _sse(
                 {

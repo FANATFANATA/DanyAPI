@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import threading
 import time
 from collections import OrderedDict
@@ -12,16 +13,24 @@ from .store import JsonStore
 def _as_int(value: Any, default: int = 0) -> int:
     if isinstance(value, bool):
         return default
-    if isinstance(value, (int, float)):
+    if isinstance(value, int):
+        return int(value)
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return default
         return int(value)
     if isinstance(value, str):
         try:
             return int(value)
         except ValueError:
-            try:
-                return int(float(value))
-            except ValueError:
-                return default
+            pass
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return default
+        if not math.isfinite(number):
+            return default
+        return int(number)
     return default
 
 
@@ -50,10 +59,19 @@ class SessionRegistry:
         return time.monotonic()
 
     def _expired(self, session_id: str, now: float) -> bool:
-        return self._ttl > 0 and now - self._sessions[session_id][1] > self._ttl
+        if self._ttl <= 0:
+            return False
+        entry = self._sessions.get(session_id)
+        return entry is not None and now - entry[1] > self._ttl
 
     def _session_key(self, session_id: str) -> str:
         return f"{self._key_prefix}{session_id}"
+
+    def _drop_session_lock(self, session_key: str) -> None:
+        if self._session_refs.get(session_key, 0) > 0:
+            return
+        self._session_locks.pop(session_key, None)
+        self._session_refs.pop(session_key, None)
 
     def _serialize(self, session: Any) -> dict[str, Any]:
         return {
@@ -82,6 +100,7 @@ class SessionRegistry:
             return
         prefix = self._key_prefix
         by_canonical: dict[str, Any] = {}
+        now = self._now()
         for key, record in self._store.items():
             if prefix:
                 if not key.startswith(prefix):
@@ -90,8 +109,7 @@ class SessionRegistry:
             else:
                 session_id = key
             if not session_id:
-                if prefix and key == prefix:
-                    self._store.discard(key)
+                self._store.discard(key)
                 continue
             try:
                 session = self._deserialize(record)
@@ -102,12 +120,11 @@ class SessionRegistry:
                 session = canonical
             else:
                 by_canonical[session.id] = session
-            self._sessions[session_id] = (session, self._now())
+            self._sessions[session_id] = (session, now)
         while len(self._sessions) > self._maxsize:
             oldest, _ = self._sessions.popitem(last=False)
             self._store.discard(self._session_key(oldest))
-            self._session_locks.pop(oldest, None)
-            self._session_refs.pop(oldest, None)
+            self._drop_session_lock(oldest)
 
     async def _create(self, **kwargs: Any) -> Any:
         return await self._client.create_session(**kwargs)
@@ -142,8 +159,7 @@ class SessionRegistry:
                 self._sessions.move_to_end(session_id)
                 self._sessions[session_id] = (session, now)
         if expired:
-            self._session_locks.pop(session_id, None)
-            self._session_refs.pop(session_id, None)
+            self._drop_session_lock(session_id)
             if store is not None:
                 store.discard(self._session_key(session_id))
             return None
@@ -203,8 +219,7 @@ class SessionRegistry:
                 oldest, entry = self._sessions.popitem(last=False)
                 if oldest not in protect:
                     evicted.append(oldest)
-                    self._session_locks.pop(oldest, None)
-                    self._session_refs.pop(oldest, None)
+                    self._drop_session_lock(oldest)
                     continue
                 self._sessions[oldest] = entry
                 if oldest in seen:
@@ -236,19 +251,24 @@ class SessionRegistry:
             self._sessions.pop(session_id, None)
         if self._store is not None:
             self._store.discard(self._session_key(session_id))
-        self._session_locks.pop(session_id, None)
-        self._session_refs.pop(session_id, None)
+        self._drop_session_lock(session_id)
 
     def close_all(self) -> None:
         with self._lock:
+            known = list(self._sessions)
             self._sessions.clear()
         self._session_locks.clear()
         self._session_refs.clear()
-        if self._store is not None:
-            prefix = self._key_prefix
-            for key, _ in self._store.items():
-                if key.startswith(prefix):
-                    self._store.discard(key)
+        store = self._store
+        if store is None:
+            return
+        if self._key_prefix:
+            for key, _ in store.items():
+                if key.startswith(self._key_prefix):
+                    store.discard(key)
+            return
+        for session_id in known:
+            store.discard(self._session_key(session_id))
 
     def flush(self) -> None:
         if self._store is not None:

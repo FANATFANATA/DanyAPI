@@ -26,15 +26,22 @@ def estimate_tokens(text: str | None) -> int:
 
 
 class StreamBudget:
-    __slots__ = ("_budget", "_chars", "_cjk", "_trim", "done", "text")
+    __slots__ = ("_budget", "_chars", "_chunks", "_cjk", "_trim", "done")
 
     def __init__(self, budget: int | None, trim: Callable[[str, int | None], str]) -> None:
         self._budget = budget
         self._trim = trim
-        self.text = ""
+        self._chunks: list[str] = []
         self.done = False
         self._cjk = 0
         self._chars = 0
+
+    @property
+    def text(self) -> str:
+        chunks = self._chunks
+        if len(chunks) == 1:
+            return chunks[0]
+        return "".join(chunks)
 
     def _count(self) -> int:
         if self._chars == 0:
@@ -44,21 +51,21 @@ class StreamBudget:
     def feed(self, piece: str | None) -> str:
         if not piece or self.done:
             return ""
+        self._chunks.append(piece)
         if self._budget is None:
-            self.text += piece
             return piece
-        previous = self.text
-        self.text = previous + piece
         cjk = _cjk_count(piece)
         self._cjk += cjk
         self._chars += len(piece) - cjk
         if self._count() <= self._budget:
             return piece
-        trimmed = self._trim(self.text, self._budget)
-        if trimmed == self.text:
+        text = "".join(self._chunks)
+        trimmed = self._trim(text, self._budget)
+        if trimmed == text:
             return piece
         self.done = True
-        self.text = trimmed
+        self._chunks = [trimmed]
+        previous = text[: len(text) - len(piece)]
         if not trimmed.startswith(previous):
             return ""
         return trimmed[len(previous) :]

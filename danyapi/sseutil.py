@@ -60,19 +60,19 @@ class IncrementalSSE:
         if not isinstance(self._buffer, bytearray):
             self._buffer = bytearray(self._buffer)
         self._buffer += chunk
+        buffer = self._buffer
         while True:
-            idx = self._buffer.find(b"\n\n", self._pos)
+            idx = buffer.find(b"\n\n", self._pos)
+            step = 2
             if idx == -1:
-                idx = self._buffer.find(b"\r\n\r\n", self._pos)
+                idx = buffer.find(b"\r\n\r\n", self._pos)
+                step = 4
                 if idx == -1:
                     break
-                block = self._buffer[self._pos : idx].decode("utf-8", errors="replace")
-                self._pos = idx + 4
-            else:
-                block = self._buffer[self._pos : idx].decode("utf-8", errors="replace")
-                self._pos = idx + 2
-            yield from parse_sse(block)
-        if self._pos and (self._pos >= _COMPACT_THRESHOLD or self._pos == len(self._buffer)):
+            start = self._pos
+            self._pos = idx + step
+            yield from parse_sse(buffer[start:idx].decode("utf-8", errors="replace"))
+        if self._pos and (self._pos >= _COMPACT_THRESHOLD or self._pos == len(buffer)):
             del self._buffer[: self._pos]
             self._pos = 0
 
@@ -152,13 +152,17 @@ def _init_message(message: dict, value: Any) -> None:
         message[_normalise_key(key)] = val
 
 
+def _delta_op(value: Any, default: str) -> str:
+    return value if isinstance(value, str) else default
+
+
 def _apply_delta(message: dict, op: str, path: str, value: Any) -> None:
     if op == "BATCH":
         values = value if isinstance(value, list) else []
         for sub in values:
             if not isinstance(sub, dict):
                 continue
-            sub_op = sub.get("o", "SET")
+            sub_op = _delta_op(sub.get("o"), "SET")
             sub_path = sub.get("p", "")
             if sub_path and path and not sub_path.startswith("response/"):
                 sub_path = f"{path}/{sub_path}"
@@ -244,7 +248,7 @@ def _touches_aggregated_fragment(op: str, path: str, value: Any, frag_idx: int) 
             sub_path = sub.get("p", "")
             if sub_path and path and not sub_path.startswith("response/"):
                 sub_path = f"{path}/{sub_path}"
-            if _touches_aggregated_fragment(sub.get("o", "SET"), sub_path, sub.get("v"), frag_idx):
+            if _touches_aggregated_fragment(_delta_op(sub.get("o"), "SET"), sub_path, sub.get("v"), frag_idx):
                 return True
         return False
     parts = _path_parts(path or "")
@@ -312,8 +316,10 @@ class MessageReconstructor:
         data = event.data
         if not isinstance(data, dict) or "v" not in data:
             return
-        op = data.get("o", self._last_op)
+        op = _delta_op(data.get("o"), self._last_op)
         path = data.get("p", self._last_path)
+        if not isinstance(path, str):
+            path = self._last_path
         if op != "BATCH":
             self._last_op = op
             self._last_path = path

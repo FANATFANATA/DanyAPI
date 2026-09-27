@@ -18,6 +18,19 @@ IMAGE_PART_TYPES = {"input_image", "image_url"}
 SUPPORTED_ROLES = {"user", "assistant", "system", "developer", "tool", "function"}
 
 
+def _as_int(value: Any) -> int:
+    if value is None or isinstance(value, bool):
+        return 0
+    try:
+        number = int(value)
+    except (TypeError, ValueError, OverflowError):
+        try:
+            number = int(float(value))
+        except (TypeError, ValueError, OverflowError):
+            return 0
+    return max(0, number)
+
+
 def _as_text(value: Any) -> str:
     if value is None:
         return ""
@@ -42,7 +55,10 @@ def _as_text(value: Any) -> str:
     if isinstance(value, dict):
         if isinstance(value.get("text"), str):
             return value["text"]
-        return json.dumps(value, ensure_ascii=False)
+        try:
+            return json.dumps(value, ensure_ascii=False)
+        except (TypeError, ValueError):
+            return str(value)
     return str(value)
 
 
@@ -150,7 +166,7 @@ def convert_tools(tools: Any) -> list[Any] | None:
             continue
         tool_type = tool.get("type")
         if tool_type == "function" or (isinstance(tool.get("name"), str) and tool_type in (None, "function")):
-            function: dict[str, Any] = {"name": tool.get("name")}
+            function: dict[str, Any] = {"name": tool.get("name") or ""}
             if "description" in tool:
                 function["description"] = tool["description"]
             if "parameters" in tool:
@@ -271,15 +287,15 @@ def _reasoning_text_from_output(output: Any) -> str:
 def _usage_to_responses(usage: Any, output: Any = None) -> dict | None:
     if not isinstance(usage, dict):
         return None
-    input_tokens = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
-    output_tokens = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
-    total_tokens = int(usage.get("total_tokens") or (input_tokens + output_tokens))
-    reasoning_tokens = int(usage.get("reasoning_tokens") or 0)
+    input_tokens = _as_int(usage.get("prompt_tokens") or usage.get("input_tokens"))
+    output_tokens = _as_int(usage.get("completion_tokens") or usage.get("output_tokens"))
+    total_tokens = _as_int(usage.get("total_tokens")) or (input_tokens + output_tokens)
+    reasoning_tokens = _as_int(usage.get("reasoning_tokens"))
     if not reasoning_tokens:
         reasoning_tokens = estimate_tokens(_reasoning_text_from_output(output))
     return {
         "input_tokens": input_tokens,
-        "input_tokens_details": {"cached_tokens": int(usage.get("cached_tokens") or 0)},
+        "input_tokens_details": {"cached_tokens": _as_int(usage.get("cached_tokens"))},
         "output_tokens": output_tokens,
         "output_tokens_details": {"reasoning_tokens": reasoning_tokens},
         "total_tokens": total_tokens,
@@ -391,11 +407,14 @@ def messages_from_output(output: Any) -> list[dict]:
             elif isinstance(content, str):
                 text_parts.append(content)
         elif item_type == "function_call":
+            arguments = item.get("arguments")
+            if isinstance(arguments, (dict, list)):
+                arguments = json.dumps(arguments, ensure_ascii=False)
             calls.append(
                 {
                     "id": item.get("call_id") or item.get("id") or f"call_{uuid.uuid4().hex[:12]}",
                     "type": "function",
-                    "function": {"name": item.get("name") or "", "arguments": item.get("arguments") or "{}"},
+                    "function": {"name": item.get("name") or "", "arguments": arguments if isinstance(arguments, str) else "{}"},
                 }
             )
     messages: list[dict] = []
@@ -513,7 +532,7 @@ def response_from_chat(chat: Any, info: RequestInfo, response_id: str, created_a
     incomplete_details = None
     if error is not None or finish == "response_incomplete":
         status = "incomplete"
-    elif finish in INCOMPLETE_REASONS:
+    elif isinstance(finish, str) and finish in INCOMPLETE_REASONS:
         status = "incomplete"
         incomplete_details = {"reason": INCOMPLETE_REASONS[finish]}
     return build_response_object(
@@ -584,6 +603,26 @@ def _error_payload(error: Any) -> dict:
 
 
 class _StreamState:
+    __slots__ = (
+        "created_at",
+        "finish",
+        "info",
+        "message_id",
+        "message_index",
+        "message_open",
+        "message_parts",
+        "output",
+        "output_index",
+        "reasoning_id",
+        "reasoning_index",
+        "reasoning_open",
+        "reasoning_parts",
+        "response_id",
+        "sequence",
+        "tool_items",
+        "usage",
+    )
+
     def __init__(self, info: RequestInfo, response_id: str, created_at: int) -> None:
         self.info = info
         self.response_id = response_id
@@ -688,6 +727,28 @@ class _StreamState:
         self.output.append(item)
         yield self.emit("response.output_item.done", {"output_index": self.message_index, "item": item})
 
+    def _open_tool_item(self, entry: dict) -> Iterator[str]:
+        if entry["added"]:
+            return
+        item = {
+            "id": entry["id"],
+            "type": "function_call",
+            "call_id": entry["call_id"],
+            "name": entry["name"],
+            "arguments": "",
+            "status": "in_progress",
+        }
+        yield self.emit("response.output_item.added", {"output_index": entry["output_index"], "item": item})
+        entry["added"] = True
+        buffered = entry["buffered_args"]
+        if buffered:
+            entry["buffered_args"] = []
+            for chunk in buffered:
+                yield self.emit(
+                    "response.function_call_arguments.delta",
+                    {"item_id": entry["id"], "output_index": entry["output_index"], "delta": chunk},
+                )
+
     def tool_delta(self, tool_calls: Any) -> Iterator[str]:
         yield from self.close_message()
         yield from self.close_reasoning()
@@ -697,7 +758,7 @@ class _StreamState:
             if not isinstance(call, dict):
                 continue
             index = call.get("index")
-            if not isinstance(index, int):
+            if isinstance(index, bool) or not isinstance(index, int) or index < 0:
                 index = 0
             entry = self.tool_items.get(index)
             function = call.get("function")
@@ -729,24 +790,8 @@ class _StreamState:
                     )
                 else:
                     entry["buffered_args"].append(arguments)
-            if entry["name"] and not entry["added"]:
-                item = {
-                    "id": entry["id"],
-                    "type": "function_call",
-                    "call_id": entry["call_id"],
-                    "name": entry["name"],
-                    "arguments": "",
-                    "status": "in_progress",
-                }
-                yield self.emit("response.output_item.added", {"output_index": entry["output_index"], "item": item})
-                entry["added"] = True
-                if entry["buffered_args"]:
-                    for buffered in entry["buffered_args"]:
-                        yield self.emit(
-                            "response.function_call_arguments.delta",
-                            {"item_id": entry["id"], "output_index": entry["output_index"], "delta": buffered},
-                        )
-                    entry["buffered_args"] = []
+            if entry["name"]:
+                yield from self._open_tool_item(entry)
 
     def close_tools(self) -> Iterator[str]:
         for index in sorted(self.tool_items):
@@ -754,24 +799,7 @@ class _StreamState:
             if not entry.get("open"):
                 continue
             entry["open"] = False
-            if not entry["added"]:
-                item = {
-                    "id": entry["id"],
-                    "type": "function_call",
-                    "call_id": entry["call_id"],
-                    "name": entry["name"],
-                    "arguments": "",
-                    "status": "in_progress",
-                }
-                yield self.emit("response.output_item.added", {"output_index": entry["output_index"], "item": item})
-                entry["added"] = True
-                if entry["buffered_args"]:
-                    for buffered in entry["buffered_args"]:
-                        yield self.emit(
-                            "response.function_call_arguments.delta",
-                            {"item_id": entry["id"], "output_index": entry["output_index"], "delta": buffered},
-                        )
-                    entry["buffered_args"] = []
+            yield from self._open_tool_item(entry)
             yield self.emit(
                 "response.function_call_arguments.done",
                 {"item_id": entry["id"], "output_index": entry["output_index"], "arguments": entry["arguments"]},

@@ -5,7 +5,7 @@ import logging
 import threading
 import time
 from collections import OrderedDict
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from typing import Any, Generic, Protocol, TypeVar
 
@@ -22,7 +22,7 @@ class AccountPoolBusy(Exception):
 
 
 @asynccontextmanager
-async def account_lock(sem: asyncio.Semaphore, max_wait: float | None = None):
+async def account_lock(sem: asyncio.Semaphore, max_wait: float | None = None) -> AsyncIterator[None]:
     if max_wait is None:
         async with sem:
             yield
@@ -102,13 +102,13 @@ class ContextIndex:
             return None
         now = time.monotonic()
         store = self._store
+        expired: list[str] = []
         with self._lock:
             if not self._seqs:
                 self.misses += 1
                 return None
             best_sid: str | None = None
             best_key = (-1, -1)
-            expired: list[str] = []
             for sid, seq in self._seqs.items():
                 if self._expired(sid, now):
                     expired.append(sid)
@@ -243,6 +243,7 @@ class AccountPool(Generic[AccountT]):
         self._ttl = max(0.0, ttl)
         self._affinity_store = affinity_store
         self._affinity_lock = threading.Lock()
+        self._revive_lock = asyncio.Lock()
         self._contexts = ContextIndex(session_cache_size, ttl, store=context_store)
         self._restore_affinities()
 
@@ -271,6 +272,8 @@ class AccountPool(Generic[AccountT]):
         for session_id, record in self._affinity_store.items():
             if not isinstance(session_id, str) or not session_id:
                 continue
+            if len(self._by_session) >= _MAX_AFFINITY:
+                break
             idx = self._resolve_affinity(record)
             if idx is None:
                 continue
@@ -281,6 +284,10 @@ class AccountPool(Generic[AccountT]):
         return [a for a in self.accounts if not a.broken]
 
     def register(self, account_index: int, session_id: str) -> None:
+        if not isinstance(account_index, int) or isinstance(account_index, bool):
+            return
+        if not 0 <= account_index < len(self.accounts) or not session_id:
+            return
         now = time.monotonic()
         record = self._affinity_record(account_index)
         evicted: list[str] = []
@@ -297,10 +304,10 @@ class AccountPool(Generic[AccountT]):
                     evicted.append(sid)
         store = self._affinity_store
         if store is not None:
-            if store.get(session_id) != record:
-                store.set(session_id, record)
             for sid in evicted:
                 store.discard(sid)
+            if store.get(session_id) != record:
+                store.set(session_id, record)
 
     def forget(self, session_id: str) -> None:
         with self._affinity_lock:
@@ -430,25 +437,29 @@ class AccountPool(Generic[AccountT]):
             await asyncio.sleep(0.05)
 
     async def revive_broken(self) -> AccountT | None:
-        now = time.monotonic()
-        for acct in self.accounts:
-            if not acct.broken:
-                continue
-            broken_at = getattr(acct, "broken_at", None)
-            if broken_at is None or now - broken_at < self._REVIVE_COOLDOWN:
-                continue
-            client = getattr(acct, "client", None)
-            if client is None:
-                continue
-            try:
-                ok = await client.check_auth()
-            except Exception:
-                ok = False
-            if ok:
-                acct.broken = False
-                acct.broken_at = None
-                log.info("%s revived after auth recheck", acct.label)
-                return acct
+        if self._revive_lock.locked():
+            return None
+        async with self._revive_lock:
+            now = time.monotonic()
+            for acct in self.accounts:
+                if not acct.broken:
+                    continue
+                broken_at = getattr(acct, "broken_at", None)
+                if broken_at is None or now - broken_at < self._REVIVE_COOLDOWN:
+                    continue
+                client = getattr(acct, "client", None)
+                if client is None:
+                    continue
+                try:
+                    ok = await client.check_auth()
+                except Exception:
+                    ok = False
+                if ok:
+                    acct.broken = False
+                    acct.broken_at = None
+                    log.info("%s revived after auth recheck", acct.label)
+                    return acct
+                acct.broken_at = time.monotonic()
         return None
 
     def add_account(self, account: AccountT) -> None:
