@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import datetime
 import json
 import os
 import re
@@ -11,7 +10,6 @@ import sys
 import tempfile
 import urllib.error
 import urllib.request
-import uuid
 from concurrent.futures import ThreadPoolExecutor
 from functools import cache
 from pathlib import Path
@@ -19,28 +17,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 ENV_FILE = ROOT / ".env"
 EXAMPLE_FILE = ROOT / ".env.example"
-
-DS_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
-DS_HEADERS = {
-    "x-client-bundle-id": "com.deepseek.chat",
-    "x-client-platform": "web",
-    "x-client-version": "2.3.0",
-    "x-client-locale": "en-US",
-    "x-client-timezone-offset": "0",
-}
-
-QWEN_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
-QWEN_HEADERS = {
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Origin": "https://chat.qwen.ai",
-    "Referer": "https://chat.qwen.ai/",
-    "source": "web",
-    "version": "0.2.83",
-    "sec-ch-ua": '"Not=A?Brand";v="99", "Google Chrome";v="151", "Chromium";v="151"',
-    "sec-ch-ua-mobile": "?0",
-    "sec-ch-ua-platform": '"Windows"',
-}
+ANDROID_MARKER = Path("/system/build.prop")
 
 GROUPS = [
     (
@@ -52,7 +29,7 @@ GROUPS = [
             (
                 "DANYAPI_ACQUIRE_TIMEOUT",
                 "Seconds to wait for a free account (empty = forever)",
-                "int_empty",
+                "int",
             ),
         ],
     ),
@@ -164,6 +141,11 @@ def is_termux():
     return "com.termux" in sys.prefix or Path("/data/data/com.termux").exists()
 
 
+@cache
+def is_android():
+    return ANDROID_MARKER.exists()
+
+
 def ensure_rust_on_termux():
     if shutil.which("rustc"):
         return True
@@ -201,7 +183,7 @@ def run_pip(req):
             return
         env["CRATE_CC_NO_DEFAULTS"] = "1"
         env["CARGO_BUILD_TARGET"] = "aarch64-linux-android"
-    elif not rustup_target_reachable():
+    elif is_android() and not rustup_target_reachable():
         print("Rustup lacks the required target; relying on a system Rust toolchain.")
         print("Install it with: rustup target add aarch64-unknown-linux-android")
     print(f"Running: {' '.join(cmd)}")
@@ -229,9 +211,6 @@ def prompt(key, label, kind, current, default=""):
         try:
             if kind == "int":
                 int(raw)
-            elif kind == "int_empty":
-                if raw != "":
-                    int(raw)
             elif kind == "float":
                 float(raw)
             elif kind == "level":
@@ -280,6 +259,8 @@ def load_defaults():
 
 
 def update_env(values):
+    for key, value in load_defaults().items():
+        values.setdefault(key, value)
     raw = ENV_FILE.read_text(encoding="utf-8").splitlines(keepends=True)
     lines = []
     seen = set()
@@ -328,28 +309,29 @@ def _request(url, headers, payload=None, timeout=25):
 
 
 def _ds_headers(token=None):
+    from danyapi.deepseek.client import CLIENT_HEADERS, USER_AGENT
+
     headers = {
-        "User-Agent": DS_UA,
+        "User-Agent": USER_AGENT,
         "Referer": "https://chat.deepseek.com/",
         "Origin": "https://chat.deepseek.com",
         "Accept": "*/*",
     }
-    headers.update(DS_HEADERS)
+    headers.update(CLIENT_HEADERS)
     if token:
         headers["Authorization"] = "Bearer " + token
     return headers
 
 
 def _qwen_headers(token=None):
-    now = datetime.datetime.now().astimezone()
-    offset = now.strftime("%z")
-    timezone = f"{now.strftime('%a %b %d %Y %H:%M:%S')} GMT{offset}"
+    from danyapi.qwen.client import COMMON_HEADERS, USER_AGENT, new_uuid, timezone_header
+
     headers = {
-        "User-Agent": QWEN_UA,
-        "X-Request-Id": str(uuid.uuid4()),
-        "Timezone": timezone,
+        "User-Agent": USER_AGENT,
+        "X-Request-Id": new_uuid(),
+        "Timezone": timezone_header(),
     }
-    headers.update(QWEN_HEADERS)
+    headers.update(COMMON_HEADERS)
     if token:
         headers["Authorization"] = "Bearer " + token
         headers["Cookie"] = "token=" + token
@@ -357,8 +339,9 @@ def _qwen_headers(token=None):
 
 
 def check_deepseek_token(token):
-    did = str(uuid.uuid4())
-    url = f"https://chat.deepseek.com/api/v0/client/settings?did={did}&scope=main"
+    from danyapi.deepseek.client import BASE_URL, new_device_id
+
+    url = f"{BASE_URL}/api/v0/client/settings?did={new_device_id()}&scope=main"
     status, body = _request(url, _ds_headers(token))
     if status is None:
         return False, f"network error: {body}"
@@ -372,7 +355,9 @@ def check_deepseek_token(token):
 
 
 def check_qwen_token(token):
-    status, body = _request("https://chat.qwen.ai/api/v1/auths/", _qwen_headers(token))
+    from danyapi.qwen.client import BASE_URL
+
+    status, body = _request(f"{BASE_URL}/api/v1/auths/", _qwen_headers(token))
     if status is None:
         return False, f"network error: {body}"
     if status != 200:
@@ -414,7 +399,8 @@ def collect_provider(name, current, defaults):
     storage = "userToken" if name == "DeepSeek" else "token"
     print()
     print(f"[ {name} ]")
-    print(f"  Grab a token: open {host} -> DevTools -> Application -> Local Storage -> {storage}")
+    print("  Easiest: run docs/token_utility.sh (or .bat on Windows) and it fills this in from your browser.")
+    print(f"  Or grab a token by hand: open {host} -> DevTools -> Application -> Local Storage -> {storage}")
     tokens = read_value(
         f"  {name} tokens, comma-separated [{current.get(tokens_key, '') or '(empty)'}]: ",
         current.get(tokens_key, ""),
@@ -484,7 +470,13 @@ def create_shortcut():
         return os.path.join(_desktop_dir(), "DanyAPI.lnk")
     if sys.platform.startswith("linux"):
         desktop = _desktop_dir()
-        content = f"[Desktop Entry]\nType=Application\nName=DanyAPI\nComment=Start the DanyAPI server\nExec={py} {launcher}\nPath={root}\nTerminal=true\n"
+        content = (
+            "[Desktop Entry]\nType=Application\nName=DanyAPI\n"
+            "Comment=Start the DanyAPI server\n"
+            f"Exec={shlex.quote(py)} {shlex.quote(launcher)}\n"
+            f"Path={shlex.quote(root)}\n"
+            "Terminal=true\n"
+        )
         path = os.path.join(desktop, "DanyAPI.desktop")
         Path(path).write_text(content, encoding="utf-8")
         os.chmod(path, 0o755)
@@ -611,7 +603,7 @@ def main():
 
     print()
     print(f"DanyAPI runs from: {ROOT}")
-    print("The server auto-updates to the latest GitHub release at every launch (DANYAPI_AUTO_UPDATE=0 disables).")
+    print("docs/start.py auto-updates to the latest GitHub release at every launch (DANYAPI_AUTO_UPDATE=0 disables).")
     print("Start it anytime with the desktop shortcut or:")
     print("  python app.py        (from the DanyAPI folder)")
     print("  python -m danyapi")

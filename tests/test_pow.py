@@ -1,6 +1,8 @@
 import asyncio
 import base64
+import gc
 import json
+import os
 import shutil
 import tempfile
 from pathlib import Path
@@ -11,6 +13,7 @@ import pytest
 from danyapi.pow import (
     _find_native_solver,
     _run_solver,
+    _solver_env,
     deepseek_hash_v1,
     deepseek_hash_v1_hex,
     solve_challenge,
@@ -182,6 +185,62 @@ def test_kick_refill_skips_running_task():
     asyncio.run(run())
 
 
+def test_kick_refill_does_not_overwrite_outstanding_task():
+    from danyapi.pow import PowManager
+
+    async def run():
+        pm = PowManager()
+        pending = asyncio.create_task(asyncio.sleep(5))
+        pm._refill = pending
+        pm._kick_refill(AsyncMock())
+        assert pm._refill is pending
+        pm.close()
+        assert pm._refill is None
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+
+    asyncio.run(run())
+
+
+def test_kick_refill_retrieves_finished_task_result():
+    from danyapi.pow import PowManager
+
+    async def run():
+        pm = PowManager()
+        captured = []
+        loop = asyncio.get_running_loop()
+        loop.set_exception_handler(lambda _loop, context: captured.append(context.get("message", "")))
+
+        async def failing():
+            raise RuntimeError("boom")
+
+        done = asyncio.create_task(failing())
+        await asyncio.sleep(0)
+        assert done.done()
+        pm._refill = done
+
+        async def fetch():
+            raise RuntimeError("must not be called")
+
+        pm._kick_refill(fetch)
+        assert pm._refill is not done
+        await pm._refill
+        del done
+        gc.collect()
+        await asyncio.sleep(0)
+        assert captured == []
+
+    asyncio.run(run())
+
+
+def test_close_without_refill_is_noop():
+    from danyapi.pow import PowManager
+
+    pm = PowManager()
+    pm.close()
+    assert pm._refill is None
+
+
 def test_find_native_solver_missing():
     with patch("danyapi.pow._SOLVER_DIR", Path(tempfile.mkdtemp())):
         assert _find_native_solver() is None
@@ -269,6 +328,57 @@ def test_run_solver_error_payload_raises():
     with patch("danyapi.pow.subprocess.run", return_value=_proc('{"error":"no answer"}')):
         with pytest.raises(RuntimeError):
             _run_solver(Path("x"), "c", "s", 1, 10)
+
+
+def test_run_solver_accepts_zero_answer():
+    with patch("danyapi.pow.subprocess.run", return_value=_proc('{"answer":0}')):
+        assert _run_solver(Path("x"), "c", "s", 1, 10) == 0
+
+
+@pytest.mark.parametrize("payload", ['{"answer":true}', '{"answer":"7"}', '{"answer":-1}', '{"answer":1.5}', "{}"])
+def test_run_solver_rejects_invalid_answer(payload):
+    with patch("danyapi.pow.subprocess.run", return_value=_proc(payload)):
+        with pytest.raises(RuntimeError) as exc:
+            _run_solver(Path("x"), "c", "s", 1, 10)
+    assert "invalid answer" in str(exc.value)
+
+
+def test_run_solver_invalid_answer_repr_is_truncated():
+    payload = json.dumps({"answer": "x" * 5000})
+    with patch("danyapi.pow.subprocess.run", return_value=_proc(payload)):
+        with pytest.raises(RuntimeError) as exc:
+            _run_solver(Path("x"), "c", "s", 1, 10)
+    assert len(str(exc.value)) < 300
+
+
+def test_solver_env_drops_secrets(monkeypatch):
+    for name in ("DEEPSEEK_TOKENS", "QWEN_TOKENS", "BYOK", "BYOK_MODE", "DANYAPI_BYOK_MODE"):
+        monkeypatch.setenv(name, "secret-value")
+    monkeypatch.setenv("DANYAPI_HOST", "127.0.0.1")
+    env = _solver_env()
+    for name in ("DEEPSEEK_TOKENS", "QWEN_TOKENS", "BYOK", "BYOK_MODE", "DANYAPI_BYOK_MODE"):
+        assert name not in env
+    assert env["DANYAPI_HOST"] == "127.0.0.1"
+    assert os.environ["DEEPSEEK_TOKENS"] == "secret-value"
+
+
+def test_run_solver_passes_scrubbed_env():
+    with patch("danyapi.pow.subprocess.run", return_value=_proc('{"answer":1}')) as run:
+        assert _run_solver(Path("x"), "c", "s", 1, 10) == 1
+    env = run.call_args.kwargs["env"]
+    assert "DEEPSEEK_TOKENS" not in env
+
+
+def test_solve_python_respects_budget():
+    salt = "S" * 140
+    assert solve_python("00" * 32, salt, 1, 100, budget=0.0) is None
+
+
+def test_solve_python_budget_expires_mid_search():
+    salt = "S" * 140
+    ticks = iter([0.0, 0.0] + [1.0] * 200)
+    with patch("danyapi.pow.time.monotonic", side_effect=lambda: next(ticks)):
+        assert solve_python("00" * 32, salt, 1, 100000, budget=0.5) is None
 
 
 def test_native_matches_python():

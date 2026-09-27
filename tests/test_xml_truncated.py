@@ -82,3 +82,35 @@ def test_bare_selfclose_has_no_trailing_content():
     assert calls[0].name == "glob"
     assert json.loads(calls[0].arguments) == {"pattern": "*/*.py"}
     assert wrapper == ""
+
+
+def test_unquoted_attribute_values_are_kept():
+    text = LT + "invoke name=read filePath=a.py" + GT + LT + SLASH + "invoke" + GT
+    check(text, "read", {"filePath": "a.py"})
+
+
+def test_unquoted_selfclose_attribute_values_are_kept():
+    text = LT + "invoke name=read filePath=a.py" + SP + SLASH + GT
+    check(wrap(text), "read", {"filePath": "a.py"})
+
+
+def test_unquoted_and_quoted_attributes_agree():
+    unquoted = wrap(LT + "invoke name=read filePath=a.py count=3" + SP + SLASH + GT)
+    quoted = wrap(LT + "invoke name=" + Q + "read" + Q + " filePath=" + Q + "a.py" + Q + " count=" + Q + "3" + Q + SP + SLASH + GT)
+    check(unquoted, "read", {"filePath": "a.py", "count": "3"})
+    check(quoted, "read", {"filePath": "a.py", "count": "3"})
+
+
+def test_duplicate_parameter_names_fold_into_list():
+    body = invoke("read", param("filePath", "a.py") + param("filePath", "b.py"))
+    check(wrap(body), "read", {"filePath": ["a.py", "b.py"]})
+
+
+def test_tool_close_tag_does_not_leak_into_wrapper():
+    mark = "\uff5c\uff5c"
+    text = f"lead <{mark}DSML{mark}invoke name=" + Q + "read" + Q + ">x</" + mark + "DSML" + mark + "invoke> tail"
+    parsed = parse_tool_calls(text)
+    assert parsed is not None
+    calls, wrapper = parsed
+    assert calls[0].name == "read"
+    assert wrapper == "lead x tail"

@@ -7,9 +7,10 @@ from pathlib import Path
 import pytest
 
 from danyapi import store as store_mod
+from danyapi import tokens as tokens_mod
 from danyapi.accounts import AccountPool, AccountPoolBusy, ContextIndex
 from danyapi.store import _MAX_AFFINITY, JsonStore
-from danyapi.tokens import StreamBudget, count_message_tokens, estimate_tokens
+from danyapi.tokens import StreamBudget, count_message_tokens, estimate_tokens, trim_to_tokens
 
 
 @pytest.fixture
@@ -185,6 +186,20 @@ def test_stream_budget_trim_not_prefix():
     budget = StreamBudget(1, lambda text, limit: "X")
     assert budget.feed("abcd") == "abcd"
     assert budget.feed("efgh") == ""
+
+
+def test_estimate_tokens_has_no_shared_cache():
+    assert not hasattr(tokens_mod.estimate_tokens, "cache_clear")
+    assert not hasattr(tokens_mod._cjk_count, "cache_clear")
+
+
+def test_stream_budget_with_trim_to_tokens():
+    budget = StreamBudget(2, trim_to_tokens)
+    assert budget.feed("alpha beta gamma delta") == "alpha beta"
+    assert budget.done is True
+    assert budget.text == "alpha beta"
+    assert budget.feed(" more") == ""
+    assert estimate_tokens(budget.text) <= 2
 
 
 class _Msg:

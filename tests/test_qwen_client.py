@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -31,7 +32,7 @@ def test_session_defaults():
     assert s.model is None
     assert s.accumulated_input_tokens == 0
     assert s.accumulated_output_tokens == 0
-    assert s.extra == {}
+    assert not hasattr(s, "extra")
 
 
 def test_session_full():
@@ -125,16 +126,33 @@ def test_request_headers_merge():
 
 async def test_headers_and_cookie_with_token():
     client = QwenClient(token="tok")
-    assert client.token == "tok"
     assert client.http.headers["Authorization"] == "Bearer tok"
+    assert client.http.cookies.get("token", domain="chat.qwen.ai", path="/") == "tok"
     await client.aclose()
 
 
 async def test_no_token():
     client = QwenClient()
-    assert client.token is None
     assert "Authorization" not in client.http.headers
+    assert not hasattr(client, "token")
     await client.aclose()
+
+
+def test_streaming_read_timeout_is_widened():
+    client = QwenClient(timeout=60.0)
+    try:
+        assert client.http.timeout.read == 300.0
+        assert client.http.timeout.connect == 60.0
+    finally:
+        asyncio.run(client.aclose())
+
+
+def test_streaming_read_timeout_scales_with_timeout():
+    client = QwenClient(timeout=120.0)
+    try:
+        assert client.http.timeout.read == 600.0
+    finally:
+        asyncio.run(client.aclose())
 
 
 async def test_check_auth_ok():

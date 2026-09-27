@@ -35,7 +35,7 @@ jobs:
         id: version
         if: steps.skip.outputs.skip == 'false'
         run: |
-          LAST_TAG=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+' | head -n1)
+          LAST_TAG=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n1)
           if [ -z "$LAST_TAG" ]; then
             NEXT_TAG="v0.0.1"
           else
@@ -43,9 +43,6 @@ jobs:
             MAJOR=$(echo "$VERSION" | cut -d. -f1)
             MINOR=$(echo "$VERSION" | cut -d. -f2)
             PATCH=$(echo "$VERSION" | cut -d. -f3)
-            if [ -z "$PATCH" ]; then
-              PATCH=0
-            fi
             NEXT_TAG="v${MAJOR}.${MINOR}.$((PATCH + 1))"
           fi
           echo "next_tag=$NEXT_TAG" >> "$GITHUB_OUTPUT"
@@ -54,7 +51,7 @@ jobs:
         id: changelog
         if: steps.skip.outputs.skip == 'false'
         run: |
-          PREV_TAG=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+' | sed -n '2p')
+          PREV_TAG=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sed -n '2p')
           if [ -z "$PREV_TAG" ]; then
             LOG=$(git log --pretty=format:"- %s (%h)" --no-merges)
           else

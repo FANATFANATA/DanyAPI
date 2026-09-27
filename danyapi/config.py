@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import math
 import os
 from pathlib import Path
@@ -12,8 +13,11 @@ MIN_PORT = 0
 MAX_PORT = 65535
 MAX_CHOICES = 8
 
+_ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
+
 
 def _noop_load_dotenv(*args: Any, **kwargs: Any) -> bool:
+    logging.getLogger(__name__).warning("python-dotenv is not installed, skipping %s", _ENV_PATH)
     return False
 
 
@@ -22,7 +26,7 @@ try:
 except ImportError:
     load_dotenv = _noop_load_dotenv
 
-load_dotenv(dotenv_path=Path(__file__).resolve().parents[1] / ".env", override=False)
+load_dotenv(dotenv_path=_ENV_PATH, override=False)
 
 
 def _env_int(key: str, default: int, minimum: int | None = None, maximum: int | None = None) -> int:
@@ -114,6 +118,8 @@ class Settings:
         self.byok_auth_ttl = _env_float("DANYAPI_BYOK_AUTH_TTL_SECONDS", 300.0)
         self.human_delay_min = _env_float("DANYAPI_HUMAN_DELAY_MIN", 0.5)
         self.human_delay_max = _env_float("DANYAPI_HUMAN_DELAY_MAX", 3.0)
+        if self.human_delay_max < self.human_delay_min:
+            self.human_delay_max = self.human_delay_min
         self.usage_enabled = not _env_off("DANYAPI_USAGE_ENABLED", "1")
         self.usage_max_records = _env_int("DANYAPI_USAGE_MAX_RECORDS", 1000, 1)
         self.auto_update = not _env_off("DANYAPI_AUTO_UPDATE", "1")

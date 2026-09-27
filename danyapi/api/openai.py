@@ -33,8 +33,9 @@ from ..deepseek.stream import IncrementalSSE, MessageReconstructor
 from ..qwen import api as qwen_api
 from ..qwen.accounts import QwenAccount
 from ..qwen.client import QwenClient, QwenError
+from ..sseutil import StreamStopFilter, split_stop
 from ..store import JsonStore
-from ..tokens import StreamBudget, _cjk_count, count_messages_tokens, estimate_tokens
+from ..tokens import StreamBudget, count_messages_tokens, estimate_tokens, trim_to_tokens
 from ..usage import init_tracker, record_usage
 from . import responses as responses_api
 
@@ -80,6 +81,8 @@ CONTEXT_LENGTH_STATUS = "CONTEXT_LENGTH_EXCEEDED"
 INPUT_EXCEEDS_LIMIT = "input_exceeds_limit"
 CONTINUE_PROMPT = "Continue"
 MAX_CONTINUE_ROUNDS = 5
+CONTINUE_DEADLINE_SEC = 120.0
+MAX_ERROR_BODY_CHARS = 4096
 RESPONSE_INCOMPLETE = "response_incomplete"
 RESPONSE_INCOMPLETE_MESSAGE = "Response is incomplete: provider errors interrupted the continuation, please retry"
 REDUCED_CONTEXT_MESSAGE = "Response was generated from reduced context because the original input exceeded the model limit and may be incomplete"
@@ -308,6 +311,22 @@ def _flush_state_stores() -> None:
             log.debug("pool flush failed: %s", exc)
 
 
+def _close_pow_managers(accts: list[Any]) -> None:
+    seen: set[int] = set()
+    for acct in accts:
+        if id(acct) in seen:
+            continue
+        seen.add(id(acct))
+        for attr in ("pow", "pow_upload"):
+            close = getattr(getattr(acct, attr, None), "close", None)
+            if close is None:
+                continue
+            try:
+                close()
+            except Exception as exc:
+                log.debug("pow manager close failed for %s: %s", getattr(acct, "label", acct), exc)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     accounts: list[DeepSeekAccount] = []
@@ -417,12 +436,10 @@ async def lifespan(app: FastAPI):
         http_client = getattr(app.state, "http_client", None)
         if http_client is not None:
             await http_client.aclose()
-        _flush_state_stores()
-        seen: set[int] = set()
-        clients = [acct.client for acct in accounts] + [acct.client for acct in qwen_accounts]
+        all_accounts: list[Any] = accounts + qwen_accounts
         for pool_obj in (getattr(app.state, "pool", None), getattr(app.state, "qwen_pool", None)):
             if pool_obj is not None:
-                clients.extend(acct.client for acct in pool_obj.accounts)
+                all_accounts.extend(pool_obj.accounts)
         byok_pools = getattr(app.state, "byok_pools", None)
         if byok_pools is not None:
             cached: list[Any] = []
@@ -431,8 +448,12 @@ async def lifespan(app: FastAPI):
                 if isinstance(entries, dict):
                     cached.extend(entries.values())
             for pool_obj in cached:
-                clients.extend(acct.client for acct in pool_obj.accounts)
-        for client in clients:
+                all_accounts.extend(pool_obj.accounts)
+        _close_pow_managers(all_accounts)
+        await asyncio.to_thread(_flush_state_stores)
+        seen: set[int] = set()
+        for acct in all_accounts:
+            client = acct.client
             if id(client) in seen:
                 continue
             seen.add(id(client))
@@ -766,16 +787,6 @@ async def add_tokens(tokens: dict) -> dict:
         await _write_env_tokens(merged_ds, merged_qw)
         settings.deepseek_tokens = merged_ds
         settings.qwen_tokens = merged_qw
-
-        parts = []
-        if added_ds:
-            parts.append(f"deepseek: +{added_ds}")
-        if added_qw:
-            parts.append(f"qwen: +{added_qw}")
-        if skipped_ds:
-            parts.append(f"deepseek skipped: {skipped_ds}")
-        if skipped_qw:
-            parts.append(f"qwen skipped: {skipped_qw}")
 
         return {
             "success": True,
@@ -1157,7 +1168,7 @@ class Attachment:
 
 
 def _decode_data_uri(meta: str, compact: str) -> tuple[str, bytes]:
-    content_type = meta.split(";", 1)[0] or "application/octet-stream"
+    content_type = meta.split(";", 1)[0].strip() or "application/octet-stream"
     try:
         data = base64.b64decode(compact, validate=True)
     except ValueError as exc:
@@ -1186,11 +1197,10 @@ def _collect_attachments(req: ChatCompletionRequest) -> list[Attachment]:
                     uri = image_url["url"]
                 else:
                     raise HTTPException(400, "invalid image_url value")
-                meta, compact = _data_uri_parts(uri)
-                raw_total += _compact_data_uri_length(compact)
+                raw_total += _raw_data_uri_length(uri)
                 if raw_total > MAX_ATTACHMENT_TOTAL_SIZE:
                     raise HTTPException(413, "attachments too large")
-                content_type, data = _decode_data_uri(meta, compact)
+                content_type, data = _split_data_uri(uri)
                 name = f"image_{len(attachments)}.{content_type.split('/')[-1] or 'bin'}"
                 attachments.append(Attachment(data, name, content_type, True))
     for f in req.files or []:
@@ -1281,6 +1291,10 @@ def _finish_reason(status: Any) -> str:
     if isinstance(status, str):
         return STATUS_TO_FINISH_REASON.get(status, "stop")
     return "stop"
+
+
+def _output_truncated(status: Any) -> bool:
+    return _finish_reason(status) == "length"
 
 
 def _pool_stats(pool) -> dict | None:
@@ -1396,7 +1410,7 @@ def _all_models() -> list[dict]:
 
 @app.get("/v1/models")
 async def list_models() -> dict:
-    return {"object": "list", "data": _models_state()}
+    return {"object": "list", "data": _all_models()}
 
 
 @app.get("/v1/models/{model_id}")
@@ -1495,6 +1509,15 @@ def _evict_auth(store: dict[str, Any]) -> None:
         store.pop(next(iter(store)), None)
 
 
+async def _api_key_from_form(request: Request) -> str | None:
+    try:
+        form = await request.form()
+    except Exception:
+        return None
+    value = form.get("api_key")
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
 async def _extract_request_api_key(request: Request) -> str | None:
     auth = request.headers.get("authorization") or ""
     if auth.lower().startswith("bearer "):
@@ -1505,6 +1528,8 @@ async def _extract_request_api_key(request: Request) -> str | None:
     if key:
         return key
     content_type = request.headers.get("content-type") or ""
+    if content_type.startswith("multipart/form-data"):
+        return await _api_key_from_form(request)
     if not content_type.startswith("application/json"):
         return None
     try:
@@ -1708,16 +1733,18 @@ async def chat_completions(req: ChatCompletionRequest, request: Request) -> Any:
     return await _dispatch_chat(req, request)
 
 
+async def _chat_dispatcher(model: str, request: Request) -> Any:
+    provider = _resolve_provider(model)
+    call = _chat_completions_qwen if provider == "qwen" else _chat_completions_deepseek
+    if not _byok_mode():
+        return call
+    pool = await _byok_pool_for(provider, request)
+    return partial(call, pool=pool)
+
+
 async def _dispatch_chat(req: ChatCompletionRequest, request: Request) -> Any:
-    provider = _resolve_provider(req.model)
-    if _byok_mode():
-        pool = await _byok_pool_for(provider, request)
-        if provider == "qwen":
-            return await _chat_completions_qwen(req, pool=pool)
-        return await _chat_completions_deepseek(req, pool=pool)
-    if provider == "qwen":
-        return await _chat_completions_qwen(req)
-    return await _chat_completions_deepseek(req)
+    dispatch = await _chat_dispatcher(req.model, request)
+    return await dispatch(req)
 
 
 def _completion_prompts(prompt: Any) -> list[str]:
@@ -1738,7 +1765,7 @@ def _completion_prompts(prompt: Any) -> list[str]:
     raise HTTPException(400, "prompt must be a string, a list of strings, or a list of token lists")
 
 
-def _completion_chat_request(req: CompletionRequest, prompt_text: str, stream: bool) -> ChatCompletionRequest:
+def _completion_chat_request(req: CompletionRequest, prompt_text: str, stream: bool, prompt_count: int) -> ChatCompletionRequest:
     return ChatCompletionRequest(
         model=req.model,
         messages=[ChatMessage(role="user", content=prompt_text)],
@@ -1752,7 +1779,7 @@ def _completion_chat_request(req: CompletionRequest, prompt_text: str, stream: b
         frequency_penalty=req.frequency_penalty,
         logit_bias=req.logit_bias,
         user=req.user,
-        session_id=req.session_id,
+        session_id=req.session_id if prompt_count <= 1 else None,
     )
 
 
@@ -1764,21 +1791,6 @@ def _legacy_choice_from_chat(chat_choice: dict, index: int) -> dict:
         "text": text if isinstance(text, str) else "",
         "logprobs": None,
         "finish_reason": chat_choice.get("finish_reason") or "stop",
-    }
-
-
-def _legacy_completion_response(chat_dict: dict, base_index: int) -> dict:
-    choices: list[dict] = []
-    for i, chat_choice in enumerate(chat_dict.get("choices") or []):
-        choices.append(_legacy_choice_from_chat(chat_choice, base_index + i))
-    return {
-        "id": chat_dict.get("id"),
-        "object": "text_completion",
-        "created": chat_dict.get("created", int(time.time())),
-        "model": chat_dict.get("model"),
-        "choices": choices,
-        "usage": chat_dict.get("usage"),
-        "session_id": chat_dict.get("session_id"),
     }
 
 
@@ -1828,34 +1840,22 @@ async def _translate_completion_stream(chat_gen):
         await _close_generator(chat_gen)
 
 
-async def _completions_stream(req: CompletionRequest, prompts: list[str], request: Request):
+async def _completions_stream(req: CompletionRequest, prompts: list[str], dispatch: Any):
     for prompt_text in prompts:
-        chat_req = _completion_chat_request(req, prompt_text, stream=True)
-        chat_resp = await _dispatch_chat(chat_req, request)
-        if isinstance(chat_resp, StreamingResponse):
-            async for line in _translate_completion_stream(chat_resp.body_iterator):
-                yield line
-        else:
-            data = _legacy_completion_response(chat_resp, 0)
-            for choice in data["choices"]:
-                yield _sse(
-                    {
-                        "id": data["id"],
-                        "object": "text_completion",
-                        "created": data["created"],
-                        "model": data["model"],
-                        "choices": [choice],
-                    }
-                )
+        chat_req = _completion_chat_request(req, prompt_text, True, len(prompts))
+        chat_resp = await dispatch(chat_req)
+        async for line in _translate_completion_stream(chat_resp.body_iterator):
+            yield line
     yield "data: [DONE]\n\n"
 
 
 @app.post("/v1/completions")
 async def completions(req: CompletionRequest, request: Request) -> Any:
     prompts = _completion_prompts(req.prompt)
+    dispatch = await _chat_dispatcher(req.model, request)
     if req.stream:
         return StreamingResponse(
-            _completions_stream(req, prompts, request),
+            _completions_stream(req, prompts, dispatch),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -1868,8 +1868,8 @@ async def completions(req: CompletionRequest, request: Request) -> Any:
     completion_id = ""
     completion_model = req.model
     for prompt_text in prompts:
-        chat_req = _completion_chat_request(req, prompt_text, stream=False)
-        chat_dict = await _dispatch_chat(chat_req, request)
+        chat_req = _completion_chat_request(req, prompt_text, False, len(prompts))
+        chat_dict = await dispatch(chat_req)
         prompt_choices = chat_dict.get("choices") or []
         choices.extend(_legacy_choice_from_chat(choice, base_index + i) for i, choice in enumerate(prompt_choices))
         base_index += len(prompt_choices)
@@ -1905,12 +1905,6 @@ async def moderations_not_supported() -> dict:
     raise HTTPException(501, "moderations are not supported by DanyAPI")
 
 
-def _responses_provider_call(req: ResponsesRequest) -> Any:
-    if _resolve_provider(req.model) == "qwen":
-        return _chat_completions_qwen
-    return _chat_completions_deepseek
-
-
 def _responses_chat_request(req: ResponsesRequest, provider_messages: list[dict], session_id: str | None) -> ChatCompletionRequest:
     return ChatCompletionRequest(
         model=req.model,
@@ -1933,15 +1927,7 @@ def _responses_chat_request(req: ResponsesRequest, provider_messages: list[dict]
 
 @app.post("/v1/responses")
 async def create_response(req: ResponsesRequest, request: Request) -> Any:
-    if _byok_mode():
-        provider = _resolve_provider(req.model)
-        pool = await _byok_pool_for(provider, request)
-        if provider == "qwen":
-            provider_call = partial(_chat_completions_qwen, pool=pool)
-        else:
-            provider_call = partial(_chat_completions_deepseek, pool=pool)
-    else:
-        provider_call = _responses_provider_call(req)
+    provider_call = await _chat_dispatcher(req.model, request)
     store = _responses_store()
     try:
         new_input = responses_api.normalize_input(req.input)
@@ -2061,19 +2047,12 @@ async def cancel_response(response_id: str) -> dict:
         cancelled = dict(public) | {"status": "cancelled", "incomplete_details": {"reason": "cancelled"}}
         store.set(response_id, dict(record) | {"public": cancelled})
         return cancelled
-    return {"id": response_id, "object": "response", "status": "cancelled"}
+    raise HTTPException(409, f"response {response_id} is not cancellable in its current state")
 
 
 @app.post("/v1/images/generations")
 async def image_generations(req: ImageGenerationRequest, request: Request) -> dict:
-    pool: AccountPool | None
-    if _byok_mode():
-        pool = await _byok_pool_for("qwen", request)
-    else:
-        pool = getattr(app.state, "qwen_pool", None)
-    if pool is None:
-        raise HTTPException(503, "qwen provider is not configured (required for image generation)")
-    return await _image_generations(req, pool)
+    return await _image_generations(req, await _image_pool(request))
 
 
 def _image_http_client() -> httpx.AsyncClient:
@@ -2311,106 +2290,31 @@ def _max_calls(parallel_tool_calls: bool | None) -> int | None:
     return 1 if parallel_tool_calls is False else None
 
 
-def _split_stop(stop: Any) -> list[str]:
-    if stop is None:
-        return []
-    if isinstance(stop, str):
-        return [stop] if stop else []
-    if isinstance(stop, list):
-        return [item for item in stop if isinstance(item, str) and item]
-    return []
-
-
-class _StreamStopFilter:
-    __slots__ = ("_buf", "_hold", "_markers")
-
-    def __init__(self, markers: list[str]) -> None:
-        self._markers = markers
-        self._hold = max(len(marker) for marker in markers) - 1
-        self._buf = ""
-
-    def feed(self, piece: str) -> tuple[str, bool]:
-        if not piece:
-            return "", False
-        text = self._buf + piece
-        cut = -1
-        for marker in self._markers:
-            pos = text.find(marker)
-            if pos != -1 and (cut == -1 or pos < cut):
-                cut = pos
-        if cut != -1:
-            self._buf = ""
-            return text[:cut], True
-        hold = self._hold
-        if hold <= 0:
-            self._buf = ""
-            return text, False
-        if len(text) > hold:
-            self._buf = text[-hold:]
-            return text[:-hold], False
-        self._buf = text
-        return "", False
-
-    def flush(self) -> str:
-        out = self._buf
-        self._buf = ""
-        return out
-
-
-def _cjk_units(text: str) -> int:
-    return _cjk_count(text)
-
-
-def _trim_to_tokens(text: str, budget: int | None) -> str:
-    if budget is None or not text or estimate_tokens(text) <= budget:
-        return text
-    words = text.split(" ")
-    parts: list[str] = []
-    total_len = 0
-    total_cjk = 0
-    n_words = 0
-    for word in words:
-        cand_len = total_len + len(word) + (1 if n_words else 0)
-        cand_cjk = total_cjk + _cjk_units(word)
-        other = cand_len - cand_cjk
-        if other == 0:
-            candidate_tokens = cand_cjk
-        else:
-            candidate_tokens = cand_cjk + max(1, other // 4)
-        if candidate_tokens > budget:
-            break
-        parts.append(word)
-        total_len = cand_len
-        total_cjk = cand_cjk
-        n_words += 1
-    return " ".join(parts)
+def _apply_stop(text: str, stop: Any) -> str:
+    cut = -1
+    for marker in split_stop(stop):
+        position = text.find(marker)
+        if position != -1 and (cut == -1 or position < cut):
+            cut = position
+    return text[:cut] if cut != -1 else text
 
 
 def _apply_limits(content: str, max_tokens: int | None, stop: Any) -> tuple[str, str]:
-    text = content or ""
-    finish = "stop"
-    stops = _split_stop(stop)
-    if stops:
-        cut = -1
-        for marker in stops:
-            position = text.find(marker)
-            if position != -1 and (cut == -1 or position < cut):
-                cut = position
-        if cut != -1:
-            text = text[:cut]
-    trimmed = _trim_to_tokens(text, max_tokens)
+    text = _apply_stop(content or "", stop)
+    trimmed = trim_to_tokens(text, max_tokens)
     if trimmed != text:
-        finish = "length"
-    return trimmed, finish
+        return trimmed, "length"
+    return trimmed, "stop"
 
 
 async def _acquire_and_build(
     pool: AccountPool,
     req: ChatCompletionRequest,
     reuse_kwargs: dict[str, Any] | None = None,
-    tools: Any = None,
-    tool_choice: Any = None,
-) -> tuple[Any, str | None, tuple[str, ...], str, bool]:
+    *,
+    tools: Any,
+    tool_choice: Any,
+) -> tuple[Any, str | None, tuple[str, ...], str, bool, Any]:
     context_seq = toolemu.context_sequence(req.messages, user=getattr(req, "user", None))
     if req.session_id:
         account, existing_sid = await _acquire_account(pool, req.session_id)
@@ -2420,8 +2324,7 @@ async def _acquire_and_build(
         cached_sid = pool.resolve_context(context_seq) if context_seq else None
         account, existing_sid = await _acquire_account(pool, cached_sid)
     has_session = _can_reuse_session(account, existing_sid, **(reuse_kwargs or {}))
-    if tools is None:
-        tools, tool_choice = _materialize_tools(req)
+    cached_session = account.sessions.get(existing_sid) if has_session else None
     try:
         prompt, tool_mode = toolemu.build_prompt(
             req.messages,
@@ -2432,7 +2335,7 @@ async def _acquire_and_build(
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
-    return account, existing_sid, context_seq, prompt, tool_mode
+    return account, existing_sid, context_seq, prompt, tool_mode, cached_session
 
 
 def _include_usage(req: ChatCompletionRequest) -> bool:
@@ -2517,7 +2420,7 @@ def _stream_error_sse(
             "model": model,
             "session_id": session_key,
             "error": error,
-            "choices": [{"index": 0, "delta": {}, "finish_reason": choice_finish or error_finish or "error"}],
+            "choices": [{"index": 0, "delta": {}, "finish_reason": choice_finish or "stop"}],
         }
     )
     return error_chunk, "data: [DONE]\n\n"
@@ -2579,7 +2482,12 @@ async def _chat_completions_deepseek(req: ChatCompletionRequest, pool: AccountPo
     search = bool(req.search)
 
     tools, tool_choice = _materialize_tools(req)
-    account, existing_sid, context_seq, prompt, tool_mode = await _acquire_and_build(pool, req, tools=tools, tool_choice=tool_choice)
+    account, existing_sid, context_seq, prompt, tool_mode, cached_session = await _acquire_and_build(
+        pool,
+        req,
+        tools=tools,
+        tool_choice=tool_choice,
+    )
 
     attachments = _collect_attachments(req)
     _validate_attachments(attachments)
@@ -2592,6 +2500,7 @@ async def _chat_completions_deepseek(req: ChatCompletionRequest, pool: AccountPo
         "account": account,
         "pool": pool,
         "existing_sid": existing_sid,
+        "cached_session": cached_session,
         "prompt": prompt,
         "model": req.model,
         "model_type": model_type,
@@ -2634,7 +2543,13 @@ async def _chat_completions_qwen(req: ChatCompletionRequest, pool: AccountPool |
     search = bool(req.search)
 
     tools, tool_choice = _materialize_tools(req)
-    account, existing_sid, context_seq, prompt, tool_mode = await _acquire_and_build(pool, req, {"model": req.model}, tools, tool_choice)
+    account, existing_sid, context_seq, prompt, tool_mode, _cached_session = await _acquire_and_build(
+        pool,
+        req,
+        {"model": req.model},
+        tools=tools,
+        tool_choice=tool_choice,
+    )
 
     attachments = _collect_attachments(req)
     if attachments:
@@ -2726,11 +2641,6 @@ async def _send_completion(
             ref_file_ids=ref_file_ids,
             pow_headers=pow_headers,
         )
-    except httpx.HTTPStatusError as exc:
-        body = exc.response.text[:500]
-        if _message_too_frequent_text(body) is not None:
-            raise HTTPException(429, body) from exc
-        raise HTTPException(exc.response.status_code, body) from exc
     except httpx.HTTPError as exc:
         raise HTTPException(502, f"DeepSeek request failed: {exc}") from exc
 
@@ -2740,7 +2650,7 @@ async def _send_completion(
     if resp.status_code != 200:
         body = await resp.aread()
         await resp.aclose()
-        text = body[:500].decode("utf-8", errors="replace")
+        text = body[:MAX_ERROR_BODY_CHARS].decode("utf-8", errors="replace")
         if _message_too_frequent_text(text) is not None:
             raise HTTPException(429, text)
         raise HTTPException(resp.status_code, text)
@@ -2752,7 +2662,7 @@ async def _send_completion(
         try:
             payload = json.loads(body)
         except json.JSONDecodeError as exc:
-            text = body[:500].decode("utf-8", errors="replace")
+            text = body[:MAX_ERROR_BODY_CHARS].decode("utf-8", errors="replace")
             if _message_too_frequent_text(text) is not None:
                 raise HTTPException(429, text) from exc
             raise HTTPException(502, text) from exc
@@ -2885,13 +2795,15 @@ def _input_exceeds_hint_from_http(exc: HTTPException) -> dict | None:
             return None
     if not isinstance(detail, dict):
         return None
-    if detail.get("finish_reason") != INPUT_EXCEEDS_LIMIT:
-        return None
-    message = detail.get("message")
-    return {
-        "message": message if isinstance(message, str) else "Content is too long",
-        "finish_reason": INPUT_EXCEEDS_LIMIT,
-    }
+    for node in (detail, detail.get("error"), detail.get("data")):
+        if not isinstance(node, dict) or node.get("finish_reason") != INPUT_EXCEEDS_LIMIT:
+            continue
+        message = node.get("message")
+        return {
+            "message": message if isinstance(message, str) else "Content is too long",
+            "finish_reason": INPUT_EXCEEDS_LIMIT,
+        }
+    return None
 
 
 def _drop_session(pool, account, session_key) -> None:
@@ -3004,7 +2916,10 @@ def _build_limited_message(
         if finish == "tool_calls":
             tool_text = message.get("content")
             if isinstance(tool_text, str):
-                message["content"] = _trim_to_tokens(tool_text, max_tokens)
+                text = trim_to_tokens(_apply_stop(tool_text, stop), max_tokens)
+                if text != tool_text:
+                    finish = "length"
+                message["content"] = text
             return message, finish
         text, limit_finish = _apply_limits(str(message.get("content") or ""), max_tokens, stop)
         message["content"] = text
@@ -3109,6 +3024,13 @@ async def _send_deepseek_stream(
     return rec, response_message_id, stop_message_id
 
 
+def _continue_deadline_expired(deadline: float | None) -> bool:
+    if deadline is None or time.monotonic() < deadline:
+        return False
+    log.warning("deepseek continuation deadline of %.0fs reached, stopping", CONTINUE_DEADLINE_SEC)
+    return True
+
+
 async def _collect_continuation(
     account,
     session,
@@ -3117,10 +3039,11 @@ async def _collect_continuation(
     thinking,
     search,
     ref_file_ids=None,
+    deadline: float | None = None,
 ) -> MessageReconstructor | None:
     attempt = 0
     rate_attempt = 0
-    while True:
+    while not _continue_deadline_expired(deadline):
         try:
             rec, _response_message_id, _stop_message_id = await _send_deepseek_stream(
                 account,
@@ -3179,6 +3102,7 @@ async def _collect_continuation(
             await asyncio.sleep(delay)
             continue
         return rec
+    return None
 
 
 def _reduced_prompt_variants(
@@ -3278,13 +3202,14 @@ async def _collect_non_stream(
     stop: Any = None,
     n: int | None = None,
     parallel_tool_calls: bool | None = None,
+    cached_session=None,
 ):
     await _human_delay()
     async with account_lock(lock, settings.acquire_timeout):
         if attachments:
             ref_file_ids = await _upload_attachments(account, attachments, model_type, thinking)
         session, session_key, parent_message_id = await _prepare_session(account, pool, existing_sid, context_seq)
-        if session_key != existing_sid and messages is not None:
+        if (session_key != existing_sid or session is not cached_session) and messages is not None:
             try:
                 prompt, tool_mode = toolemu.build_prompt(messages, tools, tool_choice, False, response_format)
             except ValueError:
@@ -3292,6 +3217,7 @@ async def _collect_non_stream(
             tool_schemas = toolemu.tool_schema_map(tools)
         stop_message_id: str | None = None
         started = time.monotonic()
+        deadline = started + CONTINUE_DEADLINE_SEC
         had_cached_session = bool(existing_sid) and account.sessions.get(existing_sid) is not None
         stale_rebuilt = False
         rec: MessageReconstructor | None = None
@@ -3414,7 +3340,9 @@ async def _collect_non_stream(
             incomplete_message = _incomplete_message(rec)
             cont_parent = rec.id or response_message_id or parent_message_id
             for _ in range(MAX_CONTINUE_ROUNDS):
-                cont_rec = await _collect_continuation(account, session, cont_parent, model_type, thinking, search, ref_file_ids)
+                if _continue_deadline_expired(deadline):
+                    break
+                cont_rec = await _collect_continuation(account, session, cont_parent, model_type, thinking, search, ref_file_ids, deadline)
                 if cont_rec is None:
                     break
                 rec.extend_with(cont_rec)
@@ -3433,9 +3361,8 @@ async def _collect_non_stream(
                     reduced = await _collect_reduced(account, pool, reduced_prompts, model_type, thinking, search, ref_file_ids)
                     if reduced is not None:
                         rec, session, session_key, variant_tool_mode, variant_tool_schemas = reduced
-                        if variant_tool_mode:
-                            tool_mode = variant_tool_mode
-                            tool_schemas = variant_tool_schemas
+                        tool_mode = variant_tool_mode
+                        tool_schemas = variant_tool_schemas
                         response_message_id = rec.id or response_message_id
                         stop_message_id = response_message_id
                         reduced_notice = REDUCED_CONTEXT_MESSAGE
@@ -3501,6 +3428,7 @@ async def _stream_openai(
     stop: Any = None,
     n: int | None = None,
     parallel_tool_calls: bool | None = None,
+    cached_session=None,
 ):
     chunk_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
@@ -3508,7 +3436,13 @@ async def _stream_openai(
     await _human_delay()
     async with account_lock(lock, settings.acquire_timeout):
         if attachments:
-            ref_file_ids = await _upload_attachments(account, attachments, model_type, thinking)
+            try:
+                ref_file_ids = await _upload_attachments(account, attachments, model_type, thinking)
+            except HTTPException as exc:
+                detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+                for line in _stream_error_sse(chunk_id, created, model, detail):
+                    yield line
+                return
         try:
             session, session_key, parent_message_id = await _prepare_session(account, pool, existing_sid, context_seq)
         except HTTPException as exc:
@@ -3517,7 +3451,7 @@ async def _stream_openai(
                 yield line
             return
 
-        if session_key != existing_sid and messages is not None:
+        if (session_key != existing_sid or session is not cached_session) and messages is not None:
             try:
                 prompt, tool_mode = toolemu.build_prompt(messages, tools, tool_choice, False, response_format)
             except ValueError:
@@ -3533,9 +3467,10 @@ async def _stream_openai(
         role_sent = False
         got_content = False
         started = time.monotonic()
-        budget = StreamBudget(max_tokens, _trim_to_tokens)
-        stop_markers = _split_stop(stop)
-        stop_filter = _StreamStopFilter(stop_markers) if stop_markers else None
+        deadline = started + CONTINUE_DEADLINE_SEC
+        budget = StreamBudget(max_tokens, trim_to_tokens)
+        stop_markers = split_stop(stop)
+        stop_filter = StreamStopFilter(stop_markers) if stop_markers else None
         stop_hit = False
         dsml_filter = toolemu.DsmlFilter()
         reasoning_filter = toolemu.DsmlFilter()
@@ -3782,7 +3717,9 @@ async def _stream_openai(
             incomplete_message = _incomplete_message(rec)
             cont_parent = rec.id or response_message_id or parent_message_id
             for _ in range(MAX_CONTINUE_ROUNDS):
-                cont_rec = await _collect_continuation(account, session, cont_parent, model_type, thinking, search, ref_file_ids)
+                if _continue_deadline_expired(deadline):
+                    break
+                cont_rec = await _collect_continuation(account, session, cont_parent, model_type, thinking, search, ref_file_ids, deadline)
                 if cont_rec is None:
                     break
                 rec.extend_with(cont_rec)
@@ -3815,9 +3752,8 @@ async def _stream_openai(
                     reduced = await _collect_reduced(account, pool, reduced_prompts, model_type, thinking, search, ref_file_ids)
                     if reduced is not None:
                         rec, session, session_key, variant_tool_mode, variant_tool_schemas = reduced
-                        if variant_tool_mode:
-                            tool_mode = variant_tool_mode
-                            tool_schemas = variant_tool_schemas
+                        tool_mode = variant_tool_mode
+                        tool_schemas = variant_tool_schemas
                         response_message_id = rec.id or response_message_id
                         stop_message_id = response_message_id
                         reduced_notice = REDUCED_CONTEXT_MESSAGE
@@ -3843,7 +3779,7 @@ async def _stream_openai(
         if not (rec.content or rec.reasoning) and rec.hint_error:
             if _is_fake_context_hint(rec):
                 log.warning("deepseek fake context-length hint after retries")
-                for line in _stream_error_sse(chunk_id, created, model, FAKE_CONTEXT_HINT_ERROR_MESSAGE, session_key, "server_error", "error"):
+                for line in _stream_error_sse(chunk_id, created, model, FAKE_CONTEXT_HINT_ERROR_MESSAGE, session_key, "server_error"):
                     yield line
                 return
             hint = rec.hint_error
@@ -3877,12 +3813,12 @@ async def _stream_openai(
             parsed = toolemu.parse_tool_calls(content_buf or rec.content, tool_schemas)
             tool_calls = parsed[0] if parsed is not None and parsed[0] else None
             if tool_calls:
-                if budget.done:
+                if _output_truncated(rec.status):
                     for line in _stream_error_sse(
                         chunk_id,
                         created,
                         model,
-                        "max_tokens reached before the tool call completed",
+                        "the provider output ended before the tool call completed",
                         session_key,
                         "length",
                         "length",

@@ -1,4 +1,5 @@
 import asyncio
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -215,7 +216,58 @@ async def test_stream_emits_error_after_five_too_frequent_cycles(fast_rate_limit
     assert acct.client.completion.await_count == openai_mod.MESSAGE_TOO_FREQUENT_MAX_RETRIES + 1
     assert '"error"' in joined
     assert "Message too frequent" in joined
+    assert '"finish_reason": "error"' not in joined
+    assert '"finish_reason": "stop"' in joined
     assert joined.rstrip().endswith("data: [DONE]")
+
+
+async def test_stream_error_frame_uses_valid_finish_reasons(fast_rate_limit):
+    valid = {"stop", "length", "content_filter", "tool_calls"}
+    cases = [
+        (TOO_FREQUENT_HINT_SSE, openai_mod.MESSAGE_TOO_FREQUENT_MAX_RETRIES + 1),
+        (BUSY_SSE, openai_mod.MAX_RETRIES + 1),
+        (FAKE_CTX_SSE, openai_mod.MAX_RETRIES + 1),
+    ]
+    for sse, repeats in cases:
+        acct = FakeAccount([sse] * repeats)
+        gen = _stream_openai(**_args(acct))
+        joined = "".join(await _collect(gen))
+        for line in joined.splitlines():
+            if not line.startswith("data: ") or line.startswith("data: [DONE]"):
+                continue
+            payload = json.loads(line[6:])
+            if "error" not in payload:
+                continue
+            for choice in payload.get("choices") or []:
+                assert choice.get("finish_reason") in valid
+
+
+async def test_non_stream_input_exceeds_nested_envelope_then_continuation():
+    acct = FakeAccount([OK_SSE])
+    nested = json.dumps({"error": {"message": "Content is too long", "finish_reason": "input_exceeds_limit"}})
+    acct.client.completion = AsyncMock(
+        side_effect=[
+            openai_mod.HTTPException(400, nested),
+            openai_mod.HTTPException(404, "gone"),
+            FakeResp(OK_SSE),
+        ]
+    )
+    with pytest.raises(openai_mod.HTTPException) as excinfo:
+        await _collect_non_stream(**_args(acct))
+    assert excinfo.value.status_code == 502
+    assert "Content is too long" in excinfo.value.detail
+    assert "response_incomplete" in excinfo.value.detail
+    assert acct.client.completion.await_count == 2
+
+
+async def test_stream_input_exceeds_nested_envelope_continues():
+    acct = FakeAccount([OK_SSE])
+    nested = json.dumps({"data": {"message": "Content is too long", "finish_reason": "input_exceeds_limit"}})
+    acct.client.completion = AsyncMock(side_effect=[openai_mod.HTTPException(400, nested), FakeResp(OK_SSE)])
+    gen = _stream_openai(**_args(acct))
+    joined = "".join(await _collect(gen))
+    assert '"content": "Привет"' in joined
+    assert acct.client.completion.await_count == 2
 
 
 async def test_non_stream_retries_too_frequent_http_error_then_success(fast_rate_limit):

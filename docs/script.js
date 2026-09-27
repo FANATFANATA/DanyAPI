@@ -38,7 +38,6 @@
         });
     });
     var COPY_LABELS = {
-        en: "Copy", ru: "Копировать",
         okEn: "Copied", okRu: "Скопировано"
     };
     function copyText(text) {
@@ -124,8 +123,8 @@
             qs_tab_docker: "Docker",
             qs_pane_install: "PowerShell",
             qs_pane_install_alt: "Linux / macOS",
-            qs_install_note: "Скрипт клонирует репозиторий, ставит зависимости, создаёт <code>.env</code>, проверяет токены и подсказывает, как запустить сервер. Обновляется сам при каждом старте.",
-            qs_docker_note: "Готовый образ, пушится на каждый коммит и тег версии. Нативный PoW-солвер собран в образ для максимальной скорости.",
+            qs_install_note: "Скрипт клонирует репозиторий, ставит зависимости, создаёт <code>.env</code>, проверяет токены и подсказывает, как запустить сервер. Обновляется сам при каждом старте. Не хочется доставать токены из хранилища браузера вручную? Запустите <code>docs/token_utility.sh</code> (или <code>docs\\token_utility.bat</code> на Windows) - он вытащит их за вас.",
+            qs_docker_note: "Готовый образ, пушится на каждый пуш в prod и dev, а также на тег версии. Нативный PoW-солвер собран в образ для максимальной скорости.",
             copy: "Копировать",
             faq_eyebrow: "FAQ",
             faq_title: "Вопросы?",
@@ -176,8 +175,8 @@
             var saved = localStorage.getItem(STORE_KEY);
             if (saved && LANGS.indexOf(saved) !== -1) return saved;
         } catch (e) {}
-        var nav = (navigator.language || navigator.userLanguage || "").toLowerCase();
-        return nav.indexOf("ru") === 0 ? "ru" : "en";
+        var browserLang = (navigator.language || navigator.userLanguage || "").toLowerCase();
+        return browserLang.indexOf("ru") === 0 ? "ru" : "en";
     }
 
     function applyLang(lang) {

@@ -1,24 +1,3 @@
-"""
-token_utility.py - Extract DeepSeek & Qwen tokens for DanyAPI.
-
-Uses your DEFAULT browser (no automation, no dependencies).
-
-    python token_utility.py
-
-Flow:
-  1. A tiny local server starts (127.0.0.1:8765) and a page opens in your
-     default browser.
-  2. Step by step wizard: first drag the " Run DanyAPI token utility" button to
-     your bookmarks bar (one time only), click Next.
-  3. The page guides you to DeepSeek: log in, click the grabber bookmark
-     there. The token is sent silently, the DeepSeek tab closes itself,
-     the wizard shows a success flash and automatically moves on to Qwen.
-  4. Same for Qwen - and when both tokens are in, you land on a results
-     screen with your tokens ready to copy.
-
-Everything stays local: the server binds to 127.0.0.1 only.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -56,7 +35,7 @@ TEXTS: dict[str, str] = {
     "step1_heading": "DeepSeek token",
     "step1_p1": "<b>1.</b> Open DeepSeek by clicking the button below.",
     "step1_p2": "<b>2.</b> Sign in to your account if needed.",
-    "step1_p3": "<b>3.</b> On the DeepSeek page, click your <b>“Run DanyAPI token utility”</b> bookmark.",
+    "step1_p3": '<b>3.</b> On the DeepSeek page, click your <b>"Run DanyAPI token utility"</b> bookmark.',
     "step1_fineprint": "The tab closes automatically after the token is sent. If the token is valid, a green checkmark"
     " will appear on this page and you will be guided to the next step within a few seconds. Overwise a red cross will"
     " appear, and you can click the button below to try again.",
@@ -65,7 +44,7 @@ TEXTS: dict[str, str] = {
     "step2_heading": "Qwen token",
     "step2_p1": "<b>1.</b> Open Qwen by clicking the button below.",
     "step2_p2": "<b>2.</b> Sign in to your account if needed.",
-    "step2_p3": "<b>3.</b> On the Qwen page, click the <b>“Run DanyAPI token utility”</b> bookmark.",
+    "step2_p3": '<b>3.</b> On the Qwen page, click the <b>"Run DanyAPI token utility"</b> bookmark.',
     "step2_fineprint": "The tab closes automatically after the token is sent. If the token is valid, a green checkmark"
     " will appear on this page and you will be guided to the next step within a few seconds. Overwise a red cross will"
     " appear, and you can click the button below to try again.",
@@ -221,13 +200,14 @@ BOOKMARKLET_SOURCE = r"""
 
 
 def build_bookmarklet(port: int) -> str:
-    """Collapse the readable source into a one-line javascript: URL."""
     src = BOOKMARKLET_SOURCE.replace("__PORT__", str(port))
     lines = [ln.strip() for ln in src.strip().splitlines()]
     lines = [ln for ln in lines if ln and not ln.startswith("//")]
     one_line = "javascript:" + " ".join(lines)
-    assert "http://" in one_line
-    assert "//" not in one_line.replace("http://", ""), "bookmarklet source contains a // comment - it would break on one line"
+    if "http://" not in one_line:
+        raise RuntimeError("bookmarklet source lost its collect endpoint")
+    if "//" in one_line.replace("http://", ""):
+        raise RuntimeError("bookmarklet source contains a // comment - it would break on one line")
     return one_line
 
 
@@ -367,9 +347,6 @@ SETUP_PAGE = r"""<!DOCTYPE html>
   }
   .bm .bm-label { display: block; pointer-events: none; -webkit-user-select: none; user-select: none; }
   .bm .bm-title {
-    /* Real text used by browsers as the bookmark name when the link is
-       dragged to the bookmarks bar. Visually hidden (the canvas paints the
-       label) and unreachable, since the shield covers the whole button. */
     position: absolute; width: 1px; height: 1px; overflow: hidden;
     clip-path: inset(50%); white-space: nowrap;
     -webkit-user-select: none; user-select: none; pointer-events: none;
@@ -435,14 +412,13 @@ SETUP_PAGE = r"""<!DOCTYPE html>
   </div>
   <div class="progress"><div class="bar" id="bar"></div></div>
 
-  <!-- STEP 0: install bookmarklet -->
   <div class="step" id="step0">
     <h2><span class="badge">0</span> __step0_heading__</h2>
     <p>__step0_intro__</p>
     <p>
       <a class="bm" href="__BOOKMARKLET__" aria-label="__bookmarklet_aria__"><span class="bm-title">__bookmarklet_label__</span><canvas
-        class="bm-label" width="214" height="24" aria-hidden="true"></canvas><!--
-      --><span class="bm-shield" aria-hidden="true"></span></a>
+        class="bm-label" width="214" height="24" aria-hidden="true"></canvas>
+      <span class="bm-shield" aria-hidden="true"></span></a>
     </p>
     <p class="fineprint">__step0_fineprint__</p>
     <div class="next">
@@ -450,7 +426,6 @@ SETUP_PAGE = r"""<!DOCTYPE html>
     </div>
   </div>
 
-  <!-- STEP 1: DeepSeek -->
   <div class="step hidden" id="step1">
     <h2><span class="badge">1</span> __step1_heading__</h2>
     <p>__step1_p1__</p>
@@ -464,7 +439,6 @@ SETUP_PAGE = r"""<!DOCTYPE html>
     </div>
   </div>
 
-  <!-- STEP 2: Qwen -->
   <div class="step hidden" id="step2">
     <h2><span class="badge">2</span> __step2_heading__</h2>
     <p>__step2_p1__</p>
@@ -478,7 +452,6 @@ SETUP_PAGE = r"""<!DOCTYPE html>
     </div>
   </div>
 
-  <!-- STEP 3: all done -->
   <div class="step hidden" id="step3">
     <h2><span class="badge done">OK</span> __step3_heading__</h2>
     <p>__step3_text__</p>
@@ -492,7 +465,6 @@ SETUP_PAGE = r"""<!DOCTYPE html>
 </div>
 
 <script>
-// Visible strings, injected from the TEXTS config at the top of token_utility.py.
 const T = __TEXTS_JSON__;
 function tfmt(key, provider) {
   return T[key].replace("{provider}", provider.charAt(0).toUpperCase() + provider.slice(1));
@@ -500,8 +472,6 @@ function tfmt(key, provider) {
 
 const state = { step: 0, deepseek: __HAS_DEEPSEEK__, qwen: __HAS_QWEN__ };
 
-// Paint the grabber label as pixels on a canvas: there is no text node in the
-// button at all, so no browser can ever turn a drag into a text selection.
 (function () {
   var c = document.querySelector("canvas.bm-label");
   if (!c) return;
@@ -520,7 +490,6 @@ function syncFromServer() {
   if (state.deepseek) showToken("1", "deepseek");
   if (state.qwen) showToken("2", "qwen");
   if (state.deepseek && state.qwen) { if (state.step < 3) successPause(finish); return true; }
-  // Auto-advance: DeepSeek already in (e.g. page refreshed) → jump straight to Qwen.
   if (state.step === 1 && state.deepseek) { goTo(2); }
   return false;
 }
@@ -529,8 +498,6 @@ let providerTabs = {};
 
 function openProvider(url, p) {
   const existing = providerTabs[p];
-  // Reuse the tab we opened last time if the browser gave us a handle, so we
-  // can close it ourselves once the token arrives.
   if (existing && !existing.closed) { existing.focus(); return; }
   const w = window.open(url, "_blank");
   if (w) { providerTabs[p] = w; w.focus(); }
@@ -542,10 +509,8 @@ function openProvider(url, p) {
 function showToken(n, provider) {
   const wait = document.getElementById("wait" + n);
   if (!wait) return;
-  // Grey out the provider button - no need to open the tab again.
   const btn = document.getElementById("btn-open-" + provider);
   if (btn) { btn.classList.add("disabled"); btn.removeAttribute("onclick"); }
-  // Green validation message also tells the user what happens next.
   const both = state.deepseek && state.qwen;
   let msg;
   if (both) {
@@ -557,14 +522,13 @@ function showToken(n, provider) {
   }
   wait.innerHTML = '<span class="okmsg">' + msg + '</span>';
   const tab = providerTabs[provider];
-  if (tab && !tab.closed) { try { tab.close(); } catch (e) {} }  // close the provider tab from the wizard side
+  if (tab && !tab.closed) { try { tab.close(); } catch (e) {} }
 }
 
 function showFail(provider) {
   const n = provider === "deepseek" ? "1" : "2";
   const wait = document.getElementById("wait" + n);
   if (!wait) return;
-  // Button stays active so the user can go back, log in, and retry.
   wait.innerHTML = '<span class="errmsg">' + tfmt("js_fail", provider) + '</span>';
 }
 
@@ -591,7 +555,6 @@ function finish() {
 let finishing = false;
 
 function successPause(next) {
-  // Let the user actually see the green checkmark for ~2s before moving on.
   setTimeout(next, 2000);
 }
 
@@ -601,7 +564,6 @@ document.getElementById("btn-next0").addEventListener("click", () => {
   syncFromServer();
 });
 
-// Poll for incoming tokens
 async function poll() {
   try {
     const r = await fetch("/status");
@@ -615,8 +577,6 @@ async function poll() {
       }
     }
     if (changed && state.deepseek && state.qwen) { successPause(finish); return; }
-    // Auto-advance: as soon as the DeepSeek token lands, linger on the
-    // success message for a moment, then move on to Qwen.
     if (changed && state.step === 1 && state.deepseek && !state.qwen) {
       successPause(() => { if (state.step === 1 && !state.qwen) goTo(2); });
     }
@@ -867,7 +827,6 @@ _TEXTS_JSON = json.dumps(TEXTS, ensure_ascii=False)
 
 
 def _apply_texts(template: str, extra: dict[str, str] | None = None) -> str:
-    """Fill __key__ placeholders with the TEXTS config (plus any extra values)."""
     subs = _STATIC_SUBS if extra is None else {**_STATIC_SUBS, **extra}
     return _TEXTS_RE.sub(lambda m: subs.get(m.group(1), m.group(0)), template)
 
@@ -906,8 +865,6 @@ def render_results_page() -> str:
 SUCCESS_PAGE = r"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>__popup_title__</title></head>
 <body style="background:#06070c;color:#9aa3b5;font-family:-apple-system,'Segoe UI',Roboto,sans-serif;margin:0;padding:24px;font-size:13px">
-<!-- Close instantly - this tab was opened by the wizard, so window.close()
-     is allowed. The wizard's poll shows the green checkmark instead. -->
 <script>try { window.close(); } catch (e) {}</script>
 <span id="fb" style="display:none">__popup_message__</span>
 <script>
@@ -923,13 +880,6 @@ _SUCCESS_PAGE_STATIC = _apply_texts(SUCCESS_PAGE)
 
 
 def register_token(provider: str, token: str) -> bool:
-    """Validate and store a token. Returns True on success.
-
-    Must stay in sync with the bookmarklet's client-side checks: only
-    token-shaped values from the provider's auth storage count, so a logged-out
-    provider page (or random localStorage junk) cannot be registered. An
-    empty/invalid token records a failed attempt instead (visible in /status).
-    """
     if provider not in ("deepseek", "qwen"):
         return False
     if token and re.fullmatch(r"\S{16,4096}", token):
@@ -972,9 +922,15 @@ class Handler(BaseHTTPRequestHandler):
         port = self.serve_port
         return {f"http://127.0.0.1:{port}", f"http://localhost:{port}", f"http://[::1]:{port}"}
 
-    def _send_cors(self) -> None:
+    def _allowed_origin(self) -> str | None:
         origin = self.headers.get("Origin")
         if not origin or origin not in self.allowed_origins | self._own_origins():
+            return None
+        return origin
+
+    def _send_cors(self) -> None:
+        origin = self._allowed_origin()
+        if origin is None:
             return
         self.send_header("Access-Control-Allow-Origin", origin)
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
@@ -1032,6 +988,9 @@ class Handler(BaseHTTPRequestHandler):
 
         if urlsplit(self.path).path != "/collect":
             self._send(b"not found", 404, "text/plain; charset=utf-8")
+            return
+        if self._allowed_origin() is None:
+            self._send(b'{"ok":false}', 403, ctype="application/json")
             return
         try:
             length = int(self.headers.get("Content-Length") or 0)

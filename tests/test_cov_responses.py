@@ -1,6 +1,7 @@
 import json
 
 import pytest
+from fastapi import HTTPException
 
 from danyapi.api import responses as resp
 
@@ -311,8 +312,9 @@ def test_input_items_from_messages_variants():
 
 
 def test_response_from_chat_invalid():
-    with pytest.raises(resp.ResponsesInputError):
+    with pytest.raises(HTTPException) as excinfo:
         resp.response_from_chat(5, resp.RequestInfo(model="m"), "r", 1)
+    assert excinfo.value.status_code == 500
 
 
 def test_response_from_chat_incomplete_reason():
@@ -331,7 +333,8 @@ def test_response_from_chat_error_and_incomplete():
         "r",
         1,
     )
-    assert errored["status"] == "incomplete"
+    assert errored["status"] == "failed"
+    assert errored["error"]["message"] == "bad"
     unfinished = resp.response_from_chat(
         {"choices": [{"message": {"role": "assistant", "content": "x"}, "finish_reason": "response_incomplete"}]},
         info,
@@ -339,6 +342,7 @@ def test_response_from_chat_error_and_incomplete():
         1,
     )
     assert unfinished["status"] == "incomplete"
+    assert unfinished["incomplete_details"] == {"reason": "max_output_tokens"}
 
 
 def test_iter_sse_payloads_non_str():
@@ -346,7 +350,7 @@ def test_iter_sse_payloads_non_str():
 
 
 def test_iter_sse_payloads_crlf():
-    assert list(resp._iter_sse_payloads('data: {"a": 1}\r\ndata: {"b": 2}\n\n')) == [{"b": 2}]
+    assert list(resp._iter_sse_payloads('data: {"a": 1}\r\ndata: {"b": 2}\n\n')) == []
 
 
 def test_iter_sse_payloads_bad_json():

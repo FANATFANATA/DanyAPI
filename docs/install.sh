@@ -4,12 +4,49 @@ REPO_URL="https://github.com/FANATFANATA/DanyAPI"
 BRANCH="prod"
 TARGET="${DANYAPI_DIR:-$HOME/DanyAPI}"
 ZIP_URL="$REPO_URL/archive/refs/heads/$BRANCH.zip"
+ENV_BACKUP=""
 
-if command -v python3 >/dev/null 2>&1; then
-    PY=python3
-elif command -v python >/dev/null 2>&1; then
-    PY=python
-else
+cleanup() {
+    restore_env
+}
+
+save_env() {
+    ENV_BACKUP=""
+    if [ -f "$TARGET/.env" ]; then
+        ENV_BACKUP="$TARGET.env.danyapi-backup"
+        if ! cp "$TARGET/.env" "$ENV_BACKUP"; then
+            echo "Could not back up $TARGET/.env, aborting." >&2
+            exit 1
+        fi
+    fi
+}
+
+restore_env() {
+    if [ -n "$ENV_BACKUP" ] && [ -f "$ENV_BACKUP" ]; then
+        if [ -f "$TARGET/.env" ]; then
+            rm -f "$ENV_BACKUP"
+        elif mkdir -p "$TARGET" && cp "$ENV_BACKUP" "$TARGET/.env"; then
+            echo "Restored your existing $TARGET/.env"
+            rm -f "$ENV_BACKUP"
+        else
+            echo "Could not restore $TARGET/.env, your settings are still in $ENV_BACKUP" >&2
+        fi
+    fi
+    ENV_BACKUP=""
+}
+
+trap cleanup EXIT
+
+PY=""
+for candidate in python3 python; do
+    if command -v "$candidate" >/dev/null 2>&1 \
+        && "$candidate" -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)" >/dev/null 2>&1; then
+        PY="$candidate"
+        break
+    fi
+done
+
+if [ -z "$PY" ]; then
     echo "Python 3.10+ is required but was not found in PATH."
     exit 1
 fi
@@ -28,11 +65,8 @@ from_zip() {
         cd "$tmp"
         if command -v unzip >/dev/null 2>&1; then
             unzip -q repo.zip
-        elif command -v tar >/dev/null 2>&1; then
-            tar -xzf repo.zip
         else
-            echo "Neither unzip nor tar is available." >&2
-            exit 1
+            "$PY" -c "import zipfile; zipfile.ZipFile('repo.zip').extractall('.')"
         fi
     )
     rm -rf "$TARGET"
@@ -41,6 +75,8 @@ from_zip() {
 }
 
 echo "DanyAPI will be installed into: $TARGET"
+
+save_env
 
 if [ -d "$TARGET/.git" ]; then
     echo "Updating existing checkout..."
@@ -61,6 +97,8 @@ else
     echo "git not found, downloading the source archive instead."
     from_zip
 fi
+
+restore_env
 
 if [ ! -f "$TARGET/docs/setup.py" ]; then
     echo "Could not find $TARGET/docs/setup.py in the checkout."

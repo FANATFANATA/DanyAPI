@@ -1,6 +1,7 @@
 import asyncio
 import base64 as b64
 import json
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -13,6 +14,7 @@ from danyapi import tools as toolemu
 from danyapi.accounts import AccountPoolBusy
 from danyapi.api.openai import app, settings
 from danyapi.deepseek.client import DeepSeekError
+from danyapi.deepseek.stream import MessageReconstructor
 
 OK_SSE = (
     "event: ready\n"
@@ -344,6 +346,7 @@ async def test_swapped_session_forgets_old():
 
 async def test_acquire_and_build_with_session():
     acct = FakeAccount()
+    acct.sessions.can_reuse = MagicMock(return_value=False)
     pool = MagicMock()
     pool.acquire = AsyncMock(return_value=(acct, "s1"))
     req = SimpleNamespace(
@@ -355,12 +358,33 @@ async def test_acquire_and_build_with_session():
         response_format=None,
         user=None,
     )
-    account, existing_sid, context_seq, prompt, tool_mode = await openai_mod._acquire_and_build(pool, req)
+    account, existing_sid, context_seq, prompt, tool_mode, cached_session = await openai_mod._acquire_and_build(pool, req, tools=None, tool_choice=None)
     assert account is acct
     assert existing_sid == "s1"
     assert context_seq
     assert "hello" in prompt
     assert tool_mode is False
+    assert cached_session is None
+
+
+async def test_acquire_and_build_returns_cached_session_object():
+    acct = FakeAccount()
+    cached = FakeSession()
+    acct.sessions.can_reuse = MagicMock(return_value=True)
+    acct.sessions.get = MagicMock(return_value=cached)
+    pool = MagicMock()
+    pool.acquire = AsyncMock(return_value=(acct, "s1"))
+    req = SimpleNamespace(
+        model="deepseek-v4.1-flash",
+        messages=[openai_mod.ChatMessage(role="user", content="hello")],
+        session_id="s1",
+        tools=None,
+        tool_choice=None,
+        response_format=None,
+        user=None,
+    )
+    *_rest, cached_session = await openai_mod._acquire_and_build(pool, req, tools=None, tool_choice=None)
+    assert cached_session is cached
 
 
 async def test_acquire_and_build_without_session_uses_context():
@@ -377,11 +401,21 @@ async def test_acquire_and_build_without_session_uses_context():
         response_format=None,
         user=None,
     )
-    account, existing_sid, context_seq, _prompt, _tool_mode = await openai_mod._acquire_and_build(pool, req)
+    account, existing_sid, context_seq, _prompt, _tool_mode, _cached = await openai_mod._acquire_and_build(pool, req, tools=None, tool_choice=None)
     assert account is acct
     assert existing_sid is None
     pool.resolve_context.assert_called_once_with(context_seq)
     pool.acquire.assert_awaited_once_with("cached", settings.acquire_timeout)
+
+
+async def test_acquire_and_build_requires_tools_arguments():
+    import inspect
+
+    params = inspect.signature(openai_mod._acquire_and_build).parameters
+    assert params["tools"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert params["tools"].default is inspect.Parameter.empty
+    assert params["tool_choice"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert params["tool_choice"].default is inspect.Parameter.empty
 
 
 async def test_acquire_and_build_raises_400_on_bad_messages():
@@ -398,7 +432,7 @@ async def test_acquire_and_build_raises_400_on_bad_messages():
         user=None,
     )
     with pytest.raises(Exception) as excinfo:
-        await openai_mod._acquire_and_build(pool, req)
+        await openai_mod._acquire_and_build(pool, req, tools=None, tool_choice=None)
     assert excinfo.value.status_code == 400
 
 
@@ -459,7 +493,7 @@ async def test_http_status_error():
     client.completion = AsyncMock(side_effect=httpx.HTTPStatusError("500", request=MagicMock(), response=MagicMock(status_code=500)))
     with pytest.raises(Exception) as excinfo:
         await openai_mod._send_completion(client, {}, "s", None, "p", "default", False, False)
-    assert excinfo.value.status_code == 500
+    assert excinfo.value.status_code == 502
 
 
 async def test_http_error():
@@ -2129,7 +2163,8 @@ async def test_stream_tool_mode_reduced_emits_tool_calls():
         thinking=False,
         search=False,
         tool_mode=True,
-        reduced_prompts=[("short prompt", False, {})],
+        tool_schemas={"get_weather": {}},
+        reduced_prompts=[("short prompt", True, {"get_weather": {}})],
     )
     joined = "".join(await _collect_agen(gen))
     assert '"tool_calls"' in joined
@@ -2316,7 +2351,7 @@ async def test_image_generations_requires_qwen_pool():
 
 
 def test_stream_error_sse_shape():
-    first, done = openai_mod._stream_error_sse("c1", 123, "m1", "boom", session_key="s1", error_finish="length")
+    first, done = openai_mod._stream_error_sse("c1", 123, "m1", "boom", session_key="s1", error_finish="length", choice_finish="length")
     assert done == "data: [DONE]\n\n"
     payload = json.loads(first[6:])
     assert payload["id"] == "c1"
@@ -2325,6 +2360,13 @@ def test_stream_error_sse_shape():
     assert payload["error"]["finish_reason"] == "length"
     assert payload["choices"][0]["delta"] == {}
     assert payload["choices"][0]["finish_reason"] == "length"
+
+
+def test_stream_error_sse_keeps_provider_reason_in_error_object():
+    first, _done = openai_mod._stream_error_sse("c1", 1, "m", "busy", "s1", "expert_busy_use_default")
+    payload = json.loads(first[6:])
+    assert payload["error"]["finish_reason"] == "expert_busy_use_default"
+    assert payload["choices"][0]["finish_reason"] == "stop"
 
 
 def test_collect_attachments_image_total_cap_413():
@@ -2366,3 +2408,463 @@ async def test_add_tokens_reactivates_broken_account(monkeypatch, tmp_path):
     assert acct.broken is False
     assert acct.broken_at is None
     assert env_file.read_text(encoding="utf-8").count(token) == 1
+
+
+def test_split_data_uri_empty_content_type_defaults():
+    content_type, data = openai_mod._split_data_uri("data:;base64," + b64.b64encode(b"abc").decode())
+    assert content_type == "application/octet-stream"
+    assert data == b"abc"
+
+
+def test_collect_attachments_empty_content_type_name():
+    uri = "data:;base64," + b64.b64encode(b"abc").decode()
+    req = SimpleNamespace(
+        messages=[openai_mod.ChatMessage(role="user", content=[{"type": "image_url", "image_url": uri}])],
+        files=[],
+    )
+    atts = openai_mod._collect_attachments(req)
+    assert atts[0].content_type == "application/octet-stream"
+    assert atts[0].name == "image_0.octet-stream"
+
+
+def test_raw_data_uri_length_matches_compact_helper():
+    uri = "data:image/png;base64," + b64.b64encode(b"abcde").decode()
+    _meta, compact = openai_mod._data_uri_parts(uri)
+    assert openai_mod._raw_data_uri_length(uri) == openai_mod._compact_data_uri_length(compact) == 5
+
+
+def test_input_exceeds_hint_nested_envelopes():
+    nested_error = json.dumps({"error": {"message": "too long", "finish_reason": "input_exceeds_limit"}})
+    under_error = openai_mod._input_exceeds_hint_from_http(openai_mod.HTTPException(400, nested_error))
+    assert under_error == {"message": "too long", "finish_reason": "input_exceeds_limit"}
+    nested_data = json.dumps({"data": {"finish_reason": "input_exceeds_limit"}})
+    under_data = openai_mod._input_exceeds_hint_from_http(openai_mod.HTTPException(400, nested_data))
+    assert under_data == {"message": "Content is too long", "finish_reason": "input_exceeds_limit"}
+    nested_object = {"detail": 1, "error": "not a dict"}
+    assert openai_mod._input_exceeds_hint_from_http(openai_mod.HTTPException(400, nested_object)) is None
+    wrong = json.dumps({"error": {"finish_reason": "other"}, "data": {"finish_reason": "nope"}})
+    assert openai_mod._input_exceeds_hint_from_http(openai_mod.HTTPException(400, wrong)) is None
+
+
+def test_error_body_limit_exceeds_previous_truncation():
+    assert openai_mod.MAX_ERROR_BODY_CHARS > 500
+
+
+async def test_send_completion_parses_long_nested_error_envelope():
+    filler = "x" * 2000
+    body = json.dumps({"trace": filler, "data": {"message": "nope", "finish_reason": "input_exceeds_limit"}})
+    assert len(body) > 500
+    resp = FakeResp(sse_text=body, status=400)
+    client = MagicMock()
+    client.completion = AsyncMock(return_value=resp)
+    with pytest.raises(openai_mod.HTTPException) as excinfo:
+        await openai_mod._send_completion(client, {}, "s", None, "p", "default", False, False)
+    hint = openai_mod._input_exceeds_hint_from_http(excinfo.value)
+    assert hint is not None
+    assert hint["finish_reason"] == "input_exceeds_limit"
+
+
+async def test_non_stream_input_exceeds_nested_envelope_continues():
+    acct = FakeAccount([OK_SSE])
+    nested = json.dumps({"error": {"message": "Content is too long", "finish_reason": "input_exceeds_limit"}})
+    acct.client.completion = AsyncMock(side_effect=[openai_mod.HTTPException(400, nested), FakeResp(sse_text=OK_SSE)])
+    acct.sessions.obtain = AsyncMock(return_value=(FakeSession(), "s1"))
+    result = await openai_mod._collect_non_stream(
+        account=acct,
+        pool=MagicMock(),
+        existing_sid="s1",
+        lock=acct.sem,
+        prompt="x",
+        model="deepseek-v4.1-flash",
+        model_type="default",
+        thinking=False,
+        search=False,
+    )
+    assert result["choices"][0]["message"]["content"] == "Hi"
+    assert acct.client.completion.await_count == 2
+
+
+def test_build_limited_message_tool_path_applies_stop():
+    content = "checking the weather now STOP tail"
+    body = f'{content} {{"tool_calls": [{{"name": "get_weather", "arguments": {{"city": "Moscow"}}}}]}}'
+    message, finish = openai_mod._build_limited_message(body, None, True, {}, None, "STOP", None, "FINISHED")
+    assert finish == "length"
+    assert message["content"] == "checking the weather now "
+    assert message["tool_calls"][0]["function"]["name"] == "get_weather"
+
+
+def test_build_limited_message_tool_path_keeps_tool_calls_without_stop():
+    body = '{"tool_calls": [{"name": "get_weather", "arguments": {"city": "Moscow"}}]}'
+    message, finish = openai_mod._build_limited_message(body, None, True, {}, None, None, None, "FINISHED")
+    assert finish == "tool_calls"
+    assert message["content"] == ""
+
+
+def test_build_limited_message_tool_path_reports_length_on_trim():
+    body = 'word word word word word word {"tool_calls": [{"name": "get_weather", "arguments": {"city": "Moscow"}}]}'
+    message, finish = openai_mod._build_limited_message(body, None, True, {}, 1, None, None, "FINISHED")
+    assert finish == "length"
+    assert message["content"] == "word"
+
+
+def test_stream_error_sse_default_finish_reason_is_valid():
+    first, _done = openai_mod._stream_error_sse("c1", 1, "m", "boom")
+    payload = json.loads(first[6:])
+    assert payload["choices"][0]["finish_reason"] == "stop"
+    assert "finish_reason" not in payload["error"]
+
+
+def test_output_truncated_follows_provider_status():
+    assert openai_mod._output_truncated("CONTEXT_LENGTH_EXCEEDED") is True
+    assert openai_mod._output_truncated("WIP") is True
+    assert openai_mod._output_truncated("INCOMPLETE") is True
+    assert openai_mod._output_truncated("FINISHED") is False
+    assert openai_mod._output_truncated(None) is False
+
+
+async def test_stream_upload_failure_reported_as_error_frame():
+    acct = FakeAccount([OK_SSE])
+    acct.client.upload_file = AsyncMock(side_effect=DeepSeekError(40001, "bad token"))
+    gen = openai_mod._stream_openai(
+        account=acct,
+        pool=MagicMock(),
+        existing_sid="s1",
+        lock=acct.sem,
+        prompt="x",
+        model="deepseek-v4.1-flash",
+        model_type="default",
+        thinking=False,
+        search=False,
+        attachments=[openai_mod.Attachment(b"a", "a.txt", "text/plain", False)],
+    )
+    joined = "".join(await _collect_agen(gen))
+    assert '"error"' in joined
+    assert "file upload failed" in joined
+    assert joined.rstrip().endswith("data: [DONE]")
+    assert '"content"' not in joined
+    acct.client.completion.assert_not_awaited()
+
+
+async def test_stream_upload_too_large_reported_as_error_frame():
+    acct = FakeAccount([OK_SSE])
+    acct.client.upload_file = AsyncMock(side_effect=openai_mod.HTTPException(413, "attachments too large"))
+    gen = openai_mod._stream_openai(
+        account=acct,
+        pool=MagicMock(),
+        existing_sid="s1",
+        lock=acct.sem,
+        prompt="x",
+        model="deepseek-v4.1-flash",
+        model_type="default",
+        thinking=False,
+        search=False,
+        attachments=[openai_mod.Attachment(b"a", "a.txt", "text/plain", False)],
+    )
+    joined = "".join(await _collect_agen(gen))
+    assert "attachments too large" in joined
+    assert joined.rstrip().endswith("data: [DONE]")
+
+
+async def test_non_stream_rebuilds_when_cached_session_was_evicted():
+    acct = FakeAccount([OK_SSE])
+    captured = {}
+
+    async def fake_collect(**kwargs):
+        captured.update(kwargs)
+        return {"ok": True}
+
+    orig = openai_mod._collect_non_stream
+    pool = MagicMock()
+    pool.acquire = AsyncMock(return_value=(acct, "s1"))
+    pool.resolve_context = MagicMock(return_value="s1")
+    fresh = FakeSession(sid="fresh")
+    acct.sessions.can_reuse = MagicMock(return_value=True)
+    acct.sessions.get = MagicMock(return_value=fresh)
+    acct.sessions.obtain = AsyncMock(return_value=(fresh, "s1"))
+    req = SimpleNamespace(
+        model="deepseek-v4.1-flash",
+        stream=False,
+        thinking=False,
+        search=False,
+        session_id=None,
+        files=None,
+        tools=None,
+        tool_choice=None,
+        response_format=None,
+        messages=[openai_mod.ChatMessage(role="user", content="alpha"), openai_mod.ChatMessage(role="user", content="beta")],
+    )
+    app.state.pool = pool
+    openai_mod._collect_non_stream = fake_collect
+    try:
+        await openai_mod._chat_completions_deepseek(req)
+    finally:
+        openai_mod._collect_non_stream = orig
+    assert captured["existing_sid"] == "s1"
+    assert captured["cached_session"] is fresh
+
+
+async def test_collect_non_stream_rebuilds_on_evicted_session():
+    acct = FakeAccount([OK_SSE])
+    prompts = []
+    orig_send = openai_mod._send_deepseek_stream
+
+    async def capture_send(account, session, parent_message_id, prompt, *args):
+        prompts.append(prompt)
+        return await orig_send(account, session, parent_message_id, prompt, *args)
+
+    fresh = FakeSession(sid="fresh")
+    acct.sessions.obtain = AsyncMock(return_value=(fresh, "s1"))
+    openai_mod._send_deepseek_stream = capture_send
+    try:
+        result = await openai_mod._collect_non_stream(
+            account=acct,
+            pool=MagicMock(),
+            existing_sid="s1",
+            lock=acct.sem,
+            prompt="delta only",
+            model="deepseek-v4.1-flash",
+            model_type="default",
+            thinking=False,
+            search=False,
+            messages=[openai_mod.ChatMessage(role="user", content="alpha")],
+            cached_session=FakeSession(sid="other"),
+        )
+    finally:
+        openai_mod._send_deepseek_stream = orig_send
+    assert result["choices"][0]["message"]["content"] == "Hi"
+    assert prompts == ["alpha"]
+
+
+async def test_collect_non_stream_keeps_delta_prompt_for_same_cached_session():
+    acct = FakeAccount([OK_SSE])
+    prompts = []
+    orig_send = openai_mod._send_deepseek_stream
+
+    async def capture_send(account, session, parent_message_id, prompt, *args):
+        prompts.append(prompt)
+        return await orig_send(account, session, parent_message_id, prompt, *args)
+
+    cached = FakeSession(sid="s1")
+    acct.sessions.obtain = AsyncMock(return_value=(cached, "s1"))
+    openai_mod._send_deepseek_stream = capture_send
+    try:
+        result = await openai_mod._collect_non_stream(
+            account=acct,
+            pool=MagicMock(),
+            existing_sid="s1",
+            lock=acct.sem,
+            prompt="delta only",
+            model="deepseek-v4.1-flash",
+            model_type="default",
+            thinking=False,
+            search=False,
+            messages=[openai_mod.ChatMessage(role="user", content="alpha")],
+            cached_session=cached,
+        )
+    finally:
+        openai_mod._send_deepseek_stream = orig_send
+    assert result["choices"][0]["message"]["content"] == "Hi"
+    assert prompts == ["delta only"]
+
+
+async def test_stream_openai_rebuilds_on_evicted_session():
+    acct = FakeAccount([OK_SSE])
+    fresh = FakeSession(sid="fresh")
+    acct.sessions.obtain = AsyncMock(return_value=(fresh, "s1"))
+    joined = "".join(
+        await _collect_agen(
+            openai_mod._stream_openai(
+                account=acct,
+                pool=MagicMock(),
+                existing_sid="s1",
+                lock=acct.sem,
+                prompt="delta only",
+                model="deepseek-v4.1-flash",
+                model_type="default",
+                thinking=False,
+                search=False,
+                messages=[openai_mod.ChatMessage(role="user", content="alpha")],
+                cached_session=FakeSession(sid="other"),
+            )
+        )
+    )
+    assert '"content": "Hi"' in joined
+    assert acct.client.completion.await_args.kwargs["prompt"] == "alpha"
+
+
+async def test_stream_openai_keeps_delta_prompt_for_same_cached_session():
+    acct = FakeAccount([OK_SSE])
+    cached = FakeSession(sid="s1")
+    acct.sessions.obtain = AsyncMock(return_value=(cached, "s1"))
+    joined = "".join(
+        await _collect_agen(
+            openai_mod._stream_openai(
+                account=acct,
+                pool=MagicMock(),
+                existing_sid="s1",
+                lock=acct.sem,
+                prompt="delta only",
+                model="deepseek-v4.1-flash",
+                model_type="default",
+                thinking=False,
+                search=False,
+                messages=[openai_mod.ChatMessage(role="user", content="alpha")],
+                cached_session=cached,
+            )
+        )
+    )
+    assert '"content": "Hi"' in joined
+    assert acct.client.completion.await_args.kwargs["prompt"] == "delta only"
+
+
+async def test_collect_continuation_respects_deadline():
+    acct = FakeAccount()
+    acct.client.completion = AsyncMock(side_effect=openai_mod.HTTPException(429, "Message too frequent"))
+    rec = await openai_mod._collect_continuation(acct, FakeSession(), None, "default", False, False, None, time.monotonic() - 1.0)
+    assert rec is None
+    acct.client.completion.assert_not_awaited()
+
+
+async def test_collect_continuation_without_deadline_still_works():
+    acct = FakeAccount([OK_SSE])
+    rec = await openai_mod._collect_continuation(acct, FakeSession(), None, "default", False, False)
+    assert rec is not None
+    assert rec.content == "Hi"
+
+
+async def test_continue_deadline_expired():
+    assert openai_mod._continue_deadline_expired(None) is False
+    assert openai_mod._continue_deadline_expired(time.monotonic() + 60) is False
+    assert openai_mod._continue_deadline_expired(time.monotonic() - 60) is True
+
+
+async def test_non_stream_continuation_deadline_stops_rounds(monkeypatch):
+    acct = FakeAccount([INPUT_SSE])
+    calls = []
+
+    async def fake_continuation(*args, **kwargs):
+        calls.append(args[7])
+        return None
+
+    monkeypatch.setattr(openai_mod, "_collect_continuation", fake_continuation)
+    monkeypatch.setattr(openai_mod, "CONTINUE_DEADLINE_SEC", -1.0)
+
+    with pytest.raises(openai_mod.HTTPException) as excinfo:
+        await openai_mod._collect_non_stream(
+            account=acct,
+            pool=MagicMock(),
+            existing_sid="s1",
+            lock=acct.sem,
+            prompt="x",
+            model="deepseek-v4.1-flash",
+            model_type="default",
+            thinking=False,
+            search=False,
+        )
+    assert excinfo.value.status_code == 502
+    assert calls == []
+
+
+async def test_non_stream_reduced_variant_without_tools_resets_tool_mode(monkeypatch):
+    acct = FakeAccount([INPUT_SSE])
+    rec = MessageReconstructor()
+    rec.message = {"fragments": [{"type": "RESPONSE", "content": '{"tool_calls": [{"name": "get_weather", "arguments": {}}]}'}]}
+    monkeypatch.setattr(openai_mod, "_collect_continuation", AsyncMock(return_value=None))
+    monkeypatch.setattr(openai_mod, "_collect_reduced", AsyncMock(return_value=(rec, FakeSession(), "s1", False, {})))
+    result = await openai_mod._collect_non_stream(
+        account=acct,
+        pool=MagicMock(),
+        existing_sid="s1",
+        lock=acct.sem,
+        prompt="x",
+        model="deepseek-v4.1-flash",
+        model_type="default",
+        thinking=False,
+        search=False,
+        tool_mode=True,
+        tool_schemas={"get_weather": {}},
+        reduced_prompts=[("plain prompt", False, {})],
+    )
+    assert "tool_calls" not in result["choices"][0]["message"]
+    assert result["choices"][0]["message"]["content"] == '{"tool_calls": [{"name": "get_weather", "arguments": {}}]}'
+    assert result["choices"][0]["finish_reason"] == "response_incomplete"
+
+
+def test_cancel_finished_response_409():
+    app.state.responses_store = None
+    store = openai_mod._responses_store()
+    store.set("resp_done", {"public": {"status": "completed", "id": "resp_done"}})
+    client = TestClient(app)
+    resp = client.post("/v1/responses/resp_done/cancel")
+    client.close()
+    assert resp.status_code == 409
+    payload = resp.json()["error"]
+    assert payload["type"] == "conflict_error"
+    assert "not cancellable" in payload["message"]
+    assert store.get("resp_done")["public"]["status"] == "completed"
+
+
+def test_list_models_uses_all_models(monkeypatch):
+    monkeypatch.setattr(openai_mod, "_all_models", MagicMock(return_value=[{"id": "m"}]))
+    client = TestClient(app)
+    payload = client.get("/v1/models").json()
+    client.close()
+    assert payload["data"] == [{"id": "m"}]
+
+
+async def test_image_generations_route_uses_image_pool(monkeypatch):
+    pool = MagicMock()
+    monkeypatch.setattr(openai_mod, "_image_pool", AsyncMock(return_value=pool))
+    captured = {}
+
+    async def fake_image_generations(req, resolved):
+        captured["pool"] = resolved
+        return {"created": 1, "data": []}
+
+    monkeypatch.setattr(openai_mod, "_image_generations", fake_image_generations)
+    client = TestClient(app)
+    payload = client.post("/v1/images/generations", json={"model": "qwen-image-gen", "prompt": "dog"}).json()
+    client.close()
+    assert payload["data"] == []
+    assert captured["pool"] is pool
+
+
+def test_close_pow_managers_invokes_every_account():
+    class _Manager:
+        def __init__(self):
+            self.closed = 0
+
+        def close(self):
+            self.closed += 1
+
+    class _Acct:
+        def __init__(self, label):
+            self.label = label
+            self.pow = _Manager()
+            self.pow_upload = _Manager()
+
+    acct = _Acct("a")
+    openai_mod._close_pow_managers([acct, acct])
+    assert acct.pow.closed == 1
+    assert acct.pow_upload.closed == 1
+
+
+def test_close_pow_managers_survives_failure():
+    class _Boom:
+        label = "b"
+        pow_upload = None
+
+        class _Pow:
+            def close(self):
+                raise RuntimeError("boom")
+
+        pow = _Pow()
+
+    openai_mod._close_pow_managers([_Boom()])
+
+
+def test_close_pow_managers_without_managers():
+    class _Bare:
+        label = "c"
+
+    openai_mod._close_pow_managers([_Bare()])

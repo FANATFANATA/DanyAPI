@@ -6,6 +6,7 @@ import logging
 import os
 import tempfile
 import threading
+import time
 import weakref
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,7 @@ DEFAULT_CACHE_SUBDIR = "danyapi"
 _MAX_AFFINITY = 8192
 
 _FLUSH_WAIT_INTERVAL = 0.5
+_FLUSH_MAX_WAIT = 5.0
 
 _PATH_LOCKS: weakref.WeakValueDictionary[str, threading.Lock] = weakref.WeakValueDictionary()
 _PATH_LOCKS_GUARD = threading.Lock()
@@ -32,6 +34,16 @@ def _path_write_lock(path: Path) -> threading.Lock:
             lock = threading.Lock()
             _PATH_LOCKS[key] = lock
         return lock
+
+
+def _fsync_dir(path: Path) -> None:
+    if os.name == "nt":
+        return
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def cache_root() -> Path:
@@ -72,15 +84,21 @@ class JsonStore:
             return
         try:
             raw = self._path.read_text(encoding="utf-8")
-        except (OSError, UnicodeError):
+        except FileNotFoundError:
+            return
+        except (OSError, UnicodeError) as exc:
+            log.warning("cache read failed for %s: %s", self._path, exc)
             return
         try:
             data = json.loads(raw)
-        except ValueError:
+        except ValueError as exc:
+            log.warning("cache file %s is corrupt and was ignored: %s", self._path, exc)
             return
-        if isinstance(data, dict):
-            self._data = data
-            self._evict()
+        if not isinstance(data, dict):
+            log.warning("cache file %s has unexpected root type %s and was ignored", self._path, type(data).__name__)
+            return
+        self._data = data
+        self._evict()
 
     def _evict(self) -> None:
         while self._maxsize > 0 and len(self._data) > self._maxsize:
@@ -93,8 +111,13 @@ class JsonStore:
         tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
         try:
             with _path_write_lock(path):
-                tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+                fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    handle.write(json.dumps(data, ensure_ascii=False))
+                    handle.flush()
+                    os.fsync(handle.fileno())
                 os.replace(tmp, path)
+                _fsync_dir(path.parent)
         except (OSError, TypeError, ValueError) as exc:
             log.warning("cache write failed for %s: %s", path, exc)
             try:
@@ -143,20 +166,31 @@ class JsonStore:
                 self._idle.set()
             self._write()
 
-    def flush(self) -> None:
+    def flush(self, timeout: float = _FLUSH_MAX_WAIT) -> None:
         if self._path is None:
             return
+        deadline = time.monotonic() + timeout
         while True:
             with self._lock:
                 if not self._pending:
                     return
-            self._idle.wait(_FLUSH_WAIT_INTERVAL)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                log.warning("cache flush for %s timed out after %gs with a write still pending", self._path, timeout)
+                return
+            self._idle.wait(min(remaining, _FLUSH_WAIT_INTERVAL))
 
     def get(self, key: str, default: Any = None) -> Any:
         with self._lock:
             return self._data.get(key, default)
 
     def set(self, key: str, value: Any) -> None:
+        if self._path is not None:
+            try:
+                json.dumps(value, ensure_ascii=False)
+            except (TypeError, ValueError) as exc:
+                log.warning("cache value for %s is not serialisable and was not stored: %s", key, exc)
+                return
         with self._lock:
             if key in self._data and self._data[key] == value:
                 return

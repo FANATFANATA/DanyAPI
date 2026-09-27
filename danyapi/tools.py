@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import uuid
 from bisect import bisect_right
@@ -247,7 +248,8 @@ _XML_OPEN_TAG = re.compile(
     re.IGNORECASE,
 )
 _XML_CLOSE_TAG = re.compile(
-    r"</(?:tool_calls|tool_call|function_calls|function_call|functions|function|tools|calls|_calls)\s*>",
+    r"</(?:tool_calls|tool_call|function_calls|function_call|functions|function|tools|calls|_calls"
+    r"|invoke|toolinvoke|tool_invoke|use_tool|tool_use|call|action|run)\s*>",
     re.IGNORECASE,
 )
 _XML_HTML_TAGS = frozenset(
@@ -376,7 +378,7 @@ _XML_PARAM_RE = re.compile(
     r"(?:</\s*parameter\s*>|(?=</?\s*(?:tool_calls|tool_call|function_calls|function_call|calls|invoke|parameter)\b)|$)",
     re.DOTALL | re.IGNORECASE,
 )
-_XML_ATTR_RE = re.compile(r"([a-zA-Z_][a-zA-Z0-9_.-]*)\s*=\s*(\"[^\"]*\"|'[^']*')", re.IGNORECASE)
+_XML_ATTR_RE = re.compile(r"([a-zA-Z_][a-zA-Z0-9_.-]*)\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s\"'=<>`]+)", re.IGNORECASE)
 _XML_NESTED_RE = re.compile(r"<[a-zA-Z_]")
 _XML_WRAPPER_CLOSE_RE = re.compile(r"</(?:tool_calls|tool_call|function_calls|function_call|tools|calls|_calls)\s*>", re.IGNORECASE)
 _XML_STRAY_TOOL_CLOSE_RE = re.compile(
@@ -454,7 +456,8 @@ _DSML_TAG_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.:-]*")
 _DSML_PIPE_RUN_RE = rf"[{_DSML_PIPE}]{{1,8}}"
 _DSML_TAIL_RUN_RE = rf"\s*[{_DSML_PIPE}]{{0,8}}"
 _DSML_DANGLING = re.compile(
-    rf"(?:<[/]?\s*{_DSML_PIPE_RUN_RE}(?:\s*(?:DSM|DSML|DS|D))?{_DSML_TAIL_RUN_RE}(?:\s*[A-Za-z0-9_.:-]*)?"
+    rf"(?:<[/]?\s*{_DSML_PIPE_RUN_RE}(?:\s*(?:DSM|DSML|DS|D))?{_DSML_TAIL_RUN_RE}"
+    rf"(?:\s*[A-Za-z0-9_.:-]+(?:\s+[^\s<>]*)*)?"
     rf"|{_DSML_PIPE_RUN_RE}\s*(?:DSM|DSML|DS|D){_DSML_TAIL_RUN_RE})\Z",
     re.IGNORECASE,
 )
@@ -532,6 +535,36 @@ def _dsml_tag_may_start(text: str, start: int) -> bool:
     return _is_dsml_char(text[index])
 
 
+def _dsml_tag_pending(text: str, start: int) -> bool:
+    size = len(text)
+    index = start + 1
+    if index < size and text[index] == "/":
+        index += 1
+    while index < size and text[index] in _DSML_SPACE:
+        index += 1
+    if index >= size:
+        return True
+    if not _is_dsml_char(text[index]):
+        return False
+    while index < size and _is_dsml_char(text[index]):
+        index += 1
+    if index >= size:
+        return True
+    while index < size and text[index] in _DSML_SPACE:
+        index += 1
+    return "dsml".startswith(text[index : index + 4].lower())
+
+
+def _dsml_dangling_pending(text: str, start: int) -> bool:
+    size = len(text)
+    index = start + 1
+    if index < size and text[index] == "/":
+        index += 1
+    while index < size and text[index] in _DSML_SPACE:
+        index += 1
+    return index >= size or text[index] in _DSML_PIPE_RUN
+
+
 def _dsml_tag_at(text: str, start: int) -> tuple[int, str, bool, bool] | None:
     size = len(text)
     index = start + 1
@@ -578,8 +611,9 @@ def _dsml_close_pattern(name: str) -> re.Pattern[str]:
     pattern = _DSML_CLOSE_CACHE.get(name)
     if pattern is None:
         pattern = re.compile(rf"<\s*[^<>]*?\b{re.escape(name)}\b[^<>]*>", re.IGNORECASE)
-        if len(_DSML_CLOSE_CACHE) < _DSML_CLOSE_CACHE_MAX:
-            _DSML_CLOSE_CACHE[name] = pattern
+        if len(_DSML_CLOSE_CACHE) >= _DSML_CLOSE_CACHE_MAX:
+            _DSML_CLOSE_CACHE.clear()
+        _DSML_CLOSE_CACHE[name] = pattern
     return pattern
 
 
@@ -619,7 +653,7 @@ def _dsml_scan_cut(text: str, final: bool) -> int:
         index = found.start()
         parsed = _dsml_tag_at(text, index)
         if parsed is None:
-            if not final and _dsml_tag_may_start(text, index):
+            if not final and _dsml_tag_may_start(text, index) and (_dsml_tag_pending(text, index) or _dsml_dangling_pending(text, index)):
                 return index
             pos = index + 1
             continue
@@ -1048,7 +1082,7 @@ def _tool_function(tool: Any) -> dict | None:
 
 def _choice_name(tool_choice: Any) -> str | None:
     if isinstance(tool_choice, str):
-        return tool_choice
+        return "required" if tool_choice == "any" else tool_choice
     if isinstance(tool_choice, dict):
         choice_type = tool_choice.get("type")
         if choice_type in ("none", "required"):
@@ -1818,9 +1852,10 @@ def _coerce_scalar(value: str, json_type: Any) -> Any:
         except ValueError:
             pass
         try:
-            return float(value)
+            number = float(value)
         except ValueError:
             return value
+        return number if math.isfinite(number) else value
     if json_type == "boolean":
         low = value.strip().lower()
         if low == "true":
@@ -1943,6 +1978,27 @@ _tool_schema_map_cache: dict[int, tuple[tuple[int, ...], list[Any], dict[str, di
 _TOOL_SCHEMA_MAP_CACHE_MAX = 256
 
 
+def _resolved_prop_type(spec: Any) -> Any:
+    if not isinstance(spec, dict):
+        return None
+    typ = spec.get("type")
+    if isinstance(typ, list):
+        for candidate in ("integer", "number", "boolean", "null", "string"):
+            if candidate in typ:
+                return candidate
+    return typ
+
+
+def _schema_params(fn: dict) -> Any:
+    params = fn.get("parameters")
+    if isinstance(params, str):
+        try:
+            return json.loads(params)
+        except (ValueError, TypeError, AttributeError):
+            return None
+    return params
+
+
 def tool_schema_map(tools: list[Any] | None) -> dict[str, dict[str, Any]]:
     if not tools or not isinstance(tools, list):
         return {}
@@ -1962,24 +2018,14 @@ def tool_schema_map(tools: list[Any] | None) -> dict[str, dict[str, Any]]:
         if not isinstance(name, str) or not name.strip():
             continue
         name = name.strip()
-        params = fn.get("parameters")
-        if isinstance(params, str):
-            try:
-                params = json.loads(params)
-            except (ValueError, TypeError, AttributeError):
-                params = None
+        params = _schema_params(fn)
         prop_types: dict[str, Any] = {}
         properties = params.get("properties") if isinstance(params, dict) else None
         if isinstance(properties, dict):
             for prop, spec in properties.items():
                 if not isinstance(prop, str) or not isinstance(spec, dict):
                     continue
-                typ = spec.get("type")
-                if isinstance(typ, list):
-                    for candidate in ("integer", "number", "boolean", "null", "string"):
-                        if candidate in typ:
-                            typ = candidate
-                            break
+                typ = _resolved_prop_type(spec)
                 if typ:
                     prop_types[prop] = typ
         aliases = fn.get("aliases")
@@ -2015,12 +2061,7 @@ def tool_schema_detail(tools: list[Any] | None) -> dict[str, dict[str, Any]]:
         if not isinstance(name, str) or not name.strip():
             continue
         name = name.strip()
-        params = fn.get("parameters")
-        if isinstance(params, str):
-            try:
-                params = json.loads(params)
-            except (ValueError, TypeError, AttributeError):
-                params = None
+        params = _schema_params(fn)
         types: dict[str, Any] = {}
         enums: dict[str, list[Any]] = {}
         defaults: dict[str, Any] = {}
@@ -2036,12 +2077,7 @@ def tool_schema_detail(tools: list[Any] | None) -> dict[str, dict[str, Any]]:
                 for prop, spec in properties.items():
                     if not isinstance(prop, str) or not isinstance(spec, dict):
                         continue
-                    typ = spec.get("type")
-                    if isinstance(typ, list):
-                        for candidate in ("integer", "number", "boolean", "null", "string"):
-                            if candidate in typ:
-                                typ = candidate
-                                break
+                    typ = _resolved_prop_type(spec)
                     if typ:
                         types[prop] = typ
                     enum_values = spec.get("enum")
@@ -2191,11 +2227,12 @@ def fix_tool_calls(
     for call in calls:
         spec = details.get(call.name)
         if not isinstance(spec, dict):
-            if schemas and _schema_for_name(schemas, call.name) is None:
+            resolved = _schema_for_name(schemas, call.name) if schemas else None
+            if schemas and resolved is None:
                 warnings.append({"call_id": call.id, "kind": "unknown_tool", "name": call.name})
                 result.append(call)
                 continue
-            spec = {}
+            spec = {"types": {key: value for key, value in (resolved or {}).items() if key != "_aliases"}}
         raw_types = spec.get("types")
         types: dict[str, Any] = raw_types if isinstance(raw_types, dict) else {}
         raw_enums = spec.get("enums")
@@ -2353,7 +2390,7 @@ def _xml_tag_attrs(body: str, param_types: dict[str, Any] | None = None) -> dict
     for match in _XML_ATTR_RE.finditer(body):
         key = match.group(1)
         raw = match.group(2)
-        value = raw[1:-1]
+        value = raw[1:-1] if raw[:1] in ('"', "'") else raw
         if key.casefold() in _JSON_TYPE_ATTRS and value.casefold() in (
             "true",
             "false",
@@ -2655,7 +2692,8 @@ def _iter_json_objects(text: str) -> Iterator[tuple[dict, int, int]]:
         scanned += end - start + 1
         attempts += 1
         if not closed:
-            return
+            i = start + 1
+            continue
         candidate = text[start : end + 1]
         try:
             obj = _loads_lenient(candidate)
@@ -2715,9 +2753,12 @@ def _yaml_value(raw: str) -> Any:
     except (ValueError, TypeError):
         pass
     try:
-        return float(value)
+        number = float(value)
     except (ValueError, TypeError):
         pass
+    else:
+        if math.isfinite(number):
+            return number
     return value
 
 
@@ -2796,7 +2837,8 @@ def _parse_dsml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | 
             param_types = _schema_for_name(tool_schemas, tool_name)
             for param in _DSML_PARAMETER.finditer(body):
                 key = param.group(2).strip()
-                params[key] = _xml_value(param.group(3), (param_types or {}).get(key))
+                raw = _DSML_XML_NORMALIZE.sub(r"<\1\2>", param.group(3))
+                _xml_set_param(params, key, _xml_value(raw, (param_types or {}).get(key)))
             if not params:
                 normalized = _DSML_XML_NORMALIZE.sub(r"<\1\2>", body)
                 parsed = _xml_invoke_arguments(normalized, param_types)
@@ -2869,7 +2911,7 @@ def _parse_dsml_lax_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]
             if index + 1 < len(invokes) and param.start() >= invokes[index + 1].start():
                 continue
             key = param.group("name").strip()
-            params_by_call[key] = _xml_value(param.group("value"), (param_types or {}).get(key))
+            _xml_set_param(params_by_call, key, _xml_value(param.group("value"), (param_types or {}).get(key)))
         calls.append(ToolCall.create(tool_name, params_by_call))
     if not calls and block_match is not None and params:
         inferred = _infer_tool_name_from_schemas({item.group("name").strip() for item in params}, tool_schemas)
@@ -2894,7 +2936,11 @@ def _parse_dsml_lax_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]
             wrapper_parts.append(text[cursor:start])
         cursor = end
     wrapper_parts.append(text[cursor:])
-    wrapper = " ".join(_DSML_NAKED.sub(" ", _DSML_LAX_TAG.sub(" ", " ".join(wrapper_parts))).split())
+    joined = " ".join(wrapper_parts)
+    joined = _XML_STRAY_TOOL_CLOSE_RE.sub(" ", joined)
+    joined = _XML_OPEN_TAG.sub(" ", joined)
+    joined = _XML_CLOSE_TAG.sub(" ", joined)
+    wrapper = " ".join(_DSML_NAKED.sub(" ", _DSML_LAX_TAG.sub(" ", joined)).split())
     return calls, wrapper
 
 

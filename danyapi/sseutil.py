@@ -34,12 +34,22 @@ def parse_sse(data: str) -> list[SSEEvent]:
             data_lines = []
             continue
         if line.startswith("event:"):
-            event_name = line[len("event:") :].strip()
+            event_name = line[len("event:") :].removeprefix(" ")
         elif line.startswith("data:"):
-            data_lines.append(line[len("data:") :].strip())
+            data_lines.append(line[len("data:") :].removeprefix(" "))
     if data_lines:
         events.append(SSEEvent(event_name, _decode("\n".join(data_lines))))
     return events
+
+
+def split_stop(stop: Any) -> list[str]:
+    if stop is None:
+        return []
+    if isinstance(stop, str):
+        return [stop] if stop else []
+    if isinstance(stop, list):
+        return [item for item in stop if isinstance(item, str) and item]
+    return []
 
 
 MAIN_RESPONSE_TYPES = ("RESPONSE", "TEMPLATE_RESPONSE")
@@ -57,8 +67,6 @@ class IncrementalSSE:
         self._pos = 0
 
     def feed(self, chunk: bytes) -> Iterator[SSEEvent]:
-        if not isinstance(self._buffer, bytearray):
-            self._buffer = bytearray(self._buffer)
         self._buffer += chunk
         buffer = self._buffer
         while True:
@@ -82,6 +90,42 @@ class IncrementalSSE:
             yield from parse_sse(tail.decode("utf-8", errors="replace"))
         self._buffer = bytearray()
         self._pos = 0
+
+
+class StreamStopFilter:
+    __slots__ = ("_buf", "_hold", "_markers")
+
+    def __init__(self, markers: list[str]) -> None:
+        self._markers = markers
+        self._hold = max(len(marker) for marker in markers) - 1
+        self._buf = ""
+
+    def feed(self, piece: str) -> tuple[str, bool]:
+        if not piece:
+            return "", False
+        text = self._buf + piece
+        cut = -1
+        for marker in self._markers:
+            pos = text.find(marker)
+            if pos != -1 and (cut == -1 or pos < cut):
+                cut = pos
+        if cut != -1:
+            self._buf = ""
+            return text[:cut], True
+        hold = self._hold
+        if hold <= 0:
+            self._buf = ""
+            return text, False
+        if len(text) > hold:
+            self._buf = text[-hold:]
+            return text[:-hold], False
+        self._buf = text
+        return "", False
+
+    def flush(self) -> str:
+        out = self._buf
+        self._buf = ""
+        return out
 
 
 @lru_cache(maxsize=2048)
@@ -231,11 +275,9 @@ def _fragment_text(fragment: Any) -> str:
     return ""
 
 
-def _diff_suffix(previous: str, current: str, prefix_ok: bool) -> str:
+def _diff_suffix(previous: str, current: str) -> str:
     if current == previous:
         return ""
-    if prefix_ok and len(current) > len(previous) and current.startswith(previous):
-        return current[len(previous) :]
     return current.removeprefix(previous)
 
 
@@ -266,7 +308,6 @@ class MessageReconstructor:
         "_agg_fragments",
         "_aggregate_dirty",
         "_content",
-        "_content_prefix_ok",
         "_diffs_revision",
         "_frag_idx",
         "_last_op",
@@ -274,7 +315,6 @@ class MessageReconstructor:
         "_prev_content",
         "_prev_reasoning",
         "_reasoning",
-        "_reasoning_prefix_ok",
         "_revision",
         "hint_error",
         "message",
@@ -295,8 +335,6 @@ class MessageReconstructor:
         self._content = ""
         self._reasoning = ""
         self._aggregate_dirty = True
-        self._content_prefix_ok = True
-        self._reasoning_prefix_ok = True
         self._diffs_revision = -1
 
     def handle(self, event: SSEEvent) -> None:
@@ -394,8 +432,6 @@ class MessageReconstructor:
         self._frag_idx = len(frags) if isinstance(frags, list) else 0
         self._agg_fragments = frags
         self._aggregate_dirty = False
-        self._content_prefix_ok = False
-        self._reasoning_prefix_ok = False
         return content, reasoning
 
     @property
@@ -410,11 +446,9 @@ class MessageReconstructor:
         if self._revision == self._diffs_revision:
             return "", ""
         content, reasoning = self._aggregates()
-        c_diff = _diff_suffix(self._prev_content, content, self._content_prefix_ok)
-        r_diff = _diff_suffix(self._prev_reasoning, reasoning, self._reasoning_prefix_ok)
+        c_diff = _diff_suffix(self._prev_content, content)
+        r_diff = _diff_suffix(self._prev_reasoning, reasoning)
         self._prev_content, self._prev_reasoning = content, reasoning
-        self._content_prefix_ok = True
-        self._reasoning_prefix_ok = True
         self._diffs_revision = self._revision
         return c_diff, r_diff
 

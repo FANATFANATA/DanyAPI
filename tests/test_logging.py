@@ -1,5 +1,6 @@
 import logging
 import logging.handlers
+import queue
 
 import pytest
 
@@ -161,10 +162,79 @@ def test_color_formatter_success_and_error(monkeypatch):
 
     monkeypatch.setattr(dlog.sys, "stderr", TTY())
     fmt = dlog._ColorFormatter()
-    ok = logging.LogRecord("x", logging.INFO, "", 0, "all ok", (), None)
+    ok = logging.LogRecord("x", logging.INFO, "", 0, "ok: pool started", (), None)
     assert dlog.SUCCESS_COLOR in fmt.format(ok)
+    ready = logging.LogRecord("x", logging.INFO, "", 0, "ready", (), None)
+    assert dlog.SUCCESS_COLOR in fmt.format(ready)
     bad = logging.LogRecord("x", logging.ERROR, "", 0, "boom", (), None)
     assert dlog.LEVEL_COLORS["ERROR"] in fmt.format(bad)
+
+
+def test_color_formatter_ignores_success_word_inside_message(monkeypatch):
+    import io
+
+    class TTY(io.StringIO):
+        def isatty(self):
+            return True
+
+    monkeypatch.setattr(dlog.sys, "stderr", TTY())
+    fmt = dlog._ColorFormatter()
+    record = logging.LogRecord("x", logging.INFO, "", 0, "received payload for %s", ("smoke and mirrors",), None)
+    assert dlog.SUCCESS_COLOR not in fmt.format(record)
+    plain = logging.LogRecord("x", logging.INFO, "", 0, "all ok", (), None)
+    assert dlog.SUCCESS_COLOR in fmt.format(plain)
+
+
+def test_file_queue_is_bounded_and_drops_when_full(clean_handlers, saved_settings, tmp_path):
+    settings.log_file = str(tmp_path / "bounded.log")
+    dlog.configure()
+    handler = next(h for h in logging.getLogger().handlers if getattr(h, "name", None) == dlog.FILE_HANDLER_NAME)
+    assert isinstance(handler, dlog._DroppingQueueHandler)
+    assert handler.queue.maxsize == dlog._FILE_QUEUE_MAX
+
+
+def test_dropping_queue_handler_drops_instead_of_raising():
+    q: queue.Queue = queue.Queue(maxsize=1)
+    handler = dlog._DroppingQueueHandler(q)
+    first = logging.LogRecord("x", logging.INFO, "", 0, "first", (), None)
+    handler.enqueue(first)
+    handler.enqueue(logging.LogRecord("x", logging.INFO, "", 0, "second", (), None))
+    assert q.qsize() == 1
+    assert q.get() is first
+
+
+def test_shutdown_keeps_listener_that_fails_to_stop():
+    class Failing:
+        def __init__(self):
+            self.calls = 0
+
+        def stop(self):
+            self.calls += 1
+            raise RuntimeError("cannot stop")
+
+    failing = Failing()
+    dlog._queue_listeners.append(failing)
+    try:
+        dlog.shutdown()
+        assert failing.calls == 1
+        assert failing in dlog._queue_listeners
+        dlog.shutdown()
+        assert failing.calls == 2
+    finally:
+        dlog._queue_listeners.clear()
+
+
+def test_shutdown_stops_then_removes_listener(tmp_path):
+    target = dlog._make_file_handler(str(tmp_path / "stop.log"), 1024, 1)
+    q: queue.Queue = queue.Queue()
+    listener = logging.handlers.QueueListener(q, target)
+    listener.start()
+    thread = listener._thread
+    dlog._queue_listeners.append(listener)
+    dlog.shutdown()
+    assert dlog._queue_listeners == []
+    assert not thread.is_alive()
+    target.close()
 
 
 def test_color_formatter_plain_without_tty(monkeypatch):

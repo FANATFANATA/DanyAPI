@@ -18,9 +18,14 @@ from danyapi.sseutil import (
     IncrementalSSE,
     MessageReconstructor,
     SSEEvent,
+    StreamStopFilter,
+    _diff_suffix,
     _set_path,
     _touches_aggregated_fragment,
+    parse_sse,
+    split_stop,
 )
+from danyapi.tokens import estimate_tokens, trim_to_tokens
 
 
 def _ds_resp(payload=None, status=200, text=""):
@@ -49,12 +54,90 @@ def _fast_rec(frags, idx, content="", reasoning=""):
     return rec
 
 
-def test_incremental_feed_converts_bytes_buffer():
+def test_incremental_feed_parses_complete_block():
     inc = IncrementalSSE()
-    inc._buffer = b'data: {"x": 1}\n\n'
-    events = list(inc.feed(b""))
+    events = list(inc.feed(b'data: {"x": 1}\n\n'))
     assert len(events) == 1
     assert events[0].data == {"x": 1}
+
+
+def test_incremental_feed_buffers_partial_block():
+    inc = IncrementalSSE()
+    assert list(inc.feed(b'data: {"x":')) == []
+    assert next(iter(inc.feed(b" 1}\n\n"))).data == {"x": 1}
+
+
+def test_parse_sse_strips_only_one_leading_space():
+    events = parse_sse("data: a\ndata:    indented\n\n")
+    assert events[0].data == "a\n   indented"
+
+
+def test_parse_sse_keeps_value_without_space():
+    events = parse_sse("data:tight\n\n")
+    assert events[0].data == "tight"
+
+
+def test_parse_sse_event_name_strips_one_space_only():
+    events = parse_sse("event:  ready \ndata: x\n\n")
+    assert events[0].event == " ready "
+
+
+def test_split_stop_variants():
+    assert split_stop(None) == []
+    assert split_stop("") == []
+    assert split_stop("x") == ["x"]
+    assert split_stop(["a", 1, "", "b"]) == ["a", "b"]
+    assert split_stop(5) == []
+
+
+def test_stream_stop_filter_holds_marker_tail():
+    flt = StreamStopFilter(["END"])
+    assert flt.feed("abc") == ("a", False)
+    assert flt.feed("EN") == ("bc", False)
+    assert flt.feed("D") == ("", True)
+    assert flt.flush() == ""
+
+
+def test_stream_stop_filter_flushes_tail():
+    flt = StreamStopFilter(["abc"])
+    assert flt.feed("xab") == ("x", False)
+    assert flt.flush() == "ab"
+
+
+def test_diff_suffix_variants():
+    assert _diff_suffix("abc", "abc") == ""
+    assert _diff_suffix("abc", "abcdef") == "def"
+    assert _diff_suffix("abcdef", "abc") == "abc"
+    assert _diff_suffix("", "x") == "x"
+
+
+def test_take_diffs_after_fragment_replacement():
+    rec = MessageReconstructor()
+    rec.handle(SSEEvent(None, {"o": "SET", "p": "response/fragments", "v": [{"type": "RESPONSE", "content": "abc"}]}))
+    assert rec.take_diffs() == ("abc", "")
+    rec.handle(SSEEvent(None, {"o": "SET", "p": "response/fragments", "v": [{"type": "RESPONSE", "content": "xyz"}]}))
+    assert rec.take_diffs() == ("xyz", "")
+    assert rec.take_diffs() == ("", "")
+
+
+def test_trim_to_tokens_returns_prefixes():
+    assert trim_to_tokens("a b c", 2) == "a b c"
+    assert trim_to_tokens("alpha beta gamma delta", 2) == "alpha beta"
+    assert trim_to_tokens("antidisestablishmentarianism", 1) == "antidis"
+    assert trim_to_tokens("\u4f60\u597d\u4e16\u754c", 2) == "\u4f60\u597d"
+    assert trim_to_tokens("one  two", 1) == "one"
+    assert trim_to_tokens("hello world", None) == "hello world"
+    assert trim_to_tokens("", 5) == ""
+    assert trim_to_tokens("abc", 0) == ""
+    assert trim_to_tokens("one  two", 100) == "one  two"
+
+
+def test_trim_to_tokens_result_fits_budget():
+    for budget in range(1, 6):
+        for text in ("a b c", "alpha beta gamma delta", "one  two", "\u4f60\u597d\u4e16\u754c", "antidisestablishmentarianism"):
+            trimmed = trim_to_tokens(text, budget)
+            assert trimmed == text[: len(trimmed)]
+            assert estimate_tokens(trimmed) <= budget
 
 
 def test_set_path_list_final_non_int_key():

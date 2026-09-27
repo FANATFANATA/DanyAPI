@@ -233,6 +233,27 @@ def test_obtain_never_evicts_fresh_alias_binding():
     assert client.counter == 1
 
 
+def test_obtain_keeps_alias_bound_session_under_pressure():
+    client = FakeSessionClient()
+    reg = SessionRegistry(client, maxsize=1)
+    _s1, k1 = asyncio.run(reg.obtain("alias-1"))
+    for _ in range(3):
+        asyncio.run(reg.obtain(None))
+    session, key = asyncio.run(reg.obtain(k1))
+    assert key == k1
+    assert reg.get(k1) is session
+    assert reg.get(session.id) is session
+    assert len(reg._sessions) <= 2
+
+
+def test_obtain_never_exceeds_size_without_alias():
+    client = FakeSessionClient()
+    reg = SessionRegistry(client, maxsize=2)
+    for _ in range(4):
+        asyncio.run(reg.obtain(None))
+    assert len(reg._sessions) == 2
+
+
 def test_obtain_alias_rebinds_on_qwen_model_switch():
     client = FakeSessionClient()
     reg = QwenSessionRegistry(client)

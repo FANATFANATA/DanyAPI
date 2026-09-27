@@ -5,7 +5,6 @@ import logging
 import queue
 import re
 import sys
-from contextlib import suppress
 from logging.handlers import QueueHandler, QueueListener, RotatingFileHandler
 from pathlib import Path
 
@@ -34,6 +33,7 @@ FILE_HANDLER_NAME = "danyapi-file"
 DEFAULT_LOG_LEVEL = "INFO"
 DEFAULT_MAX_BYTES = 10 * 1024 * 1024
 DEFAULT_BACKUP_COUNT = 3
+_FILE_QUEUE_MAX = 10000
 _FALLBACK_LEVEL_NAMES = {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG", "NOTSET"}
 
 
@@ -114,11 +114,19 @@ class _ColorFormatter(logging.Formatter):
         if not self._use_color:
             return text
         color = LEVEL_COLORS.get(record.levelname, "")
-        if record.levelname == "INFO" and _is_success(text):
+        if record.levelname == "INFO" and _is_success(str(record.msg)):
             color = SUCCESS_COLOR
         if not color:
             return text
         return f"{color}{text}{RESET}"
+
+
+class _DroppingQueueHandler(QueueHandler):
+    def enqueue(self, record: logging.LogRecord) -> None:
+        try:
+            self.queue.put_nowait(record)
+        except queue.Full:
+            return
 
 
 def _has_handler(root: logging.Logger, name: str) -> bool:
@@ -194,8 +202,8 @@ def configure() -> None:
             except OSError as exc:
                 logging.getLogger(__name__).warning("cannot open log file %s: %s, using console only", path, exc)
             else:
-                queue_for_file: queue.Queue[logging.LogRecord] = queue.Queue()
-                queue_handler = QueueHandler(queue_for_file)
+                queue_for_file: queue.Queue[logging.LogRecord] = queue.Queue(maxsize=_FILE_QUEUE_MAX)
+                queue_handler = _DroppingQueueHandler(queue_for_file)
                 queue_handler.name = FILE_HANDLER_NAME
                 queue_handler.setLevel(level)
                 queue_handler.addFilter(_LifecycleFilter())
@@ -222,8 +230,13 @@ def uvicorn_log_config() -> dict:
 
 def shutdown() -> None:
     while _queue_listeners:
-        with suppress(Exception):
-            _queue_listeners.pop().stop()
+        listener = _queue_listeners[-1]
+        try:
+            listener.stop()
+        except Exception as exc:
+            logging.getLogger(__name__).warning("log queue listener did not stop: %s", exc)
+            break
+        _queue_listeners.pop()
 
 
 atexit.register(shutdown)

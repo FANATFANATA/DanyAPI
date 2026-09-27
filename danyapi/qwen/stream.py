@@ -95,8 +95,6 @@ class QwenStreamReconstructor:
         self._reasoning_joined_cache: str | None = None
         self._nonempty: bool = False
         self.image_urls: list[str] = []
-        self.image_size: tuple[int, int] | None = None
-        self.finished: bool = False
         self.error: dict | None = None
         self.usage: dict = {}
         self._content_pending: list[str] = []
@@ -147,10 +145,6 @@ class QwenStreamReconstructor:
         created = data.get("response.created")
         if isinstance(created, dict) and created.get("response_id"):
             self.response_id = created["response_id"]
-        if data.get("response.stopped"):
-            self.finished = True
-        if data.get("done"):
-            self.finished = True
         if data.get("response_id"):
             self.response_id = data["response_id"]
         if isinstance(data.get("usage"), dict):
@@ -165,8 +159,6 @@ class QwenStreamReconstructor:
         delta = choices[0].get("delta")
         if not isinstance(delta, dict):
             return
-        if delta.get("status") == "finished":
-            self.finished = True
         phase = delta.get("phase") or ""
         if phase in IMAGE_PHASES:
             text = _delta_text(delta, "content")
@@ -184,16 +176,6 @@ class QwenStreamReconstructor:
                     self._nonempty = True
             extra = delta.get("extra")
             if isinstance(extra, dict):
-                hw = extra.get("output_image_hw")
-                if isinstance(hw, list) and hw:
-                    pair = hw[0]
-                    if isinstance(pair, list) and len(pair) >= 2:
-                        try:
-                            w, h = int(pair[0]), int(pair[1])
-                        except (TypeError, ValueError):
-                            w = h = 0
-                        if w > 0 and h > 0:
-                            self.image_size = (w, h)
                 for key in ("image_url", "image_urls", "images", "url"):
                     val = extra.get(key)
                     if isinstance(val, str) and val.startswith("http"):

@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import httpx
 
@@ -32,7 +32,6 @@ class DeepSeekSession:
     title: str = ""
     last_message_id: str | None = None
     accumulated_tokens: int = 0
-    extra: dict = field(default_factory=dict)
 
 
 class DeepSeekError(Exception):
@@ -49,7 +48,6 @@ class DeepSeekClient:
         device_id: str | None = None,
         timeout: float = 60.0,
     ) -> None:
-        self.token = token
         self.device_id = device_id or new_device_id()
         headers = {
             "User-Agent": USER_AGENT,

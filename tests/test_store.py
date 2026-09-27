@@ -1,4 +1,6 @@
 import json
+import logging
+import os
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -148,15 +150,89 @@ def test_set_unchanged_skips_write(cache_dir):
     assert store.get("k") == "v"
 
 
+def test_flush_bounded_wait(cache_dir, caplog):
+    store = JsonStore("cov-flush-bounded", "default")
+    store._pending = True
+    store._idle.clear()
+    with caplog.at_level(logging.WARNING, logger="danyapi.store"):
+        store.flush(timeout=0.05)
+    assert any("timed out" in record.getMessage() for record in caplog.records)
+    assert store._pending is True
+    store._pending = False
+    store._idle.set()
+
+
+def test_flush_default_timeout_is_bounded():
+    assert store_mod._FLUSH_MAX_WAIT == 5.0
+    assert store_mod.JsonStore.flush.__defaults__ == (store_mod._FLUSH_MAX_WAIT,)
+
+
+def test_load_logs_read_failure(cache_dir, monkeypatch, caplog):
+    store = JsonStore("cov-read", "default")
+
+    def boom(*args, **kwargs):
+        raise OSError("denied")
+
+    monkeypatch.setattr(Path, "read_text", boom)
+    with caplog.at_level(logging.WARNING, logger="danyapi.store"):
+        store._load()
+    assert any("cache read failed" in record.getMessage() for record in caplog.records)
+    assert store._data == {}
+
+
+def test_load_missing_file_is_silent(cache_dir, caplog):
+    store = JsonStore("cov-missing", "default")
+    store._path.unlink(missing_ok=True)
+    with caplog.at_level(logging.WARNING, logger="danyapi.store"):
+        store._load()
+    assert not [record for record in caplog.records if record.name == "danyapi.store"]
+
+
+def test_load_logs_corrupt_and_unexpected_root(cache_dir, caplog):
+    path = store_mod.cache_root() / "corrupt-load-sc.json"
+    path.write_text("{not json", encoding="utf-8")
+    with caplog.at_level(logging.WARNING, logger="danyapi.store"):
+        corrupt = JsonStore("corrupt-load", "sc")
+    assert any("corrupt" in record.getMessage() for record in caplog.records)
+    assert len(corrupt) == 0
+
+    path2 = store_mod.cache_root() / "list-load-sc.json"
+    path2.write_text("[1, 2]", encoding="utf-8")
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="danyapi.store"):
+        listed = JsonStore("list-load", "sc")
+    assert any("list" in record.getMessage() for record in caplog.records)
+    assert len(listed) == 0
+
+
+def test_commit_writes_restrictive_file(cache_dir):
+    store = JsonStore("cov-perm", "default")
+    store.set("k", "v")
+    assert store._path is not None
+    assert store._path.exists()
+    if os.name != "nt":
+        assert oct(store._path.stat().st_mode & 0o777) == oct(0o600)
+
+
 def test_clear_empty_returns_early(cache_dir):
     store = JsonStore("h", "default")
     store.clear()
     assert len(store) == 0
 
 
-def test_non_serializable_value_cleans_tmp(cache_dir):
+def test_unserializable_value_is_rejected(cache_dir):
     store = JsonStore("ns", "default")
     store.set("bad", object())
-    assert "bad" in store
+    assert "bad" not in store
+    store.set("good", {"k": 1})
+    assert store.get("good") == {"k": 1}
+
+
+def test_unserializable_value_warns_and_leaves_no_tmp(cache_dir, caplog):
+    store = JsonStore("ns2", "default")
+    with caplog.at_level(logging.WARNING, logger="danyapi.store"):
+        store.set("bad", object())
+    assert any("not serialisable" in record.getMessage() for record in caplog.records)
     assert store._path is not None
     assert not (store._path.with_name(store._path.name + ".tmp")).exists()
+    assert not list(store._path.parent.glob("*.tmp"))

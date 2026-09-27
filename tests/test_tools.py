@@ -276,10 +276,23 @@ def test_parse_tool_calls_single_quotes_with_backslashes_inside():
     assert json.loads(calls[0].arguments) == {"path": r"C:\Windows"}
 
 
-def test_parse_tool_calls_truncated_json_not_misparsed():
+def test_parse_tool_calls_truncated_json_recovered():
     text = '{"tool_calls": [{"name": "f", "arguments": {"command": "ls"}}'
     parsed = parse_tool_calls(text)
-    assert parsed is None
+    assert parsed is not None
+    calls, _wrapper = parsed
+    assert [call.name for call in calls] == ["f"]
+    assert json.loads(calls[0].arguments) == {"command": "ls"}
+
+
+def test_parse_tool_calls_call_after_stray_brace_in_prose():
+    text = 'look at { this and then {"name": "f", "arguments": {"x": 1}}'
+    parsed = parse_tool_calls(text)
+    assert parsed is not None
+    calls, wrapper = parsed
+    assert [call.name for call in calls] == ["f"]
+    assert json.loads(calls[0].arguments) == {"x": 1}
+    assert "look at" in wrapper
 
 
 def test_parse_tool_calls_truncated_missing_argument_key_not_accepted():

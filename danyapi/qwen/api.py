@@ -17,7 +17,8 @@ from .. import tools as toolemu
 from ..accounts import account_lock
 from ..config import MAX_CHOICES, settings
 from ..deepseek.stream import IncrementalSSE
-from ..tokens import StreamBudget, estimate_tokens
+from ..sseutil import StreamStopFilter, split_stop
+from ..tokens import StreamBudget, estimate_tokens, trim_to_tokens
 from ..usage import record_usage
 from .client import QwenClient, QwenError
 from .stream import QwenStreamReconstructor, error_code
@@ -30,6 +31,7 @@ RETRY_BACKOFF_MAX_SEC = 8.0
 
 RETRYABLE_HTTP_STATUSES = {408, 425, 429, 500, 502, 503, 504}
 STALE_SESSION_STATUSES = {400, 404}
+AUTH_HTTP_STATUSES = {401, 403}
 
 
 def _retry_delay(attempt: int) -> float:
@@ -73,12 +75,25 @@ CONTEXT_LIMIT_MARKERS = (
     "tokenlimit",
 )
 
+IMAGE_URI_SCHEMES = ("http://", "https://")
+IMAGE_URI_FORBIDDEN = "()<>"
+_BASE64_RE = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
 
-def _append_image_markdown(prompt: str, messages: list[Any] | None) -> str:
-    if not messages:
-        return prompt
-    appended: list[str] = []
-    seen: set[str] = set()
+
+def _valid_image_uri(uri: str) -> bool:
+    if not uri or any(char.isspace() or char in IMAGE_URI_FORBIDDEN for char in uri):
+        return False
+    if uri.startswith(IMAGE_URI_SCHEMES):
+        return True
+    if not uri.startswith("data:"):
+        return False
+    meta, _, payload = uri[5:].partition(",")
+    if not meta.endswith(";base64") or len(payload) % 4:
+        return False
+    return _BASE64_RE.match(payload) is not None
+
+
+def _iter_image_uris(messages: list[Any]) -> Iterator[str]:
     for message in messages:
         content = getattr(message, "content", None)
         if not isinstance(content, list):
@@ -93,12 +108,21 @@ def _append_image_markdown(prompt: str, messages: list[Any] | None) -> str:
                 uri = image_url["url"]
             else:
                 continue
-            if uri.startswith("http") or uri.startswith("data:"):
-                tag = f"![image]({uri})"
-                if tag in seen or tag in prompt:
-                    continue
-                seen.add(tag)
-                appended.append(tag)
+            if _valid_image_uri(uri):
+                yield uri
+
+
+def _append_image_markdown(prompt: str, messages: list[Any] | None) -> str:
+    if not messages:
+        return prompt
+    appended: list[str] = []
+    seen: set[str] = set()
+    for uri in _iter_image_uris(messages):
+        tag = f"![image]({uri})"
+        if tag in seen or tag in prompt:
+            continue
+        seen.add(tag)
+        appended.append(tag)
     if not appended:
         return prompt
     extra = "\n".join(appended)
@@ -163,14 +187,7 @@ async def _prepare_session(
         raise HTTPException(_error_status(exc.code), f"Qwen error: {exc}") from exc
     if pool is not None:
         pool.register(account.index, session_key)
-        if existing_sid and session_key != existing_sid:
-            pool.forget(existing_sid)
-            pool.forget_context(existing_sid)
-            account.sessions.forget(existing_sid)
-        if context_seq:
-            pool.index_context(session_key, context_seq)
-    elif existing_sid and session_key != existing_sid:
-        account.sessions.forget(existing_sid)
+        pool.index_context(session_key, context_seq)
     return session, session_key
 
 
@@ -343,49 +360,16 @@ def _max_calls(parallel_tool_calls: bool | None) -> int | None:
     return 1 if parallel_tool_calls is False else None
 
 
-def _split_stop(stop: Any) -> list[str]:
-    if stop is None:
-        return []
-    if isinstance(stop, str):
-        return [stop] if stop else []
-    if isinstance(stop, list):
-        return [item for item in stop if isinstance(item, str) and item]
-    return []
-
-
-_CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3040-\u30ff\uac00-\ud7af]")
-
-
-def _token_estimate(cjk: int, other: int) -> int:
-    if other == 0:
-        return cjk
-    return cjk + max(1, other // 4)
-
-
-def _trim_to_tokens(text: str, budget: int | None) -> str:
-    if budget is None or not text or estimate_tokens(text) <= budget:
-        return text
-    words = text.split(" ")
-    parts: list[str] = []
-    total_cjk = 0
-    total_other = 0
-    for i, word in enumerate(words):
-        cjk = len(_CJK_RE.findall(word))
-        other = len(word) - cjk + (1 if i else 0)
-        cand_cjk = total_cjk + cjk
-        cand_other = total_other + other
-        if _token_estimate(cand_cjk, cand_other) > budget:
-            break
-        parts.append(word)
-        total_cjk = cand_cjk
-        total_other = cand_other
-    return " ".join(parts)
+def _choice_count(n: int | None) -> int:
+    if not isinstance(n, int) or n <= 1:
+        return 1
+    return min(n, MAX_CHOICES)
 
 
 def _apply_limits(content: str, max_tokens: int | None, stop: Any) -> tuple[str, str]:
     text = content or ""
     finish = "stop"
-    stops = _split_stop(stop)
+    stops = split_stop(stop)
     if stops:
         cut = -1
         for marker in stops:
@@ -394,7 +378,7 @@ def _apply_limits(content: str, max_tokens: int | None, stop: Any) -> tuple[str,
                 cut = position
         if cut != -1:
             text = text[:cut]
-    trimmed = _trim_to_tokens(text, max_tokens)
+    trimmed = trim_to_tokens(text, max_tokens)
     if trimmed != text:
         finish = "length"
     return trimmed, finish
@@ -419,7 +403,7 @@ def _build_limited_message(
                 message = toolemu.format_tool_message(tool_calls, tool_text, rec.reasoning)
                 tail = message.get("content")
                 if isinstance(tail, str):
-                    trimmed_tail = _trim_to_tokens(tail, max_tokens)
+                    trimmed_tail = trim_to_tokens(tail, max_tokens)
                     if trimmed_tail != tail:
                         message["content"] = trimmed_tail
                         return message, "length"
@@ -482,7 +466,7 @@ async def _collect_response(
                     "context length exceeded: conversation too long, start a new conversation",
                 ) from None
             except HTTPException as exc:
-                if exc.status_code == 401:
+                if exc.status_code in AUTH_HTTP_STATUSES:
                     account.mark_broken()
                 if exc.status_code in STALE_SESSION_STATUSES and had_cached_session and not stale_rebuilt and messages is not None:
                     stale_rebuilt = True
@@ -639,9 +623,10 @@ async def collect_non_stream(
             "usage": _usage_details(usage, rec.reasoning),
             "session_id": session_key,
         }
-        if isinstance(n, int) and n > 1:
+        choices = _choice_count(n)
+        if choices > 1:
             template = response["choices"][0]
-            response["choices"] = [dict(template) | {"index": i} for i in range(min(n, MAX_CHOICES))]
+            response["choices"] = [dict(template) | {"index": i} for i in range(choices)]
         return response
 
 
@@ -695,15 +680,42 @@ async def stream_openai(
         tool_hidden = False
         role_sent = False
         got_content = False
-        budget = StreamBudget(max_tokens, _trim_to_tokens)
+        budget = StreamBudget(max_tokens, trim_to_tokens)
+        stop_markers = split_stop(stop)
+        stop_hit = False
         dsml_filter = toolemu.DsmlFilter()
+        stop_filter = StreamStopFilter(stop_markers) if stop_markers else None
         reasoning_filter = toolemu.DsmlFilter()
 
         def content_piece(piece: str | None) -> str:
-            return budget.feed(dsml_filter.feed(piece))
+            nonlocal stop_hit
+            if stop_hit:
+                return ""
+            text = dsml_filter.feed(piece)
+            if stop_filter is None:
+                return budget.feed(text)
+            filtered, hit = stop_filter.feed(text)
+            if hit:
+                stop_hit = True
+            return budget.feed(filtered)
 
         def flush_piece() -> str:
-            return budget.feed(dsml_filter.flush())
+            nonlocal stop_hit
+            if stop_hit:
+                return ""
+            text = dsml_filter.flush()
+            if stop_filter is None:
+                return budget.feed(text)
+            filtered, hit = stop_filter.feed(text)
+            if hit:
+                stop_hit = True
+                return budget.feed(filtered)
+            return budget.feed(filtered) + budget.feed(stop_filter.flush())
+
+        def done_finish() -> str:
+            if stop_hit:
+                return "stop"
+            return "length" if budget.done else "stop"
 
         def reasoning_piece(piece: str | None) -> str:
             return reasoning_filter.feed(piece)
@@ -722,16 +734,34 @@ async def stream_openai(
                 }
             )
 
-        def delta_line(delta: dict) -> str:
+        def delta_line(delta: dict, index: int = 0) -> str:
             return _sse(
                 {
                     "id": chunk_id,
                     "object": "chat.completion.chunk",
                     "created": created,
                     "model": model,
-                    "choices": [{"index": 0, "delta": delta, "finish_reason": None}],
+                    "choices": [{"index": index, "delta": delta, "finish_reason": None}],
                 }
             )
+
+        def finish_line(finish: str, index: int = 0) -> str:
+            payload = {
+                "id": chunk_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [{"index": index, "delta": {}, "finish_reason": finish}],
+            }
+            if session_key:
+                payload["session_id"] = session_key
+            return _sse(payload)
+
+        def extra_choice_lines(finish: str, count: int) -> Iterator[str]:
+            for extra_index in range(1, count):
+                if budget.text:
+                    yield delta_line({"content": budget.text}, extra_index)
+                yield finish_line(finish, extra_index)
 
         async def pump(source: QwenStreamReconstructor, events: Iterable[Any]) -> AsyncIterator[str]:
             nonlocal content_buf, content_shown_len, tool_hidden, got_content, role_sent
@@ -777,7 +807,7 @@ async def stream_openai(
                     yield line
                 return
             except HTTPException as exc:
-                if exc.status_code == 401:
+                if exc.status_code in AUTH_HTTP_STATUSES:
                     account.mark_broken()
                 if exc.status_code in STALE_SESSION_STATUSES and had_cached_session and not stale_rebuilt and messages is not None:
                     stale_rebuilt = True
@@ -828,7 +858,9 @@ async def stream_openai(
             content_shown_len = 0
             tool_hidden = False
             stopped = False
+            stop_hit = False
             dsml_filter = toolemu.DsmlFilter()
+            stop_filter = StreamStopFilter(stop_markers) if stop_markers else None
             reasoning_filter = toolemu.DsmlFilter()
             try:
                 async for chunk in resp.aiter_bytes():
@@ -915,9 +947,9 @@ async def stream_openai(
                 remainder = content_piece(content_buf[content_shown_len:])
                 if remainder:
                     yield delta_line({"content": remainder})
-                finish = "length" if budget.done else "stop"
+                finish = done_finish()
         else:
-            finish = "length" if budget.done else "stop"
+            finish = done_finish()
 
         remainder = flush_piece()
         if remainder:
@@ -931,16 +963,9 @@ async def stream_openai(
             role_sent = True
             yield role_line()
 
-        finish_payload = {
-            "id": chunk_id,
-            "object": "chat.completion.chunk",
-            "created": created,
-            "model": model,
-            "choices": [{"index": 0, "delta": {}, "finish_reason": finish}],
-        }
-        if session_key:
-            finish_payload["session_id"] = session_key
-        yield _sse(finish_payload)
+        yield finish_line(finish)
+        for line in extra_choice_lines(finish, _choice_count(n)):
+            yield line
         if include_usage:
             usage_payload = {
                 "id": chunk_id,

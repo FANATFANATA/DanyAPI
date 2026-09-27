@@ -40,7 +40,7 @@ async def test_session_defaults():
     assert s.title == ""
     assert s.last_message_id is None
     assert s.accumulated_tokens == 0
-    assert s.extra == {}
+    assert not hasattr(s, "extra")
 
 
 async def test_error_attrs():
@@ -407,6 +407,16 @@ async def test_completion_no_ref_files():
     await client.completion(chat_session_id="cs1", prompt="hi", parent_message_id=None)
     _, kwargs = client.http.build_request.call_args
     assert kwargs["json"]["ref_file_ids"] == []
+
+
+def test_client_does_not_keep_token_attribute():
+    client = DeepSeekClient(token="secret")
+    assert not hasattr(client, "token")
+    assert client.http.headers["Authorization"] == "Bearer secret"
+
+
+def test_completion_never_raises_for_status_codes():
+    assert "raise_for_status" not in DeepSeekClient.completion.__code__.co_names
 
 
 async def test_stop_stream():

@@ -222,7 +222,7 @@
                     <button class="copy-btn" data-copy='curl -fsSL https://raw.githubusercontent.com/FANATFANATA/DanyAPI/prod/docs/install.sh | bash' data-i18n="copy">Copy</button>
                 </div>
                 <pre><code>curl -fsSL https://raw.githubusercontent.com/FANATFANATA/DanyAPI/prod/docs/install.sh | bash</code></pre>
-                <p class="pane-note" data-i18n="qs_install_note">The script clones the repo, installs dependencies, creates <code>.env</code>, live-checks your provider tokens and tells you how to start the server. It even auto-updates itself on each start.</p>
+                <p class="pane-note" data-i18n="qs_install_note">The script clones the repo, installs dependencies, creates <code>.env</code>, live-checks your provider tokens and tells you how to start the server. It even auto-updates itself on each start. Prefer not to dig tokens out of browser storage by hand? Run <code>docs/token_utility.sh</code> (or <code>docs\token_utility.bat</code> on Windows) and it pulls them out of your browser for you.</p>
             </div>
 
             <div class="code-pane" data-pane="docker">
@@ -237,7 +237,7 @@
   -e DEEPSEEK_TOKENS=<span class="c-str">"token1,token2"</span> \
   -e QWEN_TOKENS=<span class="c-str">"token3"</span> \
   ghcr.io/fanatfanata/danyapi:latest</code></pre>
-                <p class="pane-note" data-i18n="qs_docker_note">Prebuilt image, pushed on every commit and every version tag. The native PoW solver is compiled into the image for maximum speed.</p>
+                <p class="pane-note" data-i18n="qs_docker_note">Prebuilt image, pushed on every push to prod and dev plus every version tag. The native PoW solver is compiled into the image for maximum speed.</p>
             </div>
         </div>
     </section>

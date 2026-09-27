@@ -17,16 +17,19 @@ TAG_FILE = ROOT / ".installed-release"
 TAG_CACHE = ROOT / ".latest-release-cache"
 TAG_CACHE_TTL = 10 * 60
 ENV_FILE = ROOT / ".env"
-USER_FILES = (".env",)
+POW_SOLVER_DIR = ROOT / "danyapi" / "deepseek"
+USER_FILES = (".env", str(POW_SOLVER_DIR / "pow_solver"), str(POW_SOLVER_DIR / "pow_solver.exe"))
 
 
 def env_flag(name, default):
     value = os.environ.get(name)
     if value is None and ENV_FILE.exists():
         for line in ENV_FILE.read_text(encoding="utf-8").splitlines():
-            if line.strip().startswith(name + "="):
-                value = line.split("=", 1)[1].strip().strip('"').strip("'")
-                break
+            key, _, raw = line.partition("=")
+            if key.strip() != name:
+                continue
+            value = raw.strip().strip('"').strip("'")
+            break
     if value is None or value.strip() == "":
         return default
     return value.strip().lower() not in ("0", "false", "no", "off")
@@ -82,7 +85,17 @@ def run(cmd, cwd=None):
     return subprocess.call(cmd, cwd=str(cwd or ROOT))
 
 
+def git_branch():
+    try:
+        out = subprocess.check_output(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=str(ROOT), stderr=subprocess.DEVNULL)
+        branch = out.decode("utf-8", "replace").strip()
+    except Exception:
+        return None
+    return branch or None
+
+
 def git_update(tag):
+    branch = git_branch()
     if run(["git", "fetch", "origin", "--tags", "--force"]) != 0:
         return False
     if run(["git", "checkout", "-f", tag]) != 0:
@@ -91,6 +104,8 @@ def git_update(tag):
         if run(["git", "checkout", "-f", tag]) != 0:
             return False
     if run(["git", "reset", "--hard", tag]) != 0:
+        return False
+    if branch and branch != "HEAD" and run(["git", "checkout", "-f", branch]) != 0:
         return False
     return True
 

@@ -13,16 +13,6 @@ log = logging.getLogger("danyapi.qwen")
 
 
 class QwenSessionRegistry(SessionRegistry):
-    def __init__(
-        self,
-        client: QwenClient,
-        maxsize: int = 128,
-        ttl: float = 0.0,
-        store: JsonStore | None = None,
-        key_prefix: str = "",
-    ) -> None:
-        super().__init__(client, maxsize, ttl, store=store, key_prefix=key_prefix)
-
     def _serialize(self, session: QwenSession) -> dict:
         return {
             "id": session.id,

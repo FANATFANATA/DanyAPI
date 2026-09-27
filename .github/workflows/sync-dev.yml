@@ -34,5 +34,9 @@ jobs:
             echo "dev already contains prod, nothing to do"
             exit 0
           fi
-          git merge --no-edit origin/prod
+          if ! git merge --no-edit origin/prod; then
+            git merge --abort || true
+            echo "::error::merging prod into dev produced conflicts, resolve them on dev and rerun"
+            exit 1
+          fi
           git push origin HEAD:dev

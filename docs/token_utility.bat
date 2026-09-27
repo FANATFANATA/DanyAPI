@@ -1,23 +1,38 @@
 @echo off
-setlocal
+setlocal enabledelayedexpansion
 title DanyAPI Token Utility
 cd /d "%~dp0"
 
-rem Locate a Python interpreter (any version 3.6+, 32 or 64-bit - no deps needed)
 set "PY="
 
-where python >nul 2>nul && set "PY=python"
-if not defined PY (
-    where py >nul 2>nul && set "PY=py -3"
-)
-if not defined PY (
-    if exist "%LocalAppData%\Programs\Python\Python310-32\python.exe" (
-        set "PY=%LocalAppData%\Programs\Python\Python310-32\python.exe"
+for %%V in (314 313 312 311 310) do (
+    if not defined PY (
+        set "CAND=python3.%%V"
+        where !CAND! >nul 2>nul
+        if not errorlevel 1 (
+            !CAND! -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)" >nul 2>nul
+            if not errorlevel 1 set "PY=!CAND!"
+        )
     )
 )
 
 if not defined PY (
-    echo [ERROR] Python not found. Install Python 3.6+ from https://python.org
+    set "CAND=python"
+    where !CAND! >nul 2>nul
+    if not errorlevel 1 (
+        !CAND! -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)" >nul 2>nul
+        if not errorlevel 1 set "PY=!CAND!"
+    )
+)
+
+if not defined PY (
+    set "CAND=py -3"
+    py -3 -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)" >nul 2>nul
+    if not errorlevel 1 set "PY=py -3"
+)
+
+if not defined PY (
+    echo [ERROR] Python 3.10+ not found. Install it from https://python.org
     echo         and make sure "Add Python to PATH" is checked.
     pause
     exit /b 1

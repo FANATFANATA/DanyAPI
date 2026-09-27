@@ -2,6 +2,7 @@ import asyncio
 import json
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 import danyapi.api.openai as openai_mod
@@ -77,6 +78,25 @@ class FakeAccount:
         self.broken = True
 
 
+class FakeUpstream:
+    def __init__(self, chunks, fail_at=None):
+        self.chunks = list(chunks)
+        self.fail_at = fail_at
+        self.closed = False
+
+    def __aiter__(self):
+        return self._gen()
+
+    async def _gen(self):
+        for index, chunk in enumerate(self.chunks):
+            if self.fail_at is not None and index == self.fail_at:
+                raise RuntimeError("upstream boom")
+            yield chunk
+
+    async def aclose(self):
+        self.closed = True
+
+
 def make_pool(sse_list=None):
     from unittest.mock import AsyncMock, MagicMock
 
@@ -84,6 +104,27 @@ def make_pool(sse_list=None):
     pool = MagicMock()
     pool.acquire = AsyncMock(return_value=(acct, None))
     return pool, acct
+
+
+def _frames(text: str) -> list[tuple[str, dict]]:
+    frames: list[tuple[str, dict]] = []
+    for block in text.split("\n\n"):
+        if not block.strip():
+            continue
+        event = ""
+        data = ""
+        for line in block.splitlines():
+            if line.startswith("event: "):
+                event = line[len("event: ") :]
+            elif line.startswith("data: "):
+                data = line[len("data: ") :]
+        if data:
+            frames.append((event, json.loads(data)))
+    return frames
+
+
+def _named(frames: list[tuple[str, dict]], name: str) -> list[dict]:
+    return [payload for event, payload in frames if event == name]
 
 
 @pytest.fixture(autouse=True)
@@ -495,3 +536,235 @@ def test_conversation_stored_as_json_safe():
     client.close()
     record = app.state.responses_store.get(data["id"])
     json.dumps(record)
+
+
+def test_iter_sse_payloads_joins_multiline_data():
+    payloads = list(resp._iter_sse_payloads('data: {"choices":\ndata: [{"delta":\ndata: {"content":"Hi"}}]}\n\n'))
+    assert payloads == [{"choices": [{"delta": {"content": "Hi"}}]}]
+
+
+def test_iter_sse_payloads_strips_carriage_return():
+    assert list(resp._iter_sse_payloads('data: {"a": 1}\r\n\r\n')) == [{"a": 1}]
+
+
+def test_iter_sse_payloads_ignores_non_object_and_comments():
+    assert list(resp._iter_sse_payloads(": ping\n\ndata: [1, 2]\n\n")) == []
+
+
+def test_iter_sse_payloads_mixed_frames():
+    payloads = list(resp._iter_sse_payloads('data: {"a": 1}\n\ndata: [DONE]\n\ndata: {"b": 2}\n\n'))
+    assert payloads == [{"a": 1}, None, {"b": 2}]
+
+
+def test_response_from_chat_error_is_failed():
+    info = resp.RequestInfo(model="m")
+    obj = resp.response_from_chat(
+        {"choices": [{"message": {"role": "assistant", "content": "x"}, "finish_reason": None}], "error": {"message": "bad"}},
+        info,
+        "r",
+        1,
+    )
+    assert obj["status"] == "failed"
+    assert obj["error"] == {"message": "bad"}
+    assert obj["incomplete_details"] is None
+
+
+def test_response_from_chat_reduced_context_incomplete():
+    info = resp.RequestInfo(model="m")
+    chat = {
+        "choices": [{"message": {"role": "assistant", "content": "x"}, "finish_reason": "response_incomplete"}],
+        "error": {"message": "reduced", "finish_reason": "response_incomplete"},
+    }
+    obj = resp.response_from_chat(chat, info, "r", 1)
+    assert obj["status"] == "incomplete"
+    assert obj["incomplete_details"] == {"reason": "max_output_tokens"}
+    assert obj["error"]["message"] == "reduced"
+
+
+def test_response_from_chat_reduced_context_by_finish_reason_only():
+    info = resp.RequestInfo(model="m")
+    chat = {"choices": [{"message": {"role": "assistant", "content": "x"}, "finish_reason": "response_incomplete"}]}
+    obj = resp.response_from_chat(chat, info, "r", 1)
+    assert obj["status"] == "incomplete"
+    assert obj["incomplete_details"] == {"reason": "max_output_tokens"}
+
+
+def test_response_from_chat_invalid_is_server_fault():
+    with pytest.raises(HTTPException) as excinfo:
+        resp.response_from_chat(5, resp.RequestInfo(model="m"), "r", 1)
+    assert excinfo.value.status_code == 500
+
+
+def test_messages_from_output_single_message_with_text_and_calls():
+    output = [
+        {"id": "msg_1", "type": "message", "content": [{"type": "output_text", "text": "hi"}]},
+        {"id": "fc_1", "type": "function_call", "call_id": "call_1", "name": "f", "arguments": "{}"},
+    ]
+    assert resp.messages_from_output(output) == [
+        {"role": "assistant", "content": "hi", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "f", "arguments": "{}"}}]}
+    ]
+
+
+def test_input_message_item_detail_and_file():
+    items = resp._input_message_item(
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": "https://x/y.png", "detail": "high"}},
+                {"type": "image_url", "image_url": "https://x/z.png", "detail": "weird"},
+                {"type": "image_url", "image_url": "https://x/w.png", "detail": "low"},
+                {"type": "input_file", "filename": "f.txt", "file": {"id": "x"}},
+                {"type": "input_file", "filename": "g.txt"},
+            ],
+        }
+    )
+    parts = items[0]["content"]
+    assert parts[0] == {"type": "input_image", "image_url": "https://x/y.png", "detail": "high"}
+    assert parts[1] == {"type": "input_image", "image_url": "https://x/z.png"}
+    assert parts[2] == {"type": "input_image", "image_url": "https://x/w.png", "detail": "low"}
+    assert parts[3] == {"type": "input_file", "file": {"id": "x"}, "filename": "f.txt"}
+    assert len(parts) == 4
+
+
+def test_normalize_content_keeps_valid_image_detail():
+    assert resp._normalize_content([{"type": "input_image", "image_url": {"url": "data:x", "detail": "high"}}]) == [
+        {"type": "image_url", "image_url": "data:x", "detail": "high"}
+    ]
+    assert resp._normalize_content([{"type": "input_image", "image_url": {"url": "data:x", "detail": "bogus"}}]) == [
+        {"type": "image_url", "image_url": "data:x"}
+    ]
+
+
+def test_request_info_has_no_extras_field():
+    assert not hasattr(resp.RequestInfo(model="m"), "extras")
+
+
+async def test_translate_stream_error_event_keeps_discriminator():
+    info = resp.RequestInfo(model="m")
+    upstream = FakeUpstream(['data: {"id":"x","error":{"message":"boom","finish_reason":"server_busy"},"choices":[]}\n\n'])
+    seen = []
+    frames = _frames("".join(await _collect(resp.translate_stream(upstream, info, "r", 1, on_complete=seen.append))))
+    errors = [payload for event, payload in frames if event == "error"]
+    assert len(errors) == 1
+    assert errors[0]["type"] == "error"
+    assert errors[0]["message"] == "boom"
+    assert errors[0]["code"] == "server_busy"
+    failed = [payload for event, payload in frames if event == "response.failed"]
+    assert len(failed) == 1
+    assert failed[0]["response"]["status"] == "failed"
+    assert seen and seen[0]["status"] == "failed"
+    assert upstream.closed
+
+
+async def test_translate_stream_reduced_context_is_incomplete():
+    info = resp.RequestInfo(model="m")
+    upstream = FakeUpstream(
+        [
+            'data: {"id":"x","choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":null}]}\n\n',
+            'data: {"id":"x","error":{"message":"reduced","finish_reason":"response_incomplete"},'
+            '"choices":[{"index":0,"delta":{},"finish_reason":"response_incomplete"}]}\n\n',
+        ]
+    )
+    seen = []
+    frames = _frames("".join(await _collect(resp.translate_stream(upstream, info, "r", 1, on_complete=seen.append))))
+    events = {event for event, _ in frames}
+    assert "response.incomplete" in events
+    assert "response.failed" not in events
+    assert "error" not in events
+    incomplete = _named(frames, "response.incomplete")
+    assert incomplete[0]["response"]["status"] == "incomplete"
+    assert incomplete[0]["response"]["incomplete_details"] == {"reason": "max_output_tokens"}
+    assert seen and seen[0]["status"] == "incomplete"
+    assert upstream.closed
+
+
+async def test_translate_stream_closes_upstream_on_failure():
+    info = resp.RequestInfo(model="m")
+    upstream = FakeUpstream(
+        [
+            'data: {"id":"x","choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":null}]}\n\n',
+            'data: {"id":"x","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n',
+        ],
+        fail_at=1,
+    )
+    with pytest.raises(RuntimeError):
+        await _collect(resp.translate_stream(upstream, info, "r", 1))
+    assert upstream.closed
+
+
+async def test_translate_stream_closes_upstream_on_client_disconnect():
+    info = resp.RequestInfo(model="m")
+    upstream = FakeUpstream(
+        [
+            'data: {"id":"x","choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":null}]}\n\n',
+            'data: {"id":"x","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n',
+        ]
+    )
+    stream = resp.translate_stream(upstream, info, "r", 1)
+    await stream.__anext__()
+    await stream.aclose()
+    assert upstream.closed
+
+
+async def test_translate_stream_closes_upstream_on_success():
+    info = resp.RequestInfo(model="m")
+    upstream = FakeUpstream(['data: {"id":"x","choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":"stop"}]}\n\n'])
+    await _collect(resp.translate_stream(upstream, info, "r", 1))
+    assert upstream.closed
+
+
+def test_endpoint_stream_failure_is_persisted():
+    from unittest.mock import AsyncMock
+
+    pool, acct = make_pool()
+    acct.sessions.obtain = AsyncMock(side_effect=HTTPException(503, "provider down"))
+    app.state.pool = pool
+    client = TestClient(app)
+    stream = client.post("/v1/responses", json={"model": "deepseek-v4.1-flash", "input": "hi", "stream": True})
+    text = stream.text
+    client.close()
+    assert stream.status_code == 200
+    frames = _frames(text)
+    assert _named(frames, "response.failed")
+    errors = _named(frames, "error")
+    assert errors and errors[0]["type"] == "error"
+    failed = _named(frames, "response.failed")[0]["response"]
+    assert failed["status"] == "failed"
+    stored = app.state.responses_store.get(failed["id"])
+    assert stored is not None
+    assert stored["public"]["status"] == "failed"
+    client = TestClient(app)
+    fetched = client.get(f"/v1/responses/{failed['id']}")
+    client.close()
+    assert fetched.status_code == 200
+    assert fetched.json()["status"] == "failed"
+
+
+def test_endpoint_stream_error_type_is_not_error_type():
+    from unittest.mock import AsyncMock
+
+    pool, acct = make_pool()
+    acct.sessions.obtain = AsyncMock(side_effect=HTTPException(503, "provider down"))
+    app.state.pool = pool
+    client = TestClient(app)
+    stream = client.post("/v1/responses", json={"model": "deepseek-v4.1-flash", "input": "hi", "stream": True})
+    client.close()
+    errors = _named(_frames(stream.text), "error")
+    assert len(errors) == 1
+    assert set(errors[0]) >= {"type", "sequence_number", "message", "code", "param"}
+
+
+async def test_translate_stream_output_order_matches_announced_indices():
+    info = resp.RequestInfo(model="m")
+    upstream = FakeUpstream(
+        [
+            'data: {"id":"x","choices":[{"index":0,"delta":{"content":"answer"},"finish_reason":null}]}\n\n',
+            'data: {"id":"x","choices":[{"index":0,"delta":{"reasoning_content":"late"},"finish_reason":null}]}\n\n',
+            'data: {"id":"x","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n',
+        ]
+    )
+    frames = _frames("".join(await _collect(resp.translate_stream(upstream, info, "r", 1))))
+    added = {payload["output_index"]: payload["item"]["type"] for event, payload in frames if event == "response.output_item.added"}
+    assert added == {0: "message", 1: "reasoning"}
+    completed = _named(frames, "response.completed")
+    assert [item["type"] for item in completed[0]["response"]["output"]] == [added[index] for index in sorted(added)]

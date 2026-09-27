@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from collections.abc import AsyncIterator, Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
+from fastapi import HTTPException
+
+from danyapi.sseutil import parse_sse
 from danyapi.tokens import estimate_tokens
+
+log = logging.getLogger("danyapi.api.responses")
 
 
 class ResponsesInputError(ValueError):
@@ -16,6 +22,9 @@ class ResponsesInputError(ValueError):
 TEXT_PART_TYPES = {"input_text", "output_text", "text", "summary_text"}
 IMAGE_PART_TYPES = {"input_image", "image_url"}
 SUPPORTED_ROLES = {"user", "assistant", "system", "developer", "tool", "function"}
+IMAGE_DETAILS = {"low", "high", "auto"}
+RESPONSE_INCOMPLETE = "response_incomplete"
+REDUCED_CONTEXT_REASON = "max_output_tokens"
 
 
 def _as_int(value: Any) -> int:
@@ -62,6 +71,20 @@ def _as_text(value: Any) -> str:
     return str(value)
 
 
+def _image_source(part: dict) -> tuple[str, Any]:
+    image_url = part.get("image_url")
+    if isinstance(image_url, dict):
+        detail = image_url.get("detail")
+        image_url = image_url.get("url")
+    else:
+        detail = part.get("detail")
+    return (image_url if isinstance(image_url, str) else ""), detail
+
+
+def _image_detail(detail: Any) -> str | None:
+    return detail if isinstance(detail, str) and detail in IMAGE_DETAILS else None
+
+
 def _normalize_content(content: Any) -> Any:
     if content is None:
         return ""
@@ -80,12 +103,14 @@ def _normalize_content(content: Any) -> Any:
         if part_type in TEXT_PART_TYPES:
             parts.append({"type": "text", "text": _as_text(item.get("text"))})
         elif part_type in IMAGE_PART_TYPES:
-            image_url = item.get("image_url")
-            if isinstance(image_url, dict):
-                image_url = image_url.get("url")
-            if not isinstance(image_url, str) or not image_url:
+            url, detail = _image_source(item)
+            if not url:
                 raise ResponsesInputError("input_image requires an image_url string")
-            parts.append({"type": "image_url", "image_url": image_url})
+            image_part: dict[str, Any] = {"type": "image_url", "image_url": url}
+            valid_detail = _image_detail(detail)
+            if valid_detail:
+                image_part["detail"] = valid_detail
+            parts.append(image_part)
         elif part_type == "refusal":
             parts.append({"type": "text", "text": _as_text(item.get("refusal"))})
         elif part_type in ("input_file", "file", "input_audio"):
@@ -255,7 +280,6 @@ class RequestInfo:
     text_format: dict | None = None
     truncation: str = "disabled"
     reasoning: Any = None
-    extras: dict[str, Any] = field(default_factory=dict)
 
 
 def _reasoning_text_from_output(output: Any) -> str:
@@ -417,13 +441,10 @@ def messages_from_output(output: Any) -> list[dict]:
                     "function": {"name": item.get("name") or "", "arguments": arguments if isinstance(arguments, str) else "{}"},
                 }
             )
-    messages: list[dict] = []
-    text = "".join(text_parts)
-    if text or not calls:
-        messages.append({"role": "assistant", "content": text})
+    message: dict[str, Any] = {"role": "assistant", "content": "".join(text_parts)}
     if calls:
-        messages.append({"role": "assistant", "content": "", "tool_calls": calls})
-    return messages
+        message["tool_calls"] = calls
+    return [message]
 
 
 def _input_message_item(message: dict) -> list[dict]:
@@ -449,13 +470,16 @@ def _input_message_item(message: dict) -> list[dict]:
             if part_type == "text":
                 parts.append({"type": "input_text", "text": part.get("text") or "", "annotations": []})
             elif part_type == "image_url":
-                image_url = part.get("image_url")
-                if isinstance(image_url, dict):
-                    image_url = image_url.get("url")
-                parts.append({"type": "input_image", "image_url": image_url or "", "detail": "auto"})
+                url, detail = _image_source(part)
+                image_part: dict[str, Any] = {"type": "input_image", "image_url": url}
+                valid_detail = _image_detail(detail)
+                if valid_detail:
+                    image_part["detail"] = valid_detail
+                parts.append(image_part)
             elif part_type in ("input_file", "file"):
-                file_spec = part.get("file") if isinstance(part.get("file"), dict) else part
-                parts.append({"type": "input_file", "file": file_spec, "filename": part.get("filename")})
+                file_spec = part.get("file")
+                if isinstance(file_spec, dict):
+                    parts.append({"type": "input_file", "file": file_spec, "filename": part.get("filename")})
     elif isinstance(content, str) and content:
         parts.append({"type": "input_text", "text": content, "annotations": []})
     if not parts:
@@ -519,9 +543,15 @@ INCOMPLETE_REASONS = {
 }
 
 
+def _error_finish_reason(error: Any) -> str | None:
+    if isinstance(error, dict) and error.get("finish_reason") == RESPONSE_INCOMPLETE:
+        return RESPONSE_INCOMPLETE
+    return None
+
+
 def response_from_chat(chat: Any, info: RequestInfo, response_id: str, created_at: int) -> dict:
     if not isinstance(chat, dict):
-        raise ResponsesInputError("provider returned an invalid response")
+        raise HTTPException(500, "provider returned an invalid response")
     choices = chat.get("choices")
     choice = choices[0] if isinstance(choices, list) and choices else {}
     message = choice.get("message") if isinstance(choice, dict) else None
@@ -530,8 +560,11 @@ def response_from_chat(chat: Any, info: RequestInfo, response_id: str, created_a
     error = chat.get("error") if isinstance(chat.get("error"), dict) else None
     status = "completed"
     incomplete_details = None
-    if error is not None or finish == "response_incomplete":
+    if _error_finish_reason(error) is not None or finish == RESPONSE_INCOMPLETE:
         status = "incomplete"
+        incomplete_details = {"reason": REDUCED_CONTEXT_REASON}
+    elif error is not None:
+        status = "failed"
     elif isinstance(finish, str) and finish in INCOMPLETE_REASONS:
         status = "incomplete"
         incomplete_details = {"reason": INCOMPLETE_REASONS[finish]}
@@ -554,41 +587,12 @@ def sse_event(event_type: str, data: dict) -> str:
 def _iter_sse_payloads(chunk: Any) -> Iterator[dict | None]:
     if not isinstance(chunk, str):
         return
-    start = 0
-    length = len(chunk)
-    while start <= length:
-        end = chunk.find("\n\n", start)
-        if end == -1:
-            block = chunk[start:]
-            start = length + 1
-        else:
-            block = chunk[start:end]
-            start = end + 2
-        data_line = None
-        line_start = 0
-        block_len = len(block)
-        while line_start <= block_len:
-            line_end = block.find("\n", line_start)
-            if line_end == -1:
-                line = block[line_start:]
-                line_start = block_len + 1
-            else:
-                line = block[line_start:line_end]
-                line = line.removesuffix("\r")
-                line_start = line_end + 1
-            if line.startswith("data:"):
-                data_line = line[5:].strip()
-        if data_line is None:
-            continue
-        if data_line == "[DONE]":
+    for event in parse_sse(chunk):
+        data = event.data
+        if data == "[DONE]":
             yield None
-            continue
-        try:
-            payload = json.loads(data_line)
-        except (ValueError, TypeError):
-            continue
-        if isinstance(payload, dict):
-            yield payload
+        elif isinstance(data, dict):
+            yield data
 
 
 def _error_payload(error: Any) -> dict:
@@ -602,6 +606,12 @@ def _error_payload(error: Any) -> dict:
     return {"type": "server_error", "code": None, "message": str(error), "param": None}
 
 
+def _error_event(error: Any) -> dict:
+    payload = _error_payload(error)
+    del payload["type"]
+    return payload
+
+
 class _StreamState:
     __slots__ = (
         "created_at",
@@ -611,6 +621,7 @@ class _StreamState:
         "message_index",
         "message_open",
         "message_parts",
+        "on_complete",
         "output",
         "output_index",
         "reasoning_id",
@@ -623,10 +634,11 @@ class _StreamState:
         "usage",
     )
 
-    def __init__(self, info: RequestInfo, response_id: str, created_at: int) -> None:
+    def __init__(self, info: RequestInfo, response_id: str, created_at: int, on_complete: Any = None) -> None:
         self.info = info
         self.response_id = response_id
         self.created_at = created_at
+        self.on_complete = on_complete
         self.sequence = 0
         self.output_index = 0
         self.output: list[dict] = []
@@ -815,10 +827,60 @@ class _StreamState:
             self.output.append(item)
             yield self.emit("response.output_item.done", {"output_index": entry["output_index"], "item": item})
 
+    def _open_closers(self) -> list[tuple[int, Any]]:
+        closers: list[tuple[int, Any]] = []
+        if self.reasoning_index is not None:
+            closers.append((self.reasoning_index, self.close_reasoning))
+        if self.message_index is not None:
+            closers.append((self.message_index, self.close_message))
+        closers.sort(key=lambda entry: entry[0])
+        return closers
+
     def close_all(self) -> Iterator[str]:
-        yield from self.close_reasoning()
-        yield from self.close_message()
+        for _index, close in self._open_closers():
+            yield from close()
         yield from self.close_tools()
+
+
+async def _close_chat_stream(chat_stream: Any) -> None:
+    closer = getattr(chat_stream, "aclose", None)
+    if closer is None:
+        return
+    try:
+        await closer()
+    except Exception as exc:
+        log.debug("upstream chat stream close failed: %s", exc)
+
+
+def _terminal_lines(
+    state: _StreamState,
+    status: str,
+    error: dict | None = None,
+    incomplete_details: dict | None = None,
+) -> Iterator[str]:
+    final = build_response_object(
+        state.info,
+        state.response_id,
+        state.created_at,
+        output=state.output,
+        status=status,
+        usage=state.usage,
+        error=error,
+        incomplete_details=incomplete_details,
+    )
+    if callable(state.on_complete):
+        state.on_complete(final)
+    yield state.emit(f"response.{status}", {"response": final})
+
+
+def _failure_lines(state: _StreamState, error: dict) -> Iterator[str]:
+    if _error_finish_reason(error) is not None:
+        yield from _terminal_lines(state, "incomplete", None, {"reason": REDUCED_CONTEXT_REASON})
+        return
+    yield from _terminal_lines(state, "failed", _error_payload(error))
+    payload = {"type": "error", "sequence_number": state.next_sequence()}
+    payload.update(_error_event(error))
+    yield sse_event("error", payload)
 
 
 async def translate_stream(
@@ -828,68 +890,57 @@ async def translate_stream(
     created_at: int,
     on_complete: Any = None,
 ) -> AsyncIterator[str]:
-    state = _StreamState(info, response_id, created_at)
-    initial = build_response_object(info, response_id, created_at, output=[], status="in_progress")
-    yield state.emit("response.created", {"response": initial})
-    yield state.emit("response.in_progress", {"response": initial})
-    error: Any = None
-    async for chunk in chat_stream:
-        for payload in _iter_sse_payloads(chunk):
-            if payload is None:
-                continue
-            if isinstance(payload.get("error"), dict):
-                error = payload["error"]
-                continue
-            usage = payload.get("usage")
-            if isinstance(usage, dict):
-                state.usage = usage
-            choices = payload.get("choices")
-            if not isinstance(choices, list):
-                continue
-            for choice in choices:
-                if not isinstance(choice, dict):
+    state = _StreamState(info, response_id, created_at, on_complete)
+    try:
+        initial = build_response_object(info, response_id, created_at, output=[], status="in_progress")
+        yield state.emit("response.created", {"response": initial})
+        yield state.emit("response.in_progress", {"response": initial})
+        error: dict | None = None
+        async for chunk in chat_stream:
+            for payload in _iter_sse_payloads(chunk):
+                if payload is None:
                     continue
-                delta = choice.get("delta")
-                if isinstance(delta, dict):
-                    reasoning = delta.get("reasoning_content")
-                    if isinstance(reasoning, str) and reasoning:
-                        for line in state.reasoning_delta(reasoning):
-                            yield line
-                    content = delta.get("content")
-                    if isinstance(content, str) and content:
-                        for line in state.message_delta(content):
-                            yield line
-                    if delta.get("tool_calls"):
-                        for line in state.tool_delta(delta["tool_calls"]):
-                            yield line
-                finish = choice.get("finish_reason")
-                if isinstance(finish, str) and finish:
-                    state.finish = finish
-    for line in state.close_all():
-        yield line
-    if error is not None:
-        failed = build_response_object(info, response_id, created_at, output=state.output, status="failed", usage=state.usage, error=_error_payload(error))
-        yield state.emit("response.failed", {"response": failed})
-        payload = {"type": "error", "sequence_number": state.next_sequence()}
-        payload.update(_error_payload(error))
-        yield sse_event("error", payload)
-        return
-    if state.finish in INCOMPLETE_REASONS:
-        incomplete_details = {"reason": INCOMPLETE_REASONS[state.finish]}
-        final = build_response_object(
-            info,
-            response_id,
-            created_at,
-            output=state.output,
-            status="incomplete",
-            usage=state.usage,
-            incomplete_details=incomplete_details,
-        )
-        if callable(on_complete):
-            on_complete(final)
-        yield state.emit("response.incomplete", {"response": final})
-        return
-    final = build_response_object(info, response_id, created_at, output=state.output, status="completed", usage=state.usage)
-    if callable(on_complete):
-        on_complete(final)
-    yield state.emit("response.completed", {"response": final})
+                if isinstance(payload.get("error"), dict):
+                    error = payload["error"]
+                    continue
+                usage = payload.get("usage")
+                if isinstance(usage, dict):
+                    state.usage = usage
+                choices = payload.get("choices")
+                if not isinstance(choices, list):
+                    continue
+                for choice in choices:
+                    if not isinstance(choice, dict):
+                        continue
+                    delta = choice.get("delta")
+                    if isinstance(delta, dict):
+                        reasoning = delta.get("reasoning_content")
+                        if isinstance(reasoning, str) and reasoning:
+                            for line in state.reasoning_delta(reasoning):
+                                yield line
+                        content = delta.get("content")
+                        if isinstance(content, str) and content:
+                            for line in state.message_delta(content):
+                                yield line
+                        if delta.get("tool_calls"):
+                            for line in state.tool_delta(delta["tool_calls"]):
+                                yield line
+                    finish = choice.get("finish_reason")
+                    if isinstance(finish, str) and finish:
+                        state.finish = finish
+        for line in state.close_all():
+            yield line
+        if error is not None:
+            for line in _failure_lines(state, error):
+                yield line
+            return
+        if state.finish in INCOMPLETE_REASONS:
+            status = "incomplete"
+            incomplete_details: dict | None = {"reason": INCOMPLETE_REASONS[state.finish]}
+        else:
+            status = "completed"
+            incomplete_details = None
+        for line in _terminal_lines(state, status, None, incomplete_details):
+            yield line
+    finally:
+        await _close_chat_stream(chat_stream)

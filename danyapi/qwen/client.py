@@ -4,7 +4,7 @@ import datetime
 import logging
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import httpx
 
@@ -71,7 +71,6 @@ class QwenSession:
     model: str | None = None
     accumulated_input_tokens: int = 0
     accumulated_output_tokens: int = 0
-    extra: dict = field(default_factory=dict)
 
 
 class QwenError(Exception):
@@ -87,7 +86,6 @@ class QwenClient:
         token: str | None = None,
         timeout: float = 60.0,
     ) -> None:
-        self.token = token
         headers = {
             "User-Agent": USER_AGENT,
             **COMMON_HEADERS,
@@ -97,7 +95,7 @@ class QwenClient:
         self.http = httpx.AsyncClient(
             base_url=BASE_URL,
             headers=headers,
-            timeout=httpx.Timeout(timeout),
+            timeout=httpx.Timeout(timeout, read=max(float(timeout) * 5, 300.0)),
             follow_redirects=True,
             limits=httpx.Limits(max_keepalive_connections=20, keepalive_expiry=30.0),
         )

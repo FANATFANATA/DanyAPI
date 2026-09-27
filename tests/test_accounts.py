@@ -6,7 +6,7 @@ import pytest
 
 from danyapi.accounts import AccountPool, AccountPoolBusy, ContextIndex, DeepSeekAccount, account_lock
 from danyapi.deepseek.client import DeepSeekClient
-from danyapi.store import JsonStore
+from danyapi.store import _MAX_AFFINITY, JsonStore
 
 
 def make_acct(i):
@@ -313,6 +313,49 @@ def test_register_ttl_cleanup():
     pool.register(0, "fresh")
     assert "stale" not in pool._by_session
     assert "fresh" in pool._by_session
+
+
+def test_register_ttl_cleanup_runs_for_small_pool():
+    pool = AccountPool([make_acct(0)], ttl=0.05)
+    for i in range(4096):
+        pool._by_session[f"s{i}"] = (0, time.monotonic())
+    pool._by_session["stale"] = (0, time.monotonic() - 10)
+    pool.register(0, "fresh")
+    assert "stale" not in pool._by_session
+    assert len(pool._by_session) == 4097
+    assert "fresh" in pool._by_session
+
+
+def test_register_ttl_cleanup_skipped_for_small_map():
+    pool = AccountPool([make_acct(0)], ttl=0.05)
+    pool._by_session["stale"] = (0, time.monotonic() - 10)
+    pool.register(0, "fresh")
+    assert "stale" in pool._by_session
+
+
+def test_register_evicts_least_recently_used():
+    pool = AccountPool([make_acct(0), make_acct(1)])
+    for i in range(_MAX_AFFINITY):
+        pool._by_session[f"s{i}"] = (0, time.monotonic())
+    pool.register(0, "s0")
+    assert len(pool._by_session) == _MAX_AFFINITY
+    assert list(pool._by_session)[-1] == "s0"
+    pool.register(0, "new")
+    assert len(pool._by_session) == _MAX_AFFINITY
+    assert "s1" not in pool._by_session
+    assert "s0" in pool._by_session
+    assert list(pool._by_session)[-1] == "new"
+
+
+def test_affinity_lookup_marks_session_recent(pool_store):
+    pool = AccountPool([make_acct(0), make_acct(1)], ttl=100.0)
+    for i in range(_MAX_AFFINITY):
+        pool._by_session[f"s{i}"] = (0, time.monotonic())
+    time.sleep(0.01)
+    assert pool.account_for_session("s0") is not None
+    pool.register(0, "new")
+    assert "s1" not in pool._by_session
+    assert "s0" in pool._by_session
 
 
 def test_account_for_session_expired():

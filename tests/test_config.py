@@ -1,3 +1,4 @@
+import logging
 import os
 
 import pytest
@@ -100,6 +101,27 @@ def test_empty_tokens(settings_for):
     s = settings_for({"DEEPSEEK_TOKENS": " , , ", "QWEN_TOKENS": ""})
     assert s.deepseek_tokens == []
     assert s.qwen_tokens == []
+
+
+def test_human_delay_bounds(settings_for):
+    s = settings_for({"DANYAPI_HUMAN_DELAY_MIN": "1.5", "DANYAPI_HUMAN_DELAY_MAX": "4"})
+    assert s.human_delay_min == 1.5
+    assert s.human_delay_max == 4.0
+
+
+def test_inverted_human_delay_bounds_are_normalised(settings_for):
+    s = settings_for({"DANYAPI_HUMAN_DELAY_MIN": "5", "DANYAPI_HUMAN_DELAY_MAX": "1"})
+    assert s.human_delay_min == 5.0
+    assert s.human_delay_max == 5.0
+
+
+def test_dotenv_fallback_warns_and_returns_false(caplog):
+    from danyapi import config as config_mod
+
+    with caplog.at_level(logging.WARNING, logger="danyapi.config"):
+        assert config_mod._noop_load_dotenv(dotenv_path=config_mod._ENV_PATH, override=False) is False
+    assert any("python-dotenv" in record.getMessage() for record in caplog.records)
+    assert any(str(config_mod._ENV_PATH) in record.getMessage() for record in caplog.records)
 
 
 def test_cache_dir(settings_for):

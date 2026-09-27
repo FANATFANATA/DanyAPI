@@ -73,6 +73,38 @@ async def test_extract_api_key_missing():
     assert await openai_mod._extract_request_api_key(_make_request(headers={})) is None
 
 
+async def test_extract_api_key_multipart_form_field():
+    boundary = "----danyapitest"
+    parts = [
+        f"--{boundary}\r\n",
+        'Content-Disposition: form-data; name="api_key"\r\n\r\n',
+        "  form-token \r\n",
+        f"--{boundary}--\r\n",
+    ]
+    body = "".join(parts).encode()
+    request = _make_request(headers={"Content-Type": f"multipart/form-data; boundary={boundary}"}, body=body)
+    assert await openai_mod._extract_request_api_key(request) == "form-token"
+
+
+async def test_extract_api_key_multipart_without_field():
+    boundary = "----danyapitest"
+    body = f'--{boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\nqwen\r\n--{boundary}--\r\n'.encode()
+    request = _make_request(headers={"Content-Type": f"multipart/form-data; boundary={boundary}"}, body=body)
+    assert await openai_mod._extract_request_api_key(request) is None
+
+
+async def test_extract_api_key_multipart_malformed_body():
+    request = _make_request(headers={"Content-Type": "multipart/form-data; boundary=zzz"}, body=b"garbage")
+    assert await openai_mod._extract_request_api_key(request) is None
+
+
+async def test_byok_pool_for_multipart_401():
+    request = _make_request(headers={"Content-Type": "multipart/form-data; boundary=zzz"}, body=b"garbage")
+    with pytest.raises(openai_mod.HTTPException) as excinfo:
+        await openai_mod._byok_pool_for("qwen", request)
+    assert excinfo.value.status_code == 401
+
+
 async def test_byok_pool_for_missing_key_401():
     with pytest.raises(openai_mod.HTTPException) as excinfo:
         await openai_mod._byok_pool_for("deepseek", _make_request(headers={}))
@@ -238,6 +270,68 @@ def test_image_generations_byok_401_without_key():
         json={"model": "qwen-image-gen", "prompt": "dog"},
     )
     assert response.status_code == 401
+
+
+def test_completions_stream_byok_401_without_key():
+    app.state.byok = True
+    client = TestClient(app)
+    response = client.post(
+        "/v1/completions",
+        json={"model": "deepseek-v4.1-flash", "prompt": "hello", "stream": True},
+    )
+    client.close()
+    assert response.status_code == 401
+    assert response.headers.get("content-type", "").startswith("application/json")
+    assert "text/event-stream" not in response.text
+
+
+def test_completions_non_stream_byok_401_without_key():
+    app.state.byok = True
+    client = TestClient(app)
+    response = client.post(
+        "/v1/completions",
+        json={"model": "deepseek-v4.1-flash", "prompt": "hello"},
+    )
+    client.close()
+    assert response.status_code == 401
+
+
+def test_image_edits_byok_401_without_key():
+    app.state.byok = True
+    client = TestClient(app)
+    response = client.post(
+        "/v1/images/edits",
+        files={"image": ("a.png", b"png-bytes", "image/png")},
+        data={"prompt": "make it blue"},
+    )
+    client.close()
+    assert response.status_code == 401
+
+
+def test_image_edits_byok_auth_from_api_key_field(monkeypatch):
+    monkeypatch.setattr(settings, "cache_enabled", False)
+    monkeypatch.setattr(openai_mod.QwenClient, "check_auth", AsyncMock(return_value=True))
+    monkeypatch.setattr(openai_mod.QwenClient, "fetch_models", AsyncMock(return_value=[{"id": "q1", "info": {"meta": {"chat_type": ["t2t"]}}}]))
+    app.state.byok = True
+    app.state.qwen_models = []
+    captured = {}
+
+    async def fake_image_generations(req, resolved_pool):
+        captured["pool"] = resolved_pool
+        return {"created": 1, "data": [], "usage": None, "session_id": None}
+
+    monkeypatch.setattr(openai_mod, "_image_generations", fake_image_generations)
+    client = TestClient(app)
+    response = client.post(
+        "/v1/images/edits",
+        files={"image": ("a.png", b"png-bytes", "image/png")},
+        data={"prompt": "make it blue", "api_key": "form-key"},
+    )
+    client.close()
+    assert response.status_code == 200
+    assert captured["pool"] is not None
+    assert captured["pool"].label == "qwen"
+    assert openai_mod._byok_cache_key(["form-key"]) in app.state.byok_pools["qwen"]
 
 
 def test_health_reports_byok_mode():

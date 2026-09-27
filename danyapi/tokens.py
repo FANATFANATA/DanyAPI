@@ -2,27 +2,60 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
-from functools import lru_cache
 from typing import Any
 
 _CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3040-\u30ff\uac00-\ud7af]")
 _IMAGE_TOKEN_COST = 85
 
 
-@lru_cache(maxsize=4096)
 def _cjk_count(text: str) -> int:
     return len(_CJK_RE.findall(text))
 
 
-@lru_cache(maxsize=4096)
+def _units(cjk: int, other: int) -> int:
+    if other == 0:
+        return cjk
+    return cjk + max(1, other // 4)
+
+
 def estimate_tokens(text: str | None) -> int:
     if not text:
         return 0
     cjk = _cjk_count(text)
-    other = len(text) - cjk
-    if other == 0:
-        return cjk
-    return cjk + max(1, other // 4)
+    return _units(cjk, len(text) - cjk)
+
+
+def _head_length(word: str, budget: int) -> int:
+    cjk = 0
+    length = 0
+    for char in word:
+        candidate_cjk = cjk + _cjk_count(char)
+        if _units(candidate_cjk, length + 1 - candidate_cjk) > budget:
+            break
+        cjk = candidate_cjk
+        length += 1
+    return length
+
+
+def trim_to_tokens(text: str, budget: int | None) -> str:
+    if budget is None or not text or estimate_tokens(text) <= budget:
+        return text
+    words = text.split(" ")
+    total_len = 0
+    total_cjk = 0
+    for index, word in enumerate(words):
+        candidate_len = total_len + len(word) + (1 if index else 0)
+        candidate_cjk = total_cjk + _cjk_count(word)
+        if _units(candidate_cjk, candidate_len - candidate_cjk) > budget:
+            break
+        total_len = candidate_len
+        total_cjk = candidate_cjk
+    if total_len:
+        return text[:total_len].rstrip() or text[:total_len]
+    head = words[0]
+    if not head:
+        return text
+    return text[: _head_length(head, budget)]
 
 
 class StreamBudget:

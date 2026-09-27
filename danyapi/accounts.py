@@ -95,7 +95,7 @@ class ContextIndex:
             try:
                 self._store.flush()
             except Exception as exc:
-                log.debug("context store flush failed: %s", exc)
+                log.warning("context store flush failed: %s", exc)
 
     def lookup(self, sequence: tuple[str, ...]) -> str | None:
         if not sequence:
@@ -233,7 +233,7 @@ class AccountPool(Generic[AccountT]):
     ) -> None:
         self.accounts = list(accounts)
         self.label = label
-        self._by_session: dict[str, tuple[int, float]] = {}
+        self._by_session: OrderedDict[str, tuple[int, float]] = OrderedDict()
         self._stable_to_idx: dict[str, int] = {}
         for i, acct in enumerate(accounts):
             sid = getattr(acct, "stable_id", None)
@@ -292,12 +292,12 @@ class AccountPool(Generic[AccountT]):
         record = self._affinity_record(account_index)
         evicted: list[str] = []
         with self._affinity_lock:
+            self._by_session.pop(session_id, None)
             self._by_session[session_id] = (account_index, now)
             while len(self._by_session) > _MAX_AFFINITY:
-                oldest = next(iter(self._by_session))
-                self._by_session.pop(oldest, None)
+                oldest, _ = self._by_session.popitem(last=False)
                 evicted.append(oldest)
-            if self._ttl > 0 and len(self._by_session) > max(4096, len(self.accounts) * 1024):
+            if self._ttl > 0 and len(self._by_session) >= min(4096, _MAX_AFFINITY // 2):
                 stale = [sid for sid, (_, ts) in self._by_session.items() if now - ts > self._ttl]
                 for sid in stale:
                     self._by_session.pop(sid, None)
@@ -344,6 +344,7 @@ class AccountPool(Generic[AccountT]):
                     dirty = True
                 elif self._ttl > 0 and now != ts:
                     self._by_session[session_id] = (idx, now)
+                    self._by_session.move_to_end(session_id)
         if dirty:
             self._contexts.forget(session_id)
             if store is not None:
@@ -374,7 +375,7 @@ class AccountPool(Generic[AccountT]):
             try:
                 self._affinity_store.flush()
             except Exception as exc:
-                log.debug("affinity store flush failed: %s", exc)
+                log.warning("affinity store flush failed: %s", exc)
         for acct in self.accounts:
             sessions = getattr(acct, "sessions", None)
             if sessions is None:
@@ -382,7 +383,7 @@ class AccountPool(Generic[AccountT]):
             try:
                 sessions.flush()
             except Exception as exc:
-                log.debug("session store flush failed for %s: %s", getattr(acct, "label", acct), exc)
+                log.warning("session store flush failed for %s: %s", getattr(acct, "label", acct), exc)
 
     async def acquire(self, session_id: str | None, max_wait: float | None = None) -> tuple[AccountT, str | None]:
         healthy = [a for a in self.accounts if not a.broken]

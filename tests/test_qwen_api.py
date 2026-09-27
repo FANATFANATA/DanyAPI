@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
@@ -116,8 +117,8 @@ def zero_backoff():
     qwen_api.RETRY_BACKOFF_SEC = orig
 
 
-def _args(acct, pool=None, existing_sid: str | None = "s1", tool_mode=False):
-    return {
+def _args(acct, pool=None, existing_sid: str | None = "s1", tool_mode=False, **extra):
+    args = {
         "account": acct,
         "pool": pool or MagicMock(),
         "existing_sid": existing_sid,
@@ -129,6 +130,15 @@ def _args(acct, pool=None, existing_sid: str | None = "s1", tool_mode=False):
         "search": False,
         "tool_mode": tool_mode,
     }
+    args.update(extra)
+    return args
+
+
+def _content_text(joined: str) -> str:
+    parts: list[str] = []
+    for match in re.finditer(r'"content": "((?:[^"\\]|\\.)*)"', joined):
+        parts.append(json.loads(f'"{match.group(1)}"'))
+    return "".join(parts)
 
 
 async def _send(resp):
@@ -531,10 +541,9 @@ async def test_prepare_session_new_session_registered():
     _session, key = await qwen_api._prepare_session(acct, pool, "old", "m", ("u1",))
     assert key == "new"
     pool.register.assert_called_once_with(0, "new")
-    pool.forget.assert_called_once_with("old")
-    pool.forget_context.assert_called_once_with("old")
-    acct.sessions.forget.assert_called_once_with("old")
     pool.index_context.assert_called_once_with("new", ("u1",))
+    pool.forget.assert_not_called()
+    acct.sessions.forget.assert_not_called()
 
 
 async def test_existing_session_reused():
@@ -681,6 +690,168 @@ def test_append_image_markdown():
     assert "![image](data:image/png;base64,AAAA)" in prompt
     assert qwen_api._append_image_markdown("hello", None) == "hello"
     assert qwen_api._append_image_markdown("hello", [_ImgMsg("nope")]) == "hello"
+
+
+REJECTED_IMAGE_URIS = [
+    "",
+    "httpx://x/y.png",
+    "http:/x.png",
+    "ftp://x/y.png",
+    "javascript:alert(1)",
+    "data:image/png;base64,",
+    "data:image/png,AAAA",
+    "data:image/png;base64,AA*A",
+    "data:image/png;base64,AAA",
+    "https://x/a b.png",
+    "https://x/a\tb.png",
+    "https://x/a\nb.png",
+    "https://x/a(b).png",
+    "https://x/<script>.png",
+    "![x](https://evil/y.png)",
+    "![image](https://evil/y.png)",
+]
+
+
+def test_image_uri_validation_rejects_injection():
+    for uri in REJECTED_IMAGE_URIS:
+        assert not qwen_api._valid_image_uri(uri), uri
+        messages = [_ImgMsg([{"type": "image_url", "image_url": {"url": uri}}])]
+        assert qwen_api._append_image_markdown("hello", messages) == "hello", uri
+
+
+def test_image_uri_validation_accepts_real_uris():
+    for uri in ("http://x/y.png", "https://x/y.png?q=1#a", "data:image/png;base64,QUJDRA==", "data:image/jpeg;base64,AAAA"):
+        assert qwen_api._valid_image_uri(uri), uri
+        messages = [_ImgMsg([{"type": "image_url", "image_url": {"url": uri}}])]
+        assert qwen_api._append_image_markdown("hi", messages) == f"hi\n\n![image]({uri})", uri
+
+
+def test_append_image_markdown_keeps_order_and_dedup():
+    messages = [
+        _ImgMsg([{"type": "image_url", "image_url": "https://x/b.png"}, {"type": "image_url", "image_url": "https://x/a.png"}]),
+        _ImgMsg([{"type": "image_url", "image_url": "https://x/b.png"}]),
+    ]
+    prompt = qwen_api._append_image_markdown("", messages)
+    assert prompt == "![image](https://x/b.png)\n![image](https://x/a.png)"
+
+
+def test_append_image_markdown_skips_already_present_tag():
+    messages = [_ImgMsg([{"type": "image_url", "image_url": "https://x/a.png"}])]
+    prompt = qwen_api._append_image_markdown("see ![image](https://x/a.png) here", messages)
+    assert prompt == "see ![image](https://x/a.png) here"
+
+
+async def test_stream_stop_truncates_content():
+    sse = (
+        'data: {"response.created":{"chat_id":"c1","parent_id":"p0","response_id":"r1"}} \n\n'
+        'data: {"choices": [{"delta": {"content": "Hello wor", "phase": "answer"}}], "response_id": "r1"}\n\n'
+        'data: {"choices": [{"delta": {"content": "ld STOP tail", "phase": "answer"}}], "response_id": "r1"}\n\n'
+        'data: {"choices": [{"delta": {"status": "finished", "phase": "answer"}}], "response_id": "r1"}\n\n'
+    )
+    acct = FakeAccount([sse])
+    joined = "".join(await _collect(qwen_api.stream_openai(**_args(acct, stop="STOP"))))
+    assert _content_text(joined) == "Hello world "
+    assert '"finish_reason": "stop"' in joined
+
+
+async def test_stream_stop_keeps_prefix_before_marker():
+    sse = (
+        'data: {"response.created":{"chat_id":"c1","parent_id":"p0","response_id":"r1"}} \n\n'
+        'data: {"choices": [{"delta": {"content": "one<END>", "phase": "answer"}}], "response_id": "r1"}\n\n'
+        'data: {"choices": [{"delta": {"content": "two", "phase": "answer"}}], "response_id": "r1"}\n\n'
+    )
+    acct = FakeAccount([sse])
+    joined = "".join(await _collect(qwen_api.stream_openai(**_args(acct, stop=["<END>"]))))
+    assert _content_text(joined) == "one"
+    assert '"finish_reason": "stop"' in joined
+
+
+async def test_stream_stop_marker_split_across_chunks():
+    sse = (
+        'data: {"response.created":{"chat_id":"c1","parent_id":"p0","response_id":"r1"}} \n\n'
+        'data: {"choices": [{"delta": {"content": "aaa<HAL", "phase": "answer"}}], "response_id": "r1"}\n\n'
+        'data: {"choices": [{"delta": {"content": "T>bbb", "phase": "answer"}}], "response_id": "r1"}\n\n'
+    )
+    acct = FakeAccount([sse])
+    joined = "".join(await _collect(qwen_api.stream_openai(**_args(acct, stop="<HALT>"))))
+    assert _content_text(joined) == "aaa"
+    assert '"finish_reason": "stop"' in joined
+
+
+async def test_stream_stop_absent_marker_keeps_content():
+    acct = FakeAccount([OK_SSE])
+    joined = "".join(await _collect(qwen_api.stream_openai(**_args(acct, stop="NOTPRESENT"))))
+    assert _content_text(joined) == "Hello world"
+    assert '"finish_reason": "stop"' in joined
+
+
+async def test_stream_choices_n_expands_index():
+    acct = FakeAccount([OK_SSE])
+    joined = "".join(await _collect(qwen_api.stream_openai(**_args(acct, n=3))))
+    assert '"index": 0' in joined
+    assert '"index": 1' in joined
+    assert '"index": 2' in joined
+    assert '"index": 3' not in joined
+    assert '"content": "Hello world"' in joined
+    assert joined.count('"index": 2') == 2
+
+
+async def test_stream_choices_n_bounded():
+    acct = FakeAccount([OK_SSE])
+    joined = "".join(await _collect(qwen_api.stream_openai(**_args(acct, n=99))))
+    assert f'"index": {qwen_api.MAX_CHOICES - 1}' in joined
+    assert f'"index": {qwen_api.MAX_CHOICES}' not in joined
+
+
+async def test_stream_choices_n_one_stays_single():
+    acct = FakeAccount([OK_SSE])
+    joined = "".join(await _collect(qwen_api.stream_openai(**_args(acct, n=1))))
+    assert '"index": 1' not in joined
+
+
+async def test_stream_choices_n_empty_text_skips_delta():
+    sse = (
+        'data: {"response.created":{"chat_id":"c1","parent_id":"p0","response_id":"r1"}} \n\n'
+        'data: {"choices": [{"delta": {"content": "", "role": "assistant", "status": "finished", "phase": "answer"}}], "response_id": "r1"}\n\n'
+    )
+    acct = FakeAccount([sse])
+    joined = "".join(await _collect(qwen_api.stream_openai(**_args(acct, n=2))))
+    assert '"index": 1' in joined
+    assert '"content"' not in joined
+
+
+async def test_non_stream_rejects_injected_image_uri():
+    acct = FakeAccount([OK_SSE])
+    args = _args(acct)
+    args["messages"] = [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "https://x/a.png) evil ![x](https://evil/y"}}]}]
+    await qwen_api.collect_non_stream(**args)
+    sent = acct.client.completion.await_args.kwargs["prompt"]
+    assert "![image](https://x/a.png) evil" not in sent
+    assert "https://evil/y" not in sent
+
+
+async def test_stream_rejects_injected_image_uri():
+    acct = FakeAccount([OK_SSE])
+    args = _args(acct)
+    args["messages"] = [{"role": "user", "content": [{"type": "image_url", "image_url": "data:image/png;base64,<script>"}]}]
+    await _collect(qwen_api.stream_openai(**args))
+    sent = acct.client.completion.await_args.kwargs["prompt"]
+    assert "![image](" not in sent
+
+    acct = FakeAccount([])
+    acct.client.completion = AsyncMock(side_effect=qwen_api.HTTPException(403, "forbidden"))
+    joined = "".join(await _collect(qwen_api.stream_openai(**_args(acct))))
+    assert acct.broken
+    assert '"error"' in joined
+
+
+async def test_non_stream_403_marks_broken():
+    acct = FakeAccount([])
+    acct.client.completion = AsyncMock(side_effect=qwen_api.HTTPException(403, "forbidden"))
+    with pytest.raises(qwen_api.HTTPException) as excinfo:
+        await qwen_api.collect_non_stream(**_args(acct))
+    assert excinfo.value.status_code == 403
+    assert acct.broken
 
 
 async def test_stream_empty_response_sends_role_delta():

@@ -844,10 +844,12 @@ def test_completion_prompts():
 
 
 def test_completion_chat_request():
-    req = openai_mod.CompletionRequest(model="deepseek-v4.1-flash", prompt="x")
-    chat = openai_mod._completion_chat_request(req, "hi", False)
+    req = openai_mod.CompletionRequest(model="deepseek-v4.1-flash", prompt="x", session_id="s1")
+    chat = openai_mod._completion_chat_request(req, "hi", False, 1)
     assert chat.messages[0].content == "hi"
     assert chat.stream is False
+    assert chat.session_id == "s1"
+    assert openai_mod._completion_chat_request(req, "hi", False, 2).session_id is None
 
 
 def test_legacy_choice_from_chat():
@@ -856,15 +858,6 @@ def test_legacy_choice_from_chat():
     assert choice["finish_reason"] == "stop"
     assert openai_mod._legacy_choice_from_chat({"message": "bad"}, 1)["text"] == ""
     assert openai_mod._legacy_choice_from_chat({}, 2)["finish_reason"] == "stop"
-
-
-def test_legacy_completion_response():
-    data = openai_mod._legacy_completion_response(
-        {"choices": [{"message": {"content": "x"}, "finish_reason": "stop"}], "id": "1", "created": 5},
-        0,
-    )
-    assert data["choices"][0]["text"] == "x"
-    assert data["created"] == 5
 
 
 def test_translate_chat_chunk_to_completion():
@@ -896,27 +889,36 @@ async def test_translate_completion_stream():
     assert any('"text": "hi"' in line for line in out)
 
 
-async def test_completions_stream_non_stream(monkeypatch):
-    async def fake_dispatch(req, request):
-        return {"id": "1", "choices": [{"message": {"content": "hi"}, "finish_reason": "stop"}], "created": 1, "model": "m"}
+async def _sse_body():
+    yield "data: {}\n\n"
 
-    monkeypatch.setattr(openai_mod, "_dispatch_chat", fake_dispatch)
+
+async def test_completions_stream_emits_done():
+    async def fake_dispatch(chat_req):
+        return StreamingResponse(_sse_body(), media_type="text/event-stream")
+
     req = openai_mod.CompletionRequest(model="deepseek-v4.1-flash", prompt="x")
-    out = [line async for line in openai_mod._completions_stream(req, ["x"], None)]
+    out = [line async for line in openai_mod._completions_stream(req, ["x"], fake_dispatch)]
     assert out[-1] == "data: [DONE]\n\n"
 
 
-async def test_completions_stream_streaming(monkeypatch):
-    async def inner():
-        yield "data: {}\n\n"
+async def test_completions_stream_translates_chat_chunks():
+    seen = []
 
-    async def fake_dispatch(req, request):
-        return StreamingResponse(inner(), media_type="text/event-stream")
+    async def fake_dispatch(chat_req):
+        seen.append(chat_req)
 
-    monkeypatch.setattr(openai_mod, "_dispatch_chat", fake_dispatch)
-    req = openai_mod.CompletionRequest(model="deepseek-v4.1-flash", prompt="x")
-    out = [line async for line in openai_mod._completions_stream(req, ["x"], None)]
+        async def body():
+            yield 'data: {"id":"1","choices":[{"delta":{"content":"hi"}}]}\n\n'
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(body(), media_type="text/event-stream")
+
+    req = openai_mod.CompletionRequest(model="deepseek-v4.1-flash", prompt=["a", "b"], session_id="s1")
+    out = [line async for line in openai_mod._completions_stream(req, ["a", "b"], fake_dispatch)]
     assert out[-1] == "data: [DONE]\n\n"
+    assert any('"text": "hi"' in line for line in out)
+    assert all(chat_req.session_id is None for chat_req in seen)
 
 
 def test_completions_endpoint_non_stream():
@@ -939,6 +941,41 @@ def test_completions_endpoint_stream():
     assert resp.text.rstrip().endswith("data: [DONE]")
 
 
+def test_completions_endpoint_batch_drops_session():
+    pool, acct = make_pool(FakeAccount([OK_SSE, OK_SSE]))
+    app.state.pool = pool
+    client = TestClient(app)
+    resp = client.post("/v1/completions", json={"model": "deepseek-v4.1-flash", "prompt": ["one", "two"], "session_id": "s9"})
+    client.close()
+    assert resp.status_code == 200
+    assert len(resp.json()["choices"]) == 2
+    prompts = [call.kwargs["prompt"] for call in acct.client.completion.await_args_list]
+    assert prompts == ["one", "two"]
+    assert all(call.kwargs["chat_session_id"] == "c1" for call in acct.client.completion.await_args_list)
+
+
+def test_completions_endpoint_single_prompt_keeps_session():
+    pool, acct = make_pool()
+    app.state.pool = pool
+    client = TestClient(app)
+    resp = client.post("/v1/completions", json={"model": "deepseek-v4.1-flash", "prompt": "one", "session_id": "s9"})
+    client.close()
+    assert resp.status_code == 200
+    assert acct.client.completion.await_args.kwargs["prompt"] == "one"
+    assert acct.sessions.obtain.await_args.args[0] == "s9"
+
+
+def test_completions_endpoint_stream_batch_drops_session():
+    pool, acct = make_pool(FakeAccount([OK_SSE, OK_SSE]))
+    app.state.pool = pool
+    client = TestClient(app)
+    resp = client.post("/v1/completions", json={"model": "deepseek-v4.1-flash", "prompt": ["one", "two"], "session_id": "s9", "stream": True})
+    client.close()
+    assert resp.status_code == 200
+    assert resp.text.rstrip().endswith("data: [DONE]")
+    assert acct.sessions.obtain.await_args.args[0] is None
+
+
 def test_embeddings_and_moderations_not_supported():
     client = TestClient(app)
     assert client.post("/v1/embeddings").status_code == 501
@@ -946,11 +983,23 @@ def test_embeddings_and_moderations_not_supported():
     client.close()
 
 
-def test_responses_provider_call_qwen():
+async def test_chat_dispatcher_picks_qwen():
     app.state.qwen_models = [{"id": "qwen3.8-max", "name": "Q", "owned_by": "qwen", "model_type": "chat"}]
     openai_mod._MODEL_CACHE["key"] = None
-    req = SimpleNamespace(model="qwen3.8-max")
-    assert openai_mod._responses_provider_call(req) is openai_mod._chat_completions_qwen
+    assert await openai_mod._chat_dispatcher("qwen3.8-max", SimpleNamespace()) is openai_mod._chat_completions_qwen
+
+
+async def test_chat_dispatcher_picks_deepseek():
+    assert await openai_mod._chat_dispatcher("deepseek-v4.1-flash", SimpleNamespace()) is openai_mod._chat_completions_deepseek
+
+
+async def test_chat_dispatcher_byok_binds_pool(monkeypatch):
+    pool = MagicMock()
+    monkeypatch.setattr(openai_mod, "_byok_mode", lambda: True)
+    monkeypatch.setattr(openai_mod, "_byok_pool_for", AsyncMock(return_value=pool))
+    call = await openai_mod._chat_dispatcher("deepseek-v4.1-flash", SimpleNamespace())
+    assert call.func is openai_mod._chat_completions_deepseek
+    assert call.keywords == {"pool": pool}
 
 
 def test_create_response_non_stream_and_crud():
@@ -1205,36 +1254,10 @@ def test_max_calls():
     assert openai_mod._max_calls(None) is None
 
 
-def test_split_stop():
-    assert openai_mod._split_stop(None) == []
-    assert openai_mod._split_stop("") == []
-    assert openai_mod._split_stop("x") == ["x"]
-    assert openai_mod._split_stop(["a", "", 5, "b"]) == ["a", "b"]
-    assert openai_mod._split_stop(42) == []
-
-
-def test_stream_stop_filter():
-    f = openai_mod._StreamStopFilter(["END"])
-    assert f.feed("") == ("", False)
-    _out, hit = f.feed("hello")
-    assert not hit
-    _out, hit = f.feed(" END")
-    assert hit
-    assert f.flush() == ""
-    f2 = openai_mod._StreamStopFilter(["abc"])
-    f2.feed("xxab")
-    assert f2.flush() == "ab"
-
-
-def test_cjk_units():
-    assert openai_mod._cjk_units("abc") == 0
-    assert openai_mod._cjk_units("aあb") == 1
-
-
-def test_trim_to_tokens():
-    assert openai_mod._trim_to_tokens("", 10) == ""
-    assert openai_mod._trim_to_tokens("hi", None) == "hi"
-    assert openai_mod._trim_to_tokens("alpha beta gamma delta", 1) == "alpha"
+def test_apply_stop():
+    assert openai_mod._apply_stop("hello END world", "END") == "hello "
+    assert openai_mod._apply_stop("hello", None) == "hello"
+    assert openai_mod._apply_stop("ab STOP cd", ["STOP", "cd"]) == "ab "
 
 
 def test_apply_limits():

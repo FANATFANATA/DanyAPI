@@ -243,7 +243,7 @@ async def test_chat_qwen_rejects_non_image_attachment(monkeypatch):
     monkeypatch.setattr(
         openai_mod,
         "_acquire_and_build",
-        AsyncMock(return_value=(MagicMock(), None, (), "prompt", False)),
+        AsyncMock(return_value=(MagicMock(), None, (), "prompt", False, None)),
     )
     monkeypatch.setattr(
         openai_mod,
@@ -266,7 +266,7 @@ async def test_chat_qwen_rejects_non_image_attachment(monkeypatch):
     assert excinfo.value.status_code == 400
 
 
-async def test_send_completion_too_frequent_status_error():
+async def test_send_completion_status_error_is_generic_failure():
     request = httpx.Request("POST", "https://x")
     response = httpx.Response(502, text="Message too frequent", request=request)
     err = httpx.HTTPStatusError("boom", request=request, response=response)
@@ -274,7 +274,7 @@ async def test_send_completion_too_frequent_status_error():
     client.completion = AsyncMock(side_effect=err)
     with pytest.raises(openai_mod.HTTPException) as excinfo:
         await openai_mod._send_completion(client, {}, "s", None, "p", "default", False, False)
-    assert excinfo.value.status_code == 429
+    assert excinfo.value.status_code == 502
 
 
 async def test_send_completion_unexpected_response():
@@ -874,3 +874,199 @@ async def test_stream_openai_strips_dsml_from_content():
     assert "secret reasoning" not in joined
     assert "Here is the plan." in joined
     assert "All done." in joined
+
+
+def _tool_sse_with_status(calls, status):
+    content = json.dumps({"tool_calls": calls})
+    payload = {
+        "v": {
+            "response": {
+                "message_id": 2,
+                "parent_id": 1,
+                "status": status,
+                "fragments": [{"id": 2, "type": "RESPONSE", "content": content}],
+            }
+        }
+    }
+    return f'event: ready\ndata: {{"request_message_id":1,"response_message_id":2,"model_type":"default"}}\n\ndata: {json.dumps(payload)}\n\n'
+
+
+def _tool_preamble_sse(calls, status, preamble):
+    content = preamble + json.dumps({"tool_calls": calls})
+    payload = {
+        "v": {
+            "response": {
+                "message_id": 2,
+                "parent_id": 1,
+                "status": status,
+                "fragments": [{"id": 2, "type": "RESPONSE", "content": content}],
+            }
+        }
+    }
+    return f'event: ready\ndata: {{"request_message_id":1,"response_message_id":2,"model_type":"default"}}\n\ndata: {json.dumps(payload)}\n\n'
+
+
+async def test_stream_tool_call_survives_exhausted_prose_budget():
+    calls = [{"name": "get_weather", "arguments": {"city": "Moscow"}}]
+    acct = FakeAccount([_tool_preamble_sse(calls, "FINISHED", "alpha beta gamma delta epsilon " * 4)])
+    gen = openai_mod._stream_openai(
+        account=acct,
+        pool=MagicMock(),
+        existing_sid="s1",
+        lock=acct.sem,
+        prompt="x",
+        model="deepseek-v4.1-flash",
+        model_type="default",
+        thinking=False,
+        search=False,
+        tool_mode=True,
+        max_tokens=2,
+        tool_schemas=toolemu.tool_schema_map([WEATHER_TOOL]),
+    )
+    joined = "".join(await _collect(gen))
+    assert '"tool_calls"' in joined
+    assert '"name": "get_weather"' in joined
+    assert '"finish_reason": "tool_calls"' in joined
+    assert "before the tool call completed" not in joined
+    assert joined.rstrip().endswith("data: [DONE]")
+
+
+async def test_stream_truncated_tool_block_reports_length():
+    calls = [{"name": "get_weather", "arguments": {"city": "Moscow"}}]
+    acct = FakeAccount([_tool_sse_with_status(calls, "CONTEXT_LENGTH_EXCEEDED")])
+    gen = openai_mod._stream_openai(
+        account=acct,
+        pool=MagicMock(),
+        existing_sid="s1",
+        lock=acct.sem,
+        prompt="x",
+        model="deepseek-v4.1-flash",
+        model_type="default",
+        thinking=False,
+        search=False,
+        tool_mode=True,
+        tool_schemas=toolemu.tool_schema_map([WEATHER_TOOL]),
+    )
+    joined = "".join(await _collect(gen))
+    assert '"tool_calls"' not in joined
+    assert '"finish_reason": "length"' in joined
+    assert "before the tool call completed" in joined
+    assert joined.rstrip().endswith("data: [DONE]")
+
+
+async def test_stream_upload_failure_emits_error_frame():
+    acct = FakeAccount([OK_SSE])
+    acct.client.upload_file = AsyncMock(side_effect=openai_mod.HTTPException(502, "file upload failed: boom"))
+    gen = openai_mod._stream_openai(
+        account=acct,
+        pool=MagicMock(),
+        existing_sid="s1",
+        lock=acct.sem,
+        prompt="x",
+        model="deepseek-v4.1-flash",
+        model_type="default",
+        thinking=False,
+        search=False,
+        attachments=[Attachment(b"a", "a.txt", "text/plain", False)],
+    )
+    joined = "".join(await _collect(gen))
+    assert '"error"' in joined
+    assert "file upload failed: boom" in joined
+    assert '"finish_reason": "stop"' in joined
+    assert '"content": "Hi"' not in joined
+    assert joined.rstrip().endswith("data: [DONE]")
+    acct.client.completion.assert_not_awaited()
+
+
+async def test_stream_reduced_variant_without_tools_resets_tool_mode(monkeypatch):
+    acct = FakeAccount([INPUT_SSE])
+    rec = MessageReconstructor()
+    rec.message = {"fragments": [{"type": "RESPONSE", "content": '{"tool_calls": [{"name": "get_weather", "arguments": {}}]}'}]}
+    monkeypatch.setattr(openai_mod, "_collect_continuation", AsyncMock(return_value=None))
+    monkeypatch.setattr(openai_mod, "_collect_reduced", AsyncMock(return_value=(rec, FakeSession(), "s1", False, {})))
+    gen = openai_mod._stream_openai(
+        account=acct,
+        pool=MagicMock(),
+        existing_sid="s1",
+        lock=acct.sem,
+        prompt="x",
+        model="deepseek-v4.1-flash",
+        model_type="default",
+        thinking=False,
+        search=False,
+        tool_mode=True,
+        tool_schemas=toolemu.tool_schema_map([WEATHER_TOOL]),
+        reduced_prompts=[("plain prompt", False, {})],
+    )
+    joined = "".join(await _collect(gen))
+    assert '"tool_calls"' not in joined
+    assert "get_weather" in joined
+    assert '"finish_reason": "response_incomplete"' in joined
+
+
+async def test_stream_continuation_deadline_stops_rounds(monkeypatch):
+    acct = FakeAccount([INPUT_SSE])
+    calls = []
+
+    async def fake_continuation(*args, **kwargs):
+        calls.append(args[7])
+        return None
+
+    monkeypatch.setattr(openai_mod, "_collect_continuation", fake_continuation)
+    monkeypatch.setattr(openai_mod, "CONTINUE_DEADLINE_SEC", -1.0)
+    gen = openai_mod._stream_openai(
+        account=acct,
+        pool=MagicMock(),
+        existing_sid="s1",
+        lock=acct.sem,
+        prompt="x",
+        model="deepseek-v4.1-flash",
+        model_type="default",
+        thinking=False,
+        search=False,
+    )
+    joined = "".join(await _collect(gen))
+    assert calls == []
+    assert '"response_incomplete"' in joined
+
+
+async def test_stream_continuation_receives_deadline(monkeypatch):
+    acct = FakeAccount([INPUT_SSE])
+    calls = []
+
+    async def fake_continuation(*args, **kwargs):
+        calls.append(args[7])
+        return None
+
+    monkeypatch.setattr(openai_mod, "_collect_continuation", fake_continuation)
+    gen = openai_mod._stream_openai(
+        account=acct,
+        pool=MagicMock(),
+        existing_sid="s1",
+        lock=acct.sem,
+        prompt="x",
+        model="deepseek-v4.1-flash",
+        model_type="default",
+        thinking=False,
+        search=False,
+    )
+    await _collect(gen)
+    assert len(calls) == 1
+    assert calls[0] is not None
+
+
+async def test_collect_continuation_deadline_expired_returns_none():
+    import time as time_mod
+
+    acct = FakeAccount()
+    acct.client.completion = AsyncMock(side_effect=openai_mod.HTTPException(429, "Message too frequent"))
+    rec = await openai_mod._collect_continuation(acct, FakeSession(), None, "default", False, False, None, time_mod.monotonic() - 1.0)
+    assert rec is None
+    acct.client.completion.assert_not_awaited()
+
+
+async def test_collect_continuation_without_deadline_signature_unchanged():
+    acct = FakeAccount([OK_SSE])
+    rec = await openai_mod._collect_continuation(acct, FakeSession(), None, "default", False, False)
+    assert rec is not None
+    assert rec.content == "Hi"

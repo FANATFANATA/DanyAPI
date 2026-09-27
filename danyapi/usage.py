@@ -192,7 +192,7 @@ class UsageTracker:
                 if recent_payload is not None:
                     store.set("usage_recent", recent_payload)
             except Exception as exc:
-                log.debug("usage store write failed: %s", exc)
+                log.warning("usage store write failed: %s", exc)
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
@@ -213,7 +213,7 @@ class UsageTracker:
             self._store.set("usage_recent", recent)
             self._store.flush()
         except Exception as exc:
-            log.debug("usage flush failed: %s", exc)
+            log.warning("usage flush failed: %s", exc)
 
     def reset(self) -> None:
         with self._lock:
@@ -229,4 +229,4 @@ class UsageTracker:
                 self._store.discard("usage")
                 self._store.discard("usage_recent")
             except Exception as exc:
-                log.debug("usage store clear failed: %s", exc)
+                log.warning("usage store clear failed: %s", exc)

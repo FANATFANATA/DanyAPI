@@ -24,7 +24,7 @@ def test_incremental_parse_real_stream():
         rec.handle(event)
     assert rec.response_id == "r1"
     assert rec.content == "Hello"
-    assert rec.finished
+    assert not rec.error
 
 
 def test_thinking_summary():
@@ -108,19 +108,14 @@ def test_error_capture():
     assert rec.error["details"]
 
 
-def test_done_and_stopped():
+def test_done_and_stopped_are_ignored():
     rec = QwenStreamReconstructor()
     rec.handle(SSEEvent(None, {"done": True}))
-    assert rec.finished
-    rec2 = QwenStreamReconstructor()
-    rec2.handle(SSEEvent(None, {"response.stopped": {"response_id": "r1"}}))
-    assert rec2.finished
-
-
-def test_response_stopped_false_does_not_finish():
-    rec = QwenStreamReconstructor()
+    rec.handle(SSEEvent(None, {"response.stopped": {"response_id": "r1"}}))
     rec.handle(SSEEvent(None, {"response.stopped": False}))
-    assert not rec.finished
+    assert rec.content == ""
+    assert not hasattr(rec, "finished")
+    assert not hasattr(rec, "image_size")
 
 
 def test_usage():
@@ -219,22 +214,12 @@ def test_image_phase_image_url_field():
     assert rec.image_urls == ["https://cdn.qwenlm.ai/direct.png"]
 
 
-def test_image_phase_extra_image_hw():
+def test_image_phase_extra_hw_ignored():
     rec = QwenStreamReconstructor()
-    rec.handle(
-        SSEEvent(
-            None,
-            {"choices": [{"delta": {"phase": "image", "extra": {"output_image_hw": [[1152, 2048]]}}}]},
-        )
-    )
-    assert rec.image_size == (1152, 2048)
-
-
-def test_image_phase_extra_invalid_hw_ignored():
-    rec = QwenStreamReconstructor()
-    for hw in ([], [[0, 100]], [["a", "b"]], "bad"):
+    for hw in ([[1152, 2048]], [], [[0, 100]], [["a", "b"]], "bad"):
         rec.handle(SSEEvent(None, {"choices": [{"delta": {"phase": "image", "extra": {"output_image_hw": hw}}}]}))
-    assert rec.image_size is None
+    assert rec.image_urls == []
+    assert rec.content == ""
 
 
 def test_image_phase_extra_url_variants():

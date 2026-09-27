@@ -1,4 +1,5 @@
 import json
+from typing import Any
 
 from danyapi import tools as toolemu
 from danyapi.tools import (
@@ -333,3 +334,67 @@ def test_parse_tool_calls_debug_fix_report():
 def test_toolemu_cache_clear():
     toolemu._tool_schema_map_cache.clear()
     assert toolemu._tool_schema_map_cache == {}
+
+
+def test_fix_tool_calls_full_keeps_arguments_known_from_schemas():
+    schemas = {"add": {"a": "integer", "b": "string"}}
+    calls = [ToolCall("c1", "add", '{"a": 1, "b": "x"}')]
+    assert fix_tool_calls(list(calls), schemas, None, "full")[0].arguments == '{"a": 1, "b": "x"}'
+
+
+def test_fix_tool_calls_full_coerces_using_schema_types():
+    schemas = {"add": {"a": "integer"}}
+    calls = [ToolCall("c1", "add", '{"a": "12"}')]
+    assert fix_tool_calls(list(calls), schemas, None, "full")[0].arguments == '{"a": 12}'
+
+
+def test_fix_tool_calls_full_renames_using_schema_types():
+    schemas = {"add": {"count": "integer"}}
+    calls = [ToolCall("c1", "add", '{"Count": 3}')]
+    assert fix_tool_calls(list(calls), schemas, None, "full")[0].arguments == '{"count": 3}'
+
+
+def test_fix_tool_calls_full_warns_about_unknown_tool():
+    report: dict[str, Any] = {}
+    calls = [ToolCall("c1", "nope", '{"a": 1}')]
+    result = fix_tool_calls(list(calls), {"add": {"a": "integer"}}, None, "full", report)
+    assert result[0].arguments == '{"a": 1}'
+    assert report["warnings"] == [{"call_id": "c1", "kind": "unknown_tool", "name": "nope"}]
+
+
+def test_fix_tool_calls_full_drops_unknown_when_no_schema_is_known():
+    calls = [ToolCall("c1", "add", '{"a": 1, "zzz": 2}')]
+    assert fix_tool_calls(list(calls), {"add": {"a": "integer"}}, None, "full")[0].arguments == '{"a": 1}'
+
+
+def test_fix_tool_calls_ignores_alias_marker_in_schema_types():
+    schemas = {"add": {"_aliases": ["plus"]}}
+    calls = [ToolCall("c1", "add", '{"a": 1}')]
+    assert fix_tool_calls(list(calls), schemas, None, "full")[0].arguments == "{}"
+
+
+def test_iter_json_objects_resumes_after_unterminated_brace():
+    found = list(_iter_json_objects('prose { then {"name": "f", "arguments": {"x": 1}}'))
+    assert [obj for obj, _, _ in found] == [{"name": "f", "arguments": {"x": 1}}]
+
+
+def test_iter_json_objects_skips_balanced_object_without_call():
+    found = list(_iter_json_objects('{"a": 1} and {"name": "f", "arguments": {"x": 1}}'))
+    assert [obj for obj, _, _ in found] == [{"a": 1}, {"name": "f", "arguments": {"x": 1}}]
+
+
+def test_iter_json_objects_stays_bounded_on_nested_braces():
+    text = "{" * 4000 + "}" * 4000 + ' {"name": "f", "arguments": {"x": 1}}'
+    assert len(list(_iter_json_objects(text))) <= toolemu._MAX_JSON_CANDIDATES
+
+
+def test_yaml_value_rejects_non_finite_floats():
+    assert toolemu._yaml_value("1e400") == "1e400"
+    assert toolemu._yaml_value("-Infinity") == "-Infinity"
+    assert toolemu._yaml_value("1.5") == 1.5
+
+
+def test_parse_yaml_calls_non_finite_stays_string():
+    parsed = _parse_yaml_calls("tool_calls:\n- name: f\n  x: 1e400")
+    assert parsed is not None
+    assert json.loads(parsed[0].arguments) == {"x": "1e400"}

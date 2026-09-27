@@ -8,6 +8,8 @@ import math
 import os
 import struct
 import subprocess
+import time
+from contextlib import suppress
 from pathlib import Path
 
 log = logging.getLogger("danyapi.pow")
@@ -46,8 +48,12 @@ _ROUNDS = 23
 _ROUND_CONSTANTS = _RC[1 : _ROUNDS + 1]
 
 _PYTHON_SOLVE_LIMIT = 2_000_000
+_PYTHON_SOLVE_BUDGET_SEC = 5.0
+_PYTHON_BUDGET_CHECK_INTERVAL = 1024
 
 _SOLVER_TIMEOUT_SEC = 60.0
+
+_SOLVER_ENV_DENYLIST = frozenset({"DEEPSEEK_TOKENS", "QWEN_TOKENS", "BYOK", "BYOK_MODE", "DANYAPI_BYOK_MODE"})
 
 
 def _parse_number(value):
@@ -229,12 +235,14 @@ def _find_native_solver() -> Path | None:
     return None
 
 
-def solve_python(challenge_hex: str, salt: str, expire_at: int, difficulty: int) -> int | None:
+def solve_python(challenge_hex: str, salt: str, expire_at: int, difficulty: int, budget: float = _PYTHON_SOLVE_BUDGET_SEC) -> int | None:
     prefix = f"{salt}_{expire_at}_".encode()
     target = bytes.fromhex(challenge_hex)
     limit = max(0, min(int(difficulty), _PYTHON_SOLVE_LIMIT))
     if limit == 0:
         return None
+    deadline = time.monotonic() + budget
+    check = _PYTHON_BUDGET_CHECK_INTERVAL
     pfx_len = len(prefix)
     max_width = len(str(limit - 1))
     if pfx_len + max_width <= _RATE - 2:
@@ -242,14 +250,22 @@ def solve_python(challenge_hex: str, salt: str, expire_at: int, difficulty: int)
         for width in range(1, max_width + 1):
             tails[width] = bytes([0x06]) + b"\x00" * (_RATE - pfx_len - width - 2) + b"\x80"
         for c in range(limit):
+            if c % check == 0 and time.monotonic() >= deadline:
+                return None
             digits = str(c).encode()
             if _hash_block(prefix + digits + tails[len(digits)]) == target:
                 return c
         return None
     for c in range(limit):
+        if c % check == 0 and time.monotonic() >= deadline:
+            return None
         if deepseek_hash_v1(prefix + str(c).encode()) == target:
             return c
     return None
+
+
+def _solver_env() -> dict[str, str]:
+    return {key: value for key, value in os.environ.items() if key not in _SOLVER_ENV_DENYLIST}
 
 
 def _run_solver(script: Path, challenge_hex: str, salt: str, expire_at: int, difficulty: int) -> int | None:
@@ -268,6 +284,7 @@ def _run_solver(script: Path, challenge_hex: str, salt: str, expire_at: int, dif
             text=True,
             timeout=_SOLVER_TIMEOUT_SEC,
             check=False,
+            env=_solver_env(),
         )
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(f"{script.name} timed out after {_SOLVER_TIMEOUT_SEC:g}s") from exc
@@ -283,7 +300,10 @@ def _run_solver(script: Path, challenge_hex: str, salt: str, expire_at: int, dif
         raise RuntimeError(f"{script.name} returned malformed output: {proc.stdout[:300]}")
     if "error" in out:
         raise RuntimeError(str(out["error"]))
-    return out.get("answer")
+    answer = out.get("answer")
+    if isinstance(answer, bool) or not isinstance(answer, int) or answer < 0:
+        raise RuntimeError(f"{script.name} returned an invalid answer: {out!r:.200}")
+    return answer
 
 
 def solve_native(challenge_hex: str, salt: str, expire_at: int, difficulty: int) -> int | None:
@@ -370,8 +390,19 @@ class PowManager:
             self._refill = None
 
     def _kick_refill(self, fetch) -> None:
-        if self._refill is None or self._refill.done():
-            self._refill = asyncio.create_task(self._refill_if_empty(fetch))
+        current = self._refill
+        if current is not None:
+            if not current.done():
+                return
+            with suppress(asyncio.CancelledError):
+                current.exception()
+        self._refill = asyncio.create_task(self._refill_if_empty(fetch))
+
+    def close(self) -> None:
+        current = self._refill
+        self._refill = None
+        if current is not None and not current.done():
+            current.cancel()
 
     async def make_header(self, fetch) -> dict:
         async with self._lock:

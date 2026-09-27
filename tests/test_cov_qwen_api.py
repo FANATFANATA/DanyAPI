@@ -275,12 +275,12 @@ async def test_prepare_session_index_context():
     pool.index_context.assert_called_once_with("new", ("u1",))
 
 
-async def test_prepare_session_no_pool_new_key():
+async def test_prepare_session_no_pool_keeps_key():
     acct = FakeAccount([])
     acct.sessions.obtain = AsyncMock(return_value=(FakeSession(sid="new"), "new"))
     _session, key = await qwen_api._prepare_session(acct, None, "old", "m")
     assert key == "new"
-    acct.sessions.forget.assert_called_once_with("old")
+    acct.sessions.forget.assert_not_called()
 
 
 async def test_send_completion_status_error():
@@ -411,22 +411,26 @@ async def test_human_delay_sleeps(monkeypatch):
 
 
 def test_split_stop_variants():
-    assert qwen_api._split_stop(None) == []
-    assert qwen_api._split_stop("x") == ["x"]
-    assert qwen_api._split_stop("") == []
-    assert qwen_api._split_stop(["a", 1, "", "b"]) == ["a", "b"]
-    assert qwen_api._split_stop(5) == []
-
-
-def test_token_estimate_variants():
-    assert qwen_api._token_estimate(5, 0) == 5
-    assert qwen_api._token_estimate(0, 8) == 2
+    assert qwen_api.split_stop(None) == []
+    assert qwen_api.split_stop("x") == ["x"]
+    assert qwen_api.split_stop("") == []
+    assert qwen_api.split_stop(["a", 1, "", "b"]) == ["a", "b"]
+    assert qwen_api.split_stop(5) == []
 
 
 def test_trim_to_tokens_trims():
-    assert qwen_api._trim_to_tokens("aaaa bbbb cccc", 2) == "aaaa bbbb"
-    assert qwen_api._trim_to_tokens("hello", None) == "hello"
-    assert qwen_api._trim_to_tokens("", 2) == ""
+    assert qwen_api.trim_to_tokens("aaaa bbbb cccc", 2) == "aaaa bbbb"
+    assert qwen_api.trim_to_tokens("hello", None) == "hello"
+    assert qwen_api.trim_to_tokens("", 2) == ""
+
+
+def test_choice_count_bounded():
+    assert qwen_api._choice_count(None) == 1
+    assert qwen_api._choice_count(0) == 1
+    assert qwen_api._choice_count(1) == 1
+    assert qwen_api._choice_count(3) == 3
+    assert qwen_api._choice_count(99) == qwen_api.MAX_CHOICES
+    assert qwen_api._choice_count("x") == 1
 
 
 def test_apply_limits_stop_cut():

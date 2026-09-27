@@ -214,17 +214,15 @@ class SessionRegistry:
             if bind_key != new_id:
                 self._sessions.move_to_end(new_id)
             protect = {new_id, bind_key}
-            seen: set[str] = set()
-            while self._sessions and len(self._sessions) > self._maxsize:
+            allowed = self._maxsize + (1 if bind_key != new_id else 0)
+            while self._sessions and len(self._sessions) > allowed:
                 oldest, entry = self._sessions.popitem(last=False)
                 if oldest not in protect:
                     evicted.append(oldest)
                     self._drop_session_lock(oldest)
                     continue
                 self._sessions[oldest] = entry
-                if oldest in seen:
-                    break
-                seen.add(oldest)
+                self._sessions.move_to_end(oldest)
             if self._store is not None:
                 record = self._serialize(session)
         store = self._store
