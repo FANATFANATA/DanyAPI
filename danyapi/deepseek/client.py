@@ -21,6 +21,12 @@ CLIENT_HEADERS = {
 
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 
+SETTINGS_PATH = "/api/v0/client/settings"
+SETTINGS_SCOPE_MAIN = "main"
+SETTINGS_SCOPE_MODEL = "model"
+MODEL_CONFIGS_KEY = "model_configs"
+DEFAULT_MODEL_TYPE = "default"
+
 
 def new_device_id() -> str:
     return str(uuid.uuid4())
@@ -116,8 +122,8 @@ class DeepSeekClient:
     async def check_auth(self) -> bool:
         try:
             resp = await self.http.get(
-                "/api/v0/client/settings",
-                params={"did": self.device_id, "scope": "main"},
+                SETTINGS_PATH,
+                params={"did": self.device_id, "scope": SETTINGS_SCOPE_MAIN},
             )
         except httpx.HTTPError:
             return False
@@ -128,6 +134,49 @@ class DeepSeekClient:
         except ValueError:
             return False
         return isinstance(payload, dict) and payload.get("code") == 0
+
+    async def fetch_models(self) -> list[dict]:
+        try:
+            resp = await self.http.get(
+                SETTINGS_PATH,
+                params={"did": self.device_id, "scope": SETTINGS_SCOPE_MODEL},
+            )
+        except httpx.HTTPError as exc:
+            raise DeepSeekError(-1, f"http request failed: {exc}") from exc
+        if resp.status_code != 200:
+            raise DeepSeekError(resp.status_code, f"model settings returned {resp.status_code}")
+        try:
+            payload = resp.json()
+        except ValueError as exc:
+            raise DeepSeekError(-1, f"invalid JSON from {SETTINGS_PATH}: {resp.text[:200]}") from exc
+        settings = self._biz(payload).get("settings")
+        entry = settings.get(MODEL_CONFIGS_KEY) if isinstance(settings, dict) else None
+        configs = entry.get("value") if isinstance(entry, dict) else None
+        models: list[dict] = []
+        if not isinstance(configs, list):
+            return models
+        for config in configs:
+            if not isinstance(config, dict):
+                continue
+            model_type = config.get("model_type")
+            if not isinstance(model_type, str) or not model_type:
+                continue
+            if not config.get("enabled", True):
+                log.info("deepseek model type %s is disabled upstream, skipping", model_type)
+                continue
+            models.append(
+                {
+                    "id": model_type,
+                    "name": config.get("name") or model_type,
+                    "owned_by": "deepseek",
+                    "model_type": model_type,
+                    "is_default": bool(config.get("is_default")),
+                    "switchable": bool(config.get("switchable")),
+                    "supports_thinking": bool(config.get("think_feature")),
+                    "supports_search": bool(config.get("search_feature")),
+                }
+            )
+        return models
 
     async def get_user(self) -> dict:
         resp = await self._post("/api/v0/users", None)

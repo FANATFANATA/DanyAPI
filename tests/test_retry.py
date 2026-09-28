@@ -4,12 +4,13 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi import HTTPException
 
 import danyapi.api.chats as chats_mod
 import danyapi.api.deepseek as deepseek_mod
 import danyapi.api.openai as openai_mod
 import danyapi.api.retry as retry_mod
-from danyapi.api.openai import ChatMessage, _collect_non_stream, _stream_openai
+from danyapi.api.openai import ChatMessage, _collect_non_stream, _stream_openai, app
 
 BUSY_SSE = (
     "event: ready\n"
@@ -549,9 +550,36 @@ async def test_stream_full_consumption_does_not_stop_upstream():
 
 
 def test_model_type_mapping():
-    assert openai_mod.MODEL_TYPE_BY_NAME == {
-        "deepseek-v4.1-flash": "default",
-    }
+    app.state.deepseek_models = [
+        {
+            "id": "default",
+            "name": "Instant",
+            "owned_by": "deepseek",
+            "model_type": "chat",
+            "upstream_type": "default",
+            "is_default": True,
+        }
+    ]
+    try:
+        assert openai_mod._resolve_model("default") == "default"
+        assert openai_mod._resolve_model("default-thinking") == "default"
+        assert openai_mod._resolve_model("deepseek-v4.1-flash") == "default"
+        assert openai_mod._default_deepseek_model_type() == "default"
+    finally:
+        app.state.deepseek_models = []
+
+
+def test_model_type_mapping_unknown_model():
+    with pytest.raises(HTTPException) as excinfo:
+        openai_mod._resolve_model("nope")
+    assert excinfo.value.status_code == 404
+
+
+def test_model_type_mapping_falls_back_to_upstream_default():
+    try:
+        assert openai_mod._resolve_model("deepseek-v4.1-flash") == "default"
+    finally:
+        app.state.deepseek_models = []
 
 
 async def test_search_and_thinking_allowed():

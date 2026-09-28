@@ -13,6 +13,7 @@ from fastapi.responses import StreamingResponse
 from .. import tools as toolemu
 from ..accounts import AccountPool, AccountPoolBusy
 from ..alice import api as alice_api
+from ..duckai import api as duckai_api
 from ..gigachat import api as gigachat_api
 from ..qwen import api as qwen_api
 from .attachments import _collect_attachments, _validate_attachments
@@ -33,6 +34,7 @@ CHAT_HANDLERS = {
     "qwen": "_chat_completions_qwen",
     "gigachat": "_chat_completions_gigachat",
     "alice": "_chat_completions_alice",
+    "duckai": "_chat_completions_duckai",
 }
 
 
@@ -487,5 +489,43 @@ async def _chat_completions_alice(req: ChatCompletionRequest, pool: AccountPool 
 
     try:
         return await alice_api.collect_non_stream(**common)
+    except AccountPoolBusy:
+        raise HTTPException(429, "all accounts are busy, try again later") from None
+
+
+async def _chat_completions_duckai(req: ChatCompletionRequest, pool: AccountPool | None = None) -> Any:
+    if pool is None:
+        pool = getattr(app.state, "duckai_pool", None)
+    if pool is None:
+        raise HTTPException(503, "duckai provider is not configured (set DUCKAI_ENABLED=1 to enable)")
+
+    if getattr(req, "files", None):
+        raise HTTPException(400, "duckai does not support file attachments, send images inline instead")
+    account, existing_sid = await _acquire_account(pool, req.session_id)
+
+    tools, tool_choice = _materialize_tools(req)
+    common = {
+        "account": account,
+        "messages": req.messages,
+        "model": req.model,
+        "tools": tools,
+        "tool_choice": tool_choice,
+        "functions": getattr(req, "functions", None),
+        "function_call": getattr(req, "function_call", None),
+        "thinking": req.thinking,
+        "search": bool(req.search),
+        "stop": getattr(req, "stop", None),
+        "user": getattr(req, "user", None),
+        "session_id": existing_sid,
+    }
+    if req.stream:
+        return StreamingResponse(
+            _stream_guard(duckai_api.stream_openai(include_usage=_include_usage(req), **common), req.model),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    try:
+        return await duckai_api.collect_non_stream(**common)
     except AccountPoolBusy:
         raise HTTPException(429, "all accounts are busy, try again later") from None

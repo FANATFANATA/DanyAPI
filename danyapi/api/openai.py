@@ -18,6 +18,7 @@ from ..alice.client import AliceClient, AliceError
 from ..config import MAX_CHOICES, settings
 from ..deepseek.client import DeepSeekClient, DeepSeekError, DeepSeekSession
 from ..deepseek.stream import IncrementalSSE, MessageReconstructor
+from ..duckai import api as duckai_api
 from ..gigachat import api as gigachat_api
 from ..gigachat.accounts import GigaChatAccount
 from ..gigachat.client import GigaChatClient, GigaChatError
@@ -64,6 +65,7 @@ from .chats import (
     _can_reuse_session,
     _chat_completions_alice,
     _chat_completions_deepseek,
+    _chat_completions_duckai,
     _chat_completions_gigachat,
     _chat_completions_qwen,
     _chat_dispatcher,
@@ -198,18 +200,21 @@ from .images import (
     image_variations,
 )
 from .models import (
-    ALICE_DEFAULT_MODELS,
     ALICE_MODEL_IDS,
-    GIGACHAT_DEFAULT_MODELS,
+    DEEPSEEK_LEGACY_ALIASES,
     MODEL_CREATED_AT,
-    MODEL_TYPE_BY_NAME,
-    QWEN_DEFAULT_MODELS,
+    MODEL_FETCHERS,
     REASONING_SUFFIXES,
     _all_models,
+    _default_deepseek_model_type,
     _fetch_alice_models,
+    _fetch_deepseek_models,
+    _fetch_duckai_models,
     _fetch_gigachat_models,
     _fetch_qwen_models,
     _finish_reason,
+    _header_api_key,
+    _is_deepseek_model,
     _is_reasoning_model,
     _model_cache_key,
     _model_source,
@@ -217,8 +222,13 @@ from .models import (
     _output_truncated,
     _resolve_model,
     _resolve_provider,
+    _store_models,
     get_model,
     list_models,
+    model_refresh_loop,
+    provider_enabled,
+    refresh_models,
+    refresh_provider_models,
 )
 from .powauth import (
     DEEPSEEK_AUTH_ERROR_CODES,
@@ -272,12 +282,18 @@ from .sse import (
 )
 from .state import (
     BYOK_PROVIDERS,
+    KEYLESS_PROVIDERS,
+    MODEL_ATTRS,
+    POOL_ATTRS_BY_PROVIDER,
     _byok_auth_state,
     _byok_locks_state,
     _byok_mode,
     _byok_pools_state,
     _byok_stores_state,
     app,
+    provider_models,
+    provider_needs_api_key,
+    provider_pool,
 )
 
 
@@ -318,6 +334,33 @@ def _pool_stats(pool) -> dict | None:
         return None
 
 
+def _byok_pools_for(provider: str, byok_pools: dict[str, Any]) -> list[Any]:
+    pools = [pool for pool in (byok_pools.get(provider) or {}).values() if pool is not None]
+    if provider_needs_api_key(provider):
+        return pools
+    singleton = getattr(app.state, f"byok_{provider}_pool", None)
+    if singleton is not None and singleton not in pools:
+        pools.insert(0, singleton)
+    return pools
+
+
+def _byok_provider_stats(provider: str, byok_pools: dict[str, Any]) -> dict:
+    pools = _byok_pools_for(provider, byok_pools)
+    accounts = healthy = broken = 0
+    for pool in pools:
+        stats = _pool_stats(pool) or {}
+        accounts += int(stats.get("accounts") or 0)
+        healthy += int(stats.get("healthy") or 0)
+        broken += int(stats.get("broken") or 0)
+    return {
+        "pools": len(pools),
+        "accounts": accounts,
+        "healthy": healthy,
+        "broken": broken,
+        "models": len(provider_models(provider)),
+    }
+
+
 def _usage_summary() -> dict | None:
     tracker = getattr(app.state, "usage", None)
     if tracker is None:
@@ -330,26 +373,27 @@ def _usage_summary() -> dict | None:
 
 @app.get("/health")
 async def health() -> dict:
-    pool = getattr(app.state, "pool", None)
-    qwen_pool = getattr(app.state, "qwen_pool", None)
-    gigachat_pool = getattr(app.state, "gigachat_pool", None)
-    alice_pool = getattr(app.state, "alice_pool", None)
-    result = {
+    byok_mode = _byok_mode()
+    result: dict[str, Any] = {
         "status": "ok",
-        "deepseek": pool is not None,
-        "qwen": qwen_pool is not None,
-        "gigachat": gigachat_pool is not None,
-        "alice": alice_pool is not None,
-        "deepseek_stats": _pool_stats(pool),
-        "qwen_stats": _pool_stats(qwen_pool),
-        "gigachat_stats": _pool_stats(gigachat_pool),
-        "alice_stats": _pool_stats(alice_pool),
         "usage": _usage_summary(),
     }
-    if _byok_mode():
+    if byok_mode:
         byok_pools = await _byok_pools_state()
         result["byok"] = True
-        result["byok_pools"] = {provider: len(entries) for provider, entries in byok_pools.items()}
+        result["byok_pools"] = {provider: len(entries or {}) for provider, entries in byok_pools.items()}
+        result["byok_api_key_required"] = {provider: provider_needs_api_key(provider) for provider in BYOK_PROVIDERS}
+        for provider in BYOK_PROVIDERS:
+            result[provider] = True
+            result[f"{provider}_stats"] = _byok_provider_stats(provider, byok_pools)
+        return result
+    for provider in BYOK_PROVIDERS:
+        pool = provider_pool(provider)
+        result[provider] = provider_enabled(provider)
+        stats = _pool_stats(pool)
+        if stats is not None:
+            stats = {**stats, "models": len(provider_models(provider))}
+        result[f"{provider}_stats"] = stats
     return result
 
 
@@ -368,6 +412,7 @@ _MODEL_CACHE: dict[str, Any] = {
     "qwen_ids": None,
     "gigachat_ids": None,
     "alice_ids": None,
+    "duckai_ids": None,
 }
 
 
@@ -641,7 +686,6 @@ async def unknown_v1_route(path: str) -> dict:
 
 
 __all__ = [
-    "ALICE_DEFAULT_MODELS",
     "ALICE_MODEL_IDS",
     "BYOK_AUTH_LIMIT",
     "BYOK_POOL_LIMIT",
@@ -650,12 +694,13 @@ __all__ = [
     "CONTINUE_DEADLINE_SEC",
     "CONTINUE_PROMPT",
     "DEEPSEEK_AUTH_ERROR_CODES",
+    "DEEPSEEK_LEGACY_ALIASES",
     "FAKE_CONTEXT_HINT_ERROR_MESSAGE",
     "FAKE_CONTEXT_HINT_MARKERS",
-    "GIGACHAT_DEFAULT_MODELS",
     "IMAGE_SIZE_RE",
     "INPUT_EXCEEDS_LIMIT",
     "INTERNAL_ERROR_MESSAGE",
+    "KEYLESS_PROVIDERS",
     "MAX_ATTACHMENT_TOTAL_SIZE",
     "MAX_CHOICES",
     "MAX_CONTINUE_ROUNDS",
@@ -671,10 +716,11 @@ __all__ = [
     "MESSAGE_TOO_FREQUENT_MAX_RETRIES",
     "MESSAGE_TOO_FREQUENT_WAIT_SEC",
     "MIN_IMAGE_DIM",
+    "MODEL_ATTRS",
     "MODEL_CREATED_AT",
-    "MODEL_TYPE_BY_NAME",
+    "MODEL_FETCHERS",
     "POOL_ATTRS",
-    "QWEN_DEFAULT_MODELS",
+    "POOL_ATTRS_BY_PROVIDER",
     "REASONING_SUFFIXES",
     "REDUCED_CONTEXT_MESSAGE",
     "REMOTE_IMAGE_SCHEMES",
@@ -757,6 +803,7 @@ __all__ = [
     "_can_reuse_session",
     "_chat_completions_alice",
     "_chat_completions_deepseek",
+    "_chat_completions_duckai",
     "_chat_completions_gigachat",
     "_chat_completions_qwen",
     "_chunk_id_from_line",
@@ -779,6 +826,7 @@ __all__ = [
     "_deepseek_error_detail",
     "_deepseek_status",
     "_deepseek_usage",
+    "_default_deepseek_model_type",
     "_deferred_close_tasks",
     "_delta_json",
     "_drop_session",
@@ -794,6 +842,8 @@ __all__ = [
     "_extract_request_body",
     "_fake_context_error_body",
     "_fetch_alice_models",
+    "_fetch_deepseek_models",
+    "_fetch_duckai_models",
     "_fetch_gigachat_models",
     "_fetch_qwen_models",
     "_finish_reason",
@@ -801,6 +851,7 @@ __all__ = [
     "_fresh_pow_headers",
     "_fresh_pow_upload_headers",
     "_handle_account_error",
+    "_header_api_key",
     "_image_client_lock",
     "_image_edit_req",
     "_image_generations",
@@ -812,6 +863,7 @@ __all__ = [
     "_incomplete_message",
     "_input_exceeds_hint_from_http",
     "_is_context_limit",
+    "_is_deepseek_model",
     "_is_fake_context_hint",
     "_is_input_exceeds_limit",
     "_is_message_too_frequent_hint",
@@ -863,6 +915,7 @@ __all__ = [
     "_shared_store",
     "_split_data_uri",
     "_sse",
+    "_store_models",
     "_stream_error_sse",
     "_stream_guard",
     "_stream_openai",
@@ -889,6 +942,7 @@ __all__ = [
     "completions",
     "create_response",
     "delete_response",
+    "duckai_api",
     "embeddings_not_supported",
     "favicon",
     "get_model",
@@ -901,9 +955,16 @@ __all__ = [
     "image_variations",
     "lifespan",
     "list_models",
+    "model_refresh_loop",
     "moderations_not_supported",
     "normalize_usage",
+    "provider_enabled",
+    "provider_models",
+    "provider_needs_api_key",
+    "provider_pool",
     "qwen_api",
+    "refresh_models",
+    "refresh_provider_models",
     "request_body",
     "resolve_ca",
     "responses_api",

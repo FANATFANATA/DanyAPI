@@ -14,7 +14,7 @@ A public instance is already running in production (BYOK_MODE=1):
 
 - API base URL: `https://danyapi.cloudpub.ru/v1/`
 
-Point any OpenAI compatible client at API base URL with a valid tokens, unauthenticated requests are rejected with 401. The API key should be the raw token (e.g. "token1,token2", same in .env).
+Point any OpenAI compatible client at API base URL with a valid tokens, unauthenticated requests are rejected with 401. The API key should be the raw token (e.g. "token1,token2", same in .env). The `alice`, `alice-ai`, `yagpt` and Duck.ai models need no key and are reachable without one; DeepSeek, Qwen and GigaChat models return 401 without a key. `GET /health` reports every provider as enabled in this mode, with `byok_api_key_required` naming the ones that need a key.
 
 ### Example request
 
@@ -61,6 +61,7 @@ docker run -d -p 8000:8000 \
   -e QWEN_TOKENS="token3" \
   -e GIGACHAT_KEYS="<authorization_key>" \
   -e ALICE_ENABLED=1 \
+  -e DUCKAI_ENABLED=1 \
   ghcr.io/fanatfanata/danyapi:latest
 ```
 
@@ -98,7 +99,9 @@ Credentials:
 | `DANYAPI_GIGACHAT_CA_FILE` | empty | Path to a CA bundle for GigaChat, empty uses the bundled Russian root CA |
 | `ALICE_ENABLED` | empty | `1` enables the unofficial Yandex Alice provider, see the warning below |
 | `ALICE_ACCOUNTS` | `1` | Concurrent Alice connections, `1` to `4` |
-| `BYOK` / `BYOK_MODE` / `DANYAPI_BYOK_MODE` | empty | `1` runs in bring-your-own-key mode: every request supplies its own provider token instead of using the pools above |
+| `DUCKAI_ENABLED` | empty | `1` enables the unofficial Duck.ai provider, see the warning below |
+| `DUCKAI_ACCOUNTS` | `1` | Concurrent Duck.ai connections, `1` to `4` |
+| `BYOK` / `BYOK_MODE` / `DANYAPI_BYOK_MODE` | empty | `1` runs in bring-your-own-key mode: DeepSeek, Qwen and GigaChat requests supply their own key, Alice and Duck.ai need none. `GET /health` reports every provider as enabled and reports the per-key pools |
 | `DANYAPI_ADMIN_TOKEN` | empty | Bearer token required by `POST /v1/tokens`, empty keeps that endpoint disabled |
 
 Server:
@@ -133,6 +136,7 @@ Usage and logging:
 | `DANYAPI_LOG_MAX_BYTES` | `10485760` | Size at which the log file rotates |
 | `DANYAPI_LOG_BACKUP_COUNT` | `3` | Rotated log files kept |
 | `DANYAPI_BYOK_AUTH_TTL_SECONDS` | `300` | How long a BYOK token check is reused |
+| `DANYAPI_MODELS_REFRESH_SECONDS` | `900` | How often provider model lists are refetched, `0` disables the background refresh |
 
 ## GigaChat
 
@@ -157,6 +161,33 @@ Images work on the Pro, Max and Ultra tiers only. `GigaChat-2` and `GigaChat-3-L
 Read this before enabling it. Yandex has no public API for this, so the provider speaks an undocumented internal protocol of a consumer service, and `yandex.ru/legal/alice_chat` clause 4.2 forbids circumventing technical protections and imitating the service's functioning. Yandex also versions and reshapes this protocol without notice, so the provider can break at any time. It is disabled unless you set `ALICE_ENABLED=1`, which is your acknowledgement of the above.
 
 Behaviour to expect from the answers: the endpoint is stateless, so the whole conversation is folded into one prompt; it routes prompts across scenario handlers rather than to a single model, so many prompts get a canned Alice reply or a persona refusal instead of an answer; and there is no incremental text, so streaming sends the finished text in a single chunk.
+
+## Duck.ai, unofficial
+
+The free-tier Duck.ai models, currently `mistral-small-2603`, `gpt-5.6-luna`, `tinfoil/gemma4-31b`, `gpt-5.4-mini`, `tinfoil/gpt-oss-120b` and `claude-haiku-4-5`, route to DuckDuckGo's public Duck.ai chat at `https://duck.ai/duckchat/v1`. The list is not fixed: it is parsed from the model table the Duck.ai web bundle currently ships, filtered to the models DuckDuckGo grants the free tier, and refetched on the model refresh interval. It needs no key, no account and no token.
+
+Read this before enabling it. DuckDuckGo has no public API for this, so the provider speaks an undocumented internal protocol of a consumer service, and the attestation it demands is a browser fingerprint. The Duck.ai terms at `https://duckduckgo.com/duckduckgo-help-pages/duckai` forbid circumventing technical protections and imitating the service's functioning, and DuckDuckGo reshapes this protocol without notice, so the provider can break at any time. It is disabled unless you set `DUCKAI_ENABLED=1`, which is your acknowledgement of the above.
+It does work, and it was measured end to end through the real HTTP surface on a host with no proxy: nine of twelve consecutive requests answered with real model output, streaming included. Two things make that possible and are easy to get wrong. duck.ai compares the build identifier in `x-fe-version` against the one it is currently serving, so the provider reads it from the landing page on startup; a stale value is refused as an unsupported entrypoint. And every request carries a proof that a real browser made it, computed by evaluating a script DuckDuckGo serves fresh on each request against a browser environment. The solver in `danyapi/duckai/jsa_solver.js` reproduces that environment: DOM prototype chain, error and stack API, a box model, and an HTML fragment parser. Some of those scripts are HTML parser differentials that only a real parser answers correctly, so a minority of requests is refused with `403` and an explanation. The provider re-solves a freshly served attestation and retries those, keeps a startup miss from stopping the server, and never disables the account over one.
+
+Now the part worth planning around. After a few dozen automated requests in a row, DuckDuckGo stops judging the proof and refuses the client outright: `ERR_BN_LIMIT`, the same "unsupported entrypoint" wording, returned in about a tenth of a second, before any attestation is evaluated. A real Chrome on the same host kept answering normally throughout, and roughly twenty minutes of quiet did not clear it. So this is not your address being blocked and not a solver bug; it is DuckDuckGo deciding a Python client is a client, and the decision is sticky. The honest reading is that a provider which has to impersonate a browser will be recognised eventually, and there is no amount of header tuning in Python that changes that, because what is missing is a browser engine, not a header. Treat this provider as something that works interactively and in light use, not as a dependable backend route, and keep the other providers for anything that has to be reliable.
+
+Differences from the OpenAI API to keep in mind: there is no `system` role, so system and developer messages are folded into the first user turn; `reasoningEffort` is clamped to what the chosen model supports, which is read from the same live table as the model list; there is no `n`, `seed`, penalty or `response_format` support; images must be inline data URIs, at most three per message and ten per request, and file attachments are rejected; and there is no usage accounting upstream, so token counts are estimated from the text. Tool calls are native, and web search and image generation are switched off because the free tier does not grant them.
+
+## Models
+
+Model lists are not hardcoded. Every provider is asked where it runs and the answer is what `GET /v1/models` serves:
+
+| Provider | Source | Auth |
+| --- | --- | --- |
+| DeepSeek | `model_configs` in the web client settings at `scope=model` | none |
+| Qwen | `GET /api/v2/models/` on the account | a token gives the account list, without one it serves the visitor list |
+| GigaChat | `GET /models` on the official API | authorization key |
+| Duck.ai | the model table in the Duck.ai web bundle, filtered to the free tier | none |
+| Alice | the provider's own aliases, upstream serves no catalog | none |
+
+The lists are fetched at startup and refetched every `DANYAPI_MODELS_REFRESH_SECONDS`, and a fetch that fails or comes back empty keeps the last good list rather than emptying `GET /v1/models`. Send `?refresh=1` to `GET /v1/models`, or pass a key in `Authorization` or `x-api-key`, to force a refetch right now and, for GigaChat, to read the list your own key is granted.
+
+Only models the upstream marks enabled are listed, so a DeepSeek model type the account is not given does not appear. DeepSeek ids are its `model_type` values, `default` today, with a `-thinking` sibling for each that toggles reasoning; `deepseek-v4.1-flash` still resolves as an alias of the default one. In BYOK mode the keyless providers are catalogued from the same endpoints without any key, and GigaChat joins the list as soon as a request arrives with a key.
 
 ## Token utility
 

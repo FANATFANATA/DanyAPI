@@ -510,6 +510,24 @@ def collect_alice(current, defaults):
     return {"ALICE_ENABLED": enabled}
 
 
+def collect_duckai(current, defaults):
+    print()
+    print("[ Duck.ai, unofficial ]")
+    print("  Free and keyless, but it speaks an undocumented internal protocol of a consumer service")
+    print("  and proves a browser fingerprint. DuckDuckGo's terms forbid that, and it refuses")
+    print("  datacenter addresses outright. Needs Node.js on the host. See the README.")
+    enabled = read_value(
+        "  Enable the unofficial Duck.ai provider? yes/no [" + (current.get("DUCKAI_ENABLED", "") or "no") + "]: ",
+        current.get("DUCKAI_ENABLED", ""),
+        defaults.get("DUCKAI_ENABLED", ""),
+    )
+    if enabled.strip().lower() in ("n", "no", "off", "0", "false", "нет"):
+        enabled = ""
+    elif enabled.strip():
+        enabled = "1"
+    return {"DUCKAI_ENABLED": enabled}
+
+
 def validate_provider(name, creds, defaults):
     while True:
         ok, detail = check_provider(name, creds)
@@ -664,10 +682,12 @@ def main():
     qwen = validate_provider("Qwen", collect_provider("Qwen", current, defaults), defaults)
     gigachat = validate_gigachat(collect_gigachat(current, defaults), defaults)
     alice = collect_alice(current, defaults)
+    duckai = collect_duckai(current, defaults)
     values.update(deepseek)
     values.update(qwen)
     values.update(gigachat)
     values.update(alice)
+    values.update(duckai)
 
     print()
     print("Now the rest of the settings. Enter to keep the current value, !clear to erase, !reset to restore the default.")
@@ -685,9 +705,10 @@ def main():
     has_qwen = any(v for v in qwen.values() if v)
     has_gigachat = any(v for v in gigachat.values() if v)
     has_alice = any(v for v in alice.values() if v)
-    if not (has_ds or has_qwen or has_gigachat or has_alice):
+    has_duckai = any(v for v in duckai.values() if v)
+    if not (has_ds or has_qwen or has_gigachat or has_alice or has_duckai):
         print("Warning: no provider credentials configured.")
-        print("The server will not start until you add DEEPSEEK_TOKENS, QWEN_TOKENS, GIGACHAT_KEYS or ALICE_ENABLED=1.")
+        print("The server will not start until you add DEEPSEEK_TOKENS, QWEN_TOKENS, GIGACHAT_KEYS, ALICE_ENABLED=1 or DUCKAI_ENABLED=1.")
 
     if ask("Create a DanyAPI launcher shortcut on the desktop?", True):
         try:

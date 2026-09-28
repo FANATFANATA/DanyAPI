@@ -620,13 +620,29 @@ def test_all_models():
 
 def test_get_model_found_and_missing():
     app.state.qwen_models = [{"id": "q1", "name": "Q", "owned_by": "qwen", "model_type": "chat"}]
+    app.state.deepseek_models = [
+        {
+            "id": "default",
+            "name": "Instant",
+            "owned_by": "deepseek",
+            "model_type": "chat",
+            "upstream_type": "default",
+            "is_default": True,
+        }
+    ]
     openai_mod._MODEL_CACHE["key"] = None
-    client = TestClient(app)
-    ok = client.get("/v1/models/deepseek-v4.1-flash")
-    missing = client.get("/v1/models/does-not-exist")
-    client.close()
-    assert ok.status_code == 200
-    assert missing.status_code == 404
+    try:
+        client = TestClient(app)
+        ok = client.get("/v1/models/default")
+        alias = client.get("/v1/models/default-thinking")
+        missing = client.get("/v1/models/does-not-exist")
+        client.close()
+        assert ok.status_code == 200
+        assert alias.status_code == 200
+        assert missing.status_code == 404
+    finally:
+        app.state.qwen_models = []
+        app.state.deepseek_models = []
 
 
 def test_resolve_provider_via_cache():
@@ -1481,7 +1497,12 @@ def test_write_env_tokens_is_atomic(monkeypatch, tmp_path):
 
 async def test_fetch_qwen_models_survives_network_error():
     client = SimpleNamespace(fetch_models=AsyncMock(side_effect=RuntimeError("connection reset")))
-    assert await openai_mod._fetch_qwen_models(client) == openai_mod.QWEN_DEFAULT_MODELS
+    app.state.qwen_models = [{"id": "kept", "name": "kept", "owned_by": "qwen", "model_type": "chat"}]
+    try:
+        kept = await openai_mod._store_models("qwen", client)
+        assert [model["id"] for model in kept] == ["kept"]
+    finally:
+        app.state.qwen_models = []
 
 
 async def test_image_http_client_is_shared():

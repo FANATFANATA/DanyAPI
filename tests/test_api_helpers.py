@@ -709,20 +709,49 @@ async def test_success_filters():
     assert len(result) == 3
 
 
-async def test_error_uses_defaults():
+async def test_error_keeps_last_known_models():
     from danyapi.qwen.client import QwenError
 
     client = MagicMock()
     client.fetch_models = AsyncMock(side_effect=QwenError(500, "boom"))
-    result = await openai_mod._fetch_qwen_models(client)
-    assert result == openai_mod.QWEN_DEFAULT_MODELS
+    with pytest.raises(QwenError):
+        await openai_mod._fetch_qwen_models(client)
+    app.state.qwen_models = [{"id": "kept", "name": "kept", "owned_by": "qwen", "model_type": "chat"}]
+    try:
+        kept = await openai_mod._store_models("qwen", client)
+        assert [model["id"] for model in kept] == ["kept"]
+    finally:
+        app.state.qwen_models = []
 
 
-async def test_empty_uses_defaults():
+async def test_empty_keeps_last_known_models():
     client = MagicMock()
     client.fetch_models = AsyncMock(return_value=[])
-    result = await openai_mod._fetch_qwen_models(client)
-    assert result == openai_mod.QWEN_DEFAULT_MODELS
+    app.state.qwen_models = [{"id": "kept", "name": "kept", "owned_by": "qwen", "model_type": "chat"}]
+    try:
+        kept = await openai_mod._store_models("qwen", client)
+        assert [model["id"] for model in kept] == ["kept"]
+    finally:
+        app.state.qwen_models = []
+
+
+async def test_store_models_replaces_state_on_success():
+    client = MagicMock()
+    client.fetch_models = AsyncMock(
+        return_value=[
+            {
+                "id": "qwen-live",
+                "name": "Qwen Live",
+                "info": {"meta": {"chat_type": ["t2t", "t2i"]}},
+            }
+        ]
+    )
+    try:
+        stored = await openai_mod._store_models("qwen", client)
+        assert [model["id"] for model in stored] == ["qwen-live"]
+        assert app.state.qwen_models[0]["model_type"] == "chat"
+    finally:
+        app.state.qwen_models = []
 
 
 async def test_busy():
@@ -757,12 +786,17 @@ def test_health_with_pools():
     pool.stats.return_value = {"accounts": 2}
     app.state.pool = pool
     app.state.qwen_pool = pool
-    client = TestClient(app)
-    data = client.get("/health").json()
-    client.close()
-    assert data["deepseek"]
-    assert data["qwen"]
-    assert data["deepseek_stats"] == {"accounts": 2}
+    app.state.deepseek_models = [{"id": "default", "name": "Instant", "owned_by": "deepseek", "model_type": "chat"}]
+    try:
+        client = TestClient(app)
+        data = client.get("/health").json()
+        client.close()
+        assert data["deepseek"]
+        assert data["qwen"]
+        assert data["deepseek_stats"] == {"accounts": 2, "models": 1}
+        assert data["qwen_stats"] == {"accounts": 2, "models": 0}
+    finally:
+        app.state.deepseek_models = []
 
 
 def test_usage_endpoint_disabled():
@@ -802,12 +836,27 @@ def test_health_includes_usage():
 
 def test_list_models():
     app.state.qwen_models = [{"id": "qwen3.8-max", "name": "Q", "owned_by": "qwen", "model_type": "chat"}]
-    client = TestClient(app)
-    data = client.get("/v1/models").json()
-    client.close()
-    ids = [m["id"] for m in data["data"]]
-    assert "deepseek-v4.1-flash" in ids
-    assert "qwen3.8-max" in ids
+    app.state.deepseek_models = [
+        {
+            "id": "default",
+            "name": "Instant",
+            "owned_by": "deepseek",
+            "model_type": "chat",
+            "upstream_type": "default",
+            "is_default": True,
+        }
+    ]
+    try:
+        client = TestClient(app)
+        data = client.get("/v1/models").json()
+        client.close()
+        ids = [m["id"] for m in data["data"]]
+        assert "default" in ids
+        assert "default-thinking" in ids
+        assert "qwen3.8-max" in ids
+    finally:
+        app.state.qwen_models = []
+        app.state.deepseek_models = []
 
 
 def test_chat_unknown_model():
@@ -978,14 +1027,31 @@ def test_qwen_tokens_ok():
 
 
 @pytest.mark.usefixtures("reset_app_state")
+def test_duckai_kept_when_bot_check_misses():
+    from danyapi.duckai.client import DuckAIClient as DAC
+
+    with (
+        _patch_creds(qwen_tokens=[]),
+        patch.object(settings, "duckai_enabled", True),
+        patch.object(settings, "duckai_accounts", 1),
+        patch.object(DAC, "check_auth", new=AsyncMock(return_value=False)),
+    ):
+        with TestClient(app):
+            assert app.state.duckai_pool is not None
+            assert len(app.state.duckai_pool.accounts) == 1
+            assert app.state.duckai_models
+
+
+@pytest.mark.usefixtures("reset_app_state")
 def test_no_credentials_raises():
     with (
         patch.object(settings, "deepseek_tokens", []),
         patch.object(settings, "qwen_tokens", []),
         patch.object(settings, "gigachat_keys", []),
         patch.object(settings, "alice_enabled", False),
+        patch.object(settings, "duckai_enabled", False),
     ):
-        with pytest.raises(RuntimeError, match="DEEPSEEK_TOKENS, QWEN_TOKENS, GIGACHAT_KEYS or ALICE_ENABLED"):
+        with pytest.raises(RuntimeError, match="DEEPSEEK_TOKENS, QWEN_TOKENS, GIGACHAT_KEYS, ALICE_ENABLED=1 or DUCKAI_ENABLED=1"):
             with TestClient(app):
                 pass
 

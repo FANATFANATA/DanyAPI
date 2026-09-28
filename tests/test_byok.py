@@ -1,11 +1,13 @@
 import asyncio
 import json
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from starlette.requests import Request
 
+import danyapi.api.byok as byok_mod
 import danyapi.api.images as images_mod
 import danyapi.api.openai as openai_mod
 from danyapi.api.openai import app, settings
@@ -14,9 +16,10 @@ from danyapi.api.openai import app, settings
 @pytest.fixture(autouse=True)
 async def _reset_byok_state():
     app.state.byok = False
-    app.state.byok_pools = {"deepseek": {}, "qwen": {}}
-    app.state.byok_locks = {"deepseek": asyncio.Lock(), "qwen": asyncio.Lock()}
+    app.state.byok_pools = {provider: {} for provider in openai_mod.BYOK_PROVIDERS}
+    app.state.byok_locks = {provider: asyncio.Lock() for provider in openai_mod.BYOK_PROVIDERS}
     saved_models = getattr(app.state, "qwen_models", None)
+    app.state.byok_alice_pool = None
     yield
     pools = getattr(app.state, "byok_pools", {})
     for cache in pools.values():
@@ -24,9 +27,10 @@ async def _reset_byok_state():
             pool = cache.pop(key)
             await openai_mod._close_pool(pool)
     app.state.byok = False
-    app.state.byok_pools = {"deepseek": {}, "qwen": {}}
-    app.state.byok_locks = {"deepseek": asyncio.Lock(), "qwen": asyncio.Lock()}
+    app.state.byok_pools = {provider: {} for provider in openai_mod.BYOK_PROVIDERS}
+    app.state.byok_locks = {provider: asyncio.Lock() for provider in openai_mod.BYOK_PROVIDERS}
     app.state.qwen_models = saved_models
+    app.state.byok_alice_pool = None
 
 
 def _make_request(headers: dict[str, str] | None = None, body: bytes = b"") -> Request:
@@ -339,21 +343,92 @@ def test_health_reports_byok_mode():
     app.state.byok = True
     client = TestClient(app)
     payload = client.get("/health").json()
+    client.close()
     assert payload["byok"] is True
     assert payload["byok_pools"]["deepseek"] == 0
     assert payload["byok_pools"]["qwen"] == 0
+    for provider in openai_mod.BYOK_PROVIDERS:
+        assert payload[provider] is True
+        assert payload[f"{provider}_stats"]["pools"] == 0
+    assert payload["byok_api_key_required"] == {
+        "deepseek": True,
+        "qwen": True,
+        "gigachat": True,
+        "alice": False,
+        "duckai": False,
+    }
 
 
-def test_list_models_byok_without_env_tokens_lists_qwen_defaults():
+def test_health_byok_reports_pool_stats():
     app.state.byok = True
-    app.state.qwen_models = []
-    client = TestClient(app)
-    data = client.get("/v1/models").json()
-    client.close()
-    ids = [m["id"] for m in data["data"]]
-    assert "deepseek-v4.1-flash" in ids
-    for model in openai_mod.QWEN_DEFAULT_MODELS:
-        assert model["id"] in ids
+    pool = MagicMock()
+    pool.stats.return_value = {"accounts": 2, "healthy": 2, "broken": 0}
+    app.state.byok_pools["deepseek"]["key-a"] = pool
+    app.state.byok_alice_pool = pool
+    saved_deepseek = list(getattr(app.state, "deepseek_models", None) or [])
+    app.state.deepseek_models = []
+    try:
+        client = TestClient(app)
+        payload = client.get("/health").json()
+        client.close()
+        assert payload["byok_pools"]["deepseek"] == 1
+        assert payload["deepseek_stats"] == {"pools": 1, "accounts": 2, "healthy": 2, "broken": 0, "models": 0}
+        assert payload["alice_stats"]["pools"] == 1
+        assert payload["alice_stats"]["accounts"] == 2
+    finally:
+        app.state.byok_pools["deepseek"].clear()
+        app.state.byok_alice_pool = None
+        app.state.deepseek_models = saved_deepseek
+
+
+async def test_byok_alice_needs_no_api_key(monkeypatch):
+    app.state.byok = True
+    captured = {}
+
+    async def fake_byok_pool(provider, tokens):
+        captured["provider"] = provider
+        captured["tokens"] = tokens
+        return MagicMock()
+
+    monkeypatch.setattr(byok_mod, "_byok_pool", fake_byok_pool)
+    pool = await openai_mod._byok_pool_for("alice", _make_request(headers={}))
+    assert pool is not None
+    assert captured == {"provider": "alice", "tokens": []}
+
+
+async def test_byok_duckai_needs_no_api_key(monkeypatch):
+    app.state.byok = True
+    captured = {}
+
+    async def fake_byok_pool(provider, tokens):
+        captured["provider"] = provider
+        captured["tokens"] = tokens
+        return MagicMock()
+
+    monkeypatch.setattr(byok_mod, "_byok_pool", fake_byok_pool)
+    await openai_mod._byok_pool_for("duckai", _make_request(headers={}))
+    assert captured == {"provider": "duckai", "tokens": []}
+
+
+async def test_byok_keyed_provider_still_requires_api_key():
+    app.state.byok = True
+    with pytest.raises(HTTPException) as excinfo:
+        await openai_mod._byok_pool_for("gigachat", _make_request(headers={}))
+    assert excinfo.value.status_code == 401
+    assert "gigachat" in excinfo.value.detail
+
+
+def test_list_models_byok_without_env_tokens_lists_live_models():
+    app.state.byok = True
+    app.state.qwen_models = [{"id": "qwen-live", "name": "Q", "owned_by": "qwen", "model_type": "chat"}]
+    try:
+        client = TestClient(app)
+        data = client.get("/v1/models").json()
+        client.close()
+        ids = [m["id"] for m in data["data"]]
+        assert "qwen-live" in ids
+    finally:
+        app.state.qwen_models = []
 
 
 def test_health_no_byok_key_when_disabled():

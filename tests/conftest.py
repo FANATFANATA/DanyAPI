@@ -14,6 +14,8 @@ for _key in (
     "DANYAPI_GIGACHAT_CA_FILE",
     "ALICE_ENABLED",
     "ALICE_ACCOUNTS",
+    "DUCKAI_ENABLED",
+    "DUCKAI_ACCOUNTS",
 ):
     os.environ.setdefault(_key, "")
 

@@ -698,6 +698,7 @@ hr {
 .landing .model-qw::after { background: var(--l-amber); }
 .landing .model-gc::after { background: #00a085; }
 .landing .model-al::after { background: #fc3f1d; }
+.landing .model-duck::after { background: #de5833; }
 .landing .model-head { display: flex; align-items: center; gap: 1rem; margin-bottom: 1.6rem; }
 .landing .model-logo-tile {
     flex-shrink: 0; width: 56px; height: 56px;
@@ -712,6 +713,7 @@ hr {
 }
 .landing .model-logo-tile-gc { background: #e6f7f2; color: #00735c; }
 .landing .model-logo-tile-al { background: #ffeeeb; color: #d63a17; }
+.landing .model-logo-tile-duck { background: #fdefe8; color: #b8431f; }
 .landing .model-logo-ds { display: block; flex-shrink: 0; }
 .landing .model-logo-ds img { display: block; height: 30px; width: auto; max-width: 100%; }
 .landing .model-head h3 { font-family: var(--font-disp); font-size: 1.15rem; font-weight: 700; color: var(--l-text); }

@@ -48,6 +48,14 @@ PING_TIMEOUT = 30.0
 MAX_CONTINUATIONS = 24
 HARD_MAX_PROMPT = 6000
 
+MODEL_NAMES = {
+    "alice": "Alice AI (Yandex)",
+    "alice-ai": "Alice AI (Yandex)",
+    "yagpt": "YaGPT (Yandex)",
+}
+MODEL_ALIASES = tuple(MODEL_NAMES)
+DEFAULT_MODEL = "alice"
+
 PLACEHOLDER_TEXTS = frozenset({"одну секунду...", "одну секунду", "секунду...", "подождите", "подумаю"})
 
 _VERSION_RE = re.compile(r'"production",\s*version:"(\S+?)"')
@@ -486,7 +494,15 @@ class AliceClient:
         return self._ws is not None
 
     async def fetch_models(self) -> list[dict]:
-        return []
+        return [
+            {
+                "id": alias,
+                "name": name,
+                "owned_by": "alice",
+                "model_type": "chat",
+            }
+            for alias, name in MODEL_NAMES.items()
+        ]
 
     async def fetch_version(self) -> str:
         try:

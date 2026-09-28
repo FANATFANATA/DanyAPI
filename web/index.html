@@ -378,6 +378,16 @@ body::before {
         <div id="usage-stats" class="usage-loading">Loading...</div>
     </div>
 
+    <div class="usage-section">
+        <h2 class="usage-title">Providers</h2>
+        <div id="provider-stats" class="usage-loading">Loading...</div>
+    </div>
+
+    <div class="usage-section">
+        <h2 class="usage-title">Models</h2>
+        <div id="model-list" class="usage-loading">Loading...</div>
+    </div>
+
     <div class="footer-link">
         <a href="/health" target="_blank">Health</a> &middot;
         <a href="/v1/models" target="_blank">Models</a> &middot;
@@ -433,7 +443,58 @@ body::before {
             });
     }
 
+    var PROVIDERS = ["deepseek", "qwen", "gigachat", "alice", "duckai"];
+    var providersEl = document.getElementById("provider-stats");
+    var modelsEl = document.getElementById("model-list");
+
+    function renderProviders(data) {
+        var html = '<div class="usage-models"><table class="usage-table"><thead><tr><th>Provider</th><th>Enabled</th><th>Accounts</th><th>Models</th><th>Key</th></tr></thead><tbody>';
+        for (var i = 0; i < PROVIDERS.length; i++) {
+            var name = PROVIDERS[i];
+            var stats = data[name + "_stats"] || {};
+            var key = data.byok_api_key_required ? (data.byok_api_key_required[name] ? "required" : "not needed") : "";
+            html += '<tr><td>' + name + '</td><td>' + (data[name] ? "yes" : "no") + '</td>';
+            html += '<td>' + fmt(stats.accounts !== undefined ? stats.accounts : (stats.healthy || 0)) + '</td>';
+            html += '<td>' + fmt(stats.models || 0) + '</td><td>' + key + '</td></tr>';
+        }
+        html += '</tbody></table></div>';
+        providersEl.className = "";
+        providersEl.innerHTML = html;
+    }
+
+    function renderModels(data) {
+        var models = data.data || [];
+        if (!models.length) {
+            modelsEl.className = "";
+            modelsEl.textContent = "No models available.";
+            return;
+        }
+        var html = '<div class="usage-models"><table class="usage-table"><thead><tr><th>Model</th><th>Provider</th><th>Type</th></tr></thead><tbody>';
+        for (var i = 0; i < models.length; i++) {
+            var m = models[i];
+            html += '<tr><td>' + m.id + '</td><td>' + (m.owned_by || "") + '</td><td>' + (m.model_type || "") + '</td></tr>';
+        }
+        html += '</tbody></table></div>';
+        modelsEl.className = "";
+        modelsEl.innerHTML = html;
+    }
+
+    function loadJson(path, render, el) {
+        return fetch(BASE + path)
+            .then(function (r) {
+                if (!r.ok) throw new Error("HTTP " + r.status);
+                return r.json();
+            })
+            .then(render)
+            .catch(function (e) {
+                el.className = "usage-error";
+                el.textContent = "Unavailable: " + e.message;
+            });
+    }
+
     loadUsage();
+    loadJson("/health", renderProviders, providersEl);
+    loadJson("/v1/models", renderModels, modelsEl);
 })();
 </script>
 </body>

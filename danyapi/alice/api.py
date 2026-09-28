@@ -14,14 +14,13 @@ from ..api.sse import _sse, _stream_error_sse
 from ..config import settings
 from ..tokens import estimate_tokens
 from ..usage import record_usage_dict
+from .client import DEFAULT_MODEL as DEFAULT_MODEL
 from .client import RETRYABLE_ERRORS, AliceError, fold_messages
 
 log = logging.getLogger("danyapi.alice.api")
 
 MAX_RETRIES = 2
 DONE_LINE = "data: [DONE]\n\n"
-
-DEFAULT_MODEL = "alice"
 
 
 def _status_for(error: AliceError) -> int:

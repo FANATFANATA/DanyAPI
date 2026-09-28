@@ -9,11 +9,41 @@ from ..store import JsonStore
 
 app = FastAPI(title="DanyAPI")
 
-BYOK_PROVIDERS = ("deepseek", "qwen", "gigachat", "alice")
+BYOK_PROVIDERS = ("deepseek", "qwen", "gigachat", "alice", "duckai")
+
+KEYLESS_PROVIDERS = ("alice", "duckai")
+
+MODEL_ATTRS = {
+    "deepseek": "deepseek_models",
+    "qwen": "qwen_models",
+    "gigachat": "gigachat_models",
+    "alice": "alice_models",
+    "duckai": "duckai_models",
+}
+
+POOL_ATTRS_BY_PROVIDER = {
+    "deepseek": "pool",
+    "qwen": "qwen_pool",
+    "gigachat": "gigachat_pool",
+    "alice": "alice_pool",
+    "duckai": "duckai_pool",
+}
 
 
 def _byok_mode() -> bool:
     return bool(getattr(app.state, "byok", False))
+
+
+def provider_needs_api_key(provider: str) -> bool:
+    return provider not in KEYLESS_PROVIDERS
+
+
+def provider_models(provider: str) -> list[dict]:
+    return list(getattr(app.state, MODEL_ATTRS[provider], None) or [])
+
+
+def provider_pool(provider: str) -> Any:
+    return getattr(app.state, POOL_ATTRS_BY_PROVIDER[provider], None)
 
 
 def _blank_byok_state() -> dict[str, Any]:

@@ -13,6 +13,7 @@ MIN_PORT = 0
 MAX_PORT = 65535
 MAX_CHOICES = 8
 MAX_ALICE_ACCOUNTS = 4
+MAX_DUCKAI_ACCOUNTS = 4
 
 _ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
 
@@ -109,6 +110,8 @@ class Settings:
         self.gigachat_scope = _env_first("GIGACHAT_SCOPE", "DANYAPI_GIGACHAT_SCOPE").strip() or "GIGACHAT_API_PERS"
         self.alice_enabled = _env_on("ALICE_ENABLED", "")
         self.alice_accounts = _env_int("ALICE_ACCOUNTS", 1, 1, MAX_ALICE_ACCOUNTS)
+        self.duckai_enabled = _env_on("DUCKAI_ENABLED", "")
+        self.duckai_accounts = _env_int("DUCKAI_ACCOUNTS", 1, 1, MAX_DUCKAI_ACCOUNTS)
         self.byok = _env_first("BYOK", "BYOK_MODE", "DANYAPI_BYOK_MODE").strip().lower() in _TRUE_VALUES
         self.timeout = _env_positive_float("DANYAPI_TIMEOUT", 60.0)
         self.acquire_timeout = _env_float_opt("DANYAPI_ACQUIRE_TIMEOUT")
@@ -121,6 +124,7 @@ class Settings:
         self.cache_dir = _env_str("DANYAPI_CACHE_DIR")
         self.cache_enabled = not _env_on("DANYAPI_CACHE_DISABLED", "")
         self.byok_auth_ttl = _env_float("DANYAPI_BYOK_AUTH_TTL_SECONDS", 300.0)
+        self.models_refresh_seconds = _env_float("DANYAPI_MODELS_REFRESH_SECONDS", 900.0)
         self.usage_enabled = not _env_off("DANYAPI_USAGE_ENABLED", "1")
         self.usage_max_records = _env_int("DANYAPI_USAGE_MAX_RECORDS", 1000, 1)
         self.auto_update = not _env_off("DANYAPI_AUTO_UPDATE", "1")

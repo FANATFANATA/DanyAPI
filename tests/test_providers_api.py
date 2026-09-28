@@ -191,7 +191,7 @@ def test_anthropic_messages_accepts_gigachat_model():
 def test_handler_registry_covers_all_providers():
     from danyapi.api.chats import CHAT_HANDLERS
 
-    assert set(CHAT_HANDLERS) == {"deepseek", "qwen", "gigachat", "alice"}
+    assert set(CHAT_HANDLERS) == {"deepseek", "qwen", "gigachat", "alice", "duckai"}
 
 
 def test_provider_apis_are_importable():

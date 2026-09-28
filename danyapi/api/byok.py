@@ -14,14 +14,25 @@ from ..alice.accounts import AliceAccount
 from ..alice.client import AliceClient
 from ..config import settings
 from ..deepseek.client import DeepSeekClient
+from ..duckai import api as duckai_api
+from ..duckai.accounts import DuckAIAccount
+from ..duckai.client import DuckAIClient
 from ..gigachat.accounts import GigaChatAccount
 from ..gigachat.client import GigaChatClient
 from ..qwen.accounts import QwenAccount
 from ..qwen.client import QwenClient
 from ..store import JsonStore
 from .core import MAX_REQUEST_BODY, _read_request_body, _token_stable_id
-from .models import _fetch_alice_models, _fetch_gigachat_models, _fetch_qwen_models
-from .state import BYOK_PROVIDERS, _byok_auth_state, _byok_locks_state, _byok_pools_state, _byok_stores_state, app
+from .models import _header_api_key, refresh_provider_models
+from .state import (
+    BYOK_PROVIDERS,
+    _byok_auth_state,
+    _byok_locks_state,
+    _byok_pools_state,
+    _byok_stores_state,
+    app,
+    provider_needs_api_key,
+)
 
 log = logging.getLogger("danyapi.api")
 
@@ -60,12 +71,7 @@ async def _api_key_from_form(request: Request) -> str | None:
 
 
 async def _extract_request_api_key(request: Request) -> str | None:
-    auth = request.headers.get("authorization") or ""
-    if auth.lower().startswith("bearer "):
-        key = auth[7:].strip()
-        if key:
-            return key
-    key = (request.headers.get("x-api-key") or "").strip()
+    key = _header_api_key(request)
     if key:
         return key
     content_type = request.headers.get("content-type") or ""
@@ -178,6 +184,8 @@ async def _byok_pool(provider: str, tokens: list[str]) -> AccountPool:
     tokens = list(dict.fromkeys(tokens))
     if provider == "alice":
         return await _byok_alice_pool()
+    if provider == "duckai":
+        return await _byok_duckai_pool()
     pools = await _byok_pools_state()
     cache = pools[provider]
     cache_key = _byok_cache_key(tokens)
@@ -231,6 +239,7 @@ async def _byok_pool(provider: str, tokens: list[str]) -> AccountPool:
                 context_store=context_store,
                 affinity_store=affinity_store,
             )
+            await refresh_provider_models("deepseek", accounts[0].client)
         elif provider == "qwen":
             session_store = JsonStore("qwen-sessions", scope) if settings.cache_enabled else None
             context_store = JsonStore("qwen-contexts", scope) if settings.cache_enabled else None
@@ -263,15 +272,13 @@ async def _byok_pool(provider: str, tokens: list[str]) -> AccountPool:
                 context_store=context_store,
                 affinity_store=affinity_store,
             )
-            if not getattr(app.state, "qwen_models", None):
-                app.state.qwen_models = await _fetch_qwen_models(qwen_accounts[0].client)
+            await refresh_provider_models("qwen", qwen_accounts[0].client)
         else:
             gigachat_accounts = await _byok_gigachat_accounts(tokens, "byok")
             if not gigachat_accounts:
                 raise HTTPException(401, "invalid gigachat authorization key")
             pool = AccountPool(gigachat_accounts, label="gigachat")
-            if not getattr(app.state, "gigachat_models", None):
-                app.state.gigachat_models = await _fetch_gigachat_models(gigachat_accounts[0].client)
+            await refresh_provider_models("gigachat", gigachat_accounts[0].client)
         cache[cache_key] = pool
         scoped_stores[cache_key] = created
         while len(cache) > BYOK_POOL_LIMIT:
@@ -322,12 +329,46 @@ async def _byok_alice_pool() -> AccountPool:
             raise HTTPException(502, "alice endpoint is unreachable")
         created = AccountPool(accounts, label="alice")
         _ALICE_BYOK_POOL[0] = created
-        if not getattr(app.state, "alice_models", None):
-            app.state.alice_models = await _fetch_alice_models(accounts[0].client)
+        app.state.byok_alice_pool = created
+        await refresh_provider_models("alice", None)
+        return created
+
+
+async def _byok_duckai_accounts() -> list[DuckAIAccount]:
+    client = DuckAIClient(timeout=settings.timeout)
+    if not await client.check_auth():
+        await client.aclose()
+        return []
+    return [DuckAIAccount(0, client, stable_id="duckai")]
+
+
+_DUCKAI_BYOK_LOCK = asyncio.Lock()
+_DUCKAI_BYOK_POOL: list[AccountPool | None] = [None]
+
+
+async def _byok_duckai_pool() -> AccountPool:
+    pool = _DUCKAI_BYOK_POOL[0]
+    if pool is not None and pool.healthy:
+        return pool
+    async with _DUCKAI_BYOK_LOCK:
+        cached = _DUCKAI_BYOK_POOL[0]
+        if cached is not None and cached.healthy:
+            return cached
+        accounts = await _byok_duckai_accounts()
+        if not accounts:
+            raise HTTPException(502, duckai_api.BLOCKED_HINT)
+        created = AccountPool(accounts, label="duckai")
+        _DUCKAI_BYOK_POOL[0] = created
+        app.state.byok_duckai_pool = created
+        await refresh_provider_models("duckai", accounts[0].client)
         return created
 
 
 async def _byok_pool_for(provider: str, request: Request) -> AccountPool:
+    if provider not in BYOK_PROVIDERS:
+        raise HTTPException(400, f"unknown provider: {provider}")
+    if not provider_needs_api_key(provider):
+        return await _byok_pool(provider, [])
     token = await _extract_request_api_key(request)
     tokens = [t.strip() for t in (token or "").split(",") if t.strip()]
     if not tokens:
