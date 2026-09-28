@@ -19,17 +19,23 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from ..accounts import AccountPool, AccountPoolBusy, DeepSeekAccount
+from ..alice.accounts import AliceAccount
+from ..alice.client import AliceClient
 from ..config import settings
 from ..deepseek.client import DeepSeekClient
+from ..gigachat.accounts import GigaChatAccount
+from ..gigachat.client import GigaChatClient
 from ..qwen.accounts import QwenAccount
 from ..qwen.client import QwenClient
 from ..store import JsonStore
 from ..tokens import count_messages_tokens
 from ..usage import init_tracker
-from .models import _fetch_qwen_models
-from .state import app
+from .models import _fetch_alice_models, _fetch_gigachat_models, _fetch_qwen_models
+from .state import BYOK_PROVIDERS, app
 
 log = logging.getLogger("danyapi.api")
+
+POOL_ATTRS = ("pool", "qwen_pool", "gigachat_pool", "alice_pool")
 
 
 def _token_stable_id(token: str) -> str:
@@ -48,7 +54,7 @@ _STATE_STORE_ATTRS = (
 
 
 def _iter_pools() -> Iterator[Any]:
-    for attr in ("pool", "qwen_pool"):
+    for attr in POOL_ATTRS:
         pool_obj = getattr(app.state, attr, None)
         if pool_obj is not None:
             yield pool_obj
@@ -109,11 +115,13 @@ def _close_pow_managers(accts: list[Any]) -> None:
 async def lifespan(app: FastAPI):
     accounts: list[DeepSeekAccount] = []
     qwen_accounts: list[QwenAccount] = []
+    gigachat_accounts: list[GigaChatAccount] = []
+    alice_accounts: list[AliceAccount] = []
     byok_mode = settings.byok
     app.state.byok = byok_mode
-    app.state.byok_pools = {"deepseek": {}, "qwen": {}}
-    app.state.byok_locks = {"deepseek": asyncio.Lock(), "qwen": asyncio.Lock()}
-    app.state.byok_auth = {"deepseek": {}, "qwen": {}}
+    app.state.byok_pools = {provider: {} for provider in BYOK_PROVIDERS}
+    app.state.byok_locks = {provider: asyncio.Lock() for provider in BYOK_PROVIDERS}
+    app.state.byok_auth = {provider: {} for provider in BYOK_PROVIDERS}
     cache_enabled = settings.cache_enabled
     deepseek_session_store = JsonStore("deepseek-sessions", "default" if cache_enabled else None)
     qwen_session_store = JsonStore("qwen-sessions", "default" if cache_enabled else None)
@@ -137,19 +145,41 @@ async def lifespan(app: FastAPI):
         if not byok_mode:
             ds_clients = [DeepSeekClient(token=token, timeout=settings.timeout) for token in settings.deepseek_tokens] if settings.deepseek_tokens else []
             qw_clients = [QwenClient(token=token, timeout=settings.timeout) for token in settings.qwen_tokens] if settings.qwen_tokens else []
+            gc_clients: list[GigaChatClient] = []
+            for key in settings.gigachat_keys:
+                try:
+                    gc_clients.append(GigaChatClient(key=key, scope=settings.gigachat_scope, timeout=settings.timeout))
+                except (RuntimeError, OSError) as exc:
+                    log.error("gigachat client disabled, CA unusable: %s", exc)
+            alice_clients: list[AliceClient] = []
+            if settings.alice_enabled:
+                for _ in range(settings.alice_accounts):
+                    alice_clients.append(AliceClient(timeout=settings.timeout))
             ds_checks = [client.check_auth() for client in ds_clients]
             qw_checks = [client.check_auth() for client in qw_clients]
-            if ds_checks or qw_checks:
-                auth_results = await asyncio.gather(*(ds_checks + qw_checks), return_exceptions=True)
+            gc_checks = [client.check_auth() for client in gc_clients]
+            alice_checks = [client.check_auth() for client in alice_clients]
+            if ds_checks or qw_checks or gc_checks or alice_checks:
+                auth_results = await asyncio.gather(
+                    *(ds_checks + qw_checks + gc_checks + alice_checks),
+                    return_exceptions=True,
+                )
                 for index, outcome in enumerate(auth_results):
                     if isinstance(outcome, BaseException):
                         log.warning("auth check #%d failed: %s", index, outcome)
                 auth_flags = [outcome is True for outcome in auth_results]
-                ds_auth = auth_flags[: len(ds_checks)]
-                qw_auth = auth_flags[len(ds_checks) :]
+                ds_end = len(ds_checks)
+                qw_end = ds_end + len(qw_checks)
+                gc_end = qw_end + len(gc_checks)
+                ds_auth = auth_flags[:ds_end]
+                qw_auth = auth_flags[ds_end:qw_end]
+                gc_auth = auth_flags[qw_end:gc_end]
+                alice_auth = auth_flags[gc_end:]
             else:
                 ds_auth = []
                 qw_auth = []
+                gc_auth = []
+                alice_auth = []
             if settings.deepseek_tokens:
                 for i, (token, ds_client, ok) in enumerate(zip(settings.deepseek_tokens, ds_clients, ds_auth, strict=True)):
                     if not ok:
@@ -184,6 +214,28 @@ async def lifespan(app: FastAPI):
                         )
                     )
                 log.info("qwen accounts ready: %d", len(qwen_accounts))
+            if settings.gigachat_keys:
+                for i, (key, gc_client, ok) in enumerate(zip(settings.gigachat_keys, gc_clients, gc_auth, strict=False)):
+                    if not ok:
+                        log.warning("gigachat key #%d invalid/expired, skipping", i)
+                        await gc_client.aclose()
+                        continue
+                    gigachat_accounts.append(
+                        GigaChatAccount(
+                            len(gigachat_accounts),
+                            gc_client,
+                            stable_id=_token_stable_id(key),
+                        )
+                    )
+                log.info("gigachat accounts ready: %d", len(gigachat_accounts))
+            for i, (alice_client, ok) in enumerate(zip(alice_clients, alice_auth, strict=False)):
+                if not ok:
+                    log.warning("alice endpoint unreachable, skipping account #%d", i)
+                    await alice_client.aclose()
+                    continue
+                alice_accounts.append(AliceAccount(len(alice_accounts), alice_client, stable_id="alice"))
+            if alice_clients:
+                log.info("alice accounts ready: %d", len(alice_accounts))
         if accounts:
             app.state.pool = AccountPool(
                 accounts,
@@ -207,14 +259,26 @@ async def lifespan(app: FastAPI):
         else:
             app.state.qwen_pool = None
             app.state.qwen_models = []
-        if not accounts and not qwen_accounts and not byok_mode:
-            raise RuntimeError("no valid credentials: set DEEPSEEK_TOKENS or QWEN_TOKENS")
+        if gigachat_accounts:
+            app.state.gigachat_pool = AccountPool(gigachat_accounts, label="gigachat")
+            app.state.gigachat_models = await _fetch_gigachat_models(gigachat_accounts[0].client)
+        else:
+            app.state.gigachat_pool = None
+            app.state.gigachat_models = []
+        if alice_accounts:
+            app.state.alice_pool = AccountPool(alice_accounts, label="alice")
+            app.state.alice_models = await _fetch_alice_models(alice_accounts[0].client)
+        else:
+            app.state.alice_pool = None
+            app.state.alice_models = []
+        if not accounts and not qwen_accounts and not gigachat_accounts and not alice_accounts and not byok_mode:
+            raise RuntimeError("no valid credentials: set DEEPSEEK_TOKENS, QWEN_TOKENS, GIGACHAT_KEYS or ALICE_ENABLED=1")
         yield
     finally:
         http_client = getattr(app.state, "http_client", None)
         if http_client is not None:
             await http_client.aclose()
-        all_accounts: list[Any] = accounts + qwen_accounts
+        all_accounts: list[Any] = [*accounts, *qwen_accounts, *gigachat_accounts, *alice_accounts]
         for pool_obj in _iter_pools():
             all_accounts.extend(pool_obj.accounts)
         _close_pow_managers(all_accounts)
@@ -588,11 +652,13 @@ async def _openai_headers(request: Request, call_next):
     if not headers.get("x-request-id"):
         headers["x-request-id"] = _request_id_header(request)
     if not headers.get("x-ratelimit-limit-requests"):
-        for candidate in (getattr(app.state, "pool", None), getattr(app.state, "qwen_pool", None)):
-            if candidate is not None:
-                for key, value in _pool_rate_headers(candidate).items():
-                    headers[key] = value
-                break
+        for attr in POOL_ATTRS:
+            candidate = getattr(app.state, attr, None)
+            if candidate is None:
+                continue
+            for key, value in _pool_rate_headers(candidate).items():
+                headers[key] = value
+            break
     return response
 
 

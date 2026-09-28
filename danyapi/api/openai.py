@@ -12,9 +12,17 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingRes
 
 from .. import tools as toolemu
 from ..accounts import AccountPool, DeepSeekAccount, account_lock
+from ..alice import api as alice_api
+from ..alice.accounts import AliceAccount
+from ..alice.client import AliceClient, AliceError
 from ..config import MAX_CHOICES, settings
 from ..deepseek.client import DeepSeekClient, DeepSeekError, DeepSeekSession
 from ..deepseek.stream import IncrementalSSE, MessageReconstructor
+from ..gigachat import api as gigachat_api
+from ..gigachat.accounts import GigaChatAccount
+from ..gigachat.client import GigaChatClient, GigaChatError
+from ..gigachat.messages import build_messages, normalize_usage, request_body
+from ..gigachat.tls import resolve_ca
 from ..qwen import api as qwen_api
 from ..qwen.accounts import QwenAccount
 from ..qwen.client import QwenClient
@@ -54,7 +62,9 @@ from .byok import (
 from .chats import (
     _acquire_and_build,
     _can_reuse_session,
+    _chat_completions_alice,
     _chat_completions_deepseek,
+    _chat_completions_gigachat,
     _chat_completions_qwen,
     _chat_dispatcher,
     _completion_chat_request,
@@ -62,6 +72,7 @@ from .chats import (
     _completions_stream,
     _legacy_choice_from_chat,
     _materialize_tools,
+    _max_tokens_of,
     _translate_chat_chunk_to_completion,
     _translate_completion_stream,
     completions,
@@ -76,6 +87,7 @@ from .core import (
     INTERNAL_ERROR_MESSAGE,
     MAX_LOGGED_BODY,
     MAX_REQUEST_BODY,
+    POOL_ATTRS,
     _account_busy_count,
     _acquire_account,
     _close_pow_managers,
@@ -186,11 +198,16 @@ from .images import (
     image_variations,
 )
 from .models import (
+    ALICE_DEFAULT_MODELS,
+    ALICE_MODEL_IDS,
+    GIGACHAT_DEFAULT_MODELS,
     MODEL_CREATED_AT,
     MODEL_TYPE_BY_NAME,
     QWEN_DEFAULT_MODELS,
     REASONING_SUFFIXES,
     _all_models,
+    _fetch_alice_models,
+    _fetch_gigachat_models,
     _fetch_qwen_models,
     _finish_reason,
     _is_reasoning_model,
@@ -254,6 +271,7 @@ from .sse import (
     _stream_guard,
 )
 from .state import (
+    BYOK_PROVIDERS,
     _byok_auth_state,
     _byok_locks_state,
     _byok_mode,
@@ -314,21 +332,24 @@ def _usage_summary() -> dict | None:
 async def health() -> dict:
     pool = getattr(app.state, "pool", None)
     qwen_pool = getattr(app.state, "qwen_pool", None)
+    gigachat_pool = getattr(app.state, "gigachat_pool", None)
+    alice_pool = getattr(app.state, "alice_pool", None)
     result = {
         "status": "ok",
         "deepseek": pool is not None,
         "qwen": qwen_pool is not None,
+        "gigachat": gigachat_pool is not None,
+        "alice": alice_pool is not None,
         "deepseek_stats": _pool_stats(pool),
         "qwen_stats": _pool_stats(qwen_pool),
+        "gigachat_stats": _pool_stats(gigachat_pool),
+        "alice_stats": _pool_stats(alice_pool),
         "usage": _usage_summary(),
     }
     if _byok_mode():
         byok_pools = await _byok_pools_state()
         result["byok"] = True
-        result["byok_pools"] = {
-            "deepseek": len(byok_pools["deepseek"]),
-            "qwen": len(byok_pools["qwen"]),
-        }
+        result["byok_pools"] = {provider: len(entries) for provider, entries in byok_pools.items()}
     return result
 
 
@@ -340,7 +361,14 @@ async def usage_stats() -> dict:
     return tracker.snapshot()
 
 
-_MODEL_CACHE: dict[str, Any] = {"key": None, "models": None, "index": None, "qwen_ids": None}
+_MODEL_CACHE: dict[str, Any] = {
+    "key": None,
+    "models": None,
+    "index": None,
+    "qwen_ids": None,
+    "gigachat_ids": None,
+    "alice_ids": None,
+}
 
 
 def _responses_chat_request(req: ResponsesRequest, provider_messages: list[dict], session_id: str | None) -> ChatCompletionRequest:
@@ -480,6 +508,12 @@ async def anthropic_messages(body: dict, request: Request) -> Any:
         return _anthropic_http_error(exc)
 
 
+def _upstream_model_for(provider: str, model: str) -> str:
+    if provider == "deepseek":
+        return _resolve_model(model)
+    return model
+
+
 async def _anthropic_messages(body: dict, request: Request) -> Any:
     if not isinstance(body, dict):
         raise HTTPException(400, "request body must be a JSON object")
@@ -496,7 +530,7 @@ async def _anthropic_messages(body: dict, request: Request) -> Any:
     provider = _resolve_provider(model)
     info = anthropic_api.RequestInfo(
         model=model,
-        upstream_model=model if provider == "qwen" else _resolve_model(model),
+        upstream_model=_upstream_model_for(provider, model),
         max_tokens=chat_req.max_tokens or anthropic_api.DEFAULT_MAX_TOKENS,
         prompt_tokens=anthropic_api.count_input_tokens(chat_req.messages, anthropic_api.normalize_system(body.get("system"))),
         metadata=body.get("metadata"),
@@ -607,14 +641,18 @@ async def unknown_v1_route(path: str) -> dict:
 
 
 __all__ = [
+    "ALICE_DEFAULT_MODELS",
+    "ALICE_MODEL_IDS",
     "BYOK_AUTH_LIMIT",
     "BYOK_POOL_LIMIT",
+    "BYOK_PROVIDERS",
     "CONTEXT_LENGTH_STATUS",
     "CONTINUE_DEADLINE_SEC",
     "CONTINUE_PROMPT",
     "DEEPSEEK_AUTH_ERROR_CODES",
     "FAKE_CONTEXT_HINT_ERROR_MESSAGE",
     "FAKE_CONTEXT_HINT_MARKERS",
+    "GIGACHAT_DEFAULT_MODELS",
     "IMAGE_SIZE_RE",
     "INPUT_EXCEEDS_LIMIT",
     "INTERNAL_ERROR_MESSAGE",
@@ -635,6 +673,7 @@ __all__ = [
     "MIN_IMAGE_DIM",
     "MODEL_CREATED_AT",
     "MODEL_TYPE_BY_NAME",
+    "POOL_ATTRS",
     "QWEN_DEFAULT_MODELS",
     "REASONING_SUFFIXES",
     "REDUCED_CONTEXT_MESSAGE",
@@ -658,6 +697,9 @@ __all__ = [
     "_TOKENS_LOCK",
     "_UNSET",
     "AccountPool",
+    "AliceAccount",
+    "AliceClient",
+    "AliceError",
     "Attachment",
     "ChatCompletionRequest",
     "ChatMessage",
@@ -668,6 +710,9 @@ __all__ = [
     "DeepSeekSession",
     "DeepSeekStreamError",
     "FileSpec",
+    "GigaChatAccount",
+    "GigaChatClient",
+    "GigaChatError",
     "HTTPException",
     "ImageGenerationRequest",
     "IncrementalSSE",
@@ -710,7 +755,9 @@ __all__ = [
     "_byok_validate",
     "_cached_auth",
     "_can_reuse_session",
+    "_chat_completions_alice",
     "_chat_completions_deepseek",
+    "_chat_completions_gigachat",
     "_chat_completions_qwen",
     "_chunk_id_from_line",
     "_close_busy_client",
@@ -746,6 +793,8 @@ __all__ = [
     "_extract_request_api_key",
     "_extract_request_body",
     "_fake_context_error_body",
+    "_fetch_alice_models",
+    "_fetch_gigachat_models",
     "_fetch_qwen_models",
     "_finish_reason",
     "_flush_state_stores",
@@ -776,6 +825,7 @@ __all__ = [
     "_log_requests",
     "_materialize_tools",
     "_max_calls",
+    "_max_tokens_of",
     "_merge_usage",
     "_message_too_frequent_text",
     "_model_cache_key",
@@ -822,6 +872,7 @@ __all__ = [
     "_try_stop_stream",
     "_unquote_env_value",
     "_upload_attachments",
+    "_upstream_model_for",
     "_usage_with_details",
     "_validate_attachments",
     "_wait_message_too_frequent",
@@ -829,9 +880,11 @@ __all__ = [
     "_write_env_tokens_sync",
     "account_lock",
     "add_tokens",
+    "alice_api",
     "anthropic_api",
     "anthropic_count_tokens",
     "anthropic_messages",
+    "build_messages",
     "cancel_response",
     "completions",
     "create_response",
@@ -841,6 +894,7 @@ __all__ = [
     "get_model",
     "get_response",
     "get_response_input_items",
+    "gigachat_api",
     "health",
     "image_edits",
     "image_generations",
@@ -848,7 +902,10 @@ __all__ = [
     "lifespan",
     "list_models",
     "moderations_not_supported",
+    "normalize_usage",
     "qwen_api",
+    "request_body",
+    "resolve_ca",
     "responses_api",
     "root",
     "settings",

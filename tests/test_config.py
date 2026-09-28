@@ -103,6 +103,43 @@ def test_empty_tokens(settings_for):
     assert s.qwen_tokens == []
 
 
+def test_gigachat_keys_comma(settings_for):
+    s = settings_for({"GIGACHAT_KEYS": "key1, key2 ,key3"})
+    assert s.gigachat_keys == ["key1", "key2", "key3"]
+
+
+def test_gigachat_scope_default_and_override(settings_for):
+    assert settings_for({}).gigachat_scope == "GIGACHAT_API_PERS"
+    assert settings_for({"GIGACHAT_SCOPE": "GIGACHAT_API_CORP"}).gigachat_scope == "GIGACHAT_API_CORP"
+    assert settings_for({"DANYAPI_GIGACHAT_SCOPE": "GIGACHAT_API_B2B"}).gigachat_scope == "GIGACHAT_API_B2B"
+
+
+def test_alice_disabled_by_default(settings_for):
+    assert settings_for({}).alice_enabled is False
+
+
+@pytest.mark.parametrize("value", ["1", "true", "yes", "on", "TRUE", "On"])
+def test_alice_enabled_variants(settings_for, value):
+    assert settings_for({"ALICE_ENABLED": value}).alice_enabled is True
+
+
+def test_alice_accounts_bounds(settings_for):
+    from danyapi.config import MAX_ALICE_ACCOUNTS
+
+    assert settings_for({}).alice_accounts == 1
+    assert settings_for({"ALICE_ACCOUNTS": "0"}).alice_accounts == 1
+    assert settings_for({"ALICE_ACCOUNTS": "-3"}).alice_accounts == 1
+    assert settings_for({"ALICE_ACCOUNTS": "bad"}).alice_accounts == 1
+    assert settings_for({"ALICE_ACCOUNTS": "99"}).alice_accounts == MAX_ALICE_ACCOUNTS
+    assert settings_for({"ALICE_ACCOUNTS": "3"}).alice_accounts == 3
+
+
+def test_max_alice_accounts_is_bounded():
+    from danyapi.config import MAX_ALICE_ACCOUNTS
+
+    assert MAX_ALICE_ACCOUNTS == 4
+
+
 def test_dotenv_fallback_warns_and_returns_false(caplog):
     from danyapi import config as config_mod
 

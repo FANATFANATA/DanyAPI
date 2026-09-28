@@ -6,6 +6,8 @@ from typing import Any
 
 from fastapi import HTTPException
 
+from ..alice.client import AliceClient
+from ..gigachat.client import GigaChatClient
 from ..qwen.client import QwenClient
 from .state import _byok_mode, app
 
@@ -22,7 +24,22 @@ STATUS_TO_FINISH_REASON = {
 
 MODEL_CREATED_AT = int(time.time())
 
-_MODEL_CACHE: dict[str, Any] = {"key": None, "models": None, "index": None, "qwen_ids": None}
+PROVIDER_NAMES = ("deepseek", "qwen", "gigachat", "alice")
+
+CHAT_ONLY_GIGACHAT_TYPES = frozenset({"chat", "aicheck", "embedder", None})
+
+GIGACHAT_EMBEDDING_PREFIXES = ("embed",)
+
+ALICE_MODEL_IDS = ("alice", "alice-ai", "yagpt")
+
+_MODEL_CACHE: dict[str, Any] = {
+    "key": None,
+    "models": None,
+    "index": None,
+    "qwen_ids": None,
+    "gigachat_ids": None,
+    "alice_ids": None,
+}
 
 
 MODEL_TYPE_BY_NAME = {
@@ -91,6 +108,83 @@ async def _fetch_qwen_models(client: QwenClient) -> list[dict]:
     return models
 
 
+ALICE_DEFAULT_MODELS = [
+    {
+        "id": "alice",
+        "name": "Alice AI (Yandex)",
+        "owned_by": "alice",
+        "model_type": "chat",
+    },
+    {
+        "id": "alice-ai",
+        "name": "Alice AI (Yandex)",
+        "owned_by": "alice",
+        "model_type": "chat",
+    },
+    {
+        "id": "yagpt",
+        "name": "YaGPT (Yandex)",
+        "owned_by": "alice",
+        "model_type": "chat",
+    },
+]
+
+GIGACHAT_DEFAULT_MODELS = [
+    {
+        "id": "GigaChat",
+        "name": "GigaChat 2 Lite",
+        "owned_by": "gigachat",
+        "model_type": "chat",
+    },
+    {
+        "id": "GigaChat-2-Pro",
+        "name": "GigaChat 2 Pro",
+        "owned_by": "gigachat",
+        "model_type": "chat",
+    },
+    {
+        "id": "GigaChat-2-Max",
+        "name": "GigaChat 2 Max",
+        "owned_by": "gigachat",
+        "model_type": "chat",
+    },
+]
+
+
+async def _fetch_gigachat_models(client: GigaChatClient) -> list[dict]:
+    try:
+        raw = await client.fetch_models()
+    except Exception as exc:
+        log.warning("gigachat models fetch failed, using defaults: %s", exc)
+        return GIGACHAT_DEFAULT_MODELS
+    models: list[dict] = []
+    for model in raw:
+        if not isinstance(model, dict) or not model.get("id"):
+            continue
+        model_id = str(model["id"])
+        if model_id.lower().startswith(GIGACHAT_EMBEDDING_PREFIXES):
+            continue
+        model_type = model.get("type")
+        if model_type not in CHAT_ONLY_GIGACHAT_TYPES:
+            continue
+        models.append(
+            {
+                "id": model_id,
+                "name": model.get("name") or model_id,
+                "owned_by": "gigachat",
+                "model_type": "chat",
+            }
+        )
+    if not models:
+        log.warning("gigachat models fetch returned no chat models, using defaults")
+        return GIGACHAT_DEFAULT_MODELS
+    return models
+
+
+async def _fetch_alice_models(client: AliceClient) -> list[dict]:
+    return list(ALICE_DEFAULT_MODELS)
+
+
 def _resolve_model(model: str) -> str:
     model_type = MODEL_TYPE_BY_NAME.get(model)
     if model_type is not None:
@@ -120,10 +214,13 @@ def _output_truncated(status: Any) -> bool:
 
 
 def _model_source() -> list[dict]:
-    qwen_models = getattr(app.state, "qwen_models", None) or []
-    if not qwen_models and _byok_mode():
-        return QWEN_DEFAULT_MODELS
-    return qwen_models
+    sources: list[dict] = []
+    sources.extend(getattr(app.state, "qwen_models", None) or [])
+    sources.extend(getattr(app.state, "gigachat_models", None) or [])
+    sources.extend(getattr(app.state, "alice_models", None) or [])
+    if not sources and _byok_mode():
+        return [*QWEN_DEFAULT_MODELS, *GIGACHAT_DEFAULT_MODELS, *ALICE_DEFAULT_MODELS]
+    return sources
 
 
 def _model_cache_key() -> tuple[tuple[Any, ...], ...]:
@@ -170,7 +267,9 @@ def _models_state() -> list[dict]:
     cached["key"] = key
     cached["models"] = models
     cached["index"] = {m["id"]: m for m in models}
-    cached["qwen_ids"] = {m.get("id") for m in _model_source()}
+    cached["qwen_ids"] = {m.get("id") for m in _model_source() if m.get("owned_by") == "qwen"}
+    cached["gigachat_ids"] = {m.get("id") for m in _model_source() if m.get("owned_by") == "gigachat"}
+    cached["alice_ids"] = {m.get("id") for m in _model_source() if m.get("owned_by") == "alice"}
     return models
 
 
@@ -192,13 +291,26 @@ async def get_model(model_id: str) -> dict:
     return model
 
 
-def _resolve_provider(model: str) -> str:
-    if model.startswith("qwen"):
-        return "qwen"
-    if model in MODEL_TYPE_BY_NAME or model.startswith("deepseek"):
-        return "deepseek"
+def _cached_ids(key: str) -> set[str]:
     _models_state()
-    qwen_ids = _MODEL_CACHE.get("qwen_ids")
-    if isinstance(qwen_ids, set) and model in qwen_ids:
+    value = _MODEL_CACHE.get(key)
+    return value if isinstance(value, set) else set()
+
+
+def _resolve_provider(model: str) -> str:
+    lowered = model.lower()
+    if lowered.startswith("qwen"):
         return "qwen"
+    if lowered.startswith("gigachat"):
+        return "gigachat"
+    if lowered in ALICE_MODEL_IDS:
+        return "alice"
+    if model in MODEL_TYPE_BY_NAME or lowered.startswith("deepseek"):
+        return "deepseek"
+    if model in _cached_ids("qwen_ids"):
+        return "qwen"
+    if model in _cached_ids("gigachat_ids"):
+        return "gigachat"
+    if model in _cached_ids("alice_ids"):
+        return "alice"
     raise HTTPException(404, f"Unknown model: {model}")

@@ -8,6 +8,12 @@ os.environ["DANYAPI_BYOK_MODE"] = "0"
 for _key in (
     "DEEPSEEK_TOKENS",
     "QWEN_TOKENS",
+    "GIGACHAT_KEYS",
+    "GIGACHAT_SCOPE",
+    "DANYAPI_GIGACHAT_SCOPE",
+    "DANYAPI_GIGACHAT_CA_FILE",
+    "ALICE_ENABLED",
+    "ALICE_ACCOUNTS",
 ):
     os.environ.setdefault(_key, "")
 

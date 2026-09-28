@@ -12,6 +12,8 @@ from fastapi.responses import StreamingResponse
 
 from .. import tools as toolemu
 from ..accounts import AccountPool, AccountPoolBusy
+from ..alice import api as alice_api
+from ..gigachat import api as gigachat_api
 from ..qwen import api as qwen_api
 from .attachments import _collect_attachments, _validate_attachments
 from .byok import _byok_pool_for
@@ -26,6 +28,13 @@ from .state import _byok_mode, app
 
 log = logging.getLogger("danyapi.api")
 
+CHAT_HANDLERS = {
+    "deepseek": "_chat_completions_deepseek",
+    "qwen": "_chat_completions_qwen",
+    "gigachat": "_chat_completions_gigachat",
+    "alice": "_chat_completions_alice",
+}
+
 
 @app.post("/v1/chat/completions")
 async def chat_completions(req: ChatCompletionRequest, request: Request) -> Any:
@@ -34,7 +43,10 @@ async def chat_completions(req: ChatCompletionRequest, request: Request) -> Any:
 
 async def _chat_dispatcher(model: str, request: Request) -> Any:
     provider = _resolve_provider(model)
-    call = _chat_completions_qwen if provider == "qwen" else _chat_completions_deepseek
+    name = CHAT_HANDLERS.get(provider)
+    if name is None:
+        raise HTTPException(404, f"Unknown provider: {provider}")
+    call = globals()[name]
     if not _byok_mode():
         return call
     pool = await _byok_pool_for(provider, request)
@@ -395,5 +407,85 @@ async def _chat_completions_qwen(req: ChatCompletionRequest, pool: AccountPool |
 
     try:
         return await qwen_api.collect_non_stream(lock=account.sem, **common)
+    except AccountPoolBusy:
+        raise HTTPException(429, "all accounts are busy, try again later") from None
+
+
+def _max_tokens_of(req: ChatCompletionRequest) -> int | None:
+    max_tokens = getattr(req, "max_tokens", None)
+    if max_tokens is None:
+        max_tokens = getattr(req, "max_completion_tokens", None)
+    return max_tokens
+
+
+async def _chat_completions_gigachat(req: ChatCompletionRequest, pool: AccountPool | None = None) -> Any:
+    if pool is None:
+        pool = getattr(app.state, "gigachat_pool", None)
+    if pool is None:
+        raise HTTPException(503, "gigachat provider is not configured")
+
+    tools, tool_choice = _materialize_tools(req)
+    account, existing_sid = await _acquire_account(pool, req.session_id)
+    max_tokens = _max_tokens_of(req)
+
+    common = {
+        "account": account,
+        "messages": req.messages,
+        "model": req.model,
+        "tools": tools,
+        "tool_choice": tool_choice,
+        "functions": getattr(req, "functions", None),
+        "function_call": getattr(req, "function_call", None),
+        "temperature": req.temperature,
+        "top_p": req.top_p,
+        "max_tokens": max_tokens,
+        "stop": getattr(req, "stop", None),
+        "response_format": getattr(req, "response_format", None),
+        "user": getattr(req, "user", None),
+        "session_id": existing_sid,
+    }
+    if req.stream:
+        return StreamingResponse(
+            _stream_guard(
+                gigachat_api.stream_openai(include_usage=_include_usage(req), **common),
+                req.model,
+            ),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    try:
+        return await gigachat_api.collect_non_stream(**common)
+    except AccountPoolBusy:
+        raise HTTPException(429, "all accounts are busy, try again later") from None
+
+
+async def _chat_completions_alice(req: ChatCompletionRequest, pool: AccountPool | None = None) -> Any:
+    if pool is None:
+        pool = getattr(app.state, "alice_pool", None)
+    if pool is None:
+        raise HTTPException(503, "alice provider is not configured (set ALICE_ENABLED=1 to enable)")
+
+    if getattr(req, "files", None):
+        raise HTTPException(400, "alice does not support file attachments")
+    account, existing_sid = await _acquire_account(pool, req.session_id)
+
+    common = {
+        "account": account,
+        "messages": req.messages,
+        "model": req.model,
+        "stop": getattr(req, "stop", None),
+        "user": getattr(req, "user", None),
+        "session_id": existing_sid,
+    }
+    if req.stream:
+        return StreamingResponse(
+            _stream_guard(alice_api.stream_openai(include_usage=_include_usage(req), **common), req.model),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    try:
+        return await alice_api.collect_non_stream(**common)
     except AccountPoolBusy:
         raise HTTPException(429, "all accounts are busy, try again later") from None

@@ -12,6 +12,7 @@ _FALSE_VALUES = ("0", "false", "no", "off")
 MIN_PORT = 0
 MAX_PORT = 65535
 MAX_CHOICES = 8
+MAX_ALICE_ACCOUNTS = 4
 
 _ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
 
@@ -104,6 +105,10 @@ class Settings:
         self.port = _env_int("DANYAPI_PORT", 8000, MIN_PORT, MAX_PORT)
         self.deepseek_tokens = _env_list("DEEPSEEK_TOKENS")
         self.qwen_tokens = _env_list("QWEN_TOKENS")
+        self.gigachat_keys = _env_list("GIGACHAT_KEYS")
+        self.gigachat_scope = _env_first("GIGACHAT_SCOPE", "DANYAPI_GIGACHAT_SCOPE").strip() or "GIGACHAT_API_PERS"
+        self.alice_enabled = _env_on("ALICE_ENABLED", "")
+        self.alice_accounts = _env_int("ALICE_ACCOUNTS", 1, 1, MAX_ALICE_ACCOUNTS)
         self.byok = _env_first("BYOK", "BYOK_MODE", "DANYAPI_BYOK_MODE").strip().lower() in _TRUE_VALUES
         self.timeout = _env_positive_float("DANYAPI_TIMEOUT", 60.0)
         self.acquire_timeout = _env_float_opt("DANYAPI_ACQUIRE_TIMEOUT")

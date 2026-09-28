@@ -10,14 +10,18 @@ from typing import Any
 from fastapi import HTTPException, Request
 
 from ..accounts import AccountPool, DeepSeekAccount
+from ..alice.accounts import AliceAccount
+from ..alice.client import AliceClient
 from ..config import settings
 from ..deepseek.client import DeepSeekClient
+from ..gigachat.accounts import GigaChatAccount
+from ..gigachat.client import GigaChatClient
 from ..qwen.accounts import QwenAccount
 from ..qwen.client import QwenClient
 from ..store import JsonStore
 from .core import MAX_REQUEST_BODY, _read_request_body, _token_stable_id
-from .models import _fetch_qwen_models
-from .state import _byok_auth_state, _byok_locks_state, _byok_pools_state, _byok_stores_state, app
+from .models import _fetch_alice_models, _fetch_gigachat_models, _fetch_qwen_models
+from .state import BYOK_PROVIDERS, _byok_auth_state, _byok_locks_state, _byok_pools_state, _byok_stores_state, app
 
 log = logging.getLogger("danyapi.api")
 
@@ -169,9 +173,11 @@ def _byok_cache_key(tokens: list[str]) -> str:
 
 
 async def _byok_pool(provider: str, tokens: list[str]) -> AccountPool:
-    if provider not in ("deepseek", "qwen"):
+    if provider not in BYOK_PROVIDERS:
         raise HTTPException(400, f"unknown provider: {provider}")
     tokens = list(dict.fromkeys(tokens))
+    if provider == "alice":
+        return await _byok_alice_pool()
     pools = await _byok_pools_state()
     cache = pools[provider]
     cache_key = _byok_cache_key(tokens)
@@ -225,7 +231,7 @@ async def _byok_pool(provider: str, tokens: list[str]) -> AccountPool:
                 context_store=context_store,
                 affinity_store=affinity_store,
             )
-        else:
+        elif provider == "qwen":
             session_store = JsonStore("qwen-sessions", scope) if settings.cache_enabled else None
             context_store = JsonStore("qwen-contexts", scope) if settings.cache_enabled else None
             affinity_store = JsonStore("qwen-affinities", scope) if settings.cache_enabled else None
@@ -259,6 +265,13 @@ async def _byok_pool(provider: str, tokens: list[str]) -> AccountPool:
             )
             if not getattr(app.state, "qwen_models", None):
                 app.state.qwen_models = await _fetch_qwen_models(qwen_accounts[0].client)
+        else:
+            gigachat_accounts = await _byok_gigachat_accounts(tokens, "byok")
+            if not gigachat_accounts:
+                raise HTTPException(401, "invalid gigachat authorization key")
+            pool = AccountPool(gigachat_accounts, label="gigachat")
+            if not getattr(app.state, "gigachat_models", None):
+                app.state.gigachat_models = await _fetch_gigachat_models(gigachat_accounts[0].client)
         cache[cache_key] = pool
         scoped_stores[cache_key] = created
         while len(cache) > BYOK_POOL_LIMIT:
@@ -266,6 +279,52 @@ async def _byok_pool(provider: str, tokens: list[str]) -> AccountPool:
             cache.pop(oldest_key)
             await _close_pool(oldest_pool, scoped_stores.pop(oldest_key, None))
         return pool
+
+
+async def _byok_gigachat_accounts(tokens: list[str], log_prefix: str) -> list[GigaChatAccount]:
+    accounts: list[GigaChatAccount] = []
+    for i, key in enumerate(tokens):
+        try:
+            gc_client = GigaChatClient(key=key, scope=settings.gigachat_scope, timeout=settings.timeout)
+        except (RuntimeError, OSError) as exc:
+            log.error("%s gigachat CA unusable, skipping key #%d: %s", log_prefix, i, exc)
+            continue
+        if not await _byok_validate("gigachat", key, gc_client):
+            log.warning("%s gigachat key invalid/expired, skipping", log_prefix)
+            await gc_client.aclose()
+            continue
+        accounts.append(GigaChatAccount(len(accounts), gc_client, stable_id=_token_stable_id(key)))
+    return accounts
+
+
+async def _byok_alice_accounts() -> list[AliceAccount]:
+    client = AliceClient(timeout=settings.timeout)
+    if not await client.check_auth():
+        await client.aclose()
+        return []
+    return [AliceAccount(0, client, stable_id="alice")]
+
+
+_ALICE_BYOK_LOCK = asyncio.Lock()
+_ALICE_BYOK_POOL: list[AccountPool | None] = [None]
+
+
+async def _byok_alice_pool() -> AccountPool:
+    pool = _ALICE_BYOK_POOL[0]
+    if pool is not None and pool.healthy:
+        return pool
+    async with _ALICE_BYOK_LOCK:
+        cached = _ALICE_BYOK_POOL[0]
+        if cached is not None and cached.healthy:
+            return cached
+        accounts = await _byok_alice_accounts()
+        if not accounts:
+            raise HTTPException(502, "alice endpoint is unreachable")
+        created = AccountPool(accounts, label="alice")
+        _ALICE_BYOK_POOL[0] = created
+        if not getattr(app.state, "alice_models", None):
+            app.state.alice_models = await _fetch_alice_models(accounts[0].client)
+        return created
 
 
 async def _byok_pool_for(provider: str, request: Request) -> AccountPool:
