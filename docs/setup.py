@@ -10,6 +10,7 @@ import sys
 import tempfile
 import urllib.error
 import urllib.request
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from functools import cache
 from pathlib import Path
@@ -344,6 +345,53 @@ def check_deepseek_token(token):
         return False, f"unexpected response: {body[:200]}"
 
 
+def _gigachat_token_status(key):
+    from danyapi.gigachat.client import AUTH_URL, DEFAULT_SCOPE, USER_AGENT
+    from danyapi.gigachat.tls import resolve_ca
+
+    context = resolve_ca()
+    handler = urllib.request.HTTPSHandler(context=context)
+    opener = urllib.request.build_opener(handler)
+    req = urllib.request.Request(
+        AUTH_URL,
+        data=f"scope={DEFAULT_SCOPE}".encode(),
+        headers={
+            "RqUID": str(uuid.uuid4()),
+            "Authorization": f"Basic {key}",
+            "Content-Type": "application/x-www-form-urlencoded",
+            "User-Agent": USER_AGENT,
+        },
+        method="POST",
+    )
+    try:
+        with opener.open(req, timeout=25) as resp:
+            return resp.status, resp.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", "replace") if exc.fp else str(exc)
+        return exc.code, body
+    except Exception as exc:
+        return None, str(exc)
+
+
+def check_gigachat_key(key):
+    status, body = _gigachat_token_status(key)
+    if status is None:
+        return False, f"network error: {body}"
+    if status != 200:
+        try:
+            message = json.loads(body).get("message", "")
+        except ValueError:
+            message = body[:200]
+        return False, f"http {status}: {message}"[:200]
+    try:
+        payload = json.loads(body)
+    except ValueError:
+        return False, f"unexpected response: {body[:200]}"
+    if payload.get("access_token"):
+        return True, ""
+    return False, "no access token in the response"
+
+
 def check_qwen_token(token):
     from danyapi.qwen.client import BASE_URL
 
@@ -410,6 +458,56 @@ def check_provider(name, creds):
             if not ok:
                 return False, f"token invalid: {detail}"
     return True, ""
+
+
+def collect_gigachat(current, defaults):
+    print()
+    print("[ GigaChat ]")
+    print("  Official GigaChat API, free freemium quota for a new project.")
+    print("  In the GigaChat Studio account open 'API settings' and generate an authorization key.")
+    print("  The key is the base64 of client_id:client_secret, copy it as is.")
+    keys = read_value(
+        "  GigaChat authorization keys, comma-separated ["
+        + (current.get("GIGACHAT_KEYS", "") or "(empty)")
+        + "]: ",
+        current.get("GIGACHAT_KEYS", ""),
+        defaults.get("GIGACHAT_KEYS", ""),
+    )
+    return {"GIGACHAT_KEYS": keys}
+
+
+def validate_gigachat(creds, defaults):
+    while True:
+        ok, detail = True, ""
+        for key in split_tokens(creds.get("GIGACHAT_KEYS", "")):
+            ok, detail = check_gigachat_key(key)
+            if not ok:
+                break
+        if ok:
+            print("  GigaChat credentials OK.")
+            return creds
+        print(f"  GigaChat credentials INVALID: {detail}")
+        if _input_state.eof_seen or not ask("  Re-enter GigaChat credentials?", True):
+            print("  Keeping GigaChat credentials as entered; the server may fail at startup.")
+            return creds
+        creds = collect_gigachat(creds, defaults)
+
+
+def collect_alice(current, defaults):
+    print()
+    print("[ Yandex Alice, unofficial ]")
+    print("  Free and keyless, but it speaks an undocumented internal protocol of a consumer service.")
+    print("  Yandex's terms forbid that, and the protocol can change without notice. See the README.")
+    enabled = read_value(
+        "  Enable the unofficial Alice provider? yes/no [" + (current.get("ALICE_ENABLED", "") or "no") + "]: ",
+        current.get("ALICE_ENABLED", ""),
+        defaults.get("ALICE_ENABLED", ""),
+    )
+    if enabled.strip().lower() in ("n", "no", "off", "0", "false", "нет"):
+        enabled = ""
+    elif enabled.strip():
+        enabled = "1"
+    return {"ALICE_ENABLED": enabled}
 
 
 def validate_provider(name, creds, defaults):
@@ -564,8 +662,12 @@ def main():
     values = dict(current)
     deepseek = validate_provider("DeepSeek", collect_provider("DeepSeek", current, defaults), defaults)
     qwen = validate_provider("Qwen", collect_provider("Qwen", current, defaults), defaults)
+    gigachat = validate_gigachat(collect_gigachat(current, defaults), defaults)
+    alice = collect_alice(current, defaults)
     values.update(deepseek)
     values.update(qwen)
+    values.update(gigachat)
+    values.update(alice)
 
     print()
     print("Now the rest of the settings. Enter to keep the current value, !clear to erase, !reset to restore the default.")
@@ -581,8 +683,11 @@ def main():
 
     has_ds = any(v for v in deepseek.values() if v)
     has_qwen = any(v for v in qwen.values() if v)
-    if not has_ds and not has_qwen:
-        print("Warning: no provider credentials configured. The server will not start until you add DeepSeek or Qwen tokens.")
+    has_gigachat = any(v for v in gigachat.values() if v)
+    has_alice = any(v for v in alice.values() if v)
+    if not (has_ds or has_qwen or has_gigachat or has_alice):
+        print("Warning: no provider credentials configured.")
+        print("The server will not start until you add DEEPSEEK_TOKENS, QWEN_TOKENS, GIGACHAT_KEYS or ALICE_ENABLED=1.")
 
     if ask("Create a DanyAPI launcher shortcut on the desktop?", True):
         try:

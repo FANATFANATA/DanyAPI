@@ -21,6 +21,8 @@ pow_solver
 .playwright-mcp/
 .idea/
 .vscode/
+AGENTS.md
+CLAUDE.md
 *.log
 .DS_Store
 Thumbs.db

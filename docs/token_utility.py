@@ -23,7 +23,9 @@ TEXTS: dict[str, str] = {
     "page_title": "DanyAPI - Token Utils",
     "header_title": "Token Utilities",
     "header_sub": "DanyAPI uses the internal APIs of DeepSeek and Qwen's free web clients, so it needs your auth tokens."
-    "<br>This tool simply helps you to retrieve them.",
+    "<br>This tool simply helps you to retrieve them."
+    "<br>GigaChat is not handled here: it uses an authorization key from the GigaChat Studio API settings, and"
+    " the unofficial Alice provider needs no credentials at all.",
     "step0_heading": "One-time: add the token utility bookmarklet",
     "step0_intro": "<b>Drag</b> this button onto your browser's <b>bookmarks bar</b>,<br>(press Ctrl+Shift+B if you don't see the bar):",
     "bookmarklet_label": "Run DanyAPI token utility",
@@ -72,6 +74,9 @@ TEXTS: dict[str, str] = {
     "results_sub": "Tokens for DeepSeek &amp; Qwen were successfully extracted. Use them in your <code>.env</code> when"
     " running the API locally.<br><br>To support us, you can also add them to the public API instance:"
     ' <a href="{public_url}" target="_blank" rel="noopener">{public_url}</a>',
+    "results_other_providers": "Two more providers need no browser token: add a GigaChat authorization key as"
+    " <code>GIGACHAT_KEYS</code> from the Studio API settings, or set <code>ALICE_ENABLED=1</code> for the"
+    " unofficial keyless Alice provider.",
     "results_public_instance": "Public instance",
     "results_pane_ds": "DeepSeek token",
     "results_pane_qw": "Qwen token",
@@ -760,6 +765,7 @@ RESULTS_PAGE = r"""<!DOCTYPE html>
     </a>
     <h1><span class="grad-text">__results_title__</span></h1>
     <p class="sub">__RESULTS_SUB__</p>
+    <p class="sub">__RESULTS_OTHER_PROVIDERS__</p>
   </div>
 
   <div class="card">
@@ -858,6 +864,7 @@ def render_results_page() -> str:
             "DEEPSEEK_TOKEN": show(STATE["deepseek"]),
             "QWEN_TOKEN": show(STATE["qwen"]),
             "RESULTS_SUB": TEXTS["results_sub"].replace("{public_url}", public_url),
+            "RESULTS_OTHER_PROVIDERS": TEXTS["results_other_providers"],
         },
     )
 
@@ -1042,18 +1049,25 @@ def serve(port: int = RESULT_PORT, open_browser: bool = True) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Extract DeepSeek & Qwen tokens for DanyAPI (uses your default browser)")
+    parser = argparse.ArgumentParser(
+        description="Extract DeepSeek & Qwen tokens for DanyAPI (uses your default browser). "
+        "GigaChat needs a Studio authorization key and Alice needs none, so neither is handled here."
+    )
     parser.add_argument("--port", type=int, default=RESULT_PORT, help=f"local server port (default {RESULT_PORT})")
     parser.add_argument("--no-browser", action="store_true", help="don't auto-open the browser")
     args = parser.parse_args()
 
     print("=" * 60)
     print(" DanyAPI token extractor")
-    print(" DeepSeek + Qwen → DEEPSEEK_TOKENS / QWEN_TOKENS")
+    print(" DeepSeek + Qwen -> DEEPSEEK_TOKENS / QWEN_TOKENS")
     print("=" * 60)
     print(" 1. Drag the grabber button to your bookmarks bar (once), click Next")
     print(" 2. DeepSeek: log in, click the grabber bookmark - page auto-advances")
-    print(" 3. Qwen: same again - then both tokens are shown automatically\n")
+    print(" 3. Qwen: same again - then both tokens are shown automatically")
+    print()
+    print(" GigaChat uses a Studio authorization key instead: set GIGACHAT_KEYS in .env by hand.")
+    print(" The unofficial Alice provider needs no credentials: set ALICE_ENABLED=1.")
+    print()
 
     serve(port=args.port, open_browser=not args.no_browser)
 

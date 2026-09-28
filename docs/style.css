@@ -696,6 +696,8 @@ hr {
 }
 .landing .model-ds::after { background: #4d6bfe; }
 .landing .model-qw::after { background: var(--l-amber); }
+.landing .model-gc::after { background: #00a085; }
+.landing .model-al::after { background: #fc3f1d; }
 .landing .model-head { display: flex; align-items: center; gap: 1rem; margin-bottom: 1.6rem; }
 .landing .model-logo-tile {
     flex-shrink: 0; width: 56px; height: 56px;
@@ -705,6 +707,11 @@ hr {
 .landing .model-logo-tile img { display: block; height: 100%; width: 100%; object-fit: contain; }
 .landing .model-logo-tile-qw { background: #fdfdfd; }
 .landing .model-logo-tile-qw img { height: 80%; width: auto; }
+.landing .model-logo-letter {
+    font-family: var(--font-disp); font-size: 1.6rem; font-weight: 800; line-height: 1;
+}
+.landing .model-logo-tile-gc { background: #e6f7f2; color: #00735c; }
+.landing .model-logo-tile-al { background: #ffeeeb; color: #d63a17; }
 .landing .model-logo-ds { display: block; flex-shrink: 0; }
 .landing .model-logo-ds img { display: block; height: 30px; width: auto; max-width: 100%; }
 .landing .model-head h3 { font-family: var(--font-disp); font-size: 1.15rem; font-weight: 700; color: var(--l-text); }
