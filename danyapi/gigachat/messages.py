@@ -70,7 +70,26 @@ def _extension_for(content_type: str) -> str:
     return mapping.get(content_type, ".bin")
 
 
-def _tool_call_name(tool_call: dict) -> tuple[str, str]:
+def _gigachat_arguments(value: Any) -> dict:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return {}
+        try:
+            parsed = json.loads(text)
+        except ValueError:
+            return {"input": value}
+        if isinstance(parsed, dict):
+            return parsed
+        return {"input": parsed}
+    if value is None:
+        return {}
+    return {"input": value}
+
+
+def _tool_call_name(tool_call: dict) -> tuple[str, Any]:
     function = tool_call.get("function")
     if isinstance(function, dict):
         name = function.get("name")
@@ -80,9 +99,7 @@ def _tool_call_name(tool_call: dict) -> tuple[str, str]:
         arguments = tool_call.get("arguments")
     if not isinstance(name, str) or not name:
         name = ""
-    if not isinstance(arguments, str):
-        arguments = json.dumps(arguments if arguments is not None else {})
-    return name, arguments
+    return name, _gigachat_arguments(arguments)
 
 
 def _as_function_result(content: Any) -> str:
@@ -100,40 +117,37 @@ def _developer_to_system(role: str) -> str:
     return "system" if role == "developer" else role
 
 
+EMPTY_PARAMETERS = {"type": "object", "properties": {}}
+
+
 def _build_functions(tools: Any, functions: Any) -> list[dict]:
     specs: list[dict] = []
+
+    def add(name: Any, description: Any, parameters: Any) -> None:
+        if not isinstance(name, str) or not name:
+            return
+        if isinstance(description, str) and description:
+            spec: dict[str, Any] = {"name": name, "description": description}
+        else:
+            spec = {"name": name}
+        if isinstance(parameters, dict) and parameters:
+            spec["parameters"] = parameters
+        else:
+            spec["parameters"] = dict(EMPTY_PARAMETERS)
+        if spec not in specs:
+            specs.append(spec)
+
     for item in tools or []:
         if not isinstance(item, dict):
             continue
         function = item.get("function")
         if not isinstance(function, dict):
             continue
-        name = function.get("name")
-        if not isinstance(name, str) or not name:
-            continue
-        spec: dict[str, Any] = {"name": name}
-        description = function.get("description")
-        if isinstance(description, str) and description:
-            spec["description"] = description
-        parameters = function.get("parameters")
-        if isinstance(parameters, dict) and parameters:
-            spec["parameters"] = parameters
-        specs.append(spec)
+        add(function.get("name"), function.get("description"), function.get("parameters"))
     for item in functions or []:
         if not isinstance(item, dict):
             continue
-        name = item.get("name")
-        if not isinstance(name, str) or not name:
-            continue
-        spec = {"name": name}
-        description = item.get("description")
-        if isinstance(description, str) and description:
-            spec["description"] = description
-        parameters = item.get("parameters")
-        if isinstance(parameters, dict) and parameters:
-            spec["parameters"] = parameters
-        if spec not in specs:
-            specs.append(spec)
+        add(item.get("name"), item.get("description"), item.get("parameters"))
     return specs
 
 
@@ -231,7 +245,7 @@ async def build_messages(
             text = _text_of(content).strip()
             raw_calls = getattr(message, "tool_calls", None) or []
             call_name = ""
-            call_args = "{}"
+            call_args: dict = {}
             if raw_calls:
                 first = raw_calls[0]
                 if isinstance(first, dict):
@@ -263,18 +277,13 @@ async def build_messages(
 
     pending_assistant = None
 
-    if body and body[0]["role"] == "function":
+    while body and body[0]["role"] != "user":
         body.pop(0)
     if not body:
         body.append({"role": "user", "content": "Hello"})
 
     specs = _build_functions(tools, functions)
     call_value = _function_call_value(tool_choice, function_call) if specs else None
-    if specs:
-        head: dict[str, Any] = dict(body[0]) if body else {"role": "user", "content": "Hello"}
-        tail = body[1:]
-        head["function_call"] = call_value or "auto"
-        body = [head, *tail]
 
     out: list[dict] = []
     if system_parts:

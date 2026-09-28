@@ -113,13 +113,14 @@ class GigaChatClient:
             "User-Agent": USER_AGENT,
         }
 
-    def _api_headers(self, token: str, extra: dict[str, str] | None = None) -> dict[str, str]:
+    def _api_headers(self, token: str, extra: dict[str, str] | None = None, *, json_body: bool = True) -> dict[str, str]:
         headers = {
             "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
             "Accept": "application/json",
             "X-Request-ID": self._request_id(),
         }
+        if json_body:
+            headers["Content-Type"] = "application/json"
         if extra:
             headers.update(extra)
         return headers
@@ -187,9 +188,10 @@ class GigaChatClient:
         stream: bool = False,
     ) -> httpx.Response:
         attempt = 0
+        multipart = files is not None or data is not None
         while True:
             token = await self._obtain_token()
-            request_headers = self._api_headers(token, headers)
+            request_headers = self._api_headers(token, headers, json_body=not multipart)
             req = self.http.build_request(
                 method,
                 path,

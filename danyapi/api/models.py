@@ -26,9 +26,8 @@ MODEL_CREATED_AT = int(time.time())
 
 PROVIDER_NAMES = ("deepseek", "qwen", "gigachat", "alice")
 
-CHAT_ONLY_GIGACHAT_TYPES = frozenset({"chat", "aicheck", "embedder", None})
-
-GIGACHAT_EMBEDDING_PREFIXES = ("embed",)
+GIGACHAT_EMBEDDING_MARKER = "embed"
+GIGACHAT_CHAT_TYPES = frozenset({"chat"})
 
 ALICE_MODEL_IDS = ("alice", "alice-ai", "yagpt")
 
@@ -131,7 +130,7 @@ ALICE_DEFAULT_MODELS = [
 
 GIGACHAT_DEFAULT_MODELS = [
     {
-        "id": "GigaChat",
+        "id": "GigaChat-2",
         "name": "GigaChat 2 Lite",
         "owned_by": "gigachat",
         "model_type": "chat",
@@ -145,6 +144,12 @@ GIGACHAT_DEFAULT_MODELS = [
     {
         "id": "GigaChat-2-Max",
         "name": "GigaChat 2 Max",
+        "owned_by": "gigachat",
+        "model_type": "chat",
+    },
+    {
+        "id": "GigaChat-3-Pro",
+        "name": "GigaChat 3 Pro",
         "owned_by": "gigachat",
         "model_type": "chat",
     },
@@ -162,10 +167,10 @@ async def _fetch_gigachat_models(client: GigaChatClient) -> list[dict]:
         if not isinstance(model, dict) or not model.get("id"):
             continue
         model_id = str(model["id"])
-        if model_id.lower().startswith(GIGACHAT_EMBEDDING_PREFIXES):
+        if GIGACHAT_EMBEDDING_MARKER in model_id.lower():
             continue
         model_type = model.get("type")
-        if model_type not in CHAT_ONLY_GIGACHAT_TYPES:
+        if isinstance(model_type, str) and model_type not in GIGACHAT_CHAT_TYPES:
             continue
         models.append(
             {

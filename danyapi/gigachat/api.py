@@ -30,6 +30,8 @@ def _status_for(error: GigaChatError) -> int:
     code = error.code if isinstance(error.code, int) else 500
     if code == 401 or code == 403:
         return 401
+    if code == 404:
+        return 404
     if code == 429:
         return 429
     if 400 <= code < 500:
@@ -37,7 +39,17 @@ def _status_for(error: GigaChatError) -> int:
     return 502
 
 
+NO_IMAGE_MODELS_HINT = (
+    "this GigaChat model does not accept images, use a Pro, Max or Ultra model such as GigaChat-2-Pro, GigaChat-2-Max, GigaChat-3-Pro or GigaChat-3-Ultra"
+)
+
+NO_IMAGE_MARKERS = ("does not support image", "not support image")
+
+
 def _detail_for(error: GigaChatError) -> str:
+    lowered = (error.message or "").lower()
+    if any(marker in lowered for marker in NO_IMAGE_MARKERS):
+        return f"GigaChat error: {NO_IMAGE_MODELS_HINT}"
     return f"GigaChat error: {error.message or error.code}"
 
 
@@ -52,9 +64,12 @@ def _translate_message(choice: dict) -> dict:
         arguments = function_call.get("arguments")
         if not isinstance(arguments, str):
             arguments = json.dumps(arguments if arguments is not None else {})
+        call_id = function_call.get("id")
+        if not isinstance(call_id, str) or not call_id:
+            call_id = f"call_{uuid.uuid4().hex[:24]}"
         out["tool_calls"] = [
             {
-                "id": f"call_{uuid.uuid4().hex[:24]}",
+                "id": call_id,
                 "type": "function",
                 "function": {"name": function_call["name"], "arguments": arguments or "{}"},
             }
@@ -221,10 +236,13 @@ def _delta_from_event(event: dict) -> tuple[dict, str | None]:
     function_call = delta.get("function_call")
     if isinstance(function_call, dict) and function_call.get("name"):
         arguments = function_call.get("arguments")
+        call_id = function_call.get("id")
+        if not isinstance(call_id, str) or not call_id:
+            call_id = f"call_{uuid.uuid4().hex[:24]}"
         out["tool_calls"] = [
             {
                 "index": 0,
-                "id": f"call_{uuid.uuid4().hex[:24]}",
+                "id": call_id,
                 "type": "function",
                 "function": {
                     "name": function_call.get("name"),

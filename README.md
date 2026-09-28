@@ -136,7 +136,7 @@ Usage and logging:
 
 ## GigaChat
 
-`GigaChat` and `GigaChat-2` (Lite), `GigaChat-Pro` and `GigaChat-2-Pro`, `GigaChat-Max` and `GigaChat-2-Max` are served from the official GigaChat API at `https://api.giga.chat/v1`, which speaks the OpenAI chat completions format. Every new GigaChat project starts with a free freemium quota.
+`GigaChat-2` (Lite), `GigaChat-2-Pro`, `GigaChat-2-Max`, `GigaChat-3-Lightning`, `GigaChat-3-Pro` and `GigaChat-3-Ultra` are served from the official GigaChat API at `https://api.giga.chat/v1`, which speaks the OpenAI chat completions format. The list is read from `GET /models` at startup, so it follows whatever your account is granted. Every new GigaChat project starts with a free freemium quota.
 
 Get the authorization key in the GigaChat Studio account under "Настройки API". It is the base64 of `client_id:client_secret`, not the secret on its own:
 
@@ -147,6 +147,8 @@ GIGACHAT_KEYS="<authorization_key>"
 Access tokens live 30 minutes and are refreshed automatically. GigaChat issues its certificates under the Russian Trusted Root CA, which is absent from most Python CA bundles, so a root CA is shipped in `danyapi/gigachat/russian_trusted_root_ca.pem` and combined with the system roots at runtime. Point `DANYAPI_GIGACHAT_CA_FILE` at your own bundle to override it.
 
 Differences from the OpenAI API to keep in mind: function calling uses the legacy `functions` plus `function_call` pair, which DanyAPI maps from `tools` for you, there is no `n`, `seed`, `stop` or penalty support, and images are uploaded to the GigaChat file storage first, one image per message and ten per request.
+
+Images work on the Pro, Max and Ultra tiers only. `GigaChat-2` and `GigaChat-3-Lightning` are Lite models and reject attachments; the bridge turns that into a 400 naming the models that accept them instead of a raw upstream error.
 
 ## Yandex Alice, unofficial
 
