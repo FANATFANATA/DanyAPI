@@ -308,6 +308,8 @@ def test_node_executable_prefers_a_runnable_override(monkeypatch, tmp_path) -> N
     monkeypatch.setenv("PATHEXT", ".COM;.EXE;.BAT;.CMD")
     target = tmp_path / "custom-node.exe"
     target.write_text("MZ", encoding="utf-8")
+    if os.name != "nt":
+        target.chmod(0o755)
     monkeypatch.setenv("DANYAPI_DUCKAI_NODE", f"  {target}  ")
     assert attest._node_executable() == str(target)
 

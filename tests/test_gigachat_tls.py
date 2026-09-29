@@ -92,7 +92,10 @@ def test_candidates_are_absolute_and_point_at_the_shipped_root(monkeypatch, tmp_
     assert candidate.is_absolute()
     assert candidate == tls._PACKAGE_DIR / tls.ROOT_CA_FILENAME
     assert candidate.read_bytes() == BUNDLED_BYTES
-    assert hashlib.sha256(BUNDLED_BYTES).hexdigest() == tls.ROOT_CA_SHA256
+    assert tls._is_trusted_root(BUNDLED_BYTES)
+    crlf = BUNDLED_BYTES.decode("ascii").replace("\r\n", "\n").replace("\n", "\r\n").encode("ascii")
+    assert tls._is_trusted_root(crlf)
+    assert hashlib.sha256(BUNDLED_BYTES.decode("ascii").replace("\r\n", "\n").encode("ascii")).hexdigest() == tls.ROOT_CA_SHA256
     assert decoy.read_text(encoding="ascii") == "decoy"
 
 
@@ -215,10 +218,13 @@ def test_part_text_rejects_non_ascii_and_unreadable_parts(tmp_path, caplog):
     missing = tmp_path / "gone.pem"
     padded = tmp_path / "padded.pem"
     padded.write_bytes(b"  -----BEGIN CERTIFICATE-----\n  body\n  \n")
+    binary_root = tmp_path / tls.ROOT_CA_FILENAME
+    binary_root.write_bytes(b"-----BEGIN CERTIFICATE-----\n\xff\xfe\n-----END CERTIFICATE-----\n")
 
     with caplog.at_level(logging.WARNING, logger="danyapi.gigachat"):
         assert tls._part_text(binary) is None
         assert tls._part_text(missing) is None
+        assert tls._is_trusted_root(binary_root.read_bytes()) is False
 
     assert f"gigachat CA is not ascii for {binary}" in caplog.text
     assert f"gigachat CA read failed for {missing}" in caplog.text

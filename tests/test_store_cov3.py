@@ -92,8 +92,8 @@ def test_fsync_dir_syncs_the_directory_on_posix(tmp_path, monkeypatch):
     assert calls == [("open", tmp_path, 0), ("fsync", 11), ("close", 11)]
 
 
-def test_fsync_dir_never_opens_the_directory_on_windows(tmp_path):
-    assert store_mod.os.name == "nt"
+def test_fsync_dir_never_opens_the_directory_on_windows(tmp_path, monkeypatch):
+    monkeypatch.setattr(store_mod.os, "name", "nt")
     assert store_mod._fsync_dir(tmp_path / "not-created") is None
 
 

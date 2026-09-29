@@ -323,8 +323,8 @@ def test_fsync_dir_opens_and_fsyncs_the_directory_on_posix(monkeypatch, tmp_path
     assert fake.closed_fds == [91]
 
 
-def test_fsync_dir_is_a_noop_on_windows(tmp_path):
-    assert os.name == "nt"
+def test_fsync_dir_is_a_noop_on_windows(tmp_path, monkeypatch):
+    monkeypatch.setattr(envtokens.os, "name", "nt")
     assert envtokens._fsync_dir(tmp_path) is None
 
 

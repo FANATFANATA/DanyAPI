@@ -12,7 +12,7 @@ log = logging.getLogger("danyapi.gigachat")
 
 ROOT_CA_FILENAME = "russian_trusted_root_ca.pem"
 
-ROOT_CA_SHA256 = "e4370c9b6b540f063ba1829222d2d6041cbb0bfc5d001ee6bbb97620914594dc"
+ROOT_CA_SHA256 = "aa800ef345422d6158c6fafe1c06c429dbda21c3df4bb1ccb45a920ec1111399"
 
 _PACKAGE_DIR = Path(__file__).resolve().parent
 
@@ -32,7 +32,11 @@ def _certifi_path() -> str | None:
 
 
 def _is_trusted_root(data: bytes) -> bool:
-    return hashlib.sha256(data).hexdigest() == ROOT_CA_SHA256
+    try:
+        normalised = data.decode("ascii").replace("\r\n", "\n").replace("\r", "\n")
+    except UnicodeDecodeError:
+        return False
+    return hashlib.sha256(normalised.encode("ascii")).hexdigest() == ROOT_CA_SHA256
 
 
 def _read_root() -> tuple[Path | None, bytes, bool]:

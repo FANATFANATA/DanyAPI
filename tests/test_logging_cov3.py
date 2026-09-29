@@ -186,7 +186,7 @@ def fake_windows(monkeypatch):
 
     def _install(std_handles, console_modes):
         kernel32 = _FakeKernel32(std_handles, console_modes)
-        monkeypatch.setattr(ctypes, "windll", _FakeWindll(kernel32))
+        monkeypatch.setattr(ctypes, "windll", _FakeWindll(kernel32), raising=False)
         return kernel32
 
     return _install
@@ -201,7 +201,7 @@ VT = 0x0004
 def test_enable_windows_vt_is_skipped_off_windows(monkeypatch):
     monkeypatch.setattr(dlog.sys, "platform", "linux")
     kernel32 = _FakeKernel32({STD_INPUT: 10, STD_OUTPUT: 11}, {10: 0, 11: 0})
-    monkeypatch.setattr(ctypes, "windll", _FakeWindll(kernel32))
+    monkeypatch.setattr(ctypes, "windll", _FakeWindll(kernel32), raising=False)
     assert dlog._enable_windows_vt() is None
     assert kernel32.set_calls == []
 
@@ -239,7 +239,7 @@ def test_enable_windows_vt_reports_a_ctypes_failure(monkeypatch, caplog):
 
     kernel32 = _FakeKernel32({STD_INPUT: 10, STD_OUTPUT: 11}, {10: 0, 11: 0})
     kernel32.GetStdHandle = _FakeFunction(_boom)
-    monkeypatch.setattr(ctypes, "windll", _FakeWindll(kernel32))
+    monkeypatch.setattr(ctypes, "windll", _FakeWindll(kernel32), raising=False)
     with caplog.at_level(logging.DEBUG, logger="danyapi.logging"):
         assert dlog._enable_windows_vt() is None
     assert kernel32.set_calls == []

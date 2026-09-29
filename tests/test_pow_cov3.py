@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess  # nosec B404
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -39,9 +40,11 @@ def test_parse_number_rejects_other_types(value):
 
 
 def test_native_solver_names_follow_the_platform():
-    assert _native_solver_names() == ("pow_solver.exe", "pow_solver")
-    with patch.object(pow_mod.os, "name", "posix"):
-        assert _native_solver_names() == ("pow_solver", "pow_solver.exe")
+    expected = ("pow_solver.exe", "pow_solver") if os.name == "nt" else ("pow_solver", "pow_solver.exe")
+    assert _native_solver_names() == expected
+    other = "posix" if os.name == "nt" else "nt"
+    with patch.object(pow_mod.os, "name", other):
+        assert _native_solver_names() == tuple(reversed(expected))
 
 
 def test_find_native_solver_picks_the_existing_name(tmp_path):
