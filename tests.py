@@ -27,8 +27,9 @@ tomllib: Any = _optional_module("tomllib") or _optional_module("tomli")
 yaml: Any = _optional_module("yaml")
 
 ROOT = Path(__file__).resolve().parent
-PYTHON_TARGETS = ["danyapi", "tests", "docs", "app.py", "collecter.py", "tests.py"]
-ROOT_SCRIPTS = ["app.py", "collecter.py", "tests.py"]
+OPTIONAL_ROOT_SCRIPTS = ["collecter.py"]
+ROOT_SCRIPTS = ["app.py", "tests.py", *(name for name in OPTIONAL_ROOT_SCRIPTS if (ROOT / name).is_file())]
+PYTHON_TARGETS = ["danyapi", "tests", "docs", *ROOT_SCRIPTS]
 BANDIT_SKIPS = "B101,B104,B112,B311"
 ROOT_BANDIT_SKIPS = BANDIT_SKIPS + ",B404,B603,B103"
 PYLINT_DISABLES = "import-error,unsubscriptable-object,not-an-iterable"

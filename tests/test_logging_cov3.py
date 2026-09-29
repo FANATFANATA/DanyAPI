@@ -1,11 +1,30 @@
 import ctypes
 import logging
 import queue
+import sys
+import types
 
 import pytest
 
 from danyapi import logging as dlog
 from danyapi.config import settings
+
+
+def _wintypes():
+    try:
+        from ctypes import wintypes
+    except ImportError:
+        wintypes = types.SimpleNamespace(DWORD=ctypes.c_uint32, HANDLE=ctypes.c_void_p, BOOL=ctypes.c_int)
+        module = types.ModuleType("ctypes.wintypes")
+        module.DWORD = ctypes.c_uint32
+        module.HANDLE = ctypes.c_void_p
+        module.BOOL = ctypes.c_int
+        sys.modules.setdefault("ctypes.wintypes", module)
+        ctypes.wintypes = sys.modules["ctypes.wintypes"]
+    return wintypes
+
+
+WINTYPES = _wintypes()
 
 
 @pytest.fixture
@@ -152,7 +171,7 @@ class _FakeKernel32:
 
 
 def _write_mode(pointer, value):
-    ctypes.cast(pointer, ctypes.POINTER(ctypes.wintypes.DWORD))[0] = value
+    ctypes.cast(pointer, ctypes.POINTER(WINTYPES.DWORD))[0] = value
     return 1
 
 
@@ -175,7 +194,7 @@ def fake_windows(monkeypatch):
 
 STD_INPUT = 0xFFFFFFF5
 STD_OUTPUT = 0xFFFFFFF4
-INVALID_HANDLE = ctypes.wintypes.HANDLE(-1).value
+INVALID_HANDLE = WINTYPES.HANDLE(-1).value
 VT = 0x0004
 
 

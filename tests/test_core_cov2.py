@@ -213,9 +213,18 @@ def test_flush_state_stores_reports_every_failure(caplog):
         def flush(self):
             raise RuntimeError("usage flush failed")
 
+        def snapshot(self):
+            raise RuntimeError("usage snapshot failed")
+
     class _BoomStore:
         def flush(self):
             raise RuntimeError("store flush failed")
+
+        def get(self, *args, **kwargs):
+            raise RuntimeError("store get failed")
+
+        def discard(self, *args, **kwargs):
+            raise RuntimeError("store discard failed")
 
     class _BoomPool(_FakePool):
         def flush(self):
