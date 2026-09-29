@@ -539,9 +539,9 @@ async def test_close_pool_defers_a_busy_account(caplog):
     assert "schedule deferred client close for busy byok account 'acct#1'" in caplog.text
     assert len(byok_mod._deferred_close_tasks) == 1
     semaphore.release()
-    await asyncio.sleep(0)
-    await asyncio.sleep(0)
-    await asyncio.sleep(0)
+    pending = list(byok_mod._deferred_close_tasks)
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
     assert client.closed == 1
     assert byok_mod._deferred_close_tasks == set()
 

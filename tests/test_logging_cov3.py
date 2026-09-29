@@ -91,12 +91,13 @@ def test_escape_control_covers_the_whole_control_range():
     assert escaped.endswith("\\x7f")
 
 
-def test_level_names_uses_the_stdlib_mapping():
-    assert dlog._level_names() == set(logging.getLevelNamesMapping())
+def test_level_names_uses_the_stdlib_mapping(monkeypatch):
+    monkeypatch.setattr(logging, "getLevelNamesMapping", lambda: {"INFO": 20, "WARNING": 30}, raising=False)
+    assert dlog._level_names() == {"INFO", "WARNING"}
 
 
 def test_level_names_falls_back_without_the_stdlib_mapping(monkeypatch):
-    monkeypatch.delattr(logging, "getLevelNamesMapping")
+    monkeypatch.delattr(logging, "getLevelNamesMapping", raising=False)
     assert dlog._level_names() == dlog._FALLBACK_LEVEL_NAMES
 
 

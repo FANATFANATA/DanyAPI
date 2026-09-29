@@ -462,7 +462,7 @@ async def test_chat_streams_the_first_event_before_the_solver_finishes(monkeypat
         gen = client.chat([{"role": "user", "content": []}])
         first = await asyncio.wait_for(gen.__anext__(), 2)
         assert first.delta == "he"
-        assert order == []
+        assert "solve-end" not in order
         assert client._jsa == "old-jsa"
         while not order:
             await asyncio.sleep(0)

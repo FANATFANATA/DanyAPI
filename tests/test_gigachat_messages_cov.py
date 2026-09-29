@@ -527,11 +527,12 @@ async def test_resolve_images_mixes_data_and_remote_images_in_order(monkeypatch)
 async def test_resolve_images_uploads_in_message_order_when_a_later_fetch_finishes_first(monkeypatch):
     started: list[str] = []
     gates = {0: asyncio.Event(), 1: asyncio.Event()}
-    barrier = asyncio.Barrier(2)
+    both_in_flight = asyncio.Event()
 
     async def fake_fetch(_client: Any, uri: str) -> tuple[str, bytes]:
         started.append(uri)
-        await barrier.wait()
+        if len(started) == 2:
+            both_in_flight.set()
         await gates[int(uri.rsplit("/", 1)[1][0])].wait()
         return "image/png", uri.encode()
 
@@ -541,7 +542,7 @@ async def test_resolve_images_uploads_in_message_order_when_a_later_fetch_finish
     pending = [({"role": "user", "content": f"m{index}"}, [uri]) for index, uri in enumerate(uris)]
 
     task = asyncio.ensure_future(gm._resolve_images(stub, pending))
-    await _drain()
+    await asyncio.wait_for(both_in_flight.wait(), timeout=5.0)
     assert started == uris
 
     gates[1].set()
