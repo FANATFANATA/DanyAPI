@@ -46,8 +46,9 @@ EMOJI_RE = re.compile(
     "\u26ce\u26d4\u26ea\u26f2-\u26f3\u26f5\u26fa\u26fd\u2705\u270a-\u270b\u2728\u274c\u274e"
     "\u2753-\u2755\u2757\u2795-\u2797\u27b0\u27bf\u2b1b-\u2b1c\u2b50\u2b55\u3030\u303d\ufe0f]"
 )
-GUARD_TEXT_DIRS = ["docs", "web", ".github"]
-GUARD_TEXT_FILES = ["README.md", ".env.example", "Dockerfile"]
+GUARD_TEXT_DIRS = ["docs", "web", ".github", "danyapi", "tests"]
+GUARD_TEXT_SKIP = {"danyapi/duckai/jsa_solver.js"}
+GUARD_TEXT_FILES = ["README.md", ".env.example", "Dockerfile", "app.py", "pyproject.toml", "requirements.txt", "requirements-dev.txt", "bandit.toml", ".flake8"]
 GUARD_TEXT_SUFFIXES = {".html", ".js", ".css", ".py", ".md", ".sh", ".bat", ".ps1", ".yml", ".yaml", ".json", ".toml", ".txt", ".example"}
 GUARD_SKIP_DIRS = {"__pycache__", ".git"}
 
@@ -145,7 +146,14 @@ def iter_guard_targets() -> list[Path]:
         base = ROOT / d
         if not base.is_dir():
             continue
-        targets.extend(p for p in base.rglob("*") if p.is_file() and p.suffix.lower() in GUARD_TEXT_SUFFIXES and not (GUARD_SKIP_DIRS & set(p.parts)))
+        targets.extend(
+            p
+            for p in base.rglob("*")
+            if p.is_file()
+            and p.suffix.lower() in GUARD_TEXT_SUFFIXES
+            and not (GUARD_SKIP_DIRS & set(p.parts))
+            and p.relative_to(ROOT).as_posix() not in GUARD_TEXT_SKIP
+        )
     return sorted(targets)
 
 
@@ -480,15 +488,16 @@ def main() -> int:
             mark = status_paint(STATUS_FAIL.ljust(4), use_color)
         print(f"{mark}  {name.ljust(width)}")
     print()
-    if skipped:
-        print(f"{skipped} step(s) were skipped because the tool is not installed, see the SKIP lines above.")
+    passed = len(results) - failed - skipped
     if failed:
-        print(f"RESULT: FAILED ({failed} check(s) failed)")
-        print(f"total time: {wall_time:.1f}s wall clock across {jobs} job(s)")
-        return 1
-    print("RESULT: ALL CHECKS PASSED")
+        print(f"RESULT: FAILED ({failed} of {len(results)} check(s) failed, {passed} passed)")
+    elif skipped:
+        detail = ", ".join(name for name, status, *_rest in results if status == STATUS_SKIP)
+        print(f"RESULT: {passed} passed, {skipped} step(s) not run, so this is not a full pass: {detail}")
+    else:
+        print(f"RESULT: ALL CHECKS PASSED ({len(results)} steps)")
     print(f"total time: {wall_time:.1f}s wall clock across {jobs} job(s)")
-    return 0
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

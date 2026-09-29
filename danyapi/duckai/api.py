@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import contextlib
 import json
 import logging
 import random
@@ -326,50 +327,48 @@ async def _open_stream(
 ) -> AsyncIterator[DuckAIEvent]:
     attempt = 0
     while True:
-        stream = account.client.chat(
-            duck_messages,
-            model=model,
-            effort=effort,
-            can_use_tools=can_use_tools,
-            can_use_web_search=can_use_web_search,
-        )
         delivered = False
-        try:
-            async for event in stream:
-                delivered = True
-                yield event
-            return
-        except httpx.HTTPError as exc:
-            status = getattr(getattr(exc, "response", None), "status_code", 0) or 0
-            if not delivered and status in RETRYABLE_HTTP_STATUSES and attempt < MAX_RETRIES:
-                await _sleep_backoff(attempt)
-                attempt += 1
-                await stream.aclose()
-                continue
-            raise HTTPException(502, f"duckai transport error: {exc}") from exc
-        except attest.AttestationError as exc:
-            account.client.invalidate_attestation()
-            if not delivered and attempt < MAX_RETRIES:
-                await _sleep_backoff(attempt)
-                attempt += 1
-                await stream.aclose()
-                continue
-            raise HTTPException(502, f"duckai attestation failed: {exc}") from exc
-        except DuckAIError as exc:
-            if exc.is_challenge or exc.is_entrypoint:
+        async with contextlib.aclosing(
+            account.client.chat(
+                duck_messages,
+                model=model,
+                effort=effort,
+                can_use_tools=can_use_tools,
+                can_use_web_search=can_use_web_search,
+            )
+        ) as stream:
+            try:
+                async for event in stream:
+                    delivered = True
+                    yield event
+                return
+            except httpx.HTTPError as exc:
+                status = getattr(getattr(exc, "response", None), "status_code", 0) or 0
+                if not delivered and status in RETRYABLE_HTTP_STATUSES and attempt < MAX_RETRIES:
+                    await _sleep_backoff(attempt)
+                    attempt += 1
+                    continue
+                raise HTTPException(502, f"duckai transport error: {exc}") from exc
+            except attest.AttestationError as exc:
                 account.client.invalidate_attestation()
                 if not delivered and attempt < MAX_RETRIES:
                     await _sleep_backoff(attempt)
                     attempt += 1
-                    await stream.aclose()
+                    continue
+                raise HTTPException(502, f"duckai attestation failed: {exc}") from exc
+            except DuckAIError as exc:
+                if exc.is_challenge or exc.is_entrypoint:
+                    account.client.invalidate_attestation()
+                    if not delivered and attempt < MAX_RETRIES:
+                        await _sleep_backoff(attempt)
+                        attempt += 1
+                        continue
+                    raise _http_error(exc) from exc
+                if exc.is_retryable and not delivered and attempt < MAX_RETRIES:
+                    await _sleep_backoff(attempt)
+                    attempt += 1
                     continue
                 raise _http_error(exc) from exc
-            if exc.is_retryable and not delivered and attempt < MAX_RETRIES:
-                await _sleep_backoff(attempt)
-                attempt += 1
-                await stream.aclose()
-                continue
-            raise _http_error(exc) from exc
 
 
 async def _sleep_backoff(attempt: int) -> None:

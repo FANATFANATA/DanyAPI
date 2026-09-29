@@ -20,7 +20,7 @@ from ..config import settings
 from ..deepseek.client import DeepSeekClient
 from ..qwen.accounts import QwenAccount
 from ..qwen.client import QwenClient
-from .core import _shared_store, _token_stable_id
+from .core import _shared_store, _token_stable_id, _validation_summary
 from .models import _fetch_qwen_models, refresh_provider_models
 from .state import _byok_mode, app
 
@@ -279,7 +279,7 @@ def _coerce_tokens(value: Any) -> AddTokensRequest:
     try:
         return AddTokensRequest.model_validate(value)
     except ValidationError as exc:
-        raise HTTPException(400, f"invalid request body: {exc.errors()}") from None
+        raise HTTPException(400, f"invalid request body: {_validation_summary(exc.errors())}") from None
 
 
 def _pool_account_by_stable(pool: AccountPool | None, stable_id: str) -> Any | None:

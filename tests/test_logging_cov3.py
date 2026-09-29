@@ -331,6 +331,20 @@ def test_configure_removes_the_file_handler_when_the_path_is_cleared(logging_sta
     assert target.read_text(encoding="utf-8").count("after clear") == 0
 
 
+def test_drop_file_handler_survives_a_listener_that_will_not_stop(logging_state, tmp_path, caplog):
+    settings.log_file = str(tmp_path / "stubborn.log")
+    dlog.configure()
+    assert _file_handler() is not None
+    listener = dlog._file_handler_state["listener"]
+    listener.stop = types.MethodType(lambda self: (_ for _ in ()).throw(RuntimeError("cannot stop")), listener)
+    with caplog.at_level(logging.DEBUG, logger="danyapi.logging"):
+        settings.log_file = ""
+        dlog.configure()
+    assert "failed to stop the log file listener" in caplog.text
+    assert listener not in dlog._queue_listeners
+    assert dlog.FILE_HANDLER_NAME not in [getattr(item, "name", None) for item in logging.getLogger().handlers]
+
+
 def test_configure_reapplies_a_changed_level_to_existing_handlers(logging_state, tmp_path):
     settings.log_level = "INFO"
     settings.log_file = str(tmp_path / "level.log")

@@ -1526,6 +1526,32 @@ async def test_non_stream_input_exceeds_reduced_retry():
     acct.sessions.forget.assert_called_once_with("s1")
 
 
+async def test_stream_rate_limit_gives_up_once_the_deadline_burns_out(monkeypatch):
+    acct = FakeAccount([])
+    acct.client.completion = AsyncMock(side_effect=openai_mod.HTTPException(429, "Message too frequent"))
+
+    async def _no_wait(stage, attempt, deadline=None):
+        return None
+
+    monkeypatch.setattr(deepseek_mod, "_wait_message_too_frequent", _no_wait)
+    monkeypatch.setattr(deepseek_mod, "CONTINUE_DEADLINE_SEC", -1.0)
+    gen = openai_mod._stream_openai(
+        account=acct,
+        pool=MagicMock(),
+        existing_sid="s1",
+        lock=acct.sem,
+        prompt="x",
+        model="deepseek-v4.1-flash",
+        model_type="default",
+        thinking=False,
+        search=False,
+    )
+    with pytest.raises(openai_mod.HTTPException) as excinfo:
+        await _collect_agen(gen)
+    assert excinfo.value.status_code == 429
+    assert acct.client.completion.await_count == 1
+
+
 async def test_stream_input_exceeds_reduced_retry():
     acct = FakeAccount([])
     acct.client.completion = AsyncMock(
@@ -2732,7 +2758,7 @@ def test_build_limited_message_tool_path_applies_stop():
     content = "checking the weather now STOP tail"
     body = f'{content} {{"tool_calls": [{{"name": "get_weather", "arguments": {{"city": "Moscow"}}}}]}}'
     message, finish = openai_mod._build_limited_message(body, None, True, {}, None, "STOP", None, "FINISHED")
-    assert finish == "length"
+    assert finish == "tool_calls"
     assert message["content"] == "checking the weather now "
     assert message["tool_calls"][0]["function"]["name"] == "get_weather"
 
@@ -2974,6 +3000,49 @@ async def test_collect_continuation_without_deadline_still_works():
     rec = await openai_mod._collect_continuation(acct, FakeSession(), None, "default", False, False)
     assert rec is not None
     assert rec.content == "Hi"
+
+
+async def test_collect_continuation_stops_when_the_rate_limit_deadline_burns_out(monkeypatch):
+    acct = FakeAccount()
+    acct.client.completion = AsyncMock(side_effect=openai_mod.HTTPException(429, "Message too frequent"))
+    checks = iter([False, True])
+    monkeypatch.setattr(deepseek_mod, "_continue_deadline_expired", lambda _deadline: next(checks))
+    rec = await openai_mod._collect_continuation(acct, FakeSession(), None, "default", False, False, None, time.monotonic() + 300.0)
+    assert rec is None
+
+
+async def test_wait_message_too_frequent_never_outlasts_the_deadline(monkeypatch):
+    asked: list[float] = []
+
+    async def _sleep(delay: float) -> None:
+        asked.append(delay)
+
+    monkeypatch.setattr(deepseek_mod.asyncio, "sleep", _sleep)
+    await deepseek_mod._wait_message_too_frequent("stream hint", 1, time.monotonic() + 5.0)
+    assert asked and 0.0 < asked[0] <= 5.0
+    asked.clear()
+    await deepseek_mod._wait_message_too_frequent("stream hint", 1, time.monotonic() - 1.0)
+    assert asked == [0.0]
+
+
+async def test_non_stream_rate_limit_gives_up_once_the_deadline_burns_out(monkeypatch):
+    acct = FakeAccount([])
+    acct.client.completion = AsyncMock(side_effect=openai_mod.HTTPException(429, "Message too frequent"))
+    checks = iter([False, True])
+    monkeypatch.setattr(deepseek_mod, "_continue_deadline_expired", lambda _deadline: next(checks))
+    with pytest.raises(openai_mod.HTTPException) as excinfo:
+        await openai_mod._collect_non_stream(
+            account=acct,
+            pool=MagicMock(),
+            existing_sid="s1",
+            lock=acct.sem,
+            prompt="x",
+            model="deepseek-v4.1-flash",
+            model_type="default",
+            thinking=False,
+            search=False,
+        )
+    assert excinfo.value.status_code == 429
 
 
 async def test_continue_deadline_expired():

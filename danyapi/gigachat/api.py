@@ -290,6 +290,7 @@ async def stream_openai(
                 yield line
             return
         except Exception as exc:
+            log.warning("gigachat request failed: %s", exc)
             for line in _stream_error_sse(chunk_id, created, model, f"GigaChat request failed: {exc}", session_id):
                 yield line
             return

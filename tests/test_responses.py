@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 
 import pytest
 from fastapi import HTTPException
@@ -709,6 +710,23 @@ async def test_translate_stream_closes_upstream_on_client_disconnect():
     stream = resp.translate_stream(upstream, info, "r", 1)
     await stream.__anext__()
     await stream.aclose()
+    assert upstream.closed
+
+
+async def test_translate_stream_reraises_generator_exit_without_a_spurious_error(caplog):
+    info = resp.RequestInfo(model="m")
+    upstream = FakeUpstream(
+        [
+            'data: {"id":"x","choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":null}]}\n\n',
+            'data: {"id":"x","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n',
+        ]
+    )
+    stream = resp.translate_stream(upstream, info, "r", 1)
+    for _ in range(3):
+        await stream.__anext__()
+    with caplog.at_level(logging.WARNING, logger="danyapi.api.responses"):
+        await stream.aclose()
+    assert "aborted by the upstream generator" not in caplog.text
     assert upstream.closed
 
 

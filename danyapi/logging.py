@@ -7,6 +7,7 @@ import re
 import sys
 from logging.handlers import QueueHandler, QueueListener, RotatingFileHandler
 from pathlib import Path
+from typing import Any
 
 DEFAULT_FORMAT = "(%(asctime)s) %(levelname)s %(name)s %(message)s"
 DEFAULT_DATEFMT = "%H:%M:%S"
@@ -54,7 +55,7 @@ def _level_names() -> set[str]:
 
 _LEVEL_NAMES = _level_names()
 _queue_listeners: list[QueueListener] = []
-_file_handler_state: dict[str, tuple[str, int, int]] = {}
+_file_handler_state: dict[str, Any] = {}
 
 
 def _resolve_level(level: str | None) -> str:
@@ -137,6 +138,9 @@ class _EscapingFormatter(logging.Formatter):
         _set_record_message(record, _record_message(record))
         return escape_control(super().formatMessage(record))
 
+    def format(self, record: logging.LogRecord) -> str:
+        return escape_control(super().format(record))
+
 
 class _ColorFormatter(_EscapingFormatter):
     def __init__(self) -> None:
@@ -215,6 +219,15 @@ def _drop_file_handler(root: logging.Logger) -> None:
         return
     root.removeHandler(handler)
     _DroppingQueueHandler.dropped = 0
+    queue_for_file = getattr(handler, "queue", None)
+    listener = _file_handler_state.get("listener")
+    if queue_for_file is not None and listener is not None:
+        try:
+            listener.stop()
+        except Exception:
+            logging.getLogger(__name__).debug("failed to stop the log file listener", exc_info=True)
+        _queue_listeners[:] = [item for item in _queue_listeners if item is not listener]
+        _file_handler_state.pop("listener", None)
     handler.close()
 
 
@@ -275,6 +288,7 @@ def configure() -> None:
     _queue_listeners.append(listener)
     root.addHandler(queue_handler)
     _file_handler_state["target"] = (target, max_bytes, backup_count)
+    _file_handler_state["listener"] = listener
 
 
 def uvicorn_log_config() -> dict:

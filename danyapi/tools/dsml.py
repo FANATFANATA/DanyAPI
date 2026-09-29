@@ -10,6 +10,7 @@ from .common import _XML_STRAY_TOOL_CLOSE_RE, _XML_WRAPPER_CLOSE_RE
 from .jsonfix import _extract_calls, _extract_json_object
 
 _DSML_RUN_MAX = 8
+MAX_BUFFER_CHARS = 64 * 1024
 _DSML_PIPE = r"|\u00a6\u01c0\u01c1\u05c0\u2016\u2223\u2502\u2551\u2758\ufe31\uff5c"
 _DSML_CHAR = r"(?:[|]|[^\x00-\x7f])"
 _DSML_RUN = rf"{_DSML_CHAR}{{1,{_DSML_RUN_MAX}}}"
@@ -639,6 +640,8 @@ def _dsml_dangling_pending(text: str, start: int) -> bool:
         index += 1
     while index < size and text[index] in _DSML_SPACE:
         index += 1
+    if index >= size:
+        return True
     return index >= size or text[index] in _DSML_PIPE_RUN
 
 
@@ -842,6 +845,11 @@ class DsmlFilter:
         if not text:
             return ""
         self._buf += text
+        if len(self._buf) > MAX_BUFFER_CHARS:
+            overflow = len(self._buf) - MAX_BUFFER_CHARS
+            head = self._buf[:overflow]
+            self._buf = self._buf[overflow:]
+            return _strip_output(head, drop_tail=False)
         cut = _dsml_straddle_start(self._buf, _dsml_scan_cut(self._buf, False))
         if cut <= 0:
             return ""

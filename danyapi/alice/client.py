@@ -244,6 +244,7 @@ class AliceClient:
         if ws is not None:
             with contextlib.suppress(Exception):
                 await ws.close()
+        self._frames = asyncio.Queue(maxsize=MAX_PENDING_FRAMES)
 
     async def _send(self, message: dict) -> None:
         ws = self._ws

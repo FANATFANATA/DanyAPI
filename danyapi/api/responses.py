@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import inspect
 import json
@@ -1056,6 +1057,8 @@ async def translate_stream(
                         finish = choice.get("finish_reason")
                         if isinstance(finish, str) and finish and position not in state.finishes:
                             state.finishes[position] = finish
+        except (GeneratorExit, asyncio.CancelledError):
+            raise
         except BaseException as exc:
             log.warning("responses stream aborted by the upstream generator: %s", exc)
             for line in state.close_all():

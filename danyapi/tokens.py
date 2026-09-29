@@ -68,7 +68,10 @@ def trim_to_tokens(text: str, budget: int | None) -> str:
         return text[:total_len].rstrip() or text[:total_len]
     head = words[0]
     if not head:
-        return text
+        stripped = text.lstrip()
+        if not stripped:
+            return ""
+        return stripped[: _head_length(stripped, budget)]
     return text[: _head_length(head, budget)]
 
 

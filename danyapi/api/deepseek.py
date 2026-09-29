@@ -228,15 +228,18 @@ def _is_message_too_frequent_hint(rec: MessageReconstructor) -> bool:
     return _message_too_frequent_text(hint.get("message"), hint.get("finish_reason")) is not None
 
 
-async def _wait_message_too_frequent(stage: str, attempt: int) -> None:
+async def _wait_message_too_frequent(stage: str, attempt: int, deadline: float | None = None) -> None:
+    wait = MESSAGE_TOO_FREQUENT_WAIT_SEC
+    if deadline is not None:
+        wait = max(0.0, min(wait, deadline - time.monotonic()))
     log.warning(
         "deepseek message too frequent (%s), retry %d/%d in %.0fs",
         stage,
         attempt,
         MESSAGE_TOO_FREQUENT_MAX_RETRIES,
-        MESSAGE_TOO_FREQUENT_WAIT_SEC,
+        wait,
     )
-    await asyncio.sleep(MESSAGE_TOO_FREQUENT_WAIT_SEC)
+    await asyncio.sleep(wait)
 
 
 def _is_context_limit(rec: MessageReconstructor) -> bool:
@@ -348,8 +351,9 @@ def _build_limited_message(
         if finish == "tool_calls":
             tool_text = message.get("content")
             if isinstance(tool_text, str):
-                text = trim_to_tokens(_apply_stop(tool_text, stop), max_tokens)
-                if text != tool_text:
+                stopped = _apply_stop(tool_text, stop)
+                text = trim_to_tokens(stopped, max_tokens)
+                if text != stopped:
                     finish = "length"
                 message["content"] = text
             return message, finish
@@ -491,8 +495,10 @@ async def _collect_continuation(
             raise HTTPException(502, str(exc)) from exc
         except HTTPException as exc:
             if _is_message_too_frequent_http(exc) and rate_attempt < MESSAGE_TOO_FREQUENT_MAX_RETRIES:
+                if _continue_deadline_expired(deadline):
+                    return None
                 rate_attempt += 1
-                await _wait_message_too_frequent("continuation request", rate_attempt)
+                await _wait_message_too_frequent("continuation request", rate_attempt, deadline)
                 continue
             if _is_retryable_http(exc) and attempt < MAX_RETRIES:
                 attempt += 1
@@ -514,7 +520,7 @@ async def _collect_continuation(
             and rate_attempt < MESSAGE_TOO_FREQUENT_MAX_RETRIES
         ):
             rate_attempt += 1
-            await _wait_message_too_frequent("continuation hint", rate_attempt)
+            await _wait_message_too_frequent("continuation hint", rate_attempt, deadline)
             continue
         if (
             not (rec.content or rec.reasoning)
@@ -690,8 +696,10 @@ async def _collect_non_stream(
                         response_message_id = None
                         continue
                     if _is_message_too_frequent_http(exc) and rate_attempt < MESSAGE_TOO_FREQUENT_MAX_RETRIES:
+                        if _continue_deadline_expired(deadline):
+                            raise
                         rate_attempt += 1
-                        await _wait_message_too_frequent("request", rate_attempt)
+                        await _wait_message_too_frequent("request", rate_attempt, deadline)
                         continue
                     if _is_retryable_http(exc) and attempt < MAX_RETRIES:
                         attempt += 1
@@ -713,7 +721,7 @@ async def _collect_non_stream(
                     and rate_attempt < MESSAGE_TOO_FREQUENT_MAX_RETRIES
                 ):
                     rate_attempt += 1
-                    await _wait_message_too_frequent("stream hint", rate_attempt)
+                    await _wait_message_too_frequent("stream hint", rate_attempt, deadline)
                     continue
                 if (
                     not (rec.content or rec.reasoning)
@@ -1020,8 +1028,10 @@ async def _stream_openai(
                     response_message_id = None
                     continue
                 if _is_message_too_frequent_http(exc) and rate_attempt < MESSAGE_TOO_FREQUENT_MAX_RETRIES:
+                    if _continue_deadline_expired(deadline):
+                        raise
                     rate_attempt += 1
-                    await _wait_message_too_frequent("request", rate_attempt)
+                    await _wait_message_too_frequent("request", rate_attempt, deadline)
                     continue
                 if _is_retryable_http(exc) and attempt < MAX_RETRIES:
                     attempt += 1
@@ -1073,7 +1083,7 @@ async def _stream_openai(
                 break
             if not _is_input_exceeds_limit(rec) and _is_message_too_frequent_hint(rec) and rate_attempt < MESSAGE_TOO_FREQUENT_MAX_RETRIES:
                 rate_attempt += 1
-                await _wait_message_too_frequent("stream hint", rate_attempt)
+                await _wait_message_too_frequent("stream hint", rate_attempt, deadline)
                 continue
             if not _is_input_exceeds_limit(rec) and _is_fake_context_hint(rec) and had_cached_session and not stale_rebuilt and messages is not None:
                 try:

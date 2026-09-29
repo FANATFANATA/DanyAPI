@@ -80,7 +80,8 @@ def cache_root() -> Path:
     else:
         root = Path(tempfile.gettempdir()) / DEFAULT_CACHE_SUBDIR
     try:
-        root.mkdir(parents=True, exist_ok=True)
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(root, 0o700)
     except OSError as exc:
         log.warning("cannot create cache dir %s: %s", root, exc)
     return root

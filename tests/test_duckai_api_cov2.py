@@ -338,7 +338,7 @@ async def test_transport_failure_without_a_delivered_event_retries_to_the_limit(
     assert excinfo.value.status_code == 502
     assert excinfo.value.detail == "duckai transport error: transport failed with 503"
     assert len(client.calls) == MAX_RETRIES + 1
-    assert client.closed == MAX_RETRIES
+    assert client.closed == MAX_RETRIES + 1
     assert _no_backoff == list(range(MAX_RETRIES))
 
 
@@ -348,7 +348,7 @@ async def test_failure_after_a_delivered_event_propagates_without_retrying(_no_b
         await collect_non_stream(account, [ChatMessage(role="user", content="hi")], model=MODEL)
     assert excinfo.value.status_code == 502
     assert len(client.calls) == 1
-    assert client.closed == 0
+    assert client.closed == 1
     assert _no_backoff == []
 
 
@@ -358,7 +358,7 @@ async def test_transport_failure_with_a_non_retryable_status_raises_immediately(
         await collect_non_stream(account, [ChatMessage(role="user", content="hi")], model=MODEL)
     assert excinfo.value.detail == "duckai transport error: transport failed with 400"
     assert len(client.calls) == 1
-    assert client.closed == 0
+    assert client.closed == 1
 
 
 async def test_transport_failure_without_a_response_status_raises_immediately():
@@ -368,7 +368,7 @@ async def test_transport_failure_without_a_response_status_raises_immediately():
     assert excinfo.value.status_code == 502
     assert excinfo.value.detail == "duckai transport error: no route"
     assert len(client.calls) == 1
-    assert client.closed == 0
+    assert client.closed == 1
 
 
 async def test_attestation_failure_invalidates_and_retries_to_the_limit(_no_backoff):
@@ -378,7 +378,7 @@ async def test_attestation_failure_invalidates_and_retries_to_the_limit(_no_back
     assert excinfo.value.status_code == 502
     assert excinfo.value.detail == "duckai attestation failed: unsupported fragment"
     assert client.invalidated == MAX_RETRIES + 1
-    assert client.closed == MAX_RETRIES
+    assert client.closed == MAX_RETRIES + 1
     assert _no_backoff == list(range(MAX_RETRIES))
 
 
@@ -389,7 +389,7 @@ async def test_attestation_failure_after_a_delivered_event_does_not_retry():
     assert excinfo.value.detail == "duckai attestation failed: late"
     assert client.invalidated == 1
     assert len(client.calls) == 1
-    assert client.closed == 0
+    assert client.closed == 1
 
 
 async def test_challenge_error_retries_then_maps_to_the_blocked_hint():
@@ -399,7 +399,7 @@ async def test_challenge_error_retries_then_maps_to_the_blocked_hint():
     assert excinfo.value.status_code == 403
     assert excinfo.value.detail == BLOCKED_HINT
     assert client.invalidated == MAX_RETRIES + 1
-    assert client.closed == MAX_RETRIES
+    assert client.closed == MAX_RETRIES + 1
 
 
 async def test_challenge_error_after_a_delivered_event_does_not_retry():
@@ -409,7 +409,7 @@ async def test_challenge_error_after_a_delivered_event_does_not_retry():
     assert excinfo.value.status_code == 403
     assert client.invalidated == 1
     assert len(client.calls) == 1
-    assert client.closed == 0
+    assert client.closed == 1
 
 
 async def test_retryable_duck_error_retries_then_raises_502():
@@ -419,7 +419,7 @@ async def test_retryable_duck_error_retries_then_raises_502():
     assert excinfo.value.status_code == 502
     assert excinfo.value.detail == "duckai error: boom"
     assert client.invalidated == 0
-    assert client.closed == MAX_RETRIES
+    assert client.closed == MAX_RETRIES + 1
 
 
 async def test_retryable_duck_error_after_a_delivered_event_does_not_retry():
@@ -427,7 +427,7 @@ async def test_retryable_duck_error_after_a_delivered_event_does_not_retry():
     with pytest.raises(HTTPException) as excinfo:
         await collect_non_stream(account, [ChatMessage(role="user", content="hi")], model=MODEL)
     assert excinfo.value.status_code == 502
-    assert client.closed == 0
+    assert client.closed == 1
     assert len(client.calls) == 1
 
 
@@ -438,7 +438,7 @@ async def test_non_retryable_duck_error_raises_without_retrying():
     assert excinfo.value.status_code == 400
     assert excinfo.value.detail == "duckai error: conflict"
     assert len(client.calls) == 1
-    assert client.closed == 0
+    assert client.closed == 1
 
 
 async def test_sleep_backoff_requests_a_jittered_delay(monkeypatch):

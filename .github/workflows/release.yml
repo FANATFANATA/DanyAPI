@@ -83,13 +83,14 @@ jobs:
               continue
             fi
             pending=$(printf '%s\n' "$runs" | grep -c '^in_progress\|^queued' || true)
-            failed=$(printf '%s\n' "$runs" | grep -c '^completed failure\|^completed timed_out\|^completed cancelled' || true)
-            if [ "$failed" -gt 0 ]; then
-              echo "::error::CI failed on this commit"
+            succeeded=$(printf '%s\n' "$runs" | grep -c '^completed success' || true)
+            other=$(printf '%s\n' "$runs" | grep -vc '^completed success\|^in_progress\|^queued' || true)
+            if [ "$other" -gt 0 ]; then
+              echo "::error::CI did not succeed on this commit"
               printf '%s\n' "$runs"
               exit 1
             fi
-            if [ "$pending" -eq 0 ]; then
+            if [ "$pending" -eq 0 ] && [ "$succeeded" -ge 1 ]; then
               echo "CI succeeded on this commit"
               printf '%s\n' "$runs"
               exit 0

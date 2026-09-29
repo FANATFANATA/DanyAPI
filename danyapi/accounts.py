@@ -456,7 +456,7 @@ class AccountPool(Generic[AccountT]):
                 account.sem.release()
                 if session_id is not None:
                     return account, session_id
-                self._rr = (self.accounts.index(account) + 1) % len(candidates)
+                self._rr = (candidates.index(account) + 1) % len(candidates)
                 return account, None
             if time.monotonic() >= deadline:
                 raise AccountPoolBusy()
@@ -502,7 +502,8 @@ class AccountPool(Generic[AccountT]):
             except (TimeoutError, asyncio.TimeoutError):
                 log.warning("%s auth recheck timed out", acct.label)
                 ok = False
-            except Exception:
+            except Exception as exc:
+                log.warning("%s auth recheck failed: %s", acct.label, exc)
                 ok = False
             if ok:
                 acct.broken = False

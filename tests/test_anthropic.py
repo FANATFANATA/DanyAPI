@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 
 import pytest
 from fastapi.testclient import TestClient
@@ -825,6 +826,21 @@ def test_translate_stream_upstream_exception_closes_blocks_and_errors():
         "error",
     ]
     assert _named(frames, "error")[0]["error"] == {"type": "api_error", "message": "upstream stream failed"}
+
+
+def test_translate_stream_reraises_generator_exit_without_a_spurious_error(caplog):
+    async def gen():
+        yield _sse(json.dumps({"choices": [{"index": 0, "delta": {"content": "hi"}}]}))
+
+    async def run():
+        stream = ant.translate_stream(gen(), _info(), "msg_1")
+        for _ in range(3):
+            await stream.__anext__()
+        await stream.aclose()
+
+    with caplog.at_level(logging.WARNING, logger="danyapi.api.anthropic"):
+        asyncio.run(run())
+    assert "aborted by the upstream generator" not in caplog.text
 
 
 def test_translate_stream_decodes_bytes_chunks():

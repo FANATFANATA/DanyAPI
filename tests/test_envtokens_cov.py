@@ -663,7 +663,7 @@ def test_coerce_tokens_passes_models_through_and_wraps_failures():
         envtokens._coerce_tokens({"deepseek_tokens": ["a"], "nope": 1})
     assert excinfo.value.status_code == 400
     assert excinfo.value.detail.startswith("invalid request body: ")
-    assert "extra_forbidden" in excinfo.value.detail
+    assert "nope" in excinfo.value.detail
 
 
 def test_pool_account_by_stable():

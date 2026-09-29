@@ -312,7 +312,7 @@ def _run_solver(
     if "error" in out:
         raise RuntimeError(str(out["error"]))
     answer = out.get("answer")
-    if isinstance(answer, bool) or not isinstance(answer, int) or answer < 0:
+    if isinstance(answer, bool) or not isinstance(answer, int) or answer < 0 or answer >= difficulty:
         raise RuntimeError(f"{script.name} returned an invalid answer: {out!r:.200}")
     return answer
 

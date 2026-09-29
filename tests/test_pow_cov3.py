@@ -127,7 +127,7 @@ def test_run_solver_forwards_the_timeout_and_the_payload():
 def test_run_solver_runs_a_javascript_solver_through_node():
     script = Path("pow_solver.js")
     with patch("danyapi.pow.subprocess.run", return_value=_proc('{"answer": 1}')) as run:
-        assert _run_solver(script, "c", "s", 1, 1) == 1
+        assert _run_solver(script, "c", "s", 1, 2) == 1
     assert run.call_args.args[0] == ["node", str(script)]
 
 
@@ -135,7 +135,7 @@ def test_run_solver_scrubs_the_environment_it_hands_over(monkeypatch):
     monkeypatch.setenv("DEEPSEEK_TOKENS", "secret")
     monkeypatch.setenv("DANYAPI_HOST", "127.0.0.1")
     with patch("danyapi.pow.subprocess.run", return_value=_proc('{"answer": 1}')) as run:
-        _run_solver(Path("pow_solver.exe"), "c", "s", 1, 1)
+        _run_solver(Path("pow_solver.exe"), "c", "s", 1, 2)
     env = run.call_args.kwargs["env"]
     assert "DEEPSEEK_TOKENS" not in env
     assert env["DANYAPI_HOST"] == "127.0.0.1"

@@ -11,7 +11,6 @@ from .dsml import _strip_dsml
 
 MAX_SCHEMA_FIELD = 2000
 MAX_SCHEMA_NAME = 200
-MAX_FINGERPRINT_CHARS = 512
 _SCHEMA_CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 
 TOOL_CALL_INSTRUCTION = (

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -185,7 +186,15 @@ def _move_retry(src, dst, attempts=4):
     return False
 
 
+TAG_RE = re.compile(r"^v\d+\.\d+\.\d+$")
+ARCHIVE_TIMEOUT_SEC = 60
+ARCHIVE_MAX_BYTES = 200 * 1024 * 1024
+
+
 def zip_update(tag):
+    if not TAG_RE.match(tag or ""):
+        print(f"DanyAPI: refusing to download an unexpected tag name {tag!r}")
+        return False
     parent = ROOT.parent
     url = f"https://github.com/{REPO}/archive/refs/tags/{tag}.zip"
     print(f"DanyAPI: downloading {url}")
@@ -198,7 +207,17 @@ def zip_update(tag):
     tmp_zip = staging / "update.zip"
     extract = staging / "extracted"
     try:
-        urllib.request.urlretrieve(url, str(tmp_zip))
+        with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "DanyAPI"}), timeout=ARCHIVE_TIMEOUT_SEC) as resp:
+            written = 0
+            with open(tmp_zip, "wb") as handle:
+                while True:
+                    chunk = resp.read(65536)
+                    if not chunk:
+                        break
+                    written += len(chunk)
+                    if written > ARCHIVE_MAX_BYTES:
+                        raise OSError(f"update archive is above the {ARCHIVE_MAX_BYTES} byte limit")
+                    handle.write(chunk)
         with zipfile.ZipFile(tmp_zip) as zf:
             names = [n for n in zf.namelist() if n]
             roots = {Path(n).parts[0] for n in names}

@@ -10,11 +10,13 @@ from typing import Any
 _ARGS_ALIASES = ("arguments", "args", "params", "parameters", "input")
 _NAME_ALIASES = ("name", "tool", "action", "tool_name", "call")
 _JSON_TYPE_ATTRS = frozenset({"string", "boolean", "integer", "number", "object", "array", "null"})
+_TAG_ATTR_MAX = 512
+
 _FENCES_RE = re.compile(r"^```[a-zA-Z0-9_-]*\s*\n?(.*?)\n?```$", re.DOTALL | re.IGNORECASE)
 _FENCE_OPEN_RE = re.compile(r"^```[a-zA-Z0-9_-]*[ \t]*\r?\n?")
 _FENCE_CLOSE = "```"
 _XML_PARAM_RE = re.compile(
-    r'<\s*parameter\b[^>]*?\bname\s*=\s*(["\'])([^"\']+)\1[^>]*?>'
+    rf'<\s*parameter\b[^>]{{0,{_TAG_ATTR_MAX}}}?\bname\s*=\s*(["\'])([^"\']+)\1[^>]{{0,{_TAG_ATTR_MAX}}}?>'
     r"(.*?)"
     r"(?:</\s*parameter\s*>|(?=</?\s*(?:tool_calls|tool_call|function_calls|function_call|calls|invoke|parameter)\b)|$)",
     re.DOTALL | re.IGNORECASE,
@@ -29,7 +31,7 @@ _XML_STRAY_TOOL_CLOSE_RE = re.compile(
 _XML_TOOL_NAMES = r"invoke|toolinvoke|tool_invoke|use_tool|tool_use|call|function|tool"
 _TOOL_TAG_NAMES = frozenset(name.strip().lower() for name in _XML_TOOL_NAMES.split("|"))
 _XML_TOOL_SELFCLOSE_RE = re.compile(
-    r"<(?:invoke|toolinvoke|tool_invoke|use_tool|tool_use|call|function|tool)\b([^>]*?)/>",
+    rf"<(?:invoke|toolinvoke|tool_invoke|use_tool|tool_use|call|function|tool)\b([^>]{{0,{_TAG_ATTR_MAX}}}?)/>",
     re.DOTALL | re.IGNORECASE,
 )
 _XML_NAME_ATTR_RE = re.compile(r"\bname\s*=\s*([\"']?)([^\s>\"']+)\1", re.IGNORECASE)

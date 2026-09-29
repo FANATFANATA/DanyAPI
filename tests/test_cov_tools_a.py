@@ -305,6 +305,20 @@ def test_dsml_filter_holds_pipe_tail_until_flush():
     assert flt.flush() == strip_dsml("<\uff5cDplain 2")
 
 
+def test_dsml_filter_releases_a_buffer_that_outgrows_the_cap():
+    import danyapi.tools.dsml as dsml_mod
+
+    original = dsml_mod.MAX_BUFFER_CHARS
+    dsml_mod.MAX_BUFFER_CHARS = 16
+    try:
+        flt = DsmlFilter()
+        emitted = "".join(flt.feed("<|") for _ in range(64))
+        assert emitted
+        assert len(flt._buf) <= 16
+    finally:
+        dsml_mod.MAX_BUFFER_CHARS = original
+
+
 def test_strip_dsml_removes_interrupted_tag_with_attributes():
     assert strip_dsml('ok <\uff5cDSML\uff5cparameter name="city"') == "ok  "
 

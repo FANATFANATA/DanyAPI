@@ -53,7 +53,7 @@ _TOOL_STREAM_JSON_RE = re.compile(r"\{\s*['\"]?(?:" + "|".join(TOOL_STREAM_JSON_
 _TOOL_STREAM_ARRAY_RE = re.compile(r"\[\s*\{")
 _TOOL_STREAM_YAML_RE = re.compile(r"tool_calls\s*:")
 _TOOL_STREAM_NAME_ATTR_RE = re.compile(
-    r"<\s*/?\s*(?!(?:" + "|".join(sorted(_XML_HTML_TAGS)) + r")\b)[A-Za-z_][A-Za-z0-9_.-]*[^<>]*\bname\s*=",
+    r"<\s*/?\s*(?!(?:" + "|".join(sorted(_XML_HTML_TAGS)) + r")\b)[A-Za-z_][^<>]*?\bname\s*=",
     re.IGNORECASE,
 )
 _DSML_STREAM_START = re.compile(

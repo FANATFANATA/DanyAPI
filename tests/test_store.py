@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import stat
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -125,6 +126,25 @@ def test_cache_root_mkdir_error(tmp_path, monkeypatch):
     blocker.write_text("file", encoding="utf-8")
     monkeypatch.setattr(store_mod.settings, "cache_dir", str(blocker))
     assert store_mod.cache_root() == blocker
+
+
+def test_cache_root_tightens_permissions(tmp_path, monkeypatch):
+    root = tmp_path / "cache"
+    monkeypatch.setattr(store_mod.settings, "cache_dir", str(root))
+    assert store_mod.cache_root() == root
+    assert root.is_dir()
+    if os.name != "nt":
+        assert stat.S_IMODE(root.stat().st_mode) == 0o700
+
+
+@pytest.mark.skipif(os.name == "nt", reason="posix permission path")
+def test_cache_root_chmod_failure_is_logged_unix(tmp_path, monkeypatch, caplog):
+    root = tmp_path / "cache2"
+    monkeypatch.setattr(store_mod.settings, "cache_dir", str(root))
+    monkeypatch.setattr(store_mod.os, "chmod", MagicMock(side_effect=OSError("denied")))
+    with caplog.at_level(logging.WARNING, logger="danyapi.store"):
+        assert store_mod.cache_root() == root
+    assert "cannot create cache dir" in caplog.text
 
 
 def test_load_skips_disabled():

@@ -23,6 +23,8 @@ def _strip_fences(text: str) -> str:
     return stripped[body_start:close].strip()
 
 
+_MAX_FIX_DEPTH = 200
+
 _TRAILING_COMMA_RE = re.compile(r",\s*[}\]]")
 
 
@@ -271,7 +273,7 @@ def _loads_lenient(text: str) -> Any:
     for candidate in _json_candidates(text):
         try:
             return json.loads(candidate)
-        except (json.JSONDecodeError, TypeError, ValueError):
+        except (json.JSONDecodeError, TypeError, ValueError, RecursionError):
             continue
     raise ValueError("invalid json")
 
@@ -295,6 +297,8 @@ def _fix_unbalanced_json(text: str) -> str | None:
         if ch == '"':
             in_string = True
         elif ch in "{[":
+            if len(stack) >= _MAX_FIX_DEPTH:
+                return None
             stack.append(ch)
         elif ch == "}":
             if stack and stack[-1] == "{":

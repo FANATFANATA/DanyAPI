@@ -41,7 +41,7 @@ GROUPS = [
                 "Extra browser origins allowed to call the API, comma separated (empty = any)",
                 None,
             ),
-            ("DANYAPI_ADMIN_TOKEN", "Bearer token that enables POST /v1/tokens (empty keeps it off)", None),
+            ("DANYAPI_ADMIN_TOKEN", "Bearer token that enables POST /v1/tokens (empty keeps it off)", "secret"),
         ],
     ),
     (
@@ -238,7 +238,8 @@ def run_pip(req):
 def prompt(key, label, kind, current, default=""):
     while True:
         if current:
-            raw = _read_input(f"  {key} - {label} [{current}]: ")
+            shown = mask_secrets(current) if kind in ("tokens", "secret") else current
+            raw = _read_input(f"  {key} - {label} [{shown}]: ")
         else:
             raw = _read_input(f"  {key} - {label}: ")
         if raw is None:

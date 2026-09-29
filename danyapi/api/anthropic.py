@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import logging
@@ -743,6 +744,8 @@ async def translate_stream(
                         reason = choice.get("finish_reason")
                         if isinstance(reason, str) and reason and finish is None:
                             finish = reason
+        except (GeneratorExit, asyncio.CancelledError):
+            raise
         except BaseException as exc:
             log.warning("anthropic stream aborted by the upstream generator: %s", exc)
             for line in state.close_all():

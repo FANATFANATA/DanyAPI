@@ -8,6 +8,7 @@ import tempfile
 from pathlib import Path
 
 MIN_PYTHON = (3, 10)
+BUILD_TIMEOUT_SEC = 120
 ROOT = Path(__file__).resolve().parent
 
 
@@ -28,6 +29,12 @@ def create_private(target: Path, data: bytes) -> None:
 def ensure_env() -> None:
     env_file = ROOT / ".env"
     if env_file.exists():
+        if os.name != "nt":
+            try:
+                if env_file.stat().st_mode & 0o077:
+                    os.chmod(env_file, 0o600)
+            except OSError as exc:
+                print(f"cannot tighten permissions on {env_file}: {exc}", file=sys.stderr)
         return
     example = ROOT / ".env.example"
     if example.exists():
@@ -94,7 +101,7 @@ def build_solver() -> None:
             str(src_path),
             f"/Fe:{bin_path}",
         ]
-        res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        res = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=BUILD_TIMEOUT_SEC)
         if res.returncode == 0:
             success = True
         else:
@@ -109,7 +116,7 @@ def build_solver() -> None:
             "-o",
             str(bin_path),
         ]
-        res = subprocess.run(cmd_fast, capture_output=True, text=True, check=False)
+        res = subprocess.run(cmd_fast, capture_output=True, text=True, check=False, timeout=BUILD_TIMEOUT_SEC)
         if res.returncode == 0:
             success = True
         else:
@@ -122,7 +129,7 @@ def build_solver() -> None:
                 "-o",
                 str(bin_path),
             ]
-            res2 = subprocess.run(cmd_compat, capture_output=True, text=True, check=False)
+            res2 = subprocess.run(cmd_compat, capture_output=True, text=True, check=False, timeout=BUILD_TIMEOUT_SEC)
             if res2.returncode == 0:
                 success = True
             else:
