@@ -173,7 +173,18 @@ def test_handle_touches_invalid_fragment_index():
     rec = MessageReconstructor()
     rec._frag_idx = 1
     rec.handle(SSEEvent(None, {"o": "SET", "p": "response/fragments/xx/content", "v": "x"}))
-    assert rec.message == {"fragments": {"xx": {"content": "x"}}}
+    assert rec.message == {"fragments": {}}
+
+
+def test_handle_does_not_fabricate_missing_intermediates():
+    rec = MessageReconstructor()
+    rec.handle(SSEEvent(None, {"o": "SET", "p": "response/fragments/0/content", "v": "x"}))
+    assert rec.message == {"fragments": {}}
+    rec.handle(SSEEvent(None, {"o": "SET", "p": "response/accumulated_token_usage", "v": 3}))
+    assert rec.message == {"fragments": {}, "accumulated_token_usage": 3}
+    rec.handle(SSEEvent(None, {"o": "SET", "p": "response/fragments", "v": [{"type": "RESPONSE", "content": "hi"}]}))
+    rec.handle(SSEEvent(None, {"o": "APPEND", "p": "response/fragments/0/content", "v": "!"}))
+    assert rec.message["fragments"][0]["content"] == "hi!"
 
 
 def test_handle_fast_append_marks_clean():

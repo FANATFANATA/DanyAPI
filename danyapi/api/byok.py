@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import json
 import logging
+import os
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from contextvars import ContextVar
 from typing import Any
 
 from fastapi import HTTPException, Request
@@ -21,24 +25,32 @@ from ..gigachat.accounts import GigaChatAccount
 from ..gigachat.client import GigaChatClient
 from ..qwen.accounts import QwenAccount
 from ..qwen.client import QwenClient
-from ..store import JsonStore
-from .core import MAX_REQUEST_BODY, _read_request_body, _token_stable_id
+from ..store import JsonStore, cache_root
+from .core import MAX_REQUEST_BODY
 from .models import _header_api_key, refresh_provider_models
-from .state import (
-    BYOK_PROVIDERS,
-    _byok_auth_state,
-    _byok_locks_state,
-    _byok_pools_state,
-    _byok_stores_state,
-    app,
-    provider_needs_api_key,
-)
+from .state import BYOK_PROVIDERS, _byok_auth_state, _byok_pools_state, _byok_stores_state, app, provider_needs_api_key
 
 log = logging.getLogger("danyapi.api")
 
 
 BYOK_POOL_LIMIT = 512
 BYOK_AUTH_LIMIT = 4096
+BYOK_MAX_KEYS = 16
+BYOK_MAX_JSON_BODY = 1024 * 1024
+BYOK_FORM_MAX_BYTES = 2 * 1024 * 1024
+BYOK_FORM_MAX_FILES = 8
+BYOK_FORM_MAX_FIELDS = 32
+BYOK_KEY_LOCK_LIMIT = 4096
+BYOK_SALT_FILE = "byok-affinity-salt.bin"
+KEYLESS_POOL_KEY = "__keyless__"
+
+_INVALID_KEY_DETAIL = "api key for {provider} is missing or invalid, check the key and the key format"
+_UNREACHABLE_DETAIL = "{provider} could not be reached, the api key could not be verified, try again"
+
+_CACHE_MISS = object()
+_KEY_LOCKS: dict[str, asyncio.Lock] = {}
+_AUTH_INDETERMINATE: ContextVar[int] = ContextVar("danyapi_byok_auth_indeterminate", default=0)
+_CALLER_ID: ContextVar[str] = ContextVar("danyapi_byok_caller_id", default="")
 
 
 def _cached_auth(store: dict[str, Any], stable: str, ttl: float, now: float) -> bool | None:
@@ -61,12 +73,94 @@ def _evict_auth(store: dict[str, Any]) -> None:
         store.pop(next(iter(store)), None)
 
 
-async def _api_key_from_form(request: Request) -> str | None:
+def _touch_auth(store: dict[str, Any], stable: str) -> None:
+    record = store.get(stable, _CACHE_MISS)
+    if record is _CACHE_MISS:
+        return
+    store.pop(stable, None)
+    store[stable] = record
+
+
+def _touch_pool_cache(cache: dict[str, Any], cache_key: str) -> None:
+    pool = cache.get(cache_key, _CACHE_MISS)
+    if pool is _CACHE_MISS:
+        return
+    cache.pop(cache_key, None)
+    cache[cache_key] = pool
+
+
+def _auth_indeterminate_count() -> int:
+    return _AUTH_INDETERMINATE.get()
+
+
+def _note_auth_indeterminate() -> None:
+    _AUTH_INDETERMINATE.set(_AUTH_INDETERMINATE.get() + 1)
+
+
+def _load_byok_salt() -> bytes:
+    path = cache_root() / BYOK_SALT_FILE
     try:
-        form = await request.form()
-    except Exception:
+        existing = path.read_bytes()
+        if len(existing) >= 32:
+            return existing[:32]
+    except OSError as exc:
+        log.warning("byok affinity salt is not readable, a new one is generated: %s", exc)
+    salt = os.urandom(32)
+    try:
+        path.write_bytes(salt)
+        os.chmod(path, 0o600)
+    except OSError as exc:
+        log.warning("byok affinity salt cannot be persisted, session affinity is lost on restart: %s", exc)
+    return salt
+
+
+_BYOK_SALT = _load_byok_salt()
+
+
+def _byok_stable_id(token: str) -> str:
+    return hmac.new(_BYOK_SALT, token.encode("utf-8"), hashlib.sha256).hexdigest()[:16]
+
+
+def _byok_scope(cache_key: str) -> str | None:
+    if not settings.cache_enabled:
         return None
-    value = form.get("api_key")
+    return "byok-" + hashlib.sha256(cache_key.encode("utf-8")).hexdigest()[:16]
+
+
+def _key_lock(provider: str, cache_key: str) -> asyncio.Lock:
+    name = f"{provider}:{cache_key}"
+    lock = _KEY_LOCKS.get(name)
+    if lock is None:
+        if len(_KEY_LOCKS) >= BYOK_KEY_LOCK_LIMIT:
+            for stale, candidate in list(_KEY_LOCKS.items()):
+                if not candidate.locked():
+                    _KEY_LOCKS.pop(stale, None)
+        lock = asyncio.Lock()
+        _KEY_LOCKS[name] = lock
+    return lock
+
+
+async def _api_key_from_form(request: Request) -> str | None:
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > BYOK_FORM_MAX_BYTES:
+                raise HTTPException(413, "multipart body too large")
+        except ValueError:
+            raise HTTPException(400, "invalid content-length header") from None
+    try:
+        cached = getattr(request, "_form", None)
+        if cached is not None:
+            value = cached.get("api_key")
+        else:
+            form = await request.form(max_files=BYOK_FORM_MAX_FILES, max_fields=BYOK_FORM_MAX_FIELDS)
+            try:
+                value = form.get("api_key")
+            finally:
+                await form.close()
+    except Exception as exc:
+        log.info("byok multipart body could not be parsed: %s", exc)
+        raise HTTPException(400, "malformed multipart request body") from exc
     return value.strip() if isinstance(value, str) and value.strip() else None
 
 
@@ -79,13 +173,23 @@ async def _extract_request_api_key(request: Request) -> str | None:
         return await _api_key_from_form(request)
     if not content_type.startswith("application/json"):
         return None
-    try:
-        body = await _read_request_body(request, MAX_REQUEST_BODY)
-    except HTTPException:
-        raise
-    except Exception:
-        return None
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > MAX_REQUEST_BODY:
+                raise HTTPException(413, "request body too large")
+        except ValueError:
+            return None
+    body = getattr(request, "_body", None)
+    if body is None:
+        try:
+            body = await request.body()
+        except Exception:
+            return None
     if not body:
+        return None
+    if len(body) > BYOK_MAX_JSON_BODY:
+        log.info("byok api key in the json body is ignored for bodies over %d bytes, send it in a header", BYOK_MAX_JSON_BODY)
         return None
     try:
         payload = json.loads(body)
@@ -99,6 +203,21 @@ async def _extract_request_api_key(request: Request) -> str | None:
 
 
 _deferred_close_tasks: set[asyncio.Task] = set()
+
+
+async def _close_client(client: Any) -> None:
+    try:
+        await client.aclose()
+    except Exception as exc:
+        log.info("byok client close failed: %s", exc)
+
+
+def _close_client_later(client: Any) -> None:
+    if client is None:
+        return
+    task = asyncio.create_task(_close_client(client))
+    _deferred_close_tasks.add(task)
+    task.add_done_callback(_deferred_close_tasks.discard)
 
 
 async def _close_pool(pool: Any, stores: Sequence[JsonStore] | None = None) -> None:
@@ -136,20 +255,20 @@ async def _close_pool(pool: Any, stores: Sequence[JsonStore] | None = None) -> N
 
 
 async def _close_busy_client(account: Any, sem: asyncio.Semaphore) -> None:
-    acquired = False
     try:
         await asyncio.wait_for(sem.acquire(), timeout=300)
-        acquired = True
-    except (TimeoutError, asyncio.TimeoutError, asyncio.CancelledError):
+    except (TimeoutError, asyncio.TimeoutError):
         log.info("give up deferred client close for busy byok account %r", getattr(account, "label", account))
         return
+    except asyncio.CancelledError:
+        _close_client_later(account.client)
+        raise
     try:
         await account.client.aclose()
     except Exception as exc:
         log.info("client close failed for byok account %r: %s", getattr(account, "label", account), exc)
     finally:
-        if acquired:
-            sem.release()
+        sem.release()
 
 
 async def _byok_validate(
@@ -157,17 +276,24 @@ async def _byok_validate(
     token: str,
     client: Any,
 ) -> bool:
-    auth = await _byok_auth_state()
+    auth = _byok_auth_state()
     store = auth[provider]
-    stable = _token_stable_id(token)
-    ttl = settings.byok_auth_ttl
-    cached = _cached_auth(store, stable, ttl, time.monotonic())
+    stable = _byok_stable_id(token)
+    now = time.monotonic()
+    cached = _cached_auth(store, stable, settings.byok_auth_ttl, now)
     if cached is not None:
+        _touch_auth(store, stable)
         return cached
     try:
         ok = bool(await client.check_auth())
-    except Exception:
-        ok = False
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        log.warning("byok %s auth check failed before a verdict, the key is not cached: %s: %s", provider, type(exc).__name__, exc)
+        _note_auth_indeterminate()
+        return False
+    if not ok:
+        log.warning("byok %s api key was rejected upstream", provider)
     store.pop(stable, None)
     store[stable] = [ok, time.monotonic()]
     _evict_auth(store)
@@ -175,140 +301,177 @@ async def _byok_validate(
 
 
 def _byok_cache_key(tokens: list[str]) -> str:
-    return "|".join(sorted(_token_stable_id(token) for token in tokens))
+    return "|".join(sorted(_byok_stable_id(token) for token in tokens))
+
+
+async def _build_accounts(
+    provider: str,
+    tokens: list[str],
+    make_client: Callable[[str], Any],
+    make_account: Callable[[int, Any, str], Any],
+) -> list[Any]:
+    accounts: list[Any] = []
+    pending: Any = None
+    try:
+        for token in tokens:
+            try:
+                pending = make_client(token)
+            except (RuntimeError, OSError) as exc:
+                log.error("byok %s client unusable, skipping key #%d: %s", provider, len(accounts), exc)
+                pending = None
+                continue
+            accepted = await _byok_validate(provider, token, pending)
+            if not accepted:
+                log.warning("byok %s token invalid/expired, skipping", provider)
+                await _close_client(pending)
+                pending = None
+                continue
+            accounts.append(make_account(len(accounts), pending, token))
+            pending = None
+    except BaseException:
+        _close_client_later(pending)
+        for acct in accounts:
+            _close_client_later(acct.client)
+        raise
+    return accounts
+
+
+def _no_valid_key(provider: str, indeterminate: int) -> HTTPException:
+    if indeterminate:
+        return HTTPException(503, _UNREACHABLE_DETAIL.format(provider=provider))
+    return HTTPException(401, _INVALID_KEY_DETAIL.format(provider=provider))
+
+
+async def _build_byok_pool(provider: str, tokens: list[str], scope: str | None) -> tuple[AccountPool, list[JsonStore]]:
+    created: list[JsonStore] = []
+    before = _auth_indeterminate_count()
+    if provider == "deepseek":
+        session_store = JsonStore("deepseek-sessions", scope) if settings.cache_enabled else None
+        context_store = JsonStore("deepseek-contexts", scope) if settings.cache_enabled else None
+        affinity_store = JsonStore("deepseek-affinities", scope) if settings.cache_enabled else None
+        created = [store for store in (session_store, context_store, affinity_store) if store is not None]
+        accounts = await _build_accounts(
+            provider,
+            tokens,
+            lambda token: DeepSeekClient(token=token, timeout=settings.timeout),
+            lambda index, client, token: DeepSeekAccount(
+                index,
+                client,
+                session_cache_size=settings.session_cache_size,
+                ttl=settings.session_ttl,
+                store=session_store,
+                stable_id=_byok_stable_id(token),
+            ),
+        )
+        if not accounts:
+            raise _no_valid_key(provider, _auth_indeterminate_count() - before)
+        pool = AccountPool(
+            accounts,
+            session_cache_size=settings.session_cache_size,
+            ttl=settings.session_ttl,
+            context_store=context_store,
+            affinity_store=affinity_store,
+        )
+        await refresh_provider_models("deepseek", accounts[0].client)
+        return pool, created
+    if provider == "qwen":
+        session_store = JsonStore("qwen-sessions", scope) if settings.cache_enabled else None
+        context_store = JsonStore("qwen-contexts", scope) if settings.cache_enabled else None
+        affinity_store = JsonStore("qwen-affinities", scope) if settings.cache_enabled else None
+        created = [store for store in (session_store, context_store, affinity_store) if store is not None]
+        accounts = await _build_accounts(
+            provider,
+            tokens,
+            lambda token: QwenClient(token=token, timeout=settings.timeout),
+            lambda index, client, token: QwenAccount(
+                index,
+                client,
+                session_cache_size=settings.session_cache_size,
+                ttl=settings.session_ttl,
+                store=session_store,
+                stable_id=_byok_stable_id(token),
+            ),
+        )
+        if not accounts:
+            raise _no_valid_key(provider, _auth_indeterminate_count() - before)
+        pool = AccountPool(
+            accounts,
+            label="qwen",
+            session_cache_size=settings.session_cache_size,
+            ttl=settings.session_ttl,
+            context_store=context_store,
+            affinity_store=affinity_store,
+        )
+        await refresh_provider_models("qwen", accounts[0].client)
+        return pool, created
+    if provider == "gigachat":
+        accounts = await _byok_gigachat_accounts(tokens, "byok")
+        if not accounts:
+            raise _no_valid_key(provider, _auth_indeterminate_count() - before)
+        pool = AccountPool(accounts, label="gigachat")
+        await refresh_provider_models("gigachat", accounts[0].client)
+        return pool, created
+    raise HTTPException(400, f"provider {provider} does not accept a caller supplied api key")
 
 
 async def _byok_pool(provider: str, tokens: list[str]) -> AccountPool:
     if provider not in BYOK_PROVIDERS:
         raise HTTPException(400, f"unknown provider: {provider}")
     tokens = list(dict.fromkeys(tokens))
+    if len(tokens) > BYOK_MAX_KEYS:
+        raise HTTPException(400, f"too many api keys for {provider}: at most {BYOK_MAX_KEYS} keys per request")
     if provider == "alice":
         return await _byok_alice_pool()
     if provider == "duckai":
         return await _byok_duckai_pool()
-    pools = await _byok_pools_state()
+    pools = _byok_pools_state()
     cache = pools[provider]
     cache_key = _byok_cache_key(tokens)
     pool = cache.get(cache_key)
     if pool is not None and pool.healthy:
-        cache.pop(cache_key)
-        cache[cache_key] = pool
+        _touch_pool_cache(cache, cache_key)
         return pool
-    locks = await _byok_locks_state()
-    async with locks[provider]:
+    async with _key_lock(provider, cache_key):
         pool = cache.get(cache_key)
         if pool is not None and pool.healthy:
-            cache.pop(cache_key)
-            cache[cache_key] = pool
+            _touch_pool_cache(cache, cache_key)
             return pool
-        stores = await _byok_stores_state()
+        stores = _byok_stores_state()
         scoped_stores = stores[provider]
-        if pool is not None:
-            cache.pop(cache_key, None)
-            await _close_pool(pool, scoped_stores.pop(cache_key, None))
-        scope = ("byok-" + _token_stable_id(cache_key)) if settings.cache_enabled else None
-        created: list[JsonStore] = []
-        if provider == "deepseek":
-            session_store = JsonStore("deepseek-sessions", scope) if settings.cache_enabled else None
-            context_store = JsonStore("deepseek-contexts", scope) if settings.cache_enabled else None
-            affinity_store = JsonStore("deepseek-affinities", scope) if settings.cache_enabled else None
-            created = [store for store in (session_store, context_store, affinity_store) if store is not None]
-            accounts: list[DeepSeekAccount] = []
-            for i, token in enumerate(tokens):
-                ds_client = DeepSeekClient(token=token, timeout=settings.timeout)
-                if not await _byok_validate("deepseek", token, ds_client):
-                    log.warning("byok deepseek token invalid/expired, skipping")
-                    await ds_client.aclose()
-                    continue
-                accounts.append(
-                    DeepSeekAccount(
-                        i,
-                        ds_client,
-                        session_cache_size=settings.session_cache_size,
-                        ttl=settings.session_ttl,
-                        store=session_store,
-                        stable_id=_token_stable_id(token),
-                    )
-                )
-            if not accounts:
-                raise HTTPException(401, "invalid deepseek api key")
-            pool = AccountPool(
-                accounts,
-                session_cache_size=settings.session_cache_size,
-                ttl=settings.session_ttl,
-                context_store=context_store,
-                affinity_store=affinity_store,
-            )
-            await refresh_provider_models("deepseek", accounts[0].client)
-        elif provider == "qwen":
-            session_store = JsonStore("qwen-sessions", scope) if settings.cache_enabled else None
-            context_store = JsonStore("qwen-contexts", scope) if settings.cache_enabled else None
-            affinity_store = JsonStore("qwen-affinities", scope) if settings.cache_enabled else None
-            created = [store for store in (session_store, context_store, affinity_store) if store is not None]
-            qwen_accounts: list[QwenAccount] = []
-            for i, token in enumerate(tokens):
-                qw_client = QwenClient(token=token, timeout=settings.timeout)
-                if not await _byok_validate("qwen", token, qw_client):
-                    log.warning("byok qwen token invalid/expired, skipping")
-                    await qw_client.aclose()
-                    continue
-                qwen_accounts.append(
-                    QwenAccount(
-                        i,
-                        qw_client,
-                        session_cache_size=settings.session_cache_size,
-                        ttl=settings.session_ttl,
-                        store=session_store,
-                        stable_id=_token_stable_id(token),
-                    )
-                )
-            if not qwen_accounts:
-                raise HTTPException(401, "invalid qwen api key")
-            pool = AccountPool(
-                qwen_accounts,
-                label="qwen",
-                session_cache_size=settings.session_cache_size,
-                ttl=settings.session_ttl,
-                context_store=context_store,
-                affinity_store=affinity_store,
-            )
-            await refresh_provider_models("qwen", qwen_accounts[0].client)
-        else:
-            gigachat_accounts = await _byok_gigachat_accounts(tokens, "byok")
-            if not gigachat_accounts:
-                raise HTTPException(401, "invalid gigachat authorization key")
-            pool = AccountPool(gigachat_accounts, label="gigachat")
-            await refresh_provider_models("gigachat", gigachat_accounts[0].client)
-        cache[cache_key] = pool
+        new_pool, created = await _build_byok_pool(provider, tokens, _byok_scope(cache_key))
+        stale_pool = cache.get(cache_key)
+        scoped_stores.pop(cache_key, None)
+        cache.pop(cache_key, None)
+        cache[cache_key] = new_pool
         scoped_stores[cache_key] = created
+        if stale_pool is not None and stale_pool is not new_pool:
+            await _close_pool(stale_pool)
         while len(cache) > BYOK_POOL_LIMIT:
             oldest_key, oldest_pool = next(iter(cache.items()))
             cache.pop(oldest_key)
             await _close_pool(oldest_pool, scoped_stores.pop(oldest_key, None))
-        return pool
+        return new_pool
 
 
 async def _byok_gigachat_accounts(tokens: list[str], log_prefix: str) -> list[GigaChatAccount]:
-    accounts: list[GigaChatAccount] = []
-    for i, key in enumerate(tokens):
-        try:
-            gc_client = GigaChatClient(key=key, scope=settings.gigachat_scope, timeout=settings.timeout)
-        except (RuntimeError, OSError) as exc:
-            log.error("%s gigachat CA unusable, skipping key #%d: %s", log_prefix, i, exc)
-            continue
-        if not await _byok_validate("gigachat", key, gc_client):
-            log.warning("%s gigachat key invalid/expired, skipping", log_prefix)
-            await gc_client.aclose()
-            continue
-        accounts.append(GigaChatAccount(len(accounts), gc_client, stable_id=_token_stable_id(key)))
-    return accounts
+    log.debug("%s gigachat key set received with %d key(s)", log_prefix, len(tokens))
+    return await _build_accounts(
+        "gigachat",
+        tokens,
+        lambda key: GigaChatClient(key=key, scope=settings.gigachat_scope, timeout=settings.timeout),
+        lambda index, client, key: GigaChatAccount(index, client, stable_id=_byok_stable_id(key)),
+    )
 
 
 async def _byok_alice_accounts() -> list[AliceAccount]:
     client = AliceClient(timeout=settings.timeout)
-    if not await client.check_auth():
-        await client.aclose()
-        return []
+    try:
+        if not await client.check_auth():
+            await _close_client(client)
+            return []
+    except BaseException:
+        _close_client_later(client)
+        raise
     return [AliceAccount(0, client, stable_id="alice")]
 
 
@@ -328,17 +491,25 @@ async def _byok_alice_pool() -> AccountPool:
         if not accounts:
             raise HTTPException(502, "alice endpoint is unreachable")
         created = AccountPool(accounts, label="alice")
+        stale = _ALICE_BYOK_POOL[0]
         _ALICE_BYOK_POOL[0] = created
         app.state.byok_alice_pool = created
+        await _register_keyless_pool("alice", created)
         await refresh_provider_models("alice", None)
+        if stale is not None and stale is not created:
+            await _close_pool(stale)
         return created
 
 
 async def _byok_duckai_accounts() -> list[DuckAIAccount]:
     client = DuckAIClient(timeout=settings.timeout)
-    if not await client.check_auth():
-        await client.aclose()
-        return []
+    try:
+        if not await client.check_auth():
+            await _close_client(client)
+            return []
+    except BaseException:
+        _close_client_later(client)
+        raise
     return [DuckAIAccount(0, client, stable_id="duckai")]
 
 
@@ -358,19 +529,45 @@ async def _byok_duckai_pool() -> AccountPool:
         if not accounts:
             raise HTTPException(502, duckai_api.BLOCKED_HINT)
         created = AccountPool(accounts, label="duckai")
+        stale = _DUCKAI_BYOK_POOL[0]
         _DUCKAI_BYOK_POOL[0] = created
         app.state.byok_duckai_pool = created
+        await _register_keyless_pool("duckai", created)
         await refresh_provider_models("duckai", accounts[0].client)
+        if stale is not None and stale is not created:
+            await _close_pool(stale)
         return created
+
+
+async def _register_keyless_pool(provider: str, pool: AccountPool) -> None:
+    entries = _byok_pools_state().get(provider)
+    if not isinstance(entries, dict):
+        return
+    for key in list(entries):
+        if key != KEYLESS_POOL_KEY:
+            entries.pop(key, None)
+    entries[KEYLESS_POOL_KEY] = pool
+
+
+def _byok_caller_id() -> str:
+    return _CALLER_ID.get()
+
+
+def _caller_id_for(tokens: list[str]) -> str:
+    return _byok_stable_id("|".join(sorted(tokens)))
 
 
 async def _byok_pool_for(provider: str, request: Request) -> AccountPool:
     if provider not in BYOK_PROVIDERS:
         raise HTTPException(400, f"unknown provider: {provider}")
     if not provider_needs_api_key(provider):
+        _CALLER_ID.set("")
         return await _byok_pool(provider, [])
     token = await _extract_request_api_key(request)
     tokens = [t.strip() for t in (token or "").split(",") if t.strip()]
     if not tokens:
-        raise HTTPException(401, f"missing api key for {provider} provider")
+        raise HTTPException(401, _INVALID_KEY_DETAIL.format(provider=provider))
+    if len(tokens) > BYOK_MAX_KEYS:
+        raise HTTPException(400, f"too many api keys for {provider}: at most {BYOK_MAX_KEYS} keys per request")
+    _CALLER_ID.set(_caller_id_for(tokens))
     return await _byok_pool(provider, tokens)

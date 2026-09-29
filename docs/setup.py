@@ -20,17 +20,67 @@ ENV_FILE = ROOT / ".env"
 EXAMPLE_FILE = ROOT / ".env.example"
 ANDROID_MARKER = Path("/system/build.prop")
 
+TRUE_WORDS = ("1", "true", "yes", "on")
+FALSE_WORDS = ("0", "false", "no", "off")
+GIGACHAT_SCOPES = ("GIGACHAT_API_PERS", "GIGACHAT_API_B2B", "GIGACHAT_API_CORP")
+
 GROUPS = [
     (
         "Server",
         [
             ("DANYAPI_HOST", "Address the API server binds to", None),
             ("DANYAPI_PORT", "Port the API server listens on", "int"),
-            ("DANYAPI_TIMEOUT", "Upstream request timeout in seconds", "int"),
+            ("DANYAPI_TIMEOUT", "Upstream request timeout in seconds", "float"),
             (
                 "DANYAPI_ACQUIRE_TIMEOUT",
                 "Seconds to wait for a free account (empty = forever)",
-                "int",
+                "float_opt",
+            ),
+            (
+                "DANYAPI_CORS_ORIGINS",
+                "Extra browser origins allowed to call the API, comma separated (empty = any)",
+                None,
+            ),
+            ("DANYAPI_ADMIN_TOKEN", "Bearer token that enables POST /v1/tokens (empty keeps it off)", None),
+        ],
+    ),
+    (
+        "GigaChat",
+        [
+            (
+                "GIGACHAT_SCOPE",
+                "GigaChat scope: " + ", ".join(GIGACHAT_SCOPES),
+                "scope",
+            ),
+            (
+                "DANYAPI_GIGACHAT_CA_FILE",
+                "Path to a CA bundle for GigaChat (empty = bundled Russian root CA)",
+                None,
+            ),
+        ],
+    ),
+    (
+        "Public instance",
+        [
+            (
+                "BYOK_MODE",
+                "Bring your own key mode, every caller sends its own tokens (1/0)",
+                "flag",
+            ),
+            (
+                "DANYAPI_BYOK_MODE",
+                "Alias of BYOK_MODE, used only when BYOK_MODE is empty (1/0)",
+                "flag",
+            ),
+            (
+                "DANYAPI_BYOK_AUTH_TTL_SECONDS",
+                "Seconds a bring your own key token check is reused",
+                "float",
+            ),
+            (
+                "DANYAPI_MODELS_REFRESH_SECONDS",
+                "Seconds between provider model list refreshes (0 = off)",
+                "float",
             ),
         ],
     ),
@@ -45,7 +95,7 @@ GROUPS = [
             (
                 "DANYAPI_SESSION_TTL_SECONDS",
                 "Seconds an unused session stays reusable (0 = never)",
-                "int",
+                "float",
             ),
             (
                 "DANYAPI_CACHE_DIR",
@@ -53,6 +103,7 @@ GROUPS = [
                 None,
             ),
             ("DANYAPI_CACHE_DISABLED", "Disable on-disk cache (1/true/yes/on)", None),
+            ("DANYAPI_RESPONSES_MAX_RECORDS", "Recent /v1/responses records kept", "int"),
         ],
     ),
     (
@@ -61,7 +112,7 @@ GROUPS = [
             (
                 "DANYAPI_USAGE_ENABLED",
                 "Enable usage tracking / token counter stats (1/0)",
-                "flag",
+                "onoff",
             ),
             (
                 "DANYAPI_USAGE_MAX_RECORDS",
@@ -89,7 +140,7 @@ GROUPS = [
             (
                 "DANYAPI_AUTO_UPDATE",
                 "Auto-update to the latest GitHub release on start (1/0)",
-                "flag",
+                "onoff",
             ),
         ],
     ),
@@ -204,12 +255,23 @@ def prompt(key, label, kind, current, default=""):
                 int(raw)
             elif kind == "float":
                 float(raw)
+            elif kind == "float_opt":
+                if raw != "":
+                    value = float(raw)
+                    if not (value > 0):
+                        raise ValueError("must be greater than 0 or left empty")
             elif kind == "level":
                 if raw not in ("DEBUG", "INFO", "WARNING", "ERROR"):
                     raise ValueError("must be DEBUG, INFO, WARNING or ERROR")
+            elif kind == "scope":
+                if raw not in GIGACHAT_SCOPES:
+                    raise ValueError("must be " + ", ".join(GIGACHAT_SCOPES))
             elif kind == "flag":
                 if raw not in ("0", "1"):
                     raise ValueError("must be 0 or 1")
+            elif kind == "onoff":
+                if raw.lower() not in TRUE_WORDS + FALSE_WORDS:
+                    raise ValueError("must be one of " + ", ".join(TRUE_WORDS + FALSE_WORDS))
             return raw
         except ValueError as e:
             print(f"    invalid: {e}")
@@ -218,12 +280,36 @@ def prompt(key, label, kind, current, default=""):
 def quote(value):
     if value == "":
         return ""
-    if value != value.strip() or "#" in value or "\\" in value:
-        if '"' in value:
-            print("    warning: value contains a double quote, writing it raw")
-            return value
-        return f'"{value}"'
+    if "\n" in value or "\r" in value:
+        raise ValueError("value contains a line break and cannot be written to .env")
+    if value != value.strip() or "#" in value or "\\" in value or "'" in value:
+        return "'" + value.replace("'", "\\'") + "'"
     return value
+
+
+_SINGLE_ESCAPES = {"'": "'", "\\": "\\"}
+_DOUBLE_ESCAPES = {"n": "\n", "r": "\r", "t": "\t", '"': '"', "\\": "\\"}
+
+
+def _unquote(val):
+    if len(val) < 2:
+        return val, False
+    quote_char = val[0]
+    if quote_char not in ("'", '"') or val[-1] != quote_char:
+        return val, False
+    table = _SINGLE_ESCAPES if quote_char == "'" else _DOUBLE_ESCAPES
+    out = []
+    index = 1
+    end = len(val) - 1
+    while index < end:
+        char = val[index]
+        if char == "\\" and index + 1 < end and val[index + 1] in table:
+            out.append(table[val[index + 1]])
+            index += 2
+            continue
+        out.append(char)
+        index += 1
+    return "".join(out), True
 
 
 def parse_env(path):
@@ -234,9 +320,10 @@ def parse_env(path):
         m = re.match(r"^\s*([A-Za-z0-9_]+)\s*=\s*(.*)$", line)
         if not m:
             continue
-        key, val = m.group(1), m.group(2).strip()
-        if len(val) >= 2 and val.startswith('"') and val.endswith('"'):
-            val = val[1:-1]
+        key, raw = m.group(1), m.group(2).strip()
+        val, quoted = _unquote(raw)
+        if not quoted:
+            val = raw
         values[key] = val
     return values
 
@@ -255,19 +342,22 @@ def update_env(values):
     raw = ENV_FILE.read_text(encoding="utf-8").splitlines(keepends=True)
     lines = []
     seen = set()
-    for line in raw:
-        m = re.match(r"^\s*([A-Za-z0-9_]+)\s*=", line)
-        key = m.group(1) if m else None
-        if key is not None and key in values:
-            if key in seen:
-                continue
-            seen.add(key)
-            lines.append(f"{key}={quote(values[key])}\n")
-        else:
-            lines.append(line)
-    for key, value in values.items():
-        if key not in seen:
-            lines.append(f"{key}={quote(value)}\n")
+    try:
+        for line in raw:
+            m = re.match(r"^\s*([A-Za-z0-9_]+)\s*=", line)
+            key = m.group(1) if m else None
+            if key is not None and key in values:
+                if key in seen:
+                    continue
+                seen.add(key)
+                lines.append(f"{key}={quote(values[key])}\n")
+            else:
+                lines.append(line)
+        for key, value in values.items():
+            if key not in seen:
+                lines.append(f"{key}={quote(value)}\n")
+    except ValueError as exc:
+        raise SystemExit(f"Refusing to write .env: {exc}") from exc
     fd, path = tempfile.mkstemp(dir=str(ROOT), suffix=".env.tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -279,6 +369,8 @@ def update_env(values):
         except OSError:
             pass
         raise
+    if os.name != "nt":
+        os.chmod(ENV_FILE, 0o600)
 
 
 def _request(url, headers, payload=None, timeout=25):
@@ -416,6 +508,16 @@ def split_tokens(raw):
     return [t.strip() for t in re.split(r"[, ]+", raw) if t.strip()]
 
 
+def mask_secrets(raw):
+    values = split_tokens(raw)
+    if not values:
+        return "(empty)"
+    shown = ", ".join(f"{value[:4]}...{value[-2:]}" for value in values[:2])
+    if len(values) > 2:
+        shown += f", +{len(values) - 2} more"
+    return f"{shown} ({len(values)} set)"
+
+
 def read_value(message, current, default=""):
     raw = _read_input(message)
     if raw is None:
@@ -437,14 +539,25 @@ def collect_provider(name, current, defaults):
     storage = "userToken" if name == "DeepSeek" else "token"
     print()
     print(f"[ {name} ]")
-    print("  Easiest: run docs/token_utility.sh (or .bat on Windows) and it fills this in from your browser.")
+    print("  Easiest: run docs/token_utility.sh (or .bat on Windows), it shows both tokens in your browser at /results,")
+    print("  then copy them from there into the prompt below.")
     print(f"  Or grab a token by hand: open {host} -> DevTools -> Application -> Local Storage -> {storage}")
     tokens = read_value(
-        f"  {name} tokens, comma-separated [{current.get(tokens_key, '') or '(empty)'}]: ",
+        f"  {name} tokens, comma-separated [{mask_secrets(current.get(tokens_key, ''))}]: ",
         current.get(tokens_key, ""),
         defaults.get(tokens_key, ""),
     )
     return {tokens_key: tokens}
+
+
+def _guard_checker(checker):
+    def run(token):
+        try:
+            return checker(token)
+        except Exception as exc:
+            return False, f"check failed: {type(exc).__name__}: {exc}"
+
+    return run
 
 
 def check_provider(name, creds):
@@ -452,11 +565,15 @@ def check_provider(name, creds):
     tokens = split_tokens(creds.get(upper + "_TOKENS", ""))
     if not tokens:
         return True, ""
-    checker = check_deepseek_token if name == "DeepSeek" else check_qwen_token
+    checker = _guard_checker(check_deepseek_token if name == "DeepSeek" else check_qwen_token)
     with ThreadPoolExecutor(max_workers=max(1, min(len(tokens), 8))) as pool:
-        for ok, detail in pool.map(checker, tokens):
-            if not ok:
-                return False, f"token invalid: {detail}"
+        try:
+            results = list(pool.map(checker, tokens))
+        except Exception as exc:
+            return False, f"credential check failed: {type(exc).__name__}: {exc}"
+    for ok, detail in results:
+        if not ok:
+            return False, f"token invalid: {detail}"
     return True, ""
 
 
@@ -467,9 +584,7 @@ def collect_gigachat(current, defaults):
     print("  In the GigaChat Studio account open 'API settings' and generate an authorization key.")
     print("  The key is the base64 of client_id:client_secret, copy it as is.")
     keys = read_value(
-        "  GigaChat authorization keys, comma-separated ["
-        + (current.get("GIGACHAT_KEYS", "") or "(empty)")
-        + "]: ",
+        "  GigaChat authorization keys, comma-separated [" + mask_secrets(current.get("GIGACHAT_KEYS", "")) + "]: ",
         current.get("GIGACHAT_KEYS", ""),
         defaults.get("GIGACHAT_KEYS", ""),
     )
@@ -550,8 +665,41 @@ def _desktop_dir():
     return os.path.join(os.path.expanduser("~"), "Desktop")
 
 
+def write_private(target, data):
+    fd, path = tempfile.mkstemp(dir=str(ROOT), suffix=".env.tmp")
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+        os.replace(path, target)
+    except BaseException:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        raise
+    if os.name != "nt":
+        os.chmod(target, 0o600)
+
+
 def _ps_quote(value):
     return "'" + str(value).replace("'", "''") + "'"
+
+
+def _windows_desktop_dir():
+    script = "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; [Environment]::GetFolderPath('Desktop')"
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    if result.returncode == 0:
+        path = (result.stdout or "").strip().splitlines()
+        if path and path[-1].strip():
+            return path[-1].strip()
+    return os.path.join(os.path.expanduser("~"), "Desktop")
 
 
 def create_shortcut():
@@ -559,9 +707,10 @@ def create_shortcut():
     root = str(ROOT)
     launcher = str(ROOT / "docs" / "start.py")
     if sys.platform.startswith("win"):
+        desktop = _windows_desktop_dir()
         script = "\n".join(
             [
-                "$d=[Environment]::GetFolderPath('Desktop')",
+                "$d=" + _ps_quote(desktop),
                 "$ws=New-Object -ComObject WScript.Shell",
                 "$sc=$ws.CreateShortcut((Join-Path $d 'DanyAPI.lnk'))",
                 "$sc.TargetPath=" + _ps_quote(py),
@@ -573,7 +722,7 @@ def create_shortcut():
             ]
         )
         subprocess.check_call(["powershell", "-NoProfile", "-NonInteractive", "-Command", script])
-        return os.path.join(_desktop_dir(), "DanyAPI.lnk")
+        return os.path.join(desktop, "DanyAPI.lnk")
     if sys.platform.startswith("linux"):
         desktop = _desktop_dir()
         content = (
@@ -661,10 +810,10 @@ def main():
     print("==============")
     if not ENV_FILE.exists():
         if EXAMPLE_FILE.exists():
-            shutil.copyfile(EXAMPLE_FILE, ENV_FILE)
+            write_private(ENV_FILE, EXAMPLE_FILE.read_bytes())
             print("Created .env from .env.example.")
         else:
-            ENV_FILE.write_text("", encoding="utf-8")
+            write_private(ENV_FILE, b"")
             print("Created an empty .env.")
     else:
         print("Found existing .env, keeping it.")
@@ -695,7 +844,8 @@ def main():
         print()
         print(f"[ {title} ]")
         for key, label, kind in fields:
-            values[key] = prompt(key, label, kind, values.get(key, ""), defaults.get(key, ""))
+            current_value = values.get(key) or defaults.get(key, "")
+            values[key] = prompt(key, label, kind, current_value, defaults.get(key, ""))
 
     update_env(values)
     print()

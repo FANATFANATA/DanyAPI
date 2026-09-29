@@ -3,6 +3,7 @@ import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 
 from danyapi.qwen.client import (
@@ -62,10 +63,29 @@ def test_session_registry_reuse_unknown_model():
 
     registry = QwenSessionRegistry(MagicMock(spec=QwenClient), 8, 0)
     session = QwenSession(id="c1", model=None)
-    assert registry._reuse(session, "c1", model="m") is True
-    assert session.model == "m"
+    assert registry._reuse(session, "c1", model="m") is False
+    assert session.model is None
     other = QwenSession(id="c2", model="different")
     assert registry._reuse(other, "c2", model="m") is False
+    same = QwenSession(id="c3", model="m")
+    assert registry._reuse(same, "c3", model="m") is True
+    assert same.model == "m"
+
+
+async def test_session_registry_creates_a_fresh_session_when_the_model_is_unknown():
+    from danyapi.qwen.accounts import QwenSessionRegistry
+
+    client = MagicMock(spec=QwenClient)
+    client.create_chat = AsyncMock(return_value="fresh-chat")
+    registry = QwenSessionRegistry(client, 8, 0)
+    stale = QwenSession(id="c1", model=None)
+    registry._sessions["c1"] = (stale, registry._now())
+    session, key = await registry.obtain("c1", model="qwen3.8-max")
+    assert key == "c1"
+    assert session.id == "fresh-chat"
+    assert session.model == "qwen3.8-max"
+    assert stale.model is None
+    client.create_chat.assert_awaited_once_with(model="qwen3.8-max", chat_mode="normal")
 
 
 def test_biz_success_without_data():
@@ -138,19 +158,57 @@ async def test_no_token():
     await client.aclose()
 
 
-def test_streaming_read_timeout_is_widened():
+def test_client_read_timeout_is_not_widened():
     client = QwenClient(timeout=60.0)
     try:
-        assert client.http.timeout.read == 300.0
+        assert client.http.timeout.read == 60.0
         assert client.http.timeout.connect == 60.0
+        assert client._stream_timeout.read == 300.0
+        assert client._stream_timeout.connect == 60.0
     finally:
         asyncio.run(client.aclose())
+
+
+async def test_only_the_streaming_completion_uses_the_widened_timeout():
+    client = QwenClient(timeout=60.0)
+    sent = {}
+    original_build = client.http.build_request
+    original_send = client.http.send
+
+    def build_request(*args, **kwargs):
+        sent["timeout"] = kwargs.get("timeout")
+        return original_build(*args, **kwargs)
+
+    async def send(request, **kwargs):
+        sent["method"] = request.method
+        if kwargs.get("stream"):
+            return object()
+        return SimpleNamespace(headers={"content-type": "application/json"}, json=lambda: {"success": True, "data": {"id": "c1"}})
+
+    client.http.build_request = build_request
+    client.http.send = send
+    try:
+        await client.completion(chat_session_id="c1", prompt="p", parent_message_id=None, model="m")
+        assert sent["method"] == "POST"
+        assert sent["timeout"] is client._stream_timeout
+        assert sent["timeout"].read == 300.0
+
+        sent.pop("timeout")
+        await client.stop_stream(chat_session_id="c1", response_id="r1")
+        assert sent["timeout"] is httpx.USE_CLIENT_DEFAULT
+        await client.create_chat(model="m")
+        assert sent["timeout"] is httpx.USE_CLIENT_DEFAULT
+    finally:
+        client.http.build_request = original_build
+        client.http.send = original_send
+        await client.aclose()
 
 
 def test_streaming_read_timeout_scales_with_timeout():
     client = QwenClient(timeout=120.0)
     try:
-        assert client.http.timeout.read == 600.0
+        assert client.http.timeout.read == 120.0
+        assert client._stream_timeout.read == 600.0
     finally:
         asyncio.run(client.aclose())
 

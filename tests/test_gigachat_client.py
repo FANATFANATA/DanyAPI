@@ -1,14 +1,22 @@
 import base64
 import json
+import uuid
 from collections.abc import Callable
 
 import httpx
 import pytest
 
 from danyapi.gigachat import messages as gm
-from danyapi.gigachat.client import DEFAULT_SCOPE, GigaChatClient, GigaChatError, is_authorization_key
+from danyapi.gigachat.client import (
+    AUTHORIZATION_KEY_BYTES,
+    DEFAULT_SCOPE,
+    GigaChatClient,
+    GigaChatError,
+    is_authorization_key,
+)
 
-KEY = base64.b64encode(b"client-id:client-secret").decode()
+KEY_RAW = b"9f2c1a4e-0b7d-4c8e-9a1b-2f3c4d5e6f70"
+KEY = base64.b64encode(KEY_RAW).decode()
 
 
 def _client(monkeypatch, transport: httpx.MockTransport) -> GigaChatClient:
@@ -36,10 +44,23 @@ def _router(token_calls: list[int], models_handler) -> Callable[[httpx.Request],
     return handler
 
 
-def test_is_authorization_key():
+def test_is_authorization_key_accepts_a_real_uuid_key():
+    assert len(KEY_RAW) == AUTHORIZATION_KEY_BYTES
+    assert str(uuid.UUID(KEY_RAW.decode("ascii"))) == KEY_RAW.decode("ascii")
     assert is_authorization_key(KEY) is True
+    assert is_authorization_key(f"  {KEY}  ") is True
+
+
+def test_is_authorization_key_rejects_wrong_shapes():
     assert is_authorization_key("not base64!!") is False
     assert is_authorization_key("") is False
+    assert is_authorization_key(None) is False
+    assert is_authorization_key(base64.b64encode(b"client-id:client-secret").decode()) is False
+    assert is_authorization_key(base64.b64encode(b"x" * (AUTHORIZATION_KEY_BYTES - 1)).decode()) is False
+    assert is_authorization_key(base64.b64encode(b"x" * (AUTHORIZATION_KEY_BYTES + 1)).decode()) is False
+    assert is_authorization_key(base64.b64encode(b"z" * AUTHORIZATION_KEY_BYTES).decode()) is False
+    assert is_authorization_key(base64.b64encode(b"y" * AUTHORIZATION_KEY_BYTES).decode()) is False
+    assert is_authorization_key(base64.b64encode("üüüüüüüüüüüüüüüüü".encode()).decode()) is False
 
 
 def test_default_scope_and_bad_scope_fallback():

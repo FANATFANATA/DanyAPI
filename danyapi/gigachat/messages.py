@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import asyncio
+import ipaddress
 import json
 import logging
+import socket
 import uuid
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 from fastapi import HTTPException
@@ -14,9 +18,19 @@ from .client import IMAGE_MIME_TYPES, GigaChatClient
 log = logging.getLogger("danyapi.gigachat.messages")
 
 MAX_IMAGES_PER_MESSAGE = 1
-MAX_IMAGES_PER_REQUEST = 10
 MAX_IMAGE_BYTES = 15 * 1024 * 1024
+MAX_IMAGE_FETCH_CONCURRENCY = 4
 REMOTE_SCHEMES = ("http://", "https://")
+REMOTE_TIMEOUT_SEC = 30.0
+SNIFF_BYTES = 16
+
+IMAGE_SIGNATURES: tuple[tuple[bytes, str], ...] = (
+    (b"\x89PNG\r\n\x1a\n", "image/png"),
+    (b"\xff\xd8\xff", "image/jpeg"),
+    (b"BM", "image/bmp"),
+    (b"II\x2a\x00", "image/tiff"),
+    (b"MM\x00\x2a", "image/tiff"),
+)
 
 FINISH_REASON_MAP = {
     "stop": "stop",
@@ -40,9 +54,11 @@ def _text_of(content: Any) -> str:
                 if isinstance(text, str):
                     parts.append(text)
         return "".join(parts)
-    if content is None:
+    if content is None or isinstance(content, bool):
         return ""
-    return str(content)
+    if isinstance(content, (int, float)):
+        return str(content)
+    return ""
 
 
 def _image_uris(content: Any) -> list[str]:
@@ -122,6 +138,7 @@ EMPTY_PARAMETERS = {"type": "object", "properties": {}}
 
 def _build_functions(tools: Any, functions: Any) -> list[dict]:
     specs: list[dict] = []
+    seen: set[str] = set()
 
     def add(name: Any, description: Any, parameters: Any) -> None:
         if not isinstance(name, str) or not name:
@@ -134,8 +151,11 @@ def _build_functions(tools: Any, functions: Any) -> list[dict]:
             spec["parameters"] = parameters
         else:
             spec["parameters"] = dict(EMPTY_PARAMETERS)
-        if spec not in specs:
-            specs.append(spec)
+        key = json.dumps(spec, sort_keys=True, default=str)
+        if key in seen:
+            return
+        seen.add(key)
+        specs.append(spec)
 
     for item in tools or []:
         if not isinstance(item, dict):
@@ -151,55 +171,132 @@ def _build_functions(tools: Any, functions: Any) -> list[dict]:
     return specs
 
 
-def _function_call_value(tool_choice: Any, function_call: Any) -> str | dict | None:
+def _function_call_value(
+    tool_choice: Any,
+    function_call: Any,
+    available: list[str] | None = None,
+) -> str | dict | None:
     choice = function_call if function_call is not None else tool_choice
+    names = available or []
     if choice is None:
         return "auto"
     if isinstance(choice, str):
-        if choice in ("none", "auto", "required"):
-            return "none" if choice == "required" else choice
-        return {"name": choice}
+        if choice == "none":
+            return "none"
+        if choice == "auto":
+            return "auto"
+        if choice in ("required", "any"):
+            if len(names) == 1:
+                return {"name": names[0]}
+            raise HTTPException(400, "gigachat requires a function call only when exactly one function is provided, name it in tool_choice")
+        if choice in names or not names:
+            return {"name": choice}
+        raise HTTPException(400, f"gigachat does not know function {choice}, provide one of: {', '.join(names)}")
     if isinstance(choice, dict):
         function = choice.get("function")
         name = function.get("name") if isinstance(function, dict) else choice.get("name")
         if isinstance(name, str) and name:
+            if names and name not in names:
+                raise HTTPException(400, f"gigachat does not know function {name}, provide one of: {', '.join(names)}")
             return {"name": name}
     return "auto"
 
 
-async def _upload_images(
-    client: GigaChatClient,
-    uris: list[str],
-    budget: list[int],
-) -> list[str]:
-    if not uris:
-        return []
-    if len(uris) > MAX_IMAGES_PER_MESSAGE:
-        raise HTTPException(400, f"gigachat accepts at most {MAX_IMAGES_PER_MESSAGE} image per message")
-    if budget[0] + len(uris) > MAX_IMAGES_PER_REQUEST:
-        raise HTTPException(400, f"gigachat accepts at most {MAX_IMAGES_PER_REQUEST} images per request")
-    file_ids: list[str] = []
-    for uri in uris:
-        if uri.startswith("data:"):
-            content_type, data = _split_data_uri(uri)
-        elif uri.startswith(REMOTE_SCHEMES):
-            try:
-                resp = await client.http.get(uri, timeout=30.0)
-                resp.raise_for_status()
-                data = resp.content
-            except httpx.HTTPError as exc:
-                raise HTTPException(400, f"gigachat could not fetch remote image: {exc}") from exc
-            content_type = resp.headers.get("content-type", "").split(";")[0].strip().lower()
-        else:
-            raise HTTPException(400, "gigachat images must be data URIs or http(s) URLs")
-        if content_type not in IMAGE_MIME_TYPES:
-            raise HTTPException(400, f"gigachat does not accept image type {content_type or 'unknown'}")
-        if len(data) > MAX_IMAGE_BYTES:
-            raise HTTPException(400, "gigachat accepts images up to 15 MB")
-        name = f"image{_extension_for(content_type)}"
-        file_ids.append(await client.upload_file(name, data, content_type))
-    budget[0] += len(uris)
-    return file_ids
+def _sniff_image_type(head: bytes) -> str:
+    for signature, content_type in IMAGE_SIGNATURES:
+        if head.startswith(signature):
+            return content_type
+    return ""
+
+
+def _host_is_public(host: str) -> bool:
+    try:
+        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    except (OSError, UnicodeError):
+        return False
+    if not infos:
+        return False
+    for info in infos:
+        try:
+            address = ipaddress.ip_address(info[4][0])
+        except (IndexError, ValueError):
+            return False
+        if address.is_private or address.is_loopback or address.is_link_local or address.is_reserved or address.is_multicast or address.is_unspecified:
+            return False
+    return True
+
+
+async def _fetch_remote_image(client: GigaChatClient, uri: str) -> tuple[str, bytes]:
+    host = urlsplit(uri).hostname or ""
+    if not host:
+        raise HTTPException(400, "gigachat remote image URL has no host")
+    if not await asyncio.to_thread(_host_is_public, host):
+        raise HTTPException(400, f"gigachat refuses to fetch images from the private address {host}")
+    head = b""
+    payload = bytearray()
+    try:
+        async with client.http.stream("GET", uri, timeout=REMOTE_TIMEOUT_SEC, follow_redirects=False) as resp:
+            if resp.status_code >= 400:
+                raise HTTPException(400, f"gigachat could not fetch remote image: upstream returned {resp.status_code}")
+            declared = resp.headers.get("content-type", "").split(";")[0].strip().lower()
+            if declared and declared not in IMAGE_MIME_TYPES:
+                raise HTTPException(400, f"gigachat does not accept image type {declared}")
+            async for chunk in resp.aiter_bytes():
+                if len(head) < SNIFF_BYTES:
+                    head += bytes(chunk[: SNIFF_BYTES - len(head)])
+                payload += chunk
+                if len(payload) > MAX_IMAGE_BYTES:
+                    raise HTTPException(400, f"gigachat accepts images up to {MAX_IMAGE_BYTES // (1024 * 1024)} MB")
+    except httpx.HTTPError as exc:
+        raise HTTPException(400, f"gigachat could not fetch remote image: {exc}") from exc
+    content_type = _sniff_image_type(head)
+    if not content_type:
+        raise HTTPException(400, "gigachat could not confirm the image type from the payload")
+    return content_type, bytes(payload)
+
+
+async def _resolve_images(client: GigaChatClient, pending: list[tuple[dict, list[str]]]) -> None:
+    if not pending:
+        return
+    for _entry, uris in pending:
+        if len(uris) > MAX_IMAGES_PER_MESSAGE:
+            raise HTTPException(400, f"gigachat accepts at most {MAX_IMAGES_PER_MESSAGE} image(s) per message")
+    payloads: dict[tuple[int, int], tuple[str, bytes]] = {}
+    remote: list[tuple[int, int]] = []
+    for position, (_entry, uris) in enumerate(pending):
+        for index, uri in enumerate(uris):
+            if uri.startswith("data:"):
+                payloads[(position, index)] = _split_data_uri(uri)
+            elif uri.lower().startswith(REMOTE_SCHEMES):
+                remote.append((position, index))
+            else:
+                raise HTTPException(400, "gigachat images must be data URIs or http(s) URLs")
+    if remote:
+        semaphore = asyncio.Semaphore(MAX_IMAGE_FETCH_CONCURRENCY)
+
+        async def fetch(key: tuple[int, int]) -> tuple[tuple[int, int], Any]:
+            uri = pending[key[0]][1][key[1]]
+            async with semaphore:
+                return key, await _fetch_remote_image(client, uri)
+
+        results = await asyncio.gather(*(fetch(key) for key in remote), return_exceptions=True)
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
+            key, data = result
+            payloads[key] = data
+    for position, (entry, uris) in enumerate(pending):
+        file_ids: list[str] = []
+        for index in range(len(uris)):
+            content_type, data = payloads[(position, index)]
+            if content_type not in IMAGE_MIME_TYPES:
+                raise HTTPException(400, f"gigachat does not accept image type {content_type or 'unknown'}")
+            if len(data) > MAX_IMAGE_BYTES:
+                raise HTTPException(400, f"gigachat accepts images up to {MAX_IMAGE_BYTES // (1024 * 1024)} MB")
+            name = f"image{_extension_for(content_type)}"
+            file_ids.append(await client.upload_file(name, data, content_type))
+        if file_ids:
+            entry["attachments"] = file_ids
 
 
 async def build_messages(
@@ -213,7 +310,7 @@ async def build_messages(
     system_parts: list[str] = []
     body: list[dict] = []
     id_to_name: dict[str, str] = {}
-    image_budget = [0]
+    pending_images: list[tuple[dict, list[str]]] = []
     pending_assistant: dict | None = None
 
     def release_pending() -> None:
@@ -270,10 +367,9 @@ async def build_messages(
         if not text and not uris:
             continue
         entry: dict[str, Any] = {"role": "user", "content": text}
-        file_ids = await _upload_images(client, uris, image_budget)
-        if file_ids:
-            entry["attachments"] = file_ids
         body.append(entry)
+        if uris:
+            pending_images.append((entry, uris))
 
     pending_assistant = None
 
@@ -281,9 +377,12 @@ async def build_messages(
         body.pop(0)
     if not body:
         body.append({"role": "user", "content": "Hello"})
+    if pending_images:
+        survivors = {id(entry) for entry in body}
+        await _resolve_images(client, [(entry, uris) for entry, uris in pending_images if id(entry) in survivors])
 
     specs = _build_functions(tools, functions)
-    call_value = _function_call_value(tool_choice, function_call) if specs else None
+    call_value = _function_call_value(tool_choice, function_call, [spec["name"] for spec in specs]) if specs else None
 
     out: list[dict] = []
     if system_parts:
@@ -326,13 +425,29 @@ def normalize_finish_reason(value: Any) -> str:
     return FINISH_REASON_MAP.get(value, "stop")
 
 
+def _token_count(value: Any) -> int:
+    if isinstance(value, bool) or value is None:
+        return 0
+    if isinstance(value, int):
+        return max(0, value)
+    if isinstance(value, float):
+        return int(value) if value > 0 else 0
+    if isinstance(value, str):
+        try:
+            number = int(float(value.strip()))
+        except ValueError:
+            return 0
+        return max(0, number)
+    return 0
+
+
 def normalize_usage(payload: Any) -> dict:
     if not isinstance(payload, dict):
         return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-    prompt = int(payload.get("prompt_tokens") or 0)
-    completion = int(payload.get("completion_tokens") or 0)
-    total = int(payload.get("total_tokens") or 0)
-    cached = int(payload.get("precached_prompt_tokens") or 0)
+    prompt = _token_count(payload.get("prompt_tokens"))
+    completion = _token_count(payload.get("completion_tokens"))
+    total = _token_count(payload.get("total_tokens"))
+    cached = _token_count(payload.get("precached_prompt_tokens"))
     if total <= 0:
         total = prompt + completion
     if total < prompt + completion:

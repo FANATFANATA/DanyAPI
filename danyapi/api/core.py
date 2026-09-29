@@ -5,6 +5,8 @@ import contextlib
 import hashlib
 import json
 import logging
+import posixpath
+import re
 import time
 import uuid
 import weakref
@@ -16,8 +18,9 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.types import Scope
 
 from ..accounts import AccountPool, AccountPoolBusy, DeepSeekAccount
 from ..alice.accounts import AliceAccount
@@ -33,12 +36,21 @@ from ..qwen.client import QwenClient
 from ..store import JsonStore
 from ..tokens import count_messages_tokens
 from ..usage import init_tracker
-from .models import model_refresh_loop, refresh_models
-from .state import BYOK_PROVIDERS, MODEL_ATTRS, app
+from .models import _resolve_provider, model_refresh_loop, refresh_models
+from .state import (
+    BYOK_PROVIDERS,
+    MODEL_ATTRS,
+    POOL_ATTRS_BY_PROVIDER,
+    _blank_byok_locks,
+    _blank_byok_state,
+    _blank_byok_stores,
+    app,
+    provider_pool,
+)
 
 log = logging.getLogger("danyapi.api")
 
-POOL_ATTRS = ("pool", "qwen_pool", "gigachat_pool", "alice_pool", "duckai_pool")
+POOL_ATTRS = tuple(POOL_ATTRS_BY_PROVIDER[provider] for provider in BYOK_PROVIDERS)
 
 
 def _token_stable_id(token: str) -> str:
@@ -123,9 +135,10 @@ async def lifespan(app: FastAPI):
     duckai_accounts: list[DuckAIAccount] = []
     byok_mode = settings.byok
     app.state.byok = byok_mode
-    app.state.byok_pools = {provider: {} for provider in BYOK_PROVIDERS}
-    app.state.byok_locks = {provider: asyncio.Lock() for provider in BYOK_PROVIDERS}
-    app.state.byok_auth = {provider: {} for provider in BYOK_PROVIDERS}
+    app.state.byok_pools = _blank_byok_state()
+    app.state.byok_locks = _blank_byok_locks()
+    app.state.byok_auth = _blank_byok_state()
+    app.state.byok_stores = _blank_byok_stores()
     cache_enabled = settings.cache_enabled
     deepseek_session_store = JsonStore("deepseek-sessions", "default" if cache_enabled else None)
     qwen_session_store = JsonStore("qwen-sessions", "default" if cache_enabled else None)
@@ -152,9 +165,11 @@ async def lifespan(app: FastAPI):
             ds_clients = [DeepSeekClient(token=token, timeout=settings.timeout) for token in settings.deepseek_tokens] if settings.deepseek_tokens else []
             qw_clients = [QwenClient(token=token, timeout=settings.timeout) for token in settings.qwen_tokens] if settings.qwen_tokens else []
             gc_clients: list[GigaChatClient] = []
-            for key in settings.gigachat_keys:
+            gc_key_indexes: list[int] = []
+            for key_index, key in enumerate(settings.gigachat_keys):
                 try:
                     gc_clients.append(GigaChatClient(key=key, scope=settings.gigachat_scope, timeout=settings.timeout))
+                    gc_key_indexes.append(key_index)
                 except (RuntimeError, OSError) as exc:
                     log.error("gigachat client disabled, CA unusable: %s", exc)
             alice_clients: list[AliceClient] = []
@@ -228,16 +243,16 @@ async def lifespan(app: FastAPI):
                     )
                 log.info("qwen accounts ready: %d", len(qwen_accounts))
             if settings.gigachat_keys:
-                for i, (key, gc_client, ok) in enumerate(zip(settings.gigachat_keys, gc_clients, gc_auth, strict=False)):
+                for key_index, gc_client, ok in zip(gc_key_indexes, gc_clients, gc_auth, strict=True):
                     if not ok:
-                        log.warning("gigachat key #%d invalid/expired, skipping", i)
+                        log.warning("gigachat key #%d invalid/expired, skipping", key_index)
                         await gc_client.aclose()
                         continue
                     gigachat_accounts.append(
                         GigaChatAccount(
                             len(gigachat_accounts),
                             gc_client,
-                            stable_id=_token_stable_id(key),
+                            stable_id=_token_stable_id(settings.gigachat_keys[key_index]),
                         )
                     )
                 log.info("gigachat accounts ready: %d", len(gigachat_accounts))
@@ -313,7 +328,10 @@ async def lifespan(app: FastAPI):
             if id(client) in seen:
                 continue
             seen.add(id(client))
-            await client.aclose()
+            try:
+                await client.aclose()
+            except Exception as exc:
+                log.warning("client close failed for %s: %s", getattr(acct, "label", acct), exc)
 
 
 def _shared_store(attr: str, name: str, *, maxsize: int = 0) -> JsonStore:
@@ -332,27 +350,24 @@ MAX_LOGGED_BODY = 256 * 1024
 MAX_REQUEST_BODY = 100 * 1024 * 1024
 
 
-async def _read_request_body(request: Request, limit: int) -> bytes:
-    raw_length = -1
+def _declared_body_length(request: Request) -> int:
     content_length = request.headers.get("content-length")
-    if content_length:
-        try:
-            raw_length = int(content_length)
-        except ValueError:
-            raw_length = -1
-    if raw_length > 0:
-        if raw_length > limit:
-            raise HTTPException(413, "request body too large")
-        body = await request.body()
-        if len(body) > limit:
-            raise HTTPException(413, "request body too large")
-        request._body = body
-        return body
+    if not content_length:
+        return -1
+    try:
+        return int(content_length)
+    except ValueError:
+        return -1
+
+
+async def _read_request_body(request: Request, limit: int) -> bytes:
     cached = getattr(request, "_body", None)
     if cached:
         if len(cached) > limit:
             raise HTTPException(413, "request body too large")
         return cached
+    if _declared_body_length(request) > limit:
+        raise HTTPException(413, "request body too large")
     chunks: list[bytes] = []
     total = 0
     async for chunk in request.stream():
@@ -378,23 +393,16 @@ def _parse_logged_body(body: bytes) -> dict[str, Any]:
 
 
 async def _extract_request_body(request: Request) -> dict[str, Any]:
-    content_length = request.headers.get("content-length")
-    if content_length is not None:
-        try:
-            raw_length = int(content_length)
-            if raw_length <= 0:
-                return {}
-            if raw_length > MAX_LOGGED_BODY:
-                return {}
-        except ValueError:
-            return {}
     if getattr(request, "method", None) in ("GET", "DELETE", "HEAD", "OPTIONS"):
         return {}
-    cached = getattr(request, "_body", b"")
+    raw_length = _declared_body_length(request)
+    if raw_length > MAX_REQUEST_BODY:
+        raise HTTPException(413, "request body too large")
+    if raw_length <= 0 or raw_length > MAX_LOGGED_BODY:
+        return {}
+    cached = getattr(request, "_body", None)
     if cached:
         return _parse_logged_body(cached)
-    if content_length is None:
-        return {}
     try:
         body = await _read_request_body(request, MAX_REQUEST_BODY)
     except HTTPException:
@@ -420,20 +428,28 @@ def _request_client_ip(request: Request) -> str:
     return "-"
 
 
+MAX_LOGGED_FIELD = 120
+_LOG_UNSAFE_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _log_field(value: str) -> str:
+    return _LOG_UNSAFE_RE.sub(" ", value)[:MAX_LOGGED_FIELD]
+
+
 def _request_details(request: Request, payload: dict[str, Any], count_tokens: bool = True) -> str:
     parts = []
     user_agent = request.headers.get("user-agent")
     if user_agent:
-        parts.append(f"ua={user_agent[:120]}")
+        parts.append(f"ua={_log_field(user_agent)}")
     model = payload.get("model")
     if isinstance(model, str) and model:
-        parts.append(f"model={model}")
+        parts.append(f"model={_log_field(model)}")
     session_id = payload.get("session_id")
     if isinstance(session_id, str) and session_id:
-        parts.append(f"sid={session_id}")
+        parts.append(f"sid={_log_field(session_id)}")
     user = payload.get("user")
     if isinstance(user, str) and user:
-        parts.append(f"user={user}")
+        parts.append(f"user={_log_field(user)}")
     stream = payload.get("stream")
     if isinstance(stream, bool):
         parts.append(f"stream={int(stream)}")
@@ -487,6 +503,8 @@ async def _log_requests(request: Request, call_next):
     started = time.monotonic()
     payload: dict[str, Any] = {}
     try:
+        if _declared_body_length(request) > MAX_REQUEST_BODY:
+            raise HTTPException(413, "request body too large")
         if log.isEnabledFor(logging.INFO) or log.isEnabledFor(logging.WARNING):
             payload = await _extract_request_body(request)
     except HTTPException as exc:
@@ -578,11 +596,47 @@ def _openai_error_payload(status: int, message: str, request_id: str | None = No
     return payload
 
 
+MAX_VALIDATION_ERRORS = 10
+MAX_VALIDATION_FIELD = 64
+ERROR_ENVELOPE_EXTRA_KEYS = ("finish_reason",)
+CLIENT_REQUEST_ID_HEADER = "x-client-request-id"
+MAX_CLIENT_REQUEST_ID = 128
+
+
+def _validation_summary(errors: Any) -> str:
+    if not isinstance(errors, list) or not errors:
+        return "request validation failed"
+    parts: list[str] = []
+    for entry in errors[:MAX_VALIDATION_ERRORS]:
+        if not isinstance(entry, dict):
+            continue
+        loc = ".".join(str(part) for part in entry.get("loc", ()) if isinstance(part, (str, int)))[:MAX_VALIDATION_FIELD]
+        message = str(entry.get("msg", ""))[:MAX_VALIDATION_FIELD]
+        parts.append(f"{loc}: {message}" if loc else message)
+    if not parts:
+        return "request validation failed"
+    if len(errors) > MAX_VALIDATION_ERRORS:
+        parts.append(f"and {len(errors) - MAX_VALIDATION_ERRORS} more")
+    return "; ".join(parts)
+
+
 def _request_id_header(request: Request) -> str:
-    provided = request.headers.get("x-request-id")
-    if provided and len(provided) <= 128:
-        return provided
     return uuid.uuid4().hex
+
+
+def _client_request_id(request: Request) -> str | None:
+    provided = request.headers.get("x-request-id") or request.headers.get(CLIENT_REQUEST_ID_HEADER)
+    if provided:
+        return _LOG_UNSAFE_RE.sub(" ", provided)[:MAX_CLIENT_REQUEST_ID]
+    return None
+
+
+def _response_headers(request: Request, request_id: str) -> dict[str, str]:
+    headers = {"x-request-id": request_id}
+    client_request_id = _client_request_id(request)
+    if client_request_id:
+        headers[CLIENT_REQUEST_ID_HEADER] = client_request_id
+    return headers
 
 
 @app.exception_handler(RequestValidationError)
@@ -590,15 +644,15 @@ async def _on_validation_error(request: Request, exc: RequestValidationError) ->
     request_id = _request_id_header(request)
     return JSONResponse(
         status_code=400,
-        content=_openai_error_payload(400, f"invalid request body: {exc.errors()}", request_id),
-        headers={"x-request-id": request_id},
+        content=_openai_error_payload(400, f"invalid request body: {_validation_summary(exc.errors())}", request_id),
+        headers=_response_headers(request, request_id),
     )
 
 
 @app.exception_handler(HTTPException)
 async def _on_http_exception(request: Request, exc: HTTPException) -> JSONResponse:
     request_id = _request_id_header(request)
-    headers = {"x-request-id": request_id}
+    headers = _response_headers(request, request_id)
     if exc.headers:
         headers.update({str(k): str(v) for k, v in exc.headers.items()})
     detail = exc.detail
@@ -608,7 +662,10 @@ async def _on_http_exception(request: Request, exc: HTTPException) -> JSONRespon
             inner = detail
         message = inner.get("message")
         content = _openai_error_payload(exc.status_code, message if isinstance(message, str) else str(detail), request_id)
-        content["error"].update({key: value for key, value in inner.items() if key != "message" and value is not None})
+        for key in ERROR_ENVELOPE_EXTRA_KEYS:
+            value = inner.get(key)
+            if value is not None:
+                content["error"][key] = value
     else:
         content = _openai_error_payload(exc.status_code, str(detail), request_id)
     return JSONResponse(
@@ -624,7 +681,7 @@ async def _on_uncaught_exception(request: Request, exc: Exception) -> JSONRespon
     return JSONResponse(
         status_code=500,
         content=_openai_error_payload(500, _exception_message(exc), request_id),
-        headers={"x-request-id": request_id},
+        headers=_response_headers(request, request_id),
     )
 
 
@@ -639,7 +696,17 @@ def _account_busy_count(pool: Any) -> int:
 
 _POOL_RATE_CACHE: dict[int, tuple[float, dict[str, str], weakref.ReferenceType[Any]]] = {}
 _POOL_RATE_TTL = 1.0
+_POOL_RATE_RESET_SEC = 5
 _POOL_RATE_CACHE_MAX = 16
+
+
+def _prune_pool_rate_cache(now: float) -> None:
+    for cached_key, entry in list(_POOL_RATE_CACHE.items()):
+        if entry[2]() is None or now - entry[0] >= _POOL_RATE_TTL:
+            del _POOL_RATE_CACHE[cached_key]
+    while len(_POOL_RATE_CACHE) >= _POOL_RATE_CACHE_MAX:
+        oldest = min(_POOL_RATE_CACHE, key=lambda cached_key: _POOL_RATE_CACHE[cached_key][0])
+        del _POOL_RATE_CACHE[oldest]
 
 
 def _pool_rate_headers(pool: Any | None) -> dict[str, str]:
@@ -658,31 +725,51 @@ def _pool_rate_headers(pool: Any | None) -> dict[str, str]:
     headers = {
         "x-ratelimit-limit-requests": str(max(total, 0)),
         "x-ratelimit-remaining-requests": str(max(total - busy, 0)),
-        "x-ratelimit-reset-requests": str(int(time.time())),
+        "x-ratelimit-reset-requests": str(int(time.time()) + _POOL_RATE_RESET_SEC),
     }
-    if len(_POOL_RATE_CACHE) > _POOL_RATE_CACHE_MAX:
-        _POOL_RATE_CACHE.clear()
     try:
-        _POOL_RATE_CACHE[key] = (now, headers, weakref.ref(pool))
+        ref = weakref.ref(pool)
     except TypeError:
         _POOL_RATE_CACHE.pop(key, None)
+        return headers
+    _prune_pool_rate_cache(now)
+    _POOL_RATE_CACHE[key] = (now, headers, ref)
     return headers
+
+
+RATE_LIMITED_PATHS = ("/v1/chat/completions", "/v1/completions", "/v1/messages", "/v1/responses")
+QWEN_ONLY_PATH_PREFIXES = ("/v1/images/", "/v1/videos/")
+
+
+async def _rate_limit_pool(request: Request) -> Any:
+    path = request.url.path
+    if path.startswith(QWEN_ONLY_PATH_PREFIXES):
+        return provider_pool("qwen")
+    if path not in RATE_LIMITED_PATHS:
+        return None
+    try:
+        payload = await _extract_request_body(request)
+    except HTTPException:
+        return None
+    model = payload.get("model")
+    if not isinstance(model, str) or not model:
+        return None
+    try:
+        return provider_pool(_resolve_provider(model))
+    except HTTPException:
+        return None
 
 
 @app.middleware("http")
 async def _openai_headers(request: Request, call_next):
+    pool = await _rate_limit_pool(request)
     response = await call_next(request)
     headers = response.headers
     if not headers.get("x-request-id"):
         headers["x-request-id"] = _request_id_header(request)
     if not headers.get("x-ratelimit-limit-requests"):
-        for attr in POOL_ATTRS:
-            candidate = getattr(app.state, attr, None)
-            if candidate is None:
-                continue
-            for key, value in _pool_rate_headers(candidate).items():
-                headers[key] = value
-            break
+        for key, value in _pool_rate_headers(pool).items():
+            headers[key] = value
     return response
 
 
@@ -705,7 +792,18 @@ app.add_middleware(
 )
 
 docs_path = Path(__file__).resolve().parents[2] / "docs"
+DOCS_ASSETS = frozenset({"index.html", "style.css", "script.js", "deepseek-logo.svg", "qwen-logo.svg"})
+
+
+class _DocsAssets(StaticFiles):
+    async def get_response(self, path: str, scope: Scope) -> Response:
+        requested = posixpath.normpath(path)
+        if requested not in (".", "index.html") and requested not in DOCS_ASSETS:
+            raise HTTPException(404)
+        return await super().get_response(path, scope)
+
+
 if docs_path.is_dir():
-    app.mount("/docs", StaticFiles(directory=str(docs_path), html=True), name="docs")
+    app.mount("/docs", _DocsAssets(directory=str(docs_path), html=True), name="docs")
 
 app.router.lifespan_context = lifespan

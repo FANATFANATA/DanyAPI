@@ -1,16 +1,21 @@
 from __future__ import annotations
 
+import hashlib
+import inspect
 import json
 import logging
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
+from functools import partial
 from typing import Any
 
 from fastapi import HTTPException
 
-from danyapi.sseutil import parse_sse
 from danyapi.tokens import estimate_tokens
+
+from .anthropic import iter_sse_payloads as _iter_sse_payloads
+from .anthropic import sse_event
 
 log = logging.getLogger("danyapi.api.responses")
 
@@ -25,6 +30,15 @@ SUPPORTED_ROLES = {"user", "assistant", "system", "developer", "tool", "function
 IMAGE_DETAILS = {"low", "high", "auto"}
 RESPONSE_INCOMPLETE = "response_incomplete"
 REDUCED_CONTEXT_REASON = "max_output_tokens"
+UNSUPPORTED_ITEM_TYPES = {
+    "reasoning": "reasoning items are produced by the provider and cannot be replayed as input",
+    "item_reference": "item references cannot be resolved without the originating response",
+    "web_search_call": "server side tool calls cannot be replayed as input",
+    "file_search_call": "server side tool calls cannot be replayed as input",
+    "code_interpreter_call": "server side tool calls cannot be replayed as input",
+}
+NON_TERMINAL_STATUSES = {"queued", "in_progress"}
+MAX_TEXT_DEPTH = 8
 
 
 def _as_int(value: Any) -> int:
@@ -40,13 +54,15 @@ def _as_int(value: Any) -> int:
     return max(0, number)
 
 
-def _as_text(value: Any) -> str:
+def _as_text(value: Any, depth: int = 0) -> str:
     if value is None:
         return ""
     if isinstance(value, str):
         return value
     if isinstance(value, (int, float, bool)):
         return str(value)
+    if depth >= MAX_TEXT_DEPTH:
+        return ""
     if isinstance(value, list):
         parts: list[str] = []
         for item in value:
@@ -59,14 +75,14 @@ def _as_text(value: Any) -> str:
                 elif item.get("type") == "output_text" and isinstance(item.get("content"), str):
                     parts.append(item["content"])
             else:
-                parts.append(_as_text(item))
+                parts.append(_as_text(item, depth + 1))
         return "".join(parts)
     if isinstance(value, dict):
         if isinstance(value.get("text"), str):
             return value["text"]
         try:
             return json.dumps(value, ensure_ascii=False)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, RecursionError):
             return str(value)
     return str(value)
 
@@ -148,10 +164,12 @@ def _normalize_item(item: Any) -> list[dict]:
             }
         ]
     if item_type in ("function_call_output", "computer_call_output", "custom_tool_call_output"):
-        call_id = item.get("call_id") or item.get("id") or ""
+        call_id = item.get("call_id") or item.get("id")
+        if not isinstance(call_id, str) or not call_id:
+            raise ResponsesInputError(f"{item_type} requires a non-empty call_id")
         return [{"role": "tool", "tool_call_id": call_id, "content": _as_text(item.get("output"))}]
-    if item_type in ("reasoning", "item_reference", "web_search_call", "file_search_call", "code_interpreter_call"):
-        return []
+    if item_type in UNSUPPORTED_ITEM_TYPES:
+        raise ResponsesInputError(f"input item type {item_type!r} is not supported: {UNSUPPORTED_ITEM_TYPES[item_type]}")
     role = item.get("role")
     if role is None and item_type == "message":
         role = "assistant"
@@ -168,6 +186,8 @@ def normalize_input(input_value: Any) -> list[dict]:
     if input_value is None:
         return []
     if isinstance(input_value, str):
+        if not input_value.strip():
+            return []
         return [{"role": "user", "content": input_value}]
     if isinstance(input_value, dict):
         return _normalize_item(input_value)
@@ -177,6 +197,37 @@ def normalize_input(input_value: Any) -> list[dict]:
             messages.extend(_normalize_item(item))
         return messages
     raise ResponsesInputError("input must be a string or an array of input items")
+
+
+def ensure_input_present(messages: Any) -> list[dict]:
+    if not isinstance(messages, list) or not messages:
+        raise ResponsesInputError("input must contain at least one input item")
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        if isinstance(message.get("tool_calls"), list) and message["tool_calls"]:
+            continue
+        if _as_text(message.get("content")).strip():
+            continue
+        raise ResponsesInputError("input must contain at least one non-empty input item")
+    return messages
+
+
+def validate_tool_chain(messages: Any) -> None:
+    if not isinstance(messages, list):
+        return
+    answered: set[str] = set()
+    for index, message in enumerate(messages):
+        if not isinstance(message, dict):
+            continue
+        if message.get("role") == "assistant":
+            for call in message.get("tool_calls") or []:
+                if isinstance(call, dict) and isinstance(call.get("id"), str) and call["id"]:
+                    answered.add(call["id"])
+        elif message.get("role") == "tool":
+            call_id = message.get("tool_call_id")
+            if not isinstance(call_id, str) or call_id not in answered:
+                raise ResponsesInputError(f"messages[{index}] is a tool result for an unknown call_id: {call_id!r}")
 
 
 def convert_tools(tools: Any) -> list[Any] | None:
@@ -190,7 +241,7 @@ def convert_tools(tools: Any) -> list[Any] | None:
             converted.append(tool)
             continue
         tool_type = tool.get("type")
-        if tool_type == "function" or (isinstance(tool.get("name"), str) and tool_type in (None, "function")):
+        if isinstance(tool.get("name"), str) and tool_type in (None, "function"):
             function: dict[str, Any] = {"name": tool.get("name") or ""}
             if "description" in tool:
                 function["description"] = tool["description"]
@@ -223,6 +274,8 @@ def response_text_format(text: Any) -> dict | None:
     if isinstance(text, dict):
         fmt = text.get("format")
         if isinstance(fmt, dict):
+            if fmt.get("type") == "json_schema" and isinstance(fmt.get("json_schema"), dict):
+                return dict(fmt["json_schema"])
             return fmt
         if isinstance(fmt, str):
             return {"type": fmt}
@@ -313,7 +366,6 @@ def _usage_to_responses(usage: Any, output: Any = None) -> dict | None:
         return None
     input_tokens = _as_int(usage.get("prompt_tokens") or usage.get("input_tokens"))
     output_tokens = _as_int(usage.get("completion_tokens") or usage.get("output_tokens"))
-    total_tokens = _as_int(usage.get("total_tokens")) or (input_tokens + output_tokens)
     reasoning_tokens = _as_int(usage.get("reasoning_tokens"))
     if not reasoning_tokens:
         reasoning_tokens = estimate_tokens(_reasoning_text_from_output(output))
@@ -322,7 +374,20 @@ def _usage_to_responses(usage: Any, output: Any = None) -> dict | None:
         "input_tokens_details": {"cached_tokens": _as_int(usage.get("cached_tokens"))},
         "output_tokens": output_tokens,
         "output_tokens_details": {"reasoning_tokens": reasoning_tokens},
-        "total_tokens": total_tokens,
+        "total_tokens": input_tokens + output_tokens,
+    }
+
+
+def _response_error(error: Any) -> dict | None:
+    if error is None:
+        return None
+    if not isinstance(error, dict):
+        return {"code": None, "message": "upstream request failed"}
+    code = error.get("code")
+    message = error.get("message")
+    return {
+        "code": code if isinstance(code, str) and code else None,
+        "message": message if isinstance(message, str) and message else "upstream request failed",
     }
 
 
@@ -336,12 +401,21 @@ def build_response_object(
     error: dict | None = None,
     incomplete_details: dict | None = None,
 ) -> dict:
+    reported_usage = _usage_to_responses(usage, output)
+    if reported_usage is None and status not in NON_TERMINAL_STATUSES:
+        reported_usage = {
+            "input_tokens": 0,
+            "input_tokens_details": {"cached_tokens": 0},
+            "output_tokens": 0,
+            "output_tokens_details": {"reasoning_tokens": 0},
+            "total_tokens": 0,
+        }
     return {
         "id": response_id,
         "object": "response",
         "created_at": created_at,
         "status": status,
-        "error": error,
+        "error": _response_error(error),
         "incomplete_details": incomplete_details,
         "instructions": info.instructions,
         "max_output_tokens": info.max_output_tokens,
@@ -357,7 +431,7 @@ def build_response_object(
         "tools": info.tools or [],
         "top_p": info.top_p,
         "truncation": info.truncation,
-        "usage": _usage_to_responses(usage, output),
+        "usage": reported_usage,
         "user": info.user,
         "metadata": info.metadata if isinstance(info.metadata, dict) else {},
     }
@@ -444,21 +518,37 @@ def messages_from_output(output: Any) -> list[dict]:
     message: dict[str, Any] = {"role": "assistant", "content": "".join(text_parts)}
     if calls:
         message["tool_calls"] = calls
+    if not text_parts and not calls:
+        return []
     return [message]
 
 
-def _input_message_item(message: dict) -> list[dict]:
+def _stable_id(prefix: str, payload: Any, occurrences: dict[str, int] | None = None) -> str:
+    try:
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        encoded = str(payload)
+    digest = hashlib.blake2s(encoded.encode("utf-8", "replace"), digest_size=12).hexdigest()
+    key = f"{prefix}:{digest}"
+    seen = 0 if occurrences is None else occurrences.get(key, 0)
+    if occurrences is not None:
+        occurrences[key] = seen + 1
+    return f"{prefix}_{digest}" if seen == 0 else f"{prefix}_{digest}{seen}"
+
+
+def _input_message_item(message: dict, occurrences: dict[str, int] | None = None) -> list[dict]:
     role = message.get("role") or "user"
     content = message.get("content")
     if role in ("tool", "function"):
-        call_id = message.get("tool_call_id") or message.get("name") or f"call_{uuid.uuid4().hex[:12]}"
-        output = _as_text(content)
+        call_id = message.get("tool_call_id")
+        if not isinstance(call_id, str) or not call_id:
+            call_id = _stable_id("call", {"role": role, "name": message.get("name"), "content": content}, occurrences)
         return [
             {
-                "id": f"fc_{uuid.uuid4().hex}",
+                "id": _stable_id("fc", {"call_id": call_id, "output": _as_text(content)}, occurrences),
                 "type": "function_call_output",
                 "call_id": call_id,
-                "output": output if isinstance(output, str) else "",
+                "output": _as_text(content),
             }
         ]
     parts: list[dict] = []
@@ -476,17 +566,15 @@ def _input_message_item(message: dict) -> list[dict]:
                 if valid_detail:
                     image_part["detail"] = valid_detail
                 parts.append(image_part)
-            elif part_type in ("input_file", "file"):
-                file_spec = part.get("file")
-                if isinstance(file_spec, dict):
-                    parts.append({"type": "input_file", "file": file_spec, "filename": part.get("filename")})
+            elif part_type in ("input_file", "file") and isinstance(part.get("file"), dict):
+                parts.append({"type": "input_file", "file": part["file"], "filename": part.get("filename")})
     elif isinstance(content, str) and content:
         parts.append({"type": "input_text", "text": content, "annotations": []})
     if not parts:
         parts.append({"type": "input_text", "text": "", "annotations": []})
     items: list[dict] = [
         {
-            "id": f"msg_{uuid.uuid4().hex}",
+            "id": _stable_id("msg", {"role": role, "content": parts}, occurrences),
             "type": "message",
             "status": "completed",
             "role": role,
@@ -504,11 +592,12 @@ def _input_message_item(message: dict) -> list[dict]:
             arguments = function.get("arguments")
             if isinstance(arguments, (dict, list)):
                 arguments = json.dumps(arguments, ensure_ascii=False)
+            call_id = call.get("id") or f"call_{uuid.uuid4().hex[:12]}"
             items.append(
                 {
-                    "id": f"fc_{uuid.uuid4().hex}",
+                    "id": _stable_id("fc", {"call_id": call_id, "arguments": arguments}, occurrences),
                     "type": "function_call",
-                    "call_id": call.get("id") or f"call_{uuid.uuid4().hex[:12]}",
+                    "call_id": call_id,
                     "name": function.get("name") or "",
                     "arguments": arguments if isinstance(arguments, str) else "{}",
                     "status": "completed",
@@ -519,7 +608,7 @@ def _input_message_item(message: dict) -> list[dict]:
         items.insert(
             0,
             {
-                "id": f"rs_{uuid.uuid4().hex}",
+                "id": _stable_id("rs", {"reasoning": reasoning}, occurrences),
                 "type": "reasoning",
                 "summary": [{"type": "summary_text", "text": reasoning}],
             },
@@ -531,9 +620,10 @@ def input_items_from_messages(messages: Any) -> list[dict]:
     if not isinstance(messages, list):
         return []
     items: list[dict] = []
+    occurrences: dict[str, int] = {}
     for message in messages:
         if isinstance(message, dict):
-            items.extend(_input_message_item(message))
+            items.extend(_input_message_item(message, occurrences))
     return items
 
 
@@ -580,30 +670,18 @@ def response_from_chat(chat: Any, info: RequestInfo, response_id: str, created_a
     )
 
 
-def sse_event(event_type: str, data: dict) -> str:
-    return f"event: {event_type}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
-
-
-def _iter_sse_payloads(chunk: Any) -> Iterator[dict | None]:
-    if not isinstance(chunk, str):
-        return
-    for event in parse_sse(chunk):
-        data = event.data
-        if data == "[DONE]":
-            yield None
-        elif isinstance(data, dict):
-            yield data
-
-
 def _error_payload(error: Any) -> dict:
     if isinstance(error, dict):
+        code = error.get("code")
+        message = error.get("message")
         return {
             "type": error.get("type") or "server_error",
-            "code": error.get("code") or error.get("finish_reason"),
-            "message": error.get("message") or "stream error",
+            "code": code if isinstance(code, str) and code else None,
+            "message": message if isinstance(message, str) and message else "stream error",
             "param": error.get("param"),
         }
-    return {"type": "server_error", "code": None, "message": str(error), "param": None}
+    log.warning("upstream stream produced a non-dict error: %s", type(error).__name__)
+    return {"type": "server_error", "code": None, "message": "stream error", "param": None}
 
 
 def _error_event(error: Any) -> dict:
@@ -614,8 +692,10 @@ def _error_event(error: Any) -> dict:
 
 class _StreamState:
     __slots__ = (
+        "active_choice",
         "created_at",
         "finish",
+        "finishes",
         "info",
         "message_id",
         "message_index",
@@ -641,7 +721,7 @@ class _StreamState:
         self.on_complete = on_complete
         self.sequence = 0
         self.output_index = 0
-        self.output: list[dict] = []
+        self.output: dict[int, dict] = {}
         self.reasoning_id: str | None = None
         self.reasoning_index: int | None = None
         self.reasoning_parts: list[str] = []
@@ -653,6 +733,15 @@ class _StreamState:
         self.tool_items: dict[int, dict] = {}
         self.usage: Any = None
         self.finish: str | None = None
+        self.finishes: dict[int, str] = {}
+        self.active_choice: int | None = None
+
+    def final_finish(self) -> str | None:
+        if self.active_choice is not None and self.active_choice in self.finishes:
+            return self.finishes[self.active_choice]
+        for position in sorted(self.finishes):
+            return self.finishes[position]
+        return None
 
     def next_sequence(self) -> int:
         value = self.sequence
@@ -698,7 +787,7 @@ class _StreamState:
             {"item_id": self.reasoning_id, "output_index": self.reasoning_index, "summary_index": 0, "part": part},
         )
         item = {"id": self.reasoning_id, "type": "reasoning", "summary": [part]}
-        self.output.append(item)
+        self.output[self.reasoning_index or 0] = item
         yield self.emit("response.output_item.done", {"output_index": self.reasoning_index, "item": item})
 
     def message_delta(self, text: str) -> Iterator[str]:
@@ -736,7 +825,7 @@ class _StreamState:
             {"item_id": self.message_id, "output_index": self.message_index, "content_index": 0, "part": part},
         )
         item = {"id": self.message_id, "type": "message", "status": "completed", "role": "assistant", "content": [part]}
-        self.output.append(item)
+        self.output[self.message_index or 0] = item
         yield self.emit("response.output_item.done", {"output_index": self.message_index, "item": item})
 
     def _open_tool_item(self, entry: dict) -> Iterator[str]:
@@ -805,41 +894,48 @@ class _StreamState:
             if entry["name"]:
                 yield from self._open_tool_item(entry)
 
+    def _close_tool(self, entry: dict) -> Iterator[str]:
+        if not entry.get("open"):
+            return
+        entry["open"] = False
+        yield from self._open_tool_item(entry)
+        yield self.emit(
+            "response.function_call_arguments.done",
+            {"item_id": entry["id"], "output_index": entry["output_index"], "arguments": entry["arguments"]},
+        )
+        item = {
+            "id": entry["id"],
+            "type": "function_call",
+            "call_id": entry["call_id"],
+            "name": entry["name"],
+            "arguments": entry["arguments"],
+            "status": "completed",
+        }
+        self.output[entry["output_index"]] = item
+        yield self.emit("response.output_item.done", {"output_index": entry["output_index"], "item": item})
+
     def close_tools(self) -> Iterator[str]:
-        for index in sorted(self.tool_items):
-            entry = self.tool_items[index]
-            if not entry.get("open"):
-                continue
-            entry["open"] = False
-            yield from self._open_tool_item(entry)
-            yield self.emit(
-                "response.function_call_arguments.done",
-                {"item_id": entry["id"], "output_index": entry["output_index"], "arguments": entry["arguments"]},
-            )
-            item = {
-                "id": entry["id"],
-                "type": "function_call",
-                "call_id": entry["call_id"],
-                "name": entry["name"],
-                "arguments": entry["arguments"],
-                "status": "completed",
-            }
-            self.output.append(item)
-            yield self.emit("response.output_item.done", {"output_index": entry["output_index"], "item": item})
+        for index in sorted(self.tool_items, key=lambda key: self.tool_items[key]["output_index"]):
+            yield from self._close_tool(self.tool_items[index])
 
     def _open_closers(self) -> list[tuple[int, Any]]:
         closers: list[tuple[int, Any]] = []
-        if self.reasoning_index is not None:
+        if self.reasoning_open and self.reasoning_index is not None:
             closers.append((self.reasoning_index, self.close_reasoning))
-        if self.message_index is not None:
+        if self.message_open and self.message_index is not None:
             closers.append((self.message_index, self.close_message))
-        closers.sort(key=lambda entry: entry[0])
+        for entry in self.tool_items.values():
+            if entry.get("open"):
+                closers.append((entry["output_index"], partial(self._close_tool, entry)))
+        closers.sort(key=lambda item: item[0])
         return closers
+
+    def ordered_output(self) -> list[dict]:
+        return [self.output[index] for index in sorted(self.output)]
 
     def close_all(self) -> Iterator[str]:
         for _index, close in self._open_closers():
             yield from close()
-        yield from self.close_tools()
 
 
 async def _close_chat_stream(chat_stream: Any) -> None:
@@ -852,35 +948,62 @@ async def _close_chat_stream(chat_stream: Any) -> None:
         log.debug("upstream chat stream close failed: %s", exc)
 
 
-def _terminal_lines(
+async def _terminal_lines(
     state: _StreamState,
     status: str,
     error: dict | None = None,
     incomplete_details: dict | None = None,
-) -> Iterator[str]:
+) -> AsyncIterator[str]:
     final = build_response_object(
         state.info,
         state.response_id,
         state.created_at,
-        output=state.output,
+        output=state.ordered_output(),
         status=status,
         usage=state.usage,
         error=error,
         incomplete_details=incomplete_details,
     )
-    if callable(state.on_complete):
-        state.on_complete(final)
+    await _notify_complete(state, final)
     yield state.emit(f"response.{status}", {"response": final})
 
 
-def _failure_lines(state: _StreamState, error: dict) -> Iterator[str]:
+async def _failure_lines(state: _StreamState, error: dict) -> AsyncIterator[str]:
     if _error_finish_reason(error) is not None:
-        yield from _terminal_lines(state, "incomplete", None, {"reason": REDUCED_CONTEXT_REASON})
+        async for line in _terminal_lines(state, "incomplete", None, {"reason": REDUCED_CONTEXT_REASON}):
+            yield line
         return
-    yield from _terminal_lines(state, "failed", _error_payload(error))
+    async for line in _terminal_lines(state, "failed", _error_payload(error)):
+        yield line
     payload = {"type": "error", "sequence_number": state.next_sequence()}
     payload.update(_error_event(error))
     yield sse_event("error", payload)
+
+
+async def _notify_complete(state: _StreamState, final: dict) -> None:
+    callback = state.on_complete
+    if not callable(callback):
+        return
+    outcome = callback(final)
+    if inspect.isawaitable(outcome):
+        await outcome
+
+
+def _merge_usage(state: _StreamState, usage: Any) -> None:
+    if not isinstance(usage, dict):
+        return
+    if state.usage is None:
+        state.usage = {}
+    for key, value in usage.items():
+        if value is None:
+            continue
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, (int, float)) and value == 0:
+            continue
+        if isinstance(value, (dict, list, str, tuple, set)) and not value:
+            continue
+        state.usage[key] = value
 
 
 async def translate_stream(
@@ -896,51 +1019,64 @@ async def translate_stream(
         yield state.emit("response.created", {"response": initial})
         yield state.emit("response.in_progress", {"response": initial})
         error: dict | None = None
-        async for chunk in chat_stream:
-            for payload in _iter_sse_payloads(chunk):
-                if payload is None:
-                    continue
-                if isinstance(payload.get("error"), dict):
-                    error = payload["error"]
-                    continue
-                usage = payload.get("usage")
-                if isinstance(usage, dict):
-                    state.usage = usage
-                choices = payload.get("choices")
-                if not isinstance(choices, list):
-                    continue
-                for choice in choices:
-                    if not isinstance(choice, dict):
+        try:
+            async for chunk in chat_stream:
+                for payload in _iter_sse_payloads(chunk):
+                    if payload is None:
                         continue
-                    delta = choice.get("delta")
-                    if isinstance(delta, dict):
-                        reasoning = delta.get("reasoning_content")
-                        if isinstance(reasoning, str) and reasoning:
-                            for line in state.reasoning_delta(reasoning):
-                                yield line
-                        content = delta.get("content")
-                        if isinstance(content, str) and content:
-                            for line in state.message_delta(content):
-                                yield line
-                        if delta.get("tool_calls"):
-                            for line in state.tool_delta(delta["tool_calls"]):
-                                yield line
-                    finish = choice.get("finish_reason")
-                    if isinstance(finish, str) and finish:
-                        state.finish = finish
+                    if isinstance(payload.get("error"), dict):
+                        error = payload["error"]
+                        continue
+                    _merge_usage(state, payload.get("usage"))
+                    choices = payload.get("choices")
+                    if not isinstance(choices, list):
+                        continue
+                    for position, choice in enumerate(choices):
+                        if not isinstance(choice, dict):
+                            continue
+                        delta = choice.get("delta")
+                        if isinstance(delta, dict):
+                            reasoning = delta.get("reasoning_content")
+                            if isinstance(reasoning, str) and reasoning:
+                                if state.active_choice is None:
+                                    state.active_choice = position
+                                for line in state.reasoning_delta(reasoning):
+                                    yield line
+                            content = delta.get("content")
+                            if isinstance(content, str) and content:
+                                if state.active_choice is None:
+                                    state.active_choice = position
+                                for line in state.message_delta(content):
+                                    yield line
+                            if delta.get("tool_calls"):
+                                if state.active_choice is None:
+                                    state.active_choice = position
+                                for line in state.tool_delta(delta["tool_calls"]):
+                                    yield line
+                        finish = choice.get("finish_reason")
+                        if isinstance(finish, str) and finish and position not in state.finishes:
+                            state.finishes[position] = finish
+        except BaseException as exc:
+            log.warning("responses stream aborted by the upstream generator: %s", exc)
+            for line in state.close_all():
+                yield line
+            async for line in _failure_lines(state, {"message": "upstream stream failed"}):
+                yield line
+            raise
         for line in state.close_all():
             yield line
         if error is not None:
-            for line in _failure_lines(state, error):
+            async for line in _failure_lines(state, error):
                 yield line
             return
+        state.finish = state.final_finish()
         if state.finish in INCOMPLETE_REASONS:
             status = "incomplete"
             incomplete_details: dict | None = {"reason": INCOMPLETE_REASONS[state.finish]}
         else:
             status = "completed"
             incomplete_details = None
-        for line in _terminal_lines(state, status, None, incomplete_details):
+        async for line in _terminal_lines(state, status, None, incomplete_details):
             yield line
     finally:
         await _close_chat_stream(chat_stream)

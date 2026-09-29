@@ -1,9 +1,17 @@
 from __future__ import annotations
 
 import json
+import logging
+import re
 from collections.abc import Iterator, Sequence
 from functools import lru_cache
 from typing import Any
+
+log = logging.getLogger("danyapi.sseutil")
+
+_SSE_LINE_RE = re.compile(r"\r\n|\r|\n")
+
+MAX_BUFFER_BYTES = 8 * 1024 * 1024
 
 
 class SSEEvent:
@@ -25,8 +33,7 @@ def parse_sse(data: str) -> list[SSEEvent]:
     events: list[SSEEvent] = []
     event_name: str | None = None
     data_lines: list[str] = []
-    for raw_line in data.split("\n"):
-        line = raw_line.strip("\r")
+    for line in _SSE_LINE_RE.split(data):
         if line == "":
             if data_lines:
                 events.append(SSEEvent(event_name, _decode("\n".join(data_lines))))
@@ -59,6 +66,14 @@ THINK_TYPES = ("THINK",)
 _COMPACT_THRESHOLD = 8192
 
 
+def _decode_text(raw: bytes | bytearray) -> str:
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        log.warning("sse payload is not valid utf-8 at byte %d (%s), replaced %d byte(s)", exc.start, exc.reason, len(raw))
+        return raw.decode("utf-8", errors="replace")
+
+
 class IncrementalSSE:
     __slots__ = ("_buffer", "_pos")
 
@@ -66,30 +81,44 @@ class IncrementalSSE:
         self._buffer = bytearray()
         self._pos = 0
 
+    def _next_boundary(self) -> tuple[int, int]:
+        buffer = self._buffer
+        pos = self._pos
+        lf = buffer.find(b"\n\n", pos)
+        crlf = buffer.find(b"\r\n\r\n", pos)
+        cr = buffer.find(b"\r\r", pos)
+        best = len(buffer)
+        step = 2
+        for candidate, width in ((lf, 2), (crlf, 4), (cr, 2)):
+            if candidate != -1 and candidate < best:
+                best = candidate
+                step = width
+        return best, step
+
     def feed(self, chunk: bytes) -> Iterator[SSEEvent]:
         self._buffer += chunk
         buffer = self._buffer
         while True:
-            idx = buffer.find(b"\n\n", self._pos)
-            step = 2
-            if idx == -1:
-                idx = buffer.find(b"\r\n\r\n", self._pos)
-                step = 4
-                if idx == -1:
-                    break
+            idx, step = self._next_boundary()
+            if idx == len(buffer):
+                break
             start = self._pos
             self._pos = idx + step
-            yield from parse_sse(buffer[start:idx].decode("utf-8", errors="replace"))
+            yield from parse_sse(_decode_text(buffer[start:idx]))
         if self._pos and (self._pos >= _COMPACT_THRESHOLD or self._pos == len(buffer)):
             del self._buffer[: self._pos]
             self._pos = 0
+        if len(self._buffer) > MAX_BUFFER_BYTES:
+            self._buffer = bytearray()
+            self._pos = 0
+            raise ValueError(f"sse buffer exceeded {MAX_BUFFER_BYTES} bytes without an event boundary")
 
     def finish(self) -> Iterator[SSEEvent]:
         tail = self._buffer[self._pos :]
-        if tail.strip():
-            yield from parse_sse(tail.decode("utf-8", errors="replace"))
         self._buffer = bytearray()
         self._pos = 0
+        if tail.strip():
+            yield from parse_sse(_decode_text(tail))
 
 
 class StreamStopFilter:
@@ -97,7 +126,7 @@ class StreamStopFilter:
 
     def __init__(self, markers: list[str]) -> None:
         self._markers = markers
-        self._hold = max(len(marker) for marker in markers) - 1
+        self._hold = max((len(marker) for marker in markers), default=1) - 1
         self._buf = ""
 
     def feed(self, piece: str) -> tuple[str, bool]:
@@ -178,7 +207,11 @@ def _set_path(target: dict, parts: Sequence[str], value: Any) -> None:
                     return
                 node = node[idx]
             elif isinstance(node, dict):
-                if part not in node or not isinstance(node[part], (dict, list)):
+                if part not in node:
+                    if i:
+                        return
+                    node[part] = {}
+                elif not isinstance(node[part], (dict, list)):
                     node[part] = {}
                 node = node[part]
             else:
@@ -193,7 +226,8 @@ def _init_message(message: dict, value: Any) -> None:
         return
     message.clear()
     for key, val in source.items():
-        message[_normalise_key(key)] = val
+        name = _normalise_key(key)
+        message[name] = list(val) if isinstance(val, list) else dict(val) if isinstance(val, dict) else val
 
 
 def _delta_op(value: Any, default: str) -> str:
@@ -352,17 +386,7 @@ class MessageReconstructor:
         parts = self._content_parts
         if not parts:
             return self._content_base
-        base = self._content_base
-        reported = self._reported_c
-        if reported:
-            self._prev_content = base + "".join(parts[:reported])
-            self._reported_c = 0
-            base = self._prev_content
-        if len(parts) > reported:
-            base = base + "".join(parts[reported:])
-        self._content_base = base
-        parts.clear()
-        return base
+        return self._content_base + "".join(parts)
 
     @_content.setter
     def _content(self, value: str) -> None:
@@ -375,17 +399,7 @@ class MessageReconstructor:
         parts = self._reasoning_parts
         if not parts:
             return self._reasoning_base
-        base = self._reasoning_base
-        reported = self._reported_r
-        if reported:
-            self._prev_reasoning = base + "".join(parts[:reported])
-            self._reported_r = 0
-            base = self._prev_reasoning
-        if len(parts) > reported:
-            base = base + "".join(parts[reported:])
-        self._reasoning_base = base
-        parts.clear()
-        return base
+        return self._reasoning_base + "".join(parts)
 
     @_reasoning.setter
     def _reasoning(self, value: str) -> None:
@@ -500,21 +514,39 @@ class MessageReconstructor:
     def reasoning(self) -> str:
         return self._aggregates()[1]
 
+    def _fold_content(self) -> str:
+        parts = self._content_parts
+        reported = self._reported_c
+        if not parts:
+            return ""
+        if reported:
+            self._content_base = self._content_base + "".join(parts[:reported])
+            del parts[:reported]
+        piece = "".join(parts)
+        self._reported_c = len(parts)
+        self._prev_content = self._content_base + piece
+        return piece
+
+    def _fold_reasoning(self) -> str:
+        parts = self._reasoning_parts
+        reported = self._reported_r
+        if not parts:
+            return ""
+        if reported:
+            self._reasoning_base = self._reasoning_base + "".join(parts[:reported])
+            del parts[:reported]
+        piece = "".join(parts)
+        self._reported_r = len(parts)
+        self._prev_reasoning = self._reasoning_base + piece
+        return piece
+
     def take_diffs(self) -> tuple[str, str]:
         if self._revision == self._diffs_revision:
             return "", ""
         self._diffs_revision = self._revision
         frags = self.message.get("fragments")
         if self._append_only and frags is self._agg_fragments and not self._aggregate_dirty:
-            c_parts = self._content_parts
-            reported_c = self._reported_c
-            c_new = c_parts[reported_c:] if len(c_parts) != reported_c else ()
-            self._reported_c = len(c_parts)
-            r_parts = self._reasoning_parts
-            reported_r = self._reported_r
-            r_new = r_parts[reported_r:] if len(r_parts) != reported_r else ()
-            self._reported_r = len(r_parts)
-            return "".join(c_new), "".join(r_new)
+            return self._fold_content(), self._fold_reasoning()
         self._append_only = True
         content, reasoning = self._aggregates()
         c_diff = _diff_suffix(self._prev_content, content)

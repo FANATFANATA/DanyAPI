@@ -1,6 +1,10 @@
 #ifndef _CRT_SECURE_NO_WARNINGS
 #define _CRT_SECURE_NO_WARNINGS
 #endif
+#if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
+#define _POSIX_C_SOURCE 200809L
+#endif
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -10,22 +14,23 @@
 #include <windows.h>
 #else
 #include <pthread.h>
+#include <time.h>
 #include <unistd.h>
 #endif
 
 #define RATE 136
+#define PAD_POS (RATE - 1)
 #define ROUNDS 23
 #define MAX_DIGITS 20
 #define MAX_THREADS 1024
 #define MAX_INPUT 8192
+#define MAX_SALT 4095
+#define MAX_DIFFICULTY 2000000000LL
+#define TIME_BUDGET_SEC 45.0
+#define TIME_CHECK_STRIDE 4096
 
-#if defined(_MSC_VER)
-#define POW_MEMORY_BARRIER() MemoryBarrier()
-#else
-#define POW_MEMORY_BARRIER() __sync_synchronize()
-#endif
-
-static volatile int g_found = 0;
+static _Atomic int g_found = 0;
+static _Atomic long long g_deadline_ms = -1;
 
 static const uint64_t RC[24] = {
     0x0000000000000001ULL, 0x0000000000008082ULL, 0x800000000000808aULL,
@@ -190,11 +195,9 @@ static int check_counter(const uint64_t base[25], size_t off0,
     }
   }
   st[off >> 3] ^= (uint64_t)0x06 << (8 * (off & 7));
-  off++;
-  if (off == RATE) {
+  if (++off == RATE)
     keccak_f(st);
-  }
-  st[16] ^= (uint64_t)0x80 << 56;
+  st[PAD_POS >> 3] ^= (uint64_t)0x80 << (8 * (PAD_POS & 7));
   keccak_f(st);
   for (int i = 0; i < 32; i++) {
     uint64_t lane = st[i >> 3];
@@ -213,6 +216,23 @@ typedef struct {
   uint64_t result;
 } WorkerArgs;
 
+static long long now_ms(void) {
+#if defined(_WIN32)
+  return (long long)GetTickCount64();
+#else
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (long long)ts.tv_sec * 1000LL + ts.tv_nsec / 1000000LL;
+#endif
+}
+
+static int budget_exhausted(void) {
+  long long deadline = atomic_load(&g_deadline_ms);
+  if (deadline < 0)
+    return 0;
+  return now_ms() >= deadline;
+}
+
 static void run_worker(WorkerArgs *a) {
   a->result = UINT64_MAX;
   if (a->start >= a->end)
@@ -221,13 +241,20 @@ static void run_worker(WorkerArgs *a) {
   int dlen = to_digits(a->start, digits);
   if (dlen < 0)
     return;
+  uint64_t stride = 0;
   for (uint64_t c = a->start; c < a->end; c++) {
-    if (g_found)
+    if (atomic_load(&g_found))
       return;
+    if (++stride >= TIME_CHECK_STRIDE) {
+      stride = 0;
+      if (budget_exhausted()) {
+        atomic_store(&g_found, 1);
+        return;
+      }
+    }
     if (check_counter(a->base, a->off0, digits, dlen, a->target)) {
       a->result = c;
-      POW_MEMORY_BARRIER();
-      g_found = 1;
+      atomic_store(&g_found, 1);
       return;
     }
     inc_digits(digits, &dlen);
@@ -296,8 +323,13 @@ static const char *find_json_str(const char *json, const char *key, char *buf,
     return NULL;
   p++;
   size_t i = 0;
-  while (*p && *p != '"' && i + 1 < bufsz)
+  while (*p && *p != '"') {
+    if (i + 1 >= bufsz)
+      return NULL;
     buf[i++] = *p++;
+  }
+  if (*p != '"')
+    return NULL;
   buf[i] = '\0';
   return buf;
 }
@@ -332,7 +364,7 @@ int main(void) {
     return 1;
   }
 
-  char challenge[128] = {0}, salt[4096] = {0};
+  char challenge[128] = {0}, salt[MAX_SALT + 1] = {0};
   if (!find_json_str(input, "challenge", challenge, sizeof(challenge)) ||
       !find_json_str(input, "salt", salt, sizeof(salt))) {
     puts("{\"error\":\"missing challenge/salt\"}");
@@ -362,12 +394,15 @@ int main(void) {
   absorb_prefix(base, (const uint8_t *)prefix, (size_t)plen);
   size_t off0 = (size_t)plen % RATE;
 
-  uint64_t limit =
-      difficulty < 2000000000LL ? (uint64_t)difficulty : 2000000000ULL;
+  uint64_t limit = difficulty < MAX_DIFFICULTY ? (uint64_t)difficulty
+                                               : (uint64_t)MAX_DIFFICULTY;
   if (limit == 0) {
     puts("{\"error\":\"answer not found in range\"}");
     return 1;
   }
+
+  atomic_store(&g_deadline_ms,
+               now_ms() + (long long)(TIME_BUDGET_SEC * 1000.0));
 
   int nthreads = detect_threads();
   const char *env = getenv("POW_SOLVER_THREADS");
@@ -408,7 +443,7 @@ int main(void) {
   }
 
   uint64_t chunk = (limit + (uint64_t)nthreads - 1) / (uint64_t)nthreads;
-  g_found = 0;
+  atomic_store(&g_found, 0);
   for (int i = 0; i < nthreads; i++) {
     args[i].base = base;
     args[i].off0 = off0;

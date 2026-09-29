@@ -117,8 +117,8 @@ async def test_collect_image_auth_error_raises_401():
         await qwen_api.collect_image(**_args(acct))
     assert isinstance(excinfo.value, qwen_api.HTTPException)
     assert excinfo.value.status_code == 401
-    body = excinfo.value.detail
-    assert body["error"]["code"] == "unauthorized"
+    assert excinfo.value.detail == "bad token"
+    assert isinstance(excinfo.value.detail, str)
 
 
 async def test_collect_image_stream_error_stops_upstream():

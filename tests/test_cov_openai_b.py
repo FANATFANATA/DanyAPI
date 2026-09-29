@@ -11,6 +11,7 @@ import danyapi.api.chats as chats_mod
 import danyapi.api.deepseek as deepseek_mod
 import danyapi.api.openai as openai_mod
 from danyapi import tools as toolemu
+from danyapi.accounts import AccountPoolBusy
 from danyapi.api.openai import Attachment, ChatMessage, app
 from danyapi.deepseek.stream import MessageReconstructor
 
@@ -206,7 +207,20 @@ async def test_stream_guard_generic_exception():
 
     lines = await _collect(openai_mod._stream_guard(gen(), "m"))
     joined = "".join(lines)
-    assert "stream error" in joined
+    assert "kaboom" not in joined
+    assert "stream error" not in joined
+    assert openai_mod.INTERNAL_ERROR_MESSAGE in joined
+    assert joined.rstrip().endswith("data: [DONE]")
+
+
+async def test_stream_guard_account_busy_hint_is_preserved():
+    async def gen():
+        raise AccountPoolBusy()
+        yield "never"
+
+    lines = await _collect(openai_mod._stream_guard(gen(), "m"))
+    joined = "".join(lines)
+    assert "all accounts are busy, try again later" in joined
     assert joined.rstrip().endswith("data: [DONE]")
 
 

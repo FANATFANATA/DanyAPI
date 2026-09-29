@@ -86,11 +86,18 @@ def _token_int(value: Any) -> int:
     return int(number) if -_FLOAT_LIMIT < number < _FLOAT_LIMIT else 0
 
 
+def _summary_delta(committed: str, updated: str) -> str:
+    if updated.startswith(committed):
+        return updated[len(committed) :]
+    return ""
+
+
 class QwenStreamReconstructor:
     def __init__(self) -> None:
         self.response_id: str | None = None
         self._content_parts: list[str] = []
         self._reasoning_parts: list[str] = []
+        self._summary_parts: list[str] = []
         self._content_joined_cache: str | None = None
         self._reasoning_joined_cache: str | None = None
         self._nonempty: bool = False
@@ -99,8 +106,8 @@ class QwenStreamReconstructor:
         self.usage: dict = {}
         self._content_pending: list[str] = []
         self._reasoning_pending: list[str] = []
-        self._reasoning_committed: list[str] = []
-        self._reasoning_replaced: bool = False
+        self._summary_committed: str = ""
+        self._summary_pending: str | None = None
         self._image_scan_tail: str = ""
         self._seen_image_urls: set[str] = set()
 
@@ -113,7 +120,12 @@ class QwenStreamReconstructor:
     @property
     def reasoning(self) -> str:
         if self._reasoning_joined_cache is None:
-            self._reasoning_joined_cache = "".join(self._reasoning_parts)
+            base = "".join(self._reasoning_parts)
+            summary = self._summary_parts[0] if self._summary_parts else ""
+            if base and summary:
+                self._reasoning_joined_cache = f"{base}\n\n{summary}"
+            else:
+                self._reasoning_joined_cache = base or summary
         return self._reasoning_joined_cache
 
     def _collect_image_urls(self, text: str) -> None:
@@ -215,26 +227,25 @@ class QwenStreamReconstructor:
                     if isinstance(items, list):
                         joined = "\n\n".join(text for text in (_summary_text(item) for item in items) if text)
                         if joined:
-                            self._reasoning_parts[:] = [joined]
-                            self._reasoning_joined_cache = joined
+                            self._summary_parts[:] = [joined]
+                            self._reasoning_joined_cache = None
                             self._nonempty = True
-                            self._reasoning_pending[:] = [joined]
-                            self._reasoning_replaced = True
+                            self._summary_pending = joined
 
     def take_diffs(self) -> tuple[str, str]:
         c_diff = "".join(self._content_pending)
         self._content_pending.clear()
-        if self._reasoning_replaced:
-            current_reasoning = "".join(self._reasoning_parts)
-            r_diff = current_reasoning.removeprefix("".join(self._reasoning_committed))
-            self._reasoning_committed = list(self._reasoning_parts)
+        summary = self._summary_pending
+        if summary is not None:
+            self._summary_pending = None
+            parts = list(self._reasoning_pending)
             self._reasoning_pending.clear()
-            self._reasoning_replaced = False
-        else:
-            self._reasoning_committed.extend(self._reasoning_pending)
-            r_diff = "".join(self._reasoning_pending)
-            self._reasoning_pending.clear()
-        return c_diff, r_diff
+            parts.append(_summary_delta(self._summary_committed, summary))
+            self._summary_committed = summary
+            return c_diff, "".join(parts)
+        parts = self._reasoning_pending
+        self._reasoning_pending = []
+        return c_diff, "".join(parts)
 
     @property
     def has_content(self) -> bool:
@@ -253,4 +264,10 @@ def error_code(error: dict | None) -> str | None:
     if not error:
         return None
     code = error.get("code")
-    return code if isinstance(code, str) else None
+    if isinstance(code, str):
+        return code
+    if isinstance(code, bool):
+        return None
+    if isinstance(code, (int, float)):
+        return str(int(code))
+    return None

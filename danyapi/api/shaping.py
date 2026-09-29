@@ -44,6 +44,15 @@ def _include_usage(req: ChatCompletionRequest) -> bool:
     return bool(opts.get("include_usage"))
 
 
+def _safe_int(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0
+    try:
+        return int(value)
+    except (OverflowError, ValueError):
+        return 0
+
+
 def _deepseek_usage(total: int, prompt: str = "", provider_usage: dict | None = None, completion_text: str | None = None) -> dict:
     prompt_tokens = 0
     if isinstance(provider_usage, dict):
@@ -52,7 +61,7 @@ def _deepseek_usage(total: int, prompt: str = "", provider_usage: dict | None = 
             prompt_tokens = p_tokens
     if not prompt_tokens:
         prompt_tokens = estimate_tokens(prompt)
-    total_tokens = max(0, int(total or 0))
+    total_tokens = max(0, _safe_int(total))
     if total_tokens < prompt_tokens:
         total_tokens = prompt_tokens
     completion_tokens = max(0, total_tokens - prompt_tokens)
@@ -78,7 +87,7 @@ USAGE_TOTAL_FIELDS = ("prompt_tokens", "completion_tokens", "total_tokens")
 
 def _merge_usage(previous: dict | None, current: dict) -> dict:
     if previous is None:
-        return current
+        return dict(current)
     merged = dict(previous)
     for field in USAGE_TOTAL_FIELDS:
         left = merged.get(field)

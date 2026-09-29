@@ -29,6 +29,11 @@ Thumbs.db
 references
 collecter.py
 collected.xml
+.installed-release
+.latest-release-cache
+.previous-release
+.DanyAPI.staging-*/
+.DanyAPI.old-*/
 *.bak
 *.tmp
 *.temp

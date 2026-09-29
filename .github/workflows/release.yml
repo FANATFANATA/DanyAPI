@@ -6,7 +6,7 @@ on:
       - prod
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
@@ -15,9 +15,11 @@ concurrency:
 jobs:
   release:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
 
@@ -51,7 +53,7 @@ jobs:
         id: changelog
         if: steps.skip.outputs.skip == 'false'
         run: |
-          PREV_TAG=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sed -n '2p')
+          PREV_TAG=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n1)
           if [ -z "$PREV_TAG" ]; then
             LOG=$(git log --pretty=format:"- %s (%h)" --no-merges)
           else
@@ -65,9 +67,34 @@ jobs:
             echo "CHANGELOG_EOF"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Verify the build on this commit
+        if: steps.skip.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 60); do
+            state=$(gh api "repos/${{ github.repository }}/commits/${{ github.sha }}/check-runs" \
+              --jq '[.check_runs[] | select(.name == "CI") | "\(.status) \(.conclusion)"] | first // ""')
+            case "$state" in
+              "completed success")
+                echo "CI passed on this commit"
+                exit 0
+                ;;
+              completed*)
+                echo "::error::CI on this commit is $state"
+                exit 1
+                ;;
+            esac
+            echo "waiting for CI on this commit, attempt $attempt, state='$state'"
+            sleep 10
+          done
+          echo "::error::CI did not report success on this commit in time"
+          exit 1
+
       - name: Create GitHub Release
         if: steps.skip.outputs.skip == 'false'
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
           tag_name: ${{ steps.version.outputs.next_tag }}
           generate_release_notes: false

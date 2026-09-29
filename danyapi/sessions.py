@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 import threading
 import time
@@ -8,6 +9,8 @@ from collections import OrderedDict
 from typing import Any
 
 from .store import JsonStore
+
+log = logging.getLogger("danyapi.sessions")
 
 
 def _as_int(value: Any, default: int = 0) -> int:
@@ -53,6 +56,7 @@ class SessionRegistry:
         self._session_locks: dict[str, asyncio.Lock] = {}
         self._session_refs: dict[str, int] = {}
         self._session_locks_guard = asyncio.Lock()
+        self._session_locks_guard_sync = threading.RLock()
         self._restore()
 
     def _now(self) -> float:
@@ -68,10 +72,11 @@ class SessionRegistry:
         return f"{self._key_prefix}{session_id}"
 
     def _drop_session_lock(self, session_key: str) -> None:
-        if self._session_refs.get(session_key, 0) > 0:
-            return
-        self._session_locks.pop(session_key, None)
-        self._session_refs.pop(session_key, None)
+        with self._session_locks_guard_sync:
+            if self._session_refs.get(session_key, 0) > 0:
+                return
+            self._session_locks.pop(session_key, None)
+            self._session_refs.pop(session_key, None)
 
     def _serialize(self, session: Any) -> dict[str, Any]:
         return {
@@ -113,7 +118,9 @@ class SessionRegistry:
                 continue
             try:
                 session = self._deserialize(record)
-            except Exception:
+            except Exception as exc:
+                log.warning("discarding unparsable session record %s: %s", key, exc)
+                self._store.discard(key)
                 continue
             canonical = by_canonical.get(session.id)
             if canonical is not None:
@@ -166,7 +173,7 @@ class SessionRegistry:
         return session
 
     async def _session_lock(self, session_key: str) -> asyncio.Lock:
-        async with self._session_locks_guard:
+        with self._session_locks_guard_sync:
             lock = self._session_locks.get(session_key)
             if lock is None:
                 lock = asyncio.Lock()
@@ -175,7 +182,7 @@ class SessionRegistry:
         return lock
 
     async def _release_session_lock(self, session_key: str) -> None:
-        async with self._session_locks_guard:
+        with self._session_locks_guard_sync:
             refs = self._session_refs.get(session_key)
             if refs is None:
                 return
@@ -213,16 +220,11 @@ class SessionRegistry:
             self._sessions.move_to_end(bind_key)
             if bind_key != new_id:
                 self._sessions.move_to_end(new_id)
-            protect = {new_id, bind_key}
             allowed = self._maxsize + (1 if bind_key != new_id else 0)
             while self._sessions and len(self._sessions) > allowed:
-                oldest, entry = self._sessions.popitem(last=False)
-                if oldest not in protect:
-                    evicted.append(oldest)
-                    self._drop_session_lock(oldest)
-                    continue
-                self._sessions[oldest] = entry
-                self._sessions.move_to_end(oldest)
+                oldest, _entry = self._sessions.popitem(last=False)
+                evicted.append(oldest)
+                self._drop_session_lock(oldest)
             if self._store is not None:
                 record = self._serialize(session)
         store = self._store
@@ -235,14 +237,20 @@ class SessionRegistry:
         return session, bind_key
 
     def touch_last_message(self, session_id: str, message_id: str | None) -> None:
-        session = self.get(session_id)
-        if session is not None and message_id:
+        store = self._store
+        with self._lock:
+            entry = self._sessions.get(session_id)
+            if entry is None:
+                return
+            session = entry[0]
+            if not message_id:
+                return
             self._update_last(session, message_id)
-            if self._store is not None:
-                record = self._serialize(session)
-                self._store.set(self._session_key(session_id), record)
-                if session_id != session.id:
-                    self._store.set(self._session_key(session.id), record)
+            record = self._serialize(session) if store is not None else None
+        if store is not None and record is not None:
+            store.set(self._session_key(session_id), record)
+            if session_id != session.id:
+                store.set(self._session_key(session.id), record)
 
     def forget(self, session_id: str) -> None:
         with self._lock:
@@ -255,8 +263,13 @@ class SessionRegistry:
         with self._lock:
             known = list(self._sessions)
             self._sessions.clear()
-        self._session_locks.clear()
-        self._session_refs.clear()
+        with self._session_locks_guard_sync:
+            for key in list(self._session_locks):
+                lock = self._session_locks.get(key)
+                in_use = self._session_refs.get(key, 0) > 0 or (lock is not None and lock.locked())
+                if not in_use:
+                    self._session_locks.pop(key, None)
+                    self._session_refs.pop(key, None)
         store = self._store
         if store is None:
             return

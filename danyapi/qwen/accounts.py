@@ -19,8 +19,8 @@ class QwenSessionRegistry(SessionRegistry):
             "title": session.title,
             "last_response_id": session.last_response_id,
             "model": session.model,
-            "accumulated_input_tokens": getattr(session, "accumulated_input_tokens", 0),
-            "accumulated_output_tokens": getattr(session, "accumulated_output_tokens", 0),
+            "accumulated_input_tokens": session.accumulated_input_tokens,
+            "accumulated_output_tokens": session.accumulated_output_tokens,
         }
 
     def _deserialize(self, record: Any) -> QwenSession:
@@ -44,9 +44,9 @@ class QwenSessionRegistry(SessionRegistry):
 
     def _reuse(self, session: QwenSession, session_id: str, **kwargs) -> bool:
         wanted = kwargs.get("model") or ""
-        if session.model is None:
-            session.model = wanted
-            return True
+        if not session.model:
+            log.debug("qwen session %s has no recorded model, rebuilding it for %r", session_id, wanted)
+            return False
         return session.model == wanted
 
     def _update_last(self, session: QwenSession, message_id: str) -> None:

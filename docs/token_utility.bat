@@ -42,11 +42,13 @@ echo Using interpreter: %PY%
 echo.
 
 %PY% token_utility.py %*
-if errorlevel 1 (
+set "RC=%ERRORLEVEL%"
+if not "%RC%"=="0" (
     echo.
-    echo [ERROR] Script exited with an error.
+    echo [ERROR] Script exited with code %RC%.
     pause
-    exit /b 1
+    exit /b %RC%
 )
 
 endlocal
+exit /b 0

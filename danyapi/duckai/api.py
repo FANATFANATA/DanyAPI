@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import json
 import logging
+import random
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -12,10 +15,11 @@ import httpx
 from fastapi import HTTPException
 
 from ..accounts import account_lock
-from ..api.retry import RETRYABLE_HTTP_STATUSES, _retry_delay
+from ..api.retry import MAX_RETRIES, RETRYABLE_HTTP_STATUSES, _retry_delay
 from ..api.shaping import _apply_stop
 from ..api.sse import _sse, _stream_error_sse
 from ..config import settings
+from ..sseutil import StreamStopFilter, split_stop
 from ..tokens import estimate_tokens
 from ..usage import record_usage_dict
 from . import attest
@@ -27,8 +31,9 @@ from .client import (
 
 log = logging.getLogger("danyapi.duckai.api")
 
-MAX_RETRIES = 5
-ATTESTATION_RETRY_DELAY = 0.35
+RETRY_JITTER = 0.5
+
+ATTESTATION_RETRY_DELAY = _retry_delay(1)
 
 DONE_LINE = "data: [DONE]\n\n"
 
@@ -36,23 +41,37 @@ PROVIDER = "duckai"
 
 MAX_IMAGES_PER_MESSAGE = 3
 MAX_IMAGES_PER_REQUEST = 10
+MAX_IMAGE_BYTES = 15 * 1024 * 1024
+
+ALLOWED_IMAGE_MIME_TYPES = frozenset({"image/jpeg", "image/jpg", "image/png", "image/webp", "image/gif", "image/bmp", "image/tiff"})
 
 SYSTEM_PREFIX = "Follow these instructions for the rest of the conversation:\n"
 
 NO_IMAGE_HINT = "this duckai model does not accept images"
 
+NO_IMAGE_MARKERS = (
+    "does not support image",
+    "does not accept image",
+    "image is not supported",
+    "images are not supported",
+    "image input is not supported",
+    "unsupported image",
+    "no image support",
+)
+
 BLOCKED_HINT = (
     "duckai refused this request. Every duck.ai chat request carries a proof that a real browser made it, and this one did not "
-    "pass DuckDuckGo's check. This is not a blocklist of your address: a browser on the same network passes. The proof is "
-    "computed by danyapi/duckai/jsa_solver.js, so the refusal means that script used a check the solver does not reproduce "
-    "yet. Set DANYAPI_LOG_LEVEL=DEBUG for solver timings, then retry, which usually lands on a script that works."
+    "pass DuckDuckGo's check. This is not a blocklist of your address: a browser on the same network passes. The proof danyapi "
+    "produced did not match the one duck.ai asked for this time, which normally means duck.ai rolled out a check this build does "
+    "not satisfy yet. Retrying often lands on a request that goes through. If it keeps failing, retry with DANYAPI_LOG_LEVEL=DEBUG "
+    "and read the attestation timings it prints."
 )
 
 ENTRYPOINT_HINT = (
-    "duckai refused this request as an unsupported entrypoint. There are two known causes. Either duck.ai is serving a "
-    "different build than the one in the x-fe-version header, in which case restarting the server makes it read the "
-    "current one, or the client has been recognised and is being refused outright, which is what happens after sustained "
-    "automated use and is not cleared by waiting. The other providers are unaffected."
+    "duckai refused this request as an unsupported entrypoint. There are two known causes. Either duck.ai is serving a different "
+    "build than the one danyapi negotiated when it started, in which case restarting the server makes it read the current one, or "
+    "the client has been recognised and is being refused outright, which is what happens after sustained automated use and is not "
+    "cleared by waiting. The other providers are unaffected."
 )
 
 
@@ -76,7 +95,7 @@ def _detail_for(error: DuckAIError) -> str:
         return BLOCKED_HINT
     message = (error.message or "").strip()
     lowered = message.lower()
-    if "image" in lowered and "not" in lowered:
+    if any(marker in lowered for marker in NO_IMAGE_MARKERS):
         return f"{NO_IMAGE_HINT}: {message}"
     return f"duckai error: {message or error.code}"
 
@@ -121,8 +140,17 @@ def _images_of(content: Any) -> list[tuple[str, str]]:
             raise HTTPException(400, "duckai only accepts inline data URI images")
         meta, _, payload = uri[5:].partition(",")
         mime = meta.split(";", 1)[0].strip() or "image/png"
-        if payload:
-            images.append((mime, uri))
+        if mime not in ALLOWED_IMAGE_MIME_TYPES:
+            raise HTTPException(400, f"duckai accepts only these inline image types: {', '.join(sorted(ALLOWED_IMAGE_MIME_TYPES))}, got {mime}")
+        if not payload:
+            continue
+        if "base64" not in {param.strip().lower() for param in meta.split(";")[1:]}:
+            raise HTTPException(400, "duckai only accepts base64 encoded inline image data")
+        try:
+            base64.b64decode(payload, validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise HTTPException(400, "duckai inline image data is not valid base64") from exc
+        images.append((mime, uri))
     return images
 
 
@@ -185,6 +213,7 @@ def build_messages(
     system_chunks: list[str] = []
     out: list[dict] = []
     image_total = 0
+    image_bytes = 0
     pending_tool_results: list[dict] = []
 
     def flush_assistant_parts() -> None:
@@ -231,10 +260,13 @@ def build_messages(
         images = _images_of(content)
         if images:
             image_total += len(images)
+            image_bytes += sum(len(uri) for _, uri in images)
             if image_total > MAX_IMAGES_PER_REQUEST:
                 raise HTTPException(400, f"duckai accepts at most {MAX_IMAGES_PER_REQUEST} images per request")
             if len(images) > MAX_IMAGES_PER_MESSAGE:
                 raise HTTPException(400, f"duckai accepts at most {MAX_IMAGES_PER_MESSAGE} images per message")
+            if image_bytes > MAX_IMAGE_BYTES:
+                raise HTTPException(400, f"duckai accepts at most {MAX_IMAGE_BYTES // (1024 * 1024)} MiB of inline image data per request")
         flush_assistant_parts()
         parts = []
         if text:
@@ -301,48 +333,58 @@ async def _open_stream(
             can_use_tools=can_use_tools,
             can_use_web_search=can_use_web_search,
         )
+        delivered = False
         try:
             async for event in stream:
-                attempt = 0
+                delivered = True
                 yield event
             return
         except httpx.HTTPError as exc:
             status = getattr(getattr(exc, "response", None), "status_code", 0) or 0
-            if status in RETRYABLE_HTTP_STATUSES and attempt < MAX_RETRIES:
+            if not delivered and status in RETRYABLE_HTTP_STATUSES and attempt < MAX_RETRIES:
                 await _sleep_backoff(attempt)
                 attempt += 1
+                await stream.aclose()
                 continue
             raise HTTPException(502, f"duckai transport error: {exc}") from exc
         except attest.AttestationError as exc:
             account.client.invalidate_attestation()
-            if attempt < MAX_RETRIES:
-                await asyncio.sleep(ATTESTATION_RETRY_DELAY)
+            if not delivered and attempt < MAX_RETRIES:
+                await _sleep_backoff(attempt)
                 attempt += 1
+                await stream.aclose()
                 continue
             raise HTTPException(502, f"duckai attestation failed: {exc}") from exc
         except DuckAIError as exc:
             if exc.is_challenge or exc.is_entrypoint:
                 account.client.invalidate_attestation()
-                if attempt < MAX_RETRIES:
-                    await asyncio.sleep(ATTESTATION_RETRY_DELAY)
+                if not delivered and attempt < MAX_RETRIES:
+                    await _sleep_backoff(attempt)
                     attempt += 1
+                    await stream.aclose()
                     continue
                 raise _http_error(exc) from exc
-            if exc.is_retryable and attempt < MAX_RETRIES:
+            if exc.is_retryable and not delivered and attempt < MAX_RETRIES:
                 await _sleep_backoff(attempt)
                 attempt += 1
+                await stream.aclose()
                 continue
             raise _http_error(exc) from exc
 
 
 async def _sleep_backoff(attempt: int) -> None:
-    await asyncio.sleep(_retry_delay(attempt + 1))
+    if ATTESTATION_RETRY_DELAY <= 0:
+        return
+    base = max(ATTESTATION_RETRY_DELAY, _retry_delay(attempt + 1))
+    await asyncio.sleep(base * (1.0 - RETRY_JITTER + random.random() * RETRY_JITTER))
 
 
 def _tool_calls_out(event_calls: list[dict], collected: list[dict]) -> list[dict]:
+    fresh: list[dict] = []
     for index, call in enumerate(event_calls):
-        collected.append(call if not index else {**call, "index": index})
-    return collected
+        fresh.append(call if not index else {**call, "index": index})
+    collected.extend(fresh)
+    return fresh
 
 
 async def collect_non_stream(
@@ -454,9 +496,12 @@ async def stream_openai(
     tool_calls: list[dict] = []
     emitted = False
     finish = "stop"
+    stop_markers = split_stop(stop)
+    stop_filter = StreamStopFilter(stop_markers) if stop_markers else None
+    stop_hit = False
 
     async with account_lock(account.sem, settings.acquire_timeout):
-        yield _chunk(chunk_id, created, model, {"role": "assistant", "content": ""})
+        yield _chunk(chunk_id, created, model, {"role": "assistant"})
         try:
             async for event in _open_stream(
                 account,
@@ -471,7 +516,13 @@ async def stream_openai(
                     emitted = True
                     yield _chunk(chunk_id, created, model, {"reasoning_content": event.reasoning})
                 if event.delta:
-                    piece = _apply_stop(event.delta, stop)
+                    if stop_filter is None:
+                        piece = event.delta
+                    elif stop_hit:
+                        piece = ""
+                    else:
+                        piece, hit = stop_filter.feed(event.delta)
+                        stop_hit = stop_hit or hit
                     if piece:
                         content.append(piece)
                         emitted = True
@@ -487,13 +538,21 @@ async def stream_openai(
                 yield line
             return
 
-        if tool_calls:
-            finish = "tool_calls"
-        if not emitted:
-            yield _chunk(chunk_id, created, model, {"content": ""})
-        yield _chunk(chunk_id, created, model, {}, finish)
-        usage = _usage_for(prompt, "".join(content), "".join(reasoning))
-        record_usage_dict(PROVIDER, model, usage, user=user, session_id=session_id)
-        if include_usage:
-            yield _chunk(chunk_id, created, model, {}, None, usage=usage)
+    if stop_filter is not None and not stop_hit:
+        tail = stop_filter.flush()
+        if tail:
+            content.append(tail)
+            emitted = True
+            yield _chunk(chunk_id, created, model, {"content": tail})
+    if stop_hit:
+        finish = "stop"
+    if tool_calls:
+        finish = "tool_calls"
+    if not emitted:
+        yield _chunk(chunk_id, created, model, {"content": ""})
+    yield _chunk(chunk_id, created, model, {}, finish)
+    usage = _usage_for(prompt, "".join(content), "".join(reasoning))
+    record_usage_dict(PROVIDER, model, usage, user=user, session_id=session_id)
+    if include_usage:
+        yield _chunk(chunk_id, created, model, {}, None, usage=usage)
     yield DONE_LINE

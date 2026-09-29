@@ -93,6 +93,35 @@ def _line_head(text: str, pos: int) -> int:
     return pos if pos == 0 or text[pos - 1] == "\n" else -1
 
 
+_BOUNDARY_LOOKAHEAD = 64
+
+
+def _boundary_earlier(text: str, start: int, limit: int, names: tuple[str, ...]) -> bool:
+    end = min(len(text), limit + _BOUNDARY_LOOKAHEAD)
+    for pattern in _stream_patterns(names):
+        match = pattern.search(text, start, end)
+        if match is not None and match.start() < limit:
+            return True
+    match = _DSML_STREAM_START.search(text, start, end)
+    if match is not None and match.start() < limit:
+        return True
+    if _call_marker_before(text, start, limit, names):
+        return True
+    for markers in _MARKER_GROUPS.values():
+        for marker in markers:
+            found = text.find(marker, start)
+            if found != -1 and found < limit:
+                return True
+    pos = start
+    while True:
+        match = _TOOL_STREAM_YAML_RE.search(text, pos, end)
+        if match is None or match.start() >= limit:
+            return False
+        if _line_head(text, match.start()) != -1:
+            return True
+        pos = match.end()
+
+
 def _yaml_marker(text: str, start: int) -> int:
     pos = start
     while True:
@@ -105,23 +134,24 @@ def _yaml_marker(text: str, start: int) -> int:
         pos = match.end()
 
 
+@lru_cache(maxsize=64)
+def _call_marker_re(names: tuple[str, ...]) -> re.Pattern[str]:
+    escaped = "|".join(re.escape(name) for name in names)
+    return re.compile(rf"^[ \t]*(?:{escaped})[ \t]*\(", re.MULTILINE)
+
+
 def _call_marker(text: str, start: int, names: tuple[str, ...]) -> int:
-    best = -1
-    size = len(text)
-    for name in names:
-        at = text.find(name, start)
-        while at != -1:
-            head = _line_head(text, at)
-            if head != -1:
-                after = at + len(name)
-                while after < size and text[after] in " \t":
-                    after += 1
-                if after < size and text[after] == "(":
-                    if best == -1 or head < best:
-                        best = head
-                    break
-            at = text.find(name, at + 1)
-    return best
+    if not names:
+        return -1
+    match = _call_marker_re(names).search(text, start)
+    return match.start() if match is not None else -1
+
+
+def _call_marker_before(text: str, start: int, limit: int, names: tuple[str, ...]) -> bool:
+    if not names:
+        return False
+    match = _call_marker_re(names).search(text, start, min(len(text), limit + _BOUNDARY_LOOKAHEAD))
+    return match is not None and match.start() < limit
 
 
 def _stream_names(tool_schemas: dict[str, dict[str, Any]] | None) -> tuple[str, ...]:
@@ -246,10 +276,11 @@ def tool_call_boundary(
         old_text, old_best, old_complete = cached
         prefix_ok = len(text) >= len(old_text) and text.startswith(old_text)
         if old_complete and 0 <= old_best < len(old_text) and start <= old_best and prefix_ok:
-            hold = _boundary_hold(text, start, names)
-            if hold != -1 and hold < old_best:
-                return hold, False
-            return old_best, True
+            if not _boundary_earlier(text, start, old_best, names):
+                hold = _boundary_hold(text, start, names)
+                if hold != -1 and hold < old_best:
+                    return hold, False
+                return old_best, True
     if not _boundary_may_start(text, start, names):
         hold = _boundary_hold(text, start, names)
         return (hold, False) if hold != -1 else (-1, False)
@@ -291,7 +322,9 @@ def tool_call_boundary(
     hold = _boundary_hold(text, start, names)
     if hold != -1 and (best == -1 or hold < best):
         return hold, False
-    if best != -1 and best < _BOUNDARY_CACHE_PREFIX and (not _boundary_cache or len(_boundary_cache) < _BOUNDARY_CACHE_MAX):
+    if best != -1 and best < _BOUNDARY_CACHE_PREFIX:
+        while len(_boundary_cache) >= _BOUNDARY_CACHE_MAX:
+            _boundary_cache.pop(next(iter(_boundary_cache)))
         _boundary_cache[names] = (text[:_BOUNDARY_CACHE_PREFIX], best, complete)
     return best, complete
 

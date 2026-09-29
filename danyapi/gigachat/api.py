@@ -4,24 +4,23 @@ import json
 import logging
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from typing import Any
 
 import httpx
 from fastapi import HTTPException
 
 from ..accounts import account_lock
-from ..api.retry import RETRYABLE_HTTP_STATUSES, _retry_delay
+from ..api.retry import MAX_RETRIES, _retry_delay
 from ..api.shaping import _apply_stop
 from ..api.sse import _sse, _stream_error_sse
 from ..config import settings
+from ..sseutil import IncrementalSSE
 from ..usage import record_usage_dict
 from .client import GigaChatError
 from .messages import build_messages, normalize_finish_reason, normalize_usage, request_body
 
 log = logging.getLogger("danyapi.gigachat.api")
-
-MAX_RETRIES = 3
 
 DONE_LINE = "data: [DONE]\n\n"
 
@@ -83,8 +82,7 @@ async def _send(account: Any, body: dict, model: str) -> httpx.Response:
         try:
             return await account.client.chat(body, model)
         except httpx.HTTPError as exc:
-            status = getattr(getattr(exc, "response", None), "status_code", 0) or 0
-            if status in RETRYABLE_HTTP_STATUSES and attempt < MAX_RETRIES:
+            if attempt < MAX_RETRIES:
                 await _sleep_backoff(attempt)
                 attempt += 1
                 continue
@@ -146,7 +144,10 @@ async def collect_non_stream(
             function_call,
         )
         body = request_body(gc_messages, specs, call_value, temperature, top_p, max_tokens, response_format)
-        resp = await _send(account, body, model)
+        try:
+            resp = await _send(account, body, model)
+        except GigaChatError as exc:
+            raise HTTPException(_status_for(exc), _detail_for(exc)) from exc
         try:
             if resp.status_code >= 400:
                 await _raise_upstream(resp, await _safe_json(resp))
@@ -197,24 +198,20 @@ def _chunk(chunk_id: str, created: int, model: str, delta: dict, finish: str | N
     return _sse(payload)
 
 
+def _events(payloads: Any) -> Iterator[dict]:
+    for event in payloads:
+        data = event.data
+        if isinstance(data, dict) and data:
+            yield data
+
+
 async def _iter_sse(resp: httpx.Response) -> AsyncIterator[dict]:
-    buffer = ""
+    parser = IncrementalSSE()
     async for raw in resp.aiter_bytes():
-        buffer += raw.decode("utf-8", errors="replace")
-        while "\n\n" in buffer:
-            block, _, buffer = buffer.partition("\n\n")
-            for line in block.splitlines():
-                if not line.startswith("data: "):
-                    continue
-                payload = line[len("data: ") :].strip()
-                if not payload or payload == "[DONE]":
-                    continue
-                try:
-                    parsed = json.loads(payload)
-                except ValueError:
-                    continue
-                if isinstance(parsed, dict):
-                    yield parsed
+        for event in _events(parser.feed(raw)):
+            yield event
+    for event in _events(parser.finish()):
+        yield event
 
 
 def _delta_from_event(event: dict) -> tuple[dict, str | None]:
@@ -317,9 +314,11 @@ async def stream_openai(
                         yield _chunk(chunk_id, created, model, delta)
                 if finish is not None:
                     yield _chunk(chunk_id, created, model, {}, normalize_finish_reason(finish))
+        except HTTPException:
+            raise
         except httpx.HTTPError as exc:
-            yield _chunk(chunk_id, created, model, {}, "stop")
             log.warning("gigachat stream transport error: %s", exc)
+            raise HTTPException(502, f"GigaChat stream transport error: {exc}") from exc
         except Exception as exc:
             log.exception("gigachat stream failed: %s", exc)
             yield _chunk(chunk_id, created, model, {}, "stop")
@@ -328,7 +327,7 @@ async def stream_openai(
 
         if not emitted:
             yield _chunk(chunk_id, created, model, {"role": "assistant", "content": ""})
+        record_usage_dict("gigachat", model, normalize_usage(usage_payload), user=user, session_id=session_id)
         if include_usage and usage_payload is not None:
-            record_usage_dict("gigachat", model, normalize_usage(usage_payload), user=user, session_id=session_id)
             yield _chunk(chunk_id, created, model, {}, None, usage=normalize_usage(usage_payload))
     yield DONE_LINE

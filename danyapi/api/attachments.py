@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import re
 from dataclasses import dataclass
 
 from fastapi import HTTPException
@@ -15,8 +16,12 @@ log = logging.getLogger("danyapi.api")
 
 
 MAX_FILES_PER_REQUEST = 50
-MAX_FILE_SIZE = 100 * 1024 * 1024
 MAX_ATTACHMENT_TOTAL_SIZE = 10 * 1024 * 1024
+MAX_FILE_SIZE = MAX_ATTACHMENT_TOTAL_SIZE
+MAX_FILE_NAME_LENGTH = 128
+MAX_ATTACHMENT_CONCURRENCY = 4
+
+_UNSAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
 
 def _data_uri_parts(uri: str) -> tuple[str, str]:
@@ -42,6 +47,11 @@ def _compact_data_uri_length(compact: str) -> int:
 def _raw_data_uri_length(uri: str) -> int:
     _meta, compact = _data_uri_parts(uri)
     return _compact_data_uri_length(compact)
+
+
+def _safe_file_name(name: str) -> str:
+    cleaned = _UNSAFE_NAME_RE.sub("_", name.strip()).lstrip(".")
+    return cleaned[:MAX_FILE_NAME_LENGTH] or "file"
 
 
 @dataclass
@@ -87,20 +97,26 @@ def _collect_attachments(req: ChatCompletionRequest, allow_remote: bool = False)
                     raise HTTPException(400, "invalid image_url value")
                 if allow_remote and uri.startswith(REMOTE_IMAGE_SCHEMES):
                     continue
-                raw_total += _raw_data_uri_length(uri)
+                meta, compact = _data_uri_parts(uri)
+                raw_total += _compact_data_uri_length(compact)
                 if raw_total > MAX_ATTACHMENT_TOTAL_SIZE:
                     raise HTTPException(413, "attachments too large")
-                content_type, data = _split_data_uri(uri)
-                name = f"image_{len(attachments)}.{content_type.split('/')[-1] or 'bin'}"
+                content_type, data = _decode_data_uri(meta, compact)
+                name = _safe_file_name(f"image_{len(attachments)}.{content_type.split('/')[-1] or 'bin'}")
                 attachments.append(Attachment(data, name, content_type, True))
     for f in req.files or []:
         if not f.name or not f.content:
             raise HTTPException(400, "each file needs name and base64 content")
+        name = _safe_file_name(f.name)
+        raw_total += _compact_data_uri_length(f.content)
+        if raw_total > MAX_ATTACHMENT_TOTAL_SIZE:
+            raise HTTPException(413, "attachments too large")
         try:
-            data = base64.b64decode(f.content)
+            data = base64.b64decode(f.content, validate=True)
         except ValueError as exc:
-            raise HTTPException(400, f"invalid base64 in file {f.name}") from exc
-        attachments.append(Attachment(data, f.name, f.content_type or "application/octet-stream", (f.content_type or "").startswith("image/")))
+            raise HTTPException(400, f"invalid base64 in file {name}") from exc
+        content_type = f.content_type or "application/octet-stream"
+        attachments.append(Attachment(data, name, content_type, content_type.startswith("image/")))
     return attachments
 
 
@@ -111,15 +127,25 @@ def _validate_attachments(attachments: list[Attachment]) -> None:
         raise HTTPException(400, f"too many files: max {MAX_FILES_PER_REQUEST} per request")
     for att in attachments:
         if len(att.data) > MAX_FILE_SIZE:
-            raise HTTPException(400, f"file {att.name} exceeds {MAX_FILE_SIZE // (1024 * 1024)} MB limit")
+            raise HTTPException(413, f"file {att.name} exceeds {MAX_FILE_SIZE // (1024 * 1024)} MB limit")
 
 
 async def _upload_attachments(account, attachments: list[Attachment], model_type: str, thinking: bool) -> list[str]:
     if not attachments:
         return []
-    pow_headers_list = await asyncio.gather(*(_fresh_pow_upload_headers(account) for _ in attachments))
+    sem = asyncio.Semaphore(MAX_ATTACHMENT_CONCURRENCY)
+
+    async def _pow_headers() -> dict:
+        async with sem:
+            return await _fresh_pow_upload_headers(account)
+
+    pow_results = await asyncio.gather(*(_pow_headers() for _ in attachments), return_exceptions=True)
+    pow_headers_list: list[dict] = []
+    for item in pow_results:
+        if isinstance(item, BaseException):
+            raise item
+        pow_headers_list.append(item)
     file_ids: list[str] = []
-    sem = asyncio.Semaphore(4)
 
     async def _upload_one(att: Attachment, pow_headers) -> str:
         async with sem:
@@ -144,8 +170,8 @@ async def _upload_attachments(account, attachments: list[Attachment], model_type
         *(_upload_one(att, pow_headers) for att, pow_headers in zip(attachments, pow_headers_list, strict=True)),
         return_exceptions=True,
     )
-    for item in results:
-        if isinstance(item, BaseException):
-            raise item
-        file_ids.append(item)
+    for upload_result in results:
+        if isinstance(upload_result, BaseException):
+            raise upload_result
+        file_ids.append(upload_result)
     return file_ids

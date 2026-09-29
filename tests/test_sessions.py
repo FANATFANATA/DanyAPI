@@ -329,6 +329,62 @@ def test_restore_skips_invalid_records(sessions_store):
     assert len(reg._sessions) == 1
 
 
+def test_restore_logs_and_discards_unparsable_records(sessions_store, caplog):
+    import logging
+
+    sessions_store.set("0:ok", {"id": "cs1"})
+    sessions_store.set("0:bad", "garbage")
+    with caplog.at_level(logging.WARNING, logger="danyapi.sessions"):
+        reg = SessionRegistry(FakeSessionClient(), store=sessions_store, key_prefix="0:")
+    assert any("unparsable session record" in record.getMessage() for record in caplog.records)
+    assert reg.get("ok") is not None
+    assert "0:bad" not in sessions_store
+
+
+async def test_close_all_keeps_a_lock_that_is_still_held():
+    reg = SessionRegistry(FakeSessionClient())
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_obtain():
+        started.set()
+        await release.wait()
+        return SimpleNamespace(id="c1")
+
+    reg._create = slow_obtain
+    task = asyncio.create_task(reg.obtain("c1"))
+    await started.wait()
+    assert "c1" in reg._session_locks
+    reg.close_all()
+    assert "c1" in reg._session_locks
+    release.set()
+    await task
+    assert "c1" not in reg._session_locks
+
+
+def test_close_all_drops_unused_locks():
+    reg = SessionRegistry(FakeSessionClient())
+    asyncio.run(reg.obtain("c1"))
+    assert "c1" not in reg._session_locks
+    reg._session_locks["idle"] = asyncio.Lock()
+    reg.close_all()
+    assert reg._session_locks == {}
+
+
+def test_drop_session_lock_keeps_a_referenced_lock():
+    reg = SessionRegistry(FakeSessionClient())
+
+    async def run():
+        lock = await reg._session_lock("c1")
+        reg._drop_session_lock("c1")
+        assert reg._session_locks.get("c1") is lock
+        await reg._release_session_lock("c1")
+        assert "c1" not in reg._session_locks
+        reg._drop_session_lock("c1")
+
+    asyncio.run(run())
+
+
 def test_restore_trims_to_maxsize(sessions_store):
     for i in range(5):
         sessions_store.set(f"0:s{i}", {"id": f"cs{i}"})
@@ -493,6 +549,23 @@ def test_session_skips_system():
     assert prompt == "hi"
 
 
+def _chat_req(**overrides):
+    base = {
+        "model": "deepseek-v4.1-flash",
+        "stream": False,
+        "thinking": False,
+        "search": False,
+        "session_id": None,
+        "files": None,
+        "tools": None,
+        "tool_choice": None,
+        "response_format": None,
+        "messages": [openai_mod.ChatMessage(role="user", content="hello")],
+    }
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+
 def test_deepseek_stateless_request_resolves_cached_session():
     captured = {}
     orig = openai_mod._collect_non_stream
@@ -503,26 +576,77 @@ def test_deepseek_stateless_request_resolves_cached_session():
 
     chats_mod._collect_non_stream = fake_collect
     try:
+        account = MagicMock()
+        account.sessions.get.return_value = SimpleNamespace(id="sess-a")
+        account.sessions.can_reuse.return_value = True
         pool = MagicMock()
-        pool.acquire = AsyncMock(return_value=(MagicMock(), "sess-a"))
+        pool.acquire = AsyncMock(return_value=(account, "sess-a"))
         pool.resolve_context = MagicMock(return_value="sess-a")
         openai_mod.app.state.pool = pool
-        req = SimpleNamespace(
-            model="deepseek-v4.1-flash",
-            stream=False,
-            thinking=False,
-            search=False,
-            session_id=None,
-            files=None,
-            tools=None,
-            tool_choice=None,
-            response_format=None,
-            messages=[openai_mod.ChatMessage(role="user", content="hello")],
-        )
-        asyncio.run(openai_mod._chat_completions_deepseek(req))
+        asyncio.run(openai_mod._chat_completions_deepseek(_chat_req(user="alice")))
         pool.resolve_context.assert_called_once()
         assert captured["existing_sid"] == "sess-a"
+        assert captured["cached_session"] is not None
+        assert captured["context_seq"] == context_sequence(captured["messages"], user="u:alice")
     finally:
+        chats_mod._collect_non_stream = orig
+
+
+def test_deepseek_request_without_a_scope_skips_context_resolution():
+    captured = {}
+    orig = openai_mod._collect_non_stream
+
+    async def fake_collect(**kwargs):
+        captured.update(kwargs)
+        return {"ok": True}
+
+    chats_mod._collect_non_stream = fake_collect
+    saved_byok = getattr(openai_mod.app.state, "byok", False)
+    openai_mod.app.state.byok = False
+    try:
+        account = MagicMock()
+        account.sessions.get.return_value = None
+        account.sessions.can_reuse.return_value = False
+        pool = MagicMock()
+        pool.acquire = AsyncMock(return_value=(account, None))
+        pool.resolve_context = MagicMock(return_value="sess-a")
+        openai_mod.app.state.pool = pool
+        asyncio.run(openai_mod._chat_completions_deepseek(_chat_req()))
+        pool.resolve_context.assert_not_called()
+        assert captured["existing_sid"] is None
+        assert captured["context_seq"] == ()
+    finally:
+        openai_mod.app.state.byok = saved_byok
+        chats_mod._collect_non_stream = orig
+
+
+def test_deepseek_explicit_session_is_bound_to_its_first_scope():
+    captured = {}
+    orig = openai_mod._collect_non_stream
+
+    async def fake_collect(**kwargs):
+        captured.update(kwargs)
+        return {"ok": True}
+
+    chats_mod._collect_non_stream = fake_collect
+    pool = MagicMock()
+    saved_byok = getattr(openai_mod.app.state, "byok", False)
+    openai_mod.app.state.byok = False
+    try:
+        pool.acquire = AsyncMock(return_value=(MagicMock(), "explicit-1"))
+        openai_mod.app.state.pool = pool
+        chats_mod._SESSION_OWNERS.clear()
+        asyncio.run(openai_mod._chat_completions_deepseek(_chat_req(session_id="explicit-1", user="alice")))
+        assert chats_mod._SESSION_OWNERS["explicit-1"] == "u:alice"
+        pool.resolve_context.assert_not_called()
+        with pytest.raises(Exception) as excinfo:
+            asyncio.run(openai_mod._chat_completions_deepseek(_chat_req(session_id="explicit-1", user="bob")))
+        assert excinfo.value.status_code == 403
+        assert chats_mod._SESSION_OWNERS["explicit-1"] == "u:alice"
+        assert captured["existing_sid"] == "explicit-1"
+    finally:
+        chats_mod._SESSION_OWNERS.pop("explicit-1", None)
+        openai_mod.app.state.byok = saved_byok
         chats_mod._collect_non_stream = orig
 
 
@@ -611,26 +735,47 @@ def test_qwen_stateless_request_resolves_cached_session():
 
     qwen_api.collect_non_stream = fake_collect
     try:
+        account = MagicMock()
+        account.sessions.get.return_value = SimpleNamespace(id="sess-q", model="qwen3.8-max")
+        account.sessions.can_reuse.return_value = True
         pool = MagicMock()
-        pool.acquire = AsyncMock(return_value=(MagicMock(), "sess-q"))
+        pool.acquire = AsyncMock(return_value=(account, "sess-q"))
         pool.resolve_context = MagicMock(return_value="sess-q")
         openai_mod.app.state.qwen_pool = pool
-        req = SimpleNamespace(
-            model="qwen3.8-max",
-            stream=False,
-            thinking=False,
-            search=False,
-            session_id=None,
-            files=None,
-            tools=None,
-            tool_choice=None,
-            response_format=None,
-            messages=[openai_mod.ChatMessage(role="user", content="hello")],
-        )
-        asyncio.run(openai_mod._chat_completions_qwen(req))
+        asyncio.run(openai_mod._chat_completions_qwen(_chat_req(model="qwen3.8-max", user="alice")))
         pool.resolve_context.assert_called_once()
         assert captured["existing_sid"] == "sess-q"
+        assert captured["cached_session"] is not None
+        assert captured["context_seq"] == context_sequence(captured["messages"], user="u:alice")
     finally:
+        qwen_api.collect_non_stream = orig
+
+
+def test_qwen_request_without_a_scope_skips_context_resolution():
+    captured = {}
+    orig = qwen_api.collect_non_stream
+
+    async def fake_collect(**kwargs):
+        captured.update(kwargs)
+        return {"ok": True}
+
+    qwen_api.collect_non_stream = fake_collect
+    saved_byok = getattr(openai_mod.app.state, "byok", False)
+    openai_mod.app.state.byok = False
+    try:
+        account = MagicMock()
+        account.sessions.get.return_value = None
+        account.sessions.can_reuse.return_value = False
+        pool = MagicMock()
+        pool.acquire = AsyncMock(return_value=(account, None))
+        pool.resolve_context = MagicMock(return_value="sess-q")
+        openai_mod.app.state.qwen_pool = pool
+        asyncio.run(openai_mod._chat_completions_qwen(_chat_req(model="qwen3.8-max")))
+        pool.resolve_context.assert_not_called()
+        assert captured["existing_sid"] is None
+        assert captured["context_seq"] == ()
+    finally:
+        openai_mod.app.state.byok = saved_byok
         qwen_api.collect_non_stream = orig
 
 

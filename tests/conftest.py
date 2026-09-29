@@ -17,7 +17,7 @@ for _key in (
     "DUCKAI_ENABLED",
     "DUCKAI_ACCOUNTS",
 ):
-    os.environ.setdefault(_key, "")
+    os.environ[_key] = ""
 
 
 @pytest.fixture(autouse=True)

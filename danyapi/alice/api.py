@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 import uuid
@@ -9,22 +10,22 @@ from typing import Any
 from fastapi import HTTPException
 
 from ..accounts import account_lock
+from ..api.retry import MAX_RETRIES, _retry_delay
 from ..api.shaping import _apply_stop
 from ..api.sse import _sse, _stream_error_sse
 from ..config import settings
 from ..tokens import estimate_tokens
 from ..usage import record_usage_dict
-from .client import DEFAULT_MODEL as DEFAULT_MODEL
-from .client import RETRYABLE_ERRORS, AliceError, fold_messages
+from .client import AUTH_REJECTED, CONNECT_FATAL, DEFAULT_MODEL, RETRYABLE_ERRORS, AliceError, fold_messages
 
 log = logging.getLogger("danyapi.alice.api")
 
-MAX_RETRIES = 2
 DONE_LINE = "data: [DONE]\n\n"
+BROKEN_ERROR_CODES = {AUTH_REJECTED, CONNECT_FATAL}
 
 
 def _status_for(error: AliceError) -> int:
-    if error.code in RETRYABLE_ERRORS:
+    if error.code in RETRYABLE_ERRORS or error.code == CONNECT_FATAL:
         return 502
     return 400
 
@@ -41,17 +42,31 @@ def _usage_for(prompt: str, content: str) -> dict:
     }
 
 
+def _note_failure(account, exc: AliceError) -> None:
+    if exc.code in BROKEN_ERROR_CODES:
+        account.mark_broken()
+        log.warning(
+            "alice account #%d marked broken by upstream error %s: %s",
+            getattr(account, "index", 0),
+            exc.code,
+            exc.message,
+        )
+
+
 async def _ask(account: Any, prompt: str) -> Any:
     attempt = 0
     while True:
         try:
             return await account.client.ask(prompt)
         except AliceError as exc:
+            _note_failure(account, exc)
             if not exc.retryable or attempt >= MAX_RETRIES:
                 raise
             attempt += 1
             await account.client.aclose()
-            log.debug("alice request failed (%s), retrying", exc)
+            delay = _retry_delay(attempt)
+            log.debug("alice request failed (%s), retry %d/%d in %.1fs", exc, attempt, MAX_RETRIES, delay)
+            await asyncio.sleep(delay)
 
 
 def _translation_error(exc: AliceError) -> HTTPException:
@@ -122,18 +137,25 @@ async def stream_openai(
     created = int(time.time())
     text = prompt if prompt is not None else fold_messages(messages)
 
+    content: str = ""
+    error_lines: tuple[str, str] | None = None
     async with account_lock(account.sem, settings.acquire_timeout):
         try:
             stream = await _ask(account, text)
         except AliceError as exc:
-            for line in _stream_error_sse(chunk_id, created, model, f"Alice error: {exc.message}", session_id):
-                yield line
-            return
-        content = _apply_stop(stream.content, stop)
-        yield _chunk(chunk_id, created, model, {"role": "assistant", "content": content})
-        yield _chunk(chunk_id, created, model, {}, "stop")
-        usage = _usage_for(text, content)
-        record_usage_dict("alice", model, usage, user=user, session_id=session_id)
-        if include_usage:
-            yield _chunk(chunk_id, created, model, {}, None, usage=usage)
+            error_lines = _stream_error_sse(chunk_id, created, model, f"Alice error: {exc.message}", session_id)
+        else:
+            content = _apply_stop(stream.content, stop)
+
+    if error_lines is not None:
+        for line in error_lines:
+            yield line
+        return
+
+    yield _chunk(chunk_id, created, model, {"role": "assistant", "content": content})
+    yield _chunk(chunk_id, created, model, {}, "stop")
+    usage = _usage_for(text, content)
+    record_usage_dict("alice", model, usage, user=user, session_id=session_id)
+    if include_usage:
+        yield _chunk(chunk_id, created, model, {}, None, usage=usage)
     yield DONE_LINE

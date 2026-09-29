@@ -9,6 +9,19 @@ from typing import Any
 from .common import ToolCall, _tool_function
 from .jsonfix import _coerce_scalar, _loads_lenient
 
+_FUZZY_NAME_CUTOFF = 0.8
+_FUZZY_PARAM_CUTOFF = 0.85
+
+
+def _length_reachable(needle: str, candidate: str, cutoff: float) -> bool:
+    short = len(needle)
+    long = len(candidate)
+    if short > long:
+        short, long = long, short
+    if not short:
+        return long == 0
+    return (2.0 * short) / (short + long) >= cutoff
+
 
 @lru_cache(maxsize=8192)
 def _casefold(text: str) -> str:
@@ -47,11 +60,12 @@ def _schema_for_name(tool_schemas: dict[str, dict[str, Any]] | None, name: str) 
     if name in tool_schemas:
         spec = tool_schemas[name]
         return spec if isinstance(spec, dict) else None
-    key = _folded_keys(tuple(tool_schemas)).get(_casefold(name))
+    keys, seed = _schema_scope(tool_schemas)
+    key = _folded_keys(keys).get(_casefold(name))
     if key is not None:
         spec = tool_schemas[key]
         return spec if isinstance(spec, dict) else None
-    resolved = _resolve_alias(name, tool_schemas)
+    resolved = _resolve_alias(name, seed)
     if resolved is not None and resolved in tool_schemas:
         spec = tool_schemas[resolved]
         return spec if isinstance(spec, dict) else None
@@ -69,54 +83,83 @@ def _alias_rows(seed: tuple[tuple[str, tuple[Any, ...]], ...]) -> tuple[tuple[st
     return tuple(rows)
 
 
+_scope_cache: list[tuple[dict[Any, Any], tuple[Any, ...], tuple[tuple[str, tuple[Any, ...]], ...]]] = []
+
+
+def _schema_scope(tool_schemas: dict[str, dict[str, Any]]) -> tuple[tuple[Any, ...], tuple[tuple[str, tuple[Any, ...]], ...]]:
+    entry = None
+    if _scope_cache:
+        entry = _scope_cache[0]
+    if entry is not None and entry[0] is tool_schemas:
+        return entry[1], entry[2]
+    keys = tuple(tool_schemas)
+    seed = tuple((known, tuple((spec if isinstance(spec, dict) else {}).get("_aliases") or ())) for known, spec in tool_schemas.items())
+    if entry is None:
+        _scope_cache.append((tool_schemas, keys, seed))
+    else:
+        _scope_cache[0] = (tool_schemas, keys, seed)
+    return keys, seed
+
+
 @lru_cache(maxsize=256)
 def _schema_name_keys(keys: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(_name_key(key) for key in keys)
 
 
-def _resolve_alias(name: str, tool_schemas: dict[str, dict[str, Any]] | None) -> str | None:
-    if not tool_schemas or not isinstance(tool_schemas, dict):
+def _resolve_alias(name: str, seed: tuple[tuple[str, tuple[Any, ...]], ...] | dict[str, dict[str, Any]] | None) -> str | None:
+    if seed is None:
         return None
+    if isinstance(seed, dict):
+        if not seed:
+            return None
+        seed = _schema_scope(seed)[1]
     folded = _casefold(name)
     key = _name_key(name)
     if not key:
         return None
-    seed = tuple((known, tuple((spec if isinstance(spec, dict) else {}).get("_aliases") or ())) for known, spec in tool_schemas.items())
     for alias_key, alias_folded, known in _alias_rows(seed):
         if alias_key == key or alias_folded == folded:
             return known
     return None
 
 
-def _fuzzy_known_name(name: str, tool_schemas: dict[str, dict[str, Any]]) -> str | None:
-    key = _name_key(name)
+@lru_cache(maxsize=2048)
+def _fuzzy_tool_name(key: str, keys: tuple[str, ...]) -> str | None:
     if len(key) < 4:
         return None
-    keys = _schema_name_keys(tuple(tool_schemas))
-    matches = get_close_matches(key, keys, n=2, cutoff=0.8)
+    compacted = _schema_name_keys(keys)
+    candidates = [candidate for candidate in compacted if _length_reachable(key, candidate, _FUZZY_NAME_CUTOFF)]
+    if not candidates:
+        return None
+    matches = get_close_matches(key, candidates, n=2, cutoff=_FUZZY_NAME_CUTOFF)
     if len(matches) != 1:
         return None
     hit = matches[0]
-    for known in tool_schemas:
-        if _name_key(known) == hit:
-            return known
-    return None
+    return next(known for known in keys if _name_key(known) == hit)
+
+
+def _fuzzy_known_name(name: str, tool_schemas: dict[str, dict[str, Any]]) -> str | None:
+    key = _name_key(name)
+    keys, _seed = _schema_scope(tool_schemas)
+    if not keys:
+        return None
+    return _fuzzy_tool_name(key, keys)
 
 
 def _normalize_call_name(name: str, tool_schemas: dict[str, dict[str, Any]] | None) -> str:
     if not tool_schemas or name in tool_schemas:
         return name
-    keys = tuple(tool_schemas)
+    keys, seed = _schema_scope(tool_schemas)
     hit = _folded_names(keys).get(_casefold(name))
     if hit is not None:
         return hit
     hit = _compact_names(keys).get(_name_key(name))
     if hit is not None:
         return hit
-    return _resolve_alias(name, tool_schemas) or _fuzzy_known_name(name, tool_schemas) or name
+    return _resolve_alias(name, seed) or _fuzzy_known_name(name, tool_schemas) or name
 
 
-_tool_schema_map_cache: dict[int, tuple[tuple[int, ...], list[Any], dict[str, dict[str, Any]]]] = {}
+_tool_schema_map_cache: dict[int, tuple[tuple[int, ...], dict[str, dict[str, Any]]]] = {}
 _TOOL_SCHEMA_MAP_CACHE_MAX = 256
 
 
@@ -147,8 +190,8 @@ def tool_schema_map(tools: list[Any] | None) -> dict[str, dict[str, Any]]:
     key = id(tools)
     fingerprint = tuple(id(item) for item in tools)
     cached = _tool_schema_map_cache.get(key)
-    if cached is not None and cached[0] == fingerprint and cached[1] is tools:
-        return cached[2]
+    if cached is not None and cached[0] == fingerprint:
+        return cached[1]
     result: dict[str, dict[str, Any]] = {}
     for tool in tools:
         if not isinstance(tool, dict):
@@ -176,9 +219,9 @@ def tool_schema_map(tools: list[Any] | None) -> dict[str, dict[str, Any]]:
             if cleaned:
                 prop_types["_aliases"] = cleaned
         result[name] = prop_types
-    if len(_tool_schema_map_cache) >= _TOOL_SCHEMA_MAP_CACHE_MAX:
-        _tool_schema_map_cache.clear()
-    _tool_schema_map_cache[key] = (fingerprint, tools, result)
+    while len(_tool_schema_map_cache) >= _TOOL_SCHEMA_MAP_CACHE_MAX:
+        _tool_schema_map_cache.pop(next(iter(_tool_schema_map_cache)))
+    _tool_schema_map_cache[key] = (fingerprint, result)
     return result
 
 
@@ -257,6 +300,18 @@ def tool_schema_detail(tools: list[Any] | None) -> dict[str, dict[str, Any]]:
     return result
 
 
+@lru_cache(maxsize=2048)
+def _fuzzy_arg_key(compact: str, known_props: tuple[str, ...]) -> str | None:
+    compact_map = _compact_names(known_props)
+    candidates = [key for key in compact_map if _length_reachable(compact, key, _FIX_FUZZY_PARAM_CUTOFF)]
+    if not candidates:
+        return None
+    matches = get_close_matches(compact, candidates, n=2, cutoff=_FIX_FUZZY_PARAM_CUTOFF)
+    if len(matches) == 1:
+        return compact_map[matches[0]]
+    return None
+
+
 def _resolve_arg_key(
     key: str,
     known_props: tuple[str, ...],
@@ -266,12 +321,10 @@ def _resolve_arg_key(
         return key, "exact"
     if not known_props:
         return None, "unknown"
-    folded_map = _folded_names(known_props)
-    hit = folded_map.get(_casefold(key))
+    hit = _folded_names(known_props).get(_casefold(key))
     if hit is not None:
         return hit, "casefold"
-    compact_map = _compact_names(known_props)
-    hit = compact_map.get(_name_key(key))
+    hit = _compact_names(known_props).get(_name_key(key))
     if hit is not None:
         return hit, "compact"
     folded = _casefold(key)
@@ -281,9 +334,9 @@ def _resolve_arg_key(
             if _casefold(alias) == folded or _name_key(alias) == compact:
                 return prop, "alias"
     if len(compact) >= _FIX_FUZZY_PARAM_MIN:
-        matches = get_close_matches(compact, tuple(compact_map), n=2, cutoff=_FIX_FUZZY_PARAM_CUTOFF)
-        if len(matches) == 1:
-            return compact_map[matches[0]], "fuzzy"
+        hit = _fuzzy_arg_key(compact, known_props)
+        if hit is not None:
+            return hit, "fuzzy"
     return None, "unknown"
 
 

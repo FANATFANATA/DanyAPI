@@ -2,18 +2,23 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import ipaddress
 import logging
 import re
+import socket
 import time
+from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 from fastapi import File, Form, HTTPException, Request, UploadFile
+from pydantic import ValidationError
 
 from ..accounts import AccountPool, AccountPoolBusy
 from ..qwen import api as qwen_api
 from .attachments import MAX_FILE_SIZE
 from .byok import _byok_pool_for
-from .core import _acquire_account
+from .core import _acquire_account, _validation_summary
 from .schemas import ImageGenerationRequest
 from .shaping import _merge_usage
 from .state import _byok_mode, app
@@ -24,6 +29,14 @@ log = logging.getLogger("danyapi.api")
 IMAGE_SIZE_RE = re.compile(r"^(\d{2,5})\s*[*x\u00d7,]\s*(\d{2,5})$", re.IGNORECASE)
 MIN_IMAGE_DIM = 16
 MAX_IMAGE_DIM = 8192
+
+IMAGE_FETCH_SCHEMES = ("http", "https")
+IMAGE_FETCH_REDIRECTS = 3
+IMAGE_FETCH_TIMEOUT_SEC = 30.0
+REDIRECT_STATUSES = (301, 302, 303, 307, 308)
+IMAGE_DOWNLOAD_CONCURRENCY = 4
+QWEN_UNAVAILABLE_MESSAGE = "qwen provider is not configured (required for image generation)"
+UPLOAD_CHUNK_SIZE = 64 * 1024
 
 
 def _parse_image_size(size: str | None) -> tuple[int, int] | None:
@@ -59,6 +72,56 @@ def _resize_image_bytes(content: bytes, dims: tuple[int, int] | None) -> bytes:
         return content
 
 
+def _host_is_public(host: str) -> bool:
+    try:
+        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    except (OSError, UnicodeError):
+        return False
+    if not infos:
+        return False
+    for info in infos:
+        try:
+            address = ipaddress.ip_address(info[4][0])
+        except (IndexError, ValueError):
+            return False
+        if address.is_private or address.is_loopback or address.is_link_local or address.is_reserved or address.is_multicast or address.is_unspecified:
+            return False
+    return True
+
+
+async def _check_image_url(url: str) -> None:
+    parts = urlsplit(url)
+    if parts.scheme not in IMAGE_FETCH_SCHEMES:
+        raise ValueError(f"unsupported image url scheme {parts.scheme or url[:16]!r}")
+    host = parts.hostname or ""
+    if not host:
+        raise ValueError("image url has no host")
+    if not await asyncio.to_thread(_host_is_public, host):
+        raise ValueError(f"refusing to fetch image from the non-public address {host}")
+
+
+async def _download_image(hc: httpx.AsyncClient, url: str) -> bytes:
+    current = url
+    for _ in range(IMAGE_FETCH_REDIRECTS + 1):
+        await _check_image_url(current)
+        async with hc.stream("GET", current, timeout=IMAGE_FETCH_TIMEOUT_SEC, follow_redirects=False) as resp:
+            if resp.status_code in REDIRECT_STATUSES:
+                location = resp.headers.get("location")
+                if not location:
+                    raise ValueError("image redirect without a location header")
+                current = str(resp.url.join(location))
+                continue
+            if resp.status_code != 200:
+                raise ValueError(f"image download failed with status {resp.status_code}")
+            payload = bytearray()
+            async for chunk in resp.aiter_bytes():
+                payload += chunk
+                if len(payload) > MAX_FILE_SIZE:
+                    raise ValueError(f"image exceeds {MAX_FILE_SIZE // (1024 * 1024)} MB")
+            return bytes(payload)
+    raise ValueError("image download exceeded the redirect limit")
+
+
 @app.post("/v1/images/generations")
 async def image_generations(req: ImageGenerationRequest, request: Request) -> dict:
     return await _image_generations(req, await _image_pool(request))
@@ -81,40 +144,34 @@ async def _image_http_client() -> httpx.AsyncClient:
 
 async def _image_generations(req: ImageGenerationRequest, pool: AccountPool | None = None) -> dict:
     if pool is None:
-        pool = getattr(app.state, "qwen_pool", None)
-    if pool is None:
-        raise HTTPException(503, "qwen provider is not configured (required for image generation)")
+        raise HTTPException(503, QWEN_UNAVAILABLE_MESSAGE)
 
     dims = _parse_image_size(req.size)
     count = max(1, int(getattr(req, "n", 1) or 1))
+    want_b64 = req.response_format == "b64_json"
+    if dims is not None and not want_b64:
+        raise HTTPException(400, "size requires response_format=b64_json")
 
     account, existing_sid = await _acquire_account(pool, req.session_id)
 
-    want_b64 = req.response_format == "b64_json"
-    use_http = want_b64 or dims
     data: list[dict] = []
     usage = None
     result_sid = existing_sid
     hc = await _image_http_client()
-    download_sem = asyncio.Semaphore(4)
+    download_sem = asyncio.Semaphore(IMAGE_DOWNLOAD_CONCURRENCY)
 
     async def _fetch_image(url: str) -> dict:
-        if not use_http:
+        if not want_b64:
             return {"url": url}
         async with download_sem:
             try:
-                img_resp = await hc.get(url)
-                if img_resp.status_code != 200:
-                    log.warning("image download failed (%s) for %s, returning url", img_resp.status_code, url)
-                    return {"url": url}
-                if dims is not None:
-                    payload_bytes = await asyncio.to_thread(_resize_image_bytes, img_resp.content, dims)
-                else:
-                    payload_bytes = img_resp.content
-                return {"b64_json": await _b64encode(payload_bytes)}
+                payload_bytes = await _download_image(hc, url)
             except Exception as exc:
-                log.warning("image fetch failed for %s, returning url: %s", url, exc)
-                return {"url": url}
+                log.warning("image download failed for %s: %s", url, exc)
+                raise HTTPException(502, "image download failed") from exc
+            if dims is not None:
+                payload_bytes = await asyncio.to_thread(_resize_image_bytes, payload_bytes, dims)
+            return {"b64_json": await _b64encode(payload_bytes)}
 
     try:
         for _ in range(count):
@@ -155,7 +212,7 @@ async def _image_pool(request: Request) -> AccountPool:
     else:
         pool = getattr(app.state, "qwen_pool", None)
     if pool is None:
-        raise HTTPException(503, "qwen provider is not configured (required for image generation)")
+        raise HTTPException(503, QWEN_UNAVAILABLE_MESSAGE)
     return pool
 
 
@@ -175,11 +232,21 @@ async def _image_markdown(data: bytes, content_type: str) -> str:
 
 
 async def _read_upload(file: UploadFile) -> tuple[bytes, str]:
-    data = await file.read(MAX_FILE_SIZE + 1)
-    if len(data) > MAX_FILE_SIZE:
-        raise HTTPException(413, f"uploaded file exceeds {MAX_FILE_SIZE // (1024 * 1024)} MB limit")
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        remaining = MAX_FILE_SIZE - total
+        chunk = await file.read(min(UPLOAD_CHUNK_SIZE, remaining + 1))
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > MAX_FILE_SIZE:
+            raise HTTPException(413, f"uploaded file exceeds {MAX_FILE_SIZE // (1024 * 1024)} MB limit")
+        chunks.append(chunk)
+        if len(chunk) < UPLOAD_CHUNK_SIZE:
+            break
     content_type = (file.content_type or "application/octet-stream").split(";", 1)[0].strip() or "application/octet-stream"
-    return data, content_type
+    return b"".join(chunks), content_type
 
 
 def _image_edit_req(prompt: str, image_md: str, mask_md: str | None) -> str:
@@ -190,6 +257,13 @@ def _image_edit_req(prompt: str, image_md: str, mask_md: str | None) -> str:
     if mask_md:
         parts.append(mask_md)
     return "\n".join(parts)
+
+
+def _image_request(**fields: Any) -> ImageGenerationRequest:
+    try:
+        return ImageGenerationRequest(**fields)
+    except ValidationError as exc:
+        raise HTTPException(400, f"invalid request body: {_validation_summary(exc.errors())}") from exc
 
 
 @app.post("/v1/images/edits")
@@ -211,7 +285,7 @@ async def image_edits(
     if mask is not None:
         mask_data, mask_type = await _read_upload(mask)
         mask_md = await _image_markdown(mask_data, mask_type)
-    req = ImageGenerationRequest(
+    req = _image_request(
         model=model,
         prompt=_image_edit_req(prompt, await _image_markdown(image_data, image_type), mask_md),
         n=n,
@@ -227,6 +301,7 @@ async def image_edits(
 async def image_variations(
     request: Request,
     image: UploadFile = File(...),
+    prompt: str = Form(default=""),
     model: str = Form(default="qwen-image-gen"),
     n: int = Form(default=1),
     size: str | None = Form(default=None),
@@ -236,9 +311,9 @@ async def image_variations(
 ) -> dict:
     pool = await _image_pool(request)
     image_data, image_type = await _read_upload(image)
-    req = ImageGenerationRequest(
+    req = _image_request(
         model=model,
-        prompt=await _image_markdown(image_data, image_type),
+        prompt=_image_edit_req(prompt, await _image_markdown(image_data, image_type), None),
         n=n,
         size=size,
         response_format=response_format,

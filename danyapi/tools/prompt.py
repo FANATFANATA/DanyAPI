@@ -2,10 +2,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+import zlib
 from typing import Any
 
 from .common import _tool_function
 from .dsml import _strip_dsml
+
+MAX_SCHEMA_FIELD = 2000
+MAX_SCHEMA_NAME = 200
+MAX_FINGERPRINT_CHARS = 512
+_SCHEMA_CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 
 TOOL_CALL_INSTRUCTION = (
     "{functions}\n\n"
@@ -90,6 +97,17 @@ def _argument_summary(fn: dict) -> str | None:
     return ", ".join(parts) if parts else None
 
 
+def _schema_field(value: Any, limit: int = MAX_SCHEMA_FIELD, escape_markup: bool = False) -> str:
+    text = value if isinstance(value, str) else str(value)
+    text = _SCHEMA_CONTROL_RE.sub(" ", text)
+    text = " ".join(text.split())
+    if escape_markup:
+        text = text.replace("<", "&lt;").replace(">", "&gt;")
+    if len(text) > limit:
+        text = text[:limit] + " ...[truncated]"
+    return text
+
+
 def render_tool_schema(tools: list[Any] | None, tool_choice: Any = None) -> str | None:
     if not tools:
         return None
@@ -105,23 +123,26 @@ def render_tool_schema(tools: list[Any] | None, tool_choice: Any = None) -> str 
         return None
     lines = []
     for i, fn in enumerate(functions, start=1):
-        lines.append(f"{i}. name: {fn['name']}")
+        lines.append(f"{i}. name: {_schema_field(fn['name'], MAX_SCHEMA_NAME, escape_markup=True)}")
         if fn.get("description"):
-            lines.append(f"   description: {fn['description']}")
+            lines.append(f"   description: {_schema_field(fn['description'], escape_markup=True)}")
         params = fn.get("parameters")
         if params is not None:
             if isinstance(params, str):
-                params_json = params
+                try:
+                    params_json = json.dumps(json.loads(params), ensure_ascii=False, separators=(",", ":"))
+                except (TypeError, ValueError):
+                    params_json = _schema_field(params, escape_markup=True)
             else:
                 params_json = json.dumps(params, ensure_ascii=False, separators=(",", ":"))
-            lines.append(f"   parameters: {params_json}")
+            lines.append(f"   parameters: {_schema_field(params_json, escape_markup=False)}")
             argument_summary = _argument_summary(fn)
             if argument_summary:
                 lines.append(f"   arguments: {argument_summary}")
     if choice in CHOICE_INSTRUCTIONS:
         choice_line = CHOICE_INSTRUCTIONS[choice]
     elif isinstance(choice, str) and choice not in ("auto", "none", "required"):
-        choice_line = f"You MUST call exactly the function {choice} and no other functions."
+        choice_line = f"You MUST call exactly the function {_schema_field(choice, MAX_SCHEMA_NAME, escape_markup=True)} and no other functions."
     else:
         choice_line = "If you do not need to call any function, reply normally with your answer and do not invent a tool call."
     return TOOL_CALL_INSTRUCTION.format(
@@ -158,18 +179,62 @@ def _msg_field(msg: Any, key: str, default: Any = None) -> Any:
     return getattr(msg, key, default)
 
 
+MAX_FINGERPRINT_CHARS = 256
+MAX_FINGERPRINT_FULL = 65536
+
+
+def _fingerprint_part(value: str) -> str:
+    size = len(value)
+    if size <= MAX_FINGERPRINT_CHARS:
+        return value
+    head = value[:MAX_FINGERPRINT_CHARS]
+    tail = value[-MAX_FINGERPRINT_CHARS:]
+    if size <= MAX_FINGERPRINT_FULL:
+        body = hashlib.sha256(value.encode("utf-8", "replace")).hexdigest()
+    else:
+        body = f"{zlib.crc32(head.encode('utf-8', 'replace')):08x}{zlib.crc32(tail.encode('utf-8', 'replace')):08x}"
+    return f"{size}:{body}:{head}:{tail}"
+
+
+def _fingerprint_parts(content: Any) -> list[str]:
+    parts: list[str] = []
+    if isinstance(content, str):
+        candidates = [content]
+    elif isinstance(content, list):
+        candidates = []
+        for item in content:
+            if isinstance(item, str):
+                candidates.append(item)
+            elif isinstance(item, dict):
+                if isinstance(item.get("text"), str):
+                    candidates.append(item["text"])
+                elif item.get("type") == "image_url":
+                    image = item.get("image_url")
+                    if isinstance(image, str):
+                        candidates.append(image)
+                    elif isinstance(image, dict) and isinstance(image.get("url"), str):
+                        candidates.append(image["url"])
+    else:
+        return parts
+    return [_fingerprint_part(value) for value in candidates]
+
+
 def context_sequence(messages: list[Any], user: str | None = None) -> tuple[str, ...]:
     sequence: list[str] = []
-    scope = f"\0{user or ''}"
+    scope = user or ""
     for msg in messages:
         role = _msg_field(msg, "role", "user")
         if role not in ("system", "user"):
             continue
-        content = _content_text(_msg_field(msg, "content", ""), with_images=True, separator="\n")
-        if not content.strip():
+        parts = _fingerprint_parts(_msg_field(msg, "content", ""))
+        if not parts or not "".join(parts).strip():
             continue
-        digest = hashlib.sha256(f"{role}\0{content}{scope}".encode()).hexdigest()
-        sequence.append(digest)
+        digest = hashlib.sha256()
+        digest.update(f"{role}\0{scope}\0".encode())
+        for part in parts:
+            digest.update(b"\0")
+            digest.update(part.encode("utf-8", "replace"))
+        sequence.append(digest.hexdigest())
     return tuple(sequence)
 
 
@@ -262,7 +327,7 @@ def extract_last_user(messages: list[Any]) -> str:
             if text:
                 return text
             continue
-        raise ValueError("unsupported message content")
+        continue
     raise ValueError("no user message found")
 
 

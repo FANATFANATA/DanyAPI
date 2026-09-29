@@ -1,15 +1,20 @@
-FROM python:3.14-slim
+FROM python:3.14.2-slim-bookworm@sha256:e87711ef5c86aaeaa7031718a69db79d334d94c545c709583f651b8185870941
 
 WORKDIR /app
 
 COPY requirements.txt .
 RUN apt-get update \
     && apt-get install -y --no-install-recommends gcc libc6-dev nodejs \
-    && pip install --no-cache-dir -r requirements.txt
+    && pip install --no-cache-dir -r requirements.txt \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY danyapi ./danyapi
 COPY web ./web
-COPY docs ./docs
+COPY docs/index.html ./docs/index.html
+COPY docs/style.css ./docs/style.css
+COPY docs/script.js ./docs/script.js
+COPY docs/deepseek-logo.svg ./docs/deepseek-logo.svg
+COPY docs/qwen-logo.svg ./docs/qwen-logo.svg
 
 RUN gcc -O3 -pthread -funroll-loops -flto -fomit-frame-pointer -o danyapi/deepseek/pow_solver danyapi/deepseek/pow_solver.c \
     && apt-get purge -y gcc libc6-dev \

@@ -128,15 +128,7 @@ def test_extract_reads_directive_text_and_version():
 def test_extract_reads_chat_dialog_update():
     client = AliceClient()
     stream = AliceStream()
-    directive = {
-        "payload": {
-            "response": {
-                "chat_dialog_update": [
-                    {"add_message_request": {"messages": [{"content": {"plain_response_text": "из апдейта"}}]}}
-                ]
-            }
-        }
-    }
+    directive = {"payload": {"response": {"chat_dialog_update": [{"add_message_request": {"messages": [{"content": {"plain_response_text": "из апдейта"}}]}}]}}}
     client._extract(directive, stream)
     assert stream.content == "из апдейта"
 

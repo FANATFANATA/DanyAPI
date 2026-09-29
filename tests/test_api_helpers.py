@@ -189,13 +189,26 @@ def test_pool_stats():
 
 
 def test_resolve_model():
-    assert openai_mod._resolve_model("deepseek-v4.1-flash") == "default"
-    assert openai_mod._resolve_model("deepseek-v4.1-flash-thinking") == "default"
+    app.state.deepseek_models = [
+        {"id": "instant", "owned_by": "deepseek", "upstream_type": "default", "is_default": True},
+        {"id": "reasoner", "owned_by": "deepseek", "upstream_type": "expert", "is_default": False},
+    ]
+    try:
+        assert models_mod._resolve_model("instant") == "default"
+        assert models_mod._resolve_model("reasoner") == "expert"
+        assert models_mod._resolve_model("instant-thinking") == "default"
+        assert models_mod._resolve_model("reasoner-thinking") == "expert"
+        assert models_mod._resolve_model("deepseek-v4.1-flash") == "default"
+    finally:
+        app.state.deepseek_models = []
 
 
 def test_resolve_model_unknown():
     with pytest.raises(Exception) as excinfo:
-        openai_mod._resolve_model("nope")
+        models_mod._resolve_model("nope")
+    assert excinfo.value.status_code == 404
+    with pytest.raises(Exception) as excinfo:
+        models_mod._resolve_model("nope-thinking")
     assert excinfo.value.status_code == 404
 
 
@@ -366,15 +379,47 @@ async def test_acquire_and_build_with_session():
         tools=None,
         tool_choice=None,
         response_format=None,
-        user=None,
+        user="alice",
     )
-    account, existing_sid, context_seq, prompt, tool_mode, cached_session = await openai_mod._acquire_and_build(pool, req, tools=None, tool_choice=None)
+    chats_mod._SESSION_OWNERS.clear()
+    try:
+        account, existing_sid, context_seq, prompt, tool_mode, cached_session = await openai_mod._acquire_and_build(pool, req, tools=None, tool_choice=None)
+    finally:
+        bound = dict(chats_mod._SESSION_OWNERS)
+        chats_mod._SESSION_OWNERS.clear()
     assert account is acct
     assert existing_sid == "s1"
     assert context_seq
     assert "hello" in prompt
     assert tool_mode is False
     assert cached_session is None
+    assert bound == {"s1": "u:alice"}
+
+
+async def test_acquire_and_build_rejects_session_id_of_another_scope():
+    acct = FakeAccount()
+    pool = MagicMock()
+    pool.acquire = AsyncMock(return_value=(acct, "s1"))
+    chats_mod._SESSION_OWNERS.clear()
+    try:
+        first = SimpleNamespace(
+            model="deepseek-v4.1-flash",
+            messages=[openai_mod.ChatMessage(role="user", content="hello")],
+            session_id="s1",
+            tools=None,
+            tool_choice=None,
+            response_format=None,
+            user="alice",
+        )
+        await openai_mod._acquire_and_build(pool, first, tools=None, tool_choice=None)
+        second = SimpleNamespace(**{**first.__dict__, "user": "bob"})
+        with pytest.raises(Exception) as excinfo:
+            await openai_mod._acquire_and_build(pool, second, tools=None, tool_choice=None)
+        assert excinfo.value.status_code == 403
+        assert excinfo.value.detail == "session_id belongs to another client"
+        assert pool.acquire.await_count == 1
+    finally:
+        chats_mod._SESSION_OWNERS.clear()
 
 
 async def test_acquire_and_build_returns_cached_session_object():
@@ -409,13 +454,78 @@ async def test_acquire_and_build_without_session_uses_context():
         tools=None,
         tool_choice=None,
         response_format=None,
-        user=None,
+        user="alice",
     )
     account, existing_sid, context_seq, _prompt, _tool_mode, _cached = await openai_mod._acquire_and_build(pool, req, tools=None, tool_choice=None)
     assert account is acct
     assert existing_sid is None
+    assert context_seq
     pool.resolve_context.assert_called_once_with(context_seq)
     pool.acquire.assert_awaited_once_with("cached", settings.acquire_timeout)
+
+
+async def test_context_sequence_differs_between_scopes():
+    messages = [openai_mod.ChatMessage(role="user", content="hello")]
+    assert toolemu.context_sequence(messages, user="u:alice") != toolemu.context_sequence(messages, user="u:bob")
+
+
+async def test_acquire_and_build_without_scope_gets_fresh_session():
+    acct = FakeAccount()
+    pool = MagicMock()
+    pool.acquire = AsyncMock(return_value=(acct, None))
+    pool.resolve_context = MagicMock(return_value="cached")
+    req = SimpleNamespace(
+        model="deepseek-v4.1-flash",
+        messages=[openai_mod.ChatMessage(role="user", content="hello")],
+        session_id=None,
+        tools=None,
+        tool_choice=None,
+        response_format=None,
+        user=None,
+    )
+    chats_mod._SESSION_OWNERS.clear()
+    try:
+        account, existing_sid, context_seq, _prompt, _tool_mode, _cached = await openai_mod._acquire_and_build(pool, req, tools=None, tool_choice=None)
+        unbound = SimpleNamespace(**{**req.__dict__, "session_id": "s1"})
+        await openai_mod._acquire_and_build(pool, unbound, tools=None, tool_choice=None)
+        leaked = dict(chats_mod._SESSION_OWNERS)
+    finally:
+        chats_mod._SESSION_OWNERS.clear()
+    assert account is acct
+    assert existing_sid is None
+    assert context_seq == ()
+    pool.resolve_context.assert_not_called()
+    pool.acquire.assert_any_await(None, settings.acquire_timeout)
+    assert leaked == {}
+
+
+async def test_acquire_and_build_binds_session_in_byok_without_user(monkeypatch):
+    acct = FakeAccount()
+    pool = MagicMock()
+    pool.acquire = AsyncMock(return_value=(acct, "s1"))
+    monkeypatch.setattr(chats_mod, "_byok_mode", lambda: True)
+    monkeypatch.setattr(chats_mod, "_caller_scope", lambda: "key-1")
+    req = SimpleNamespace(
+        model="deepseek-v4.1-flash",
+        messages=[openai_mod.ChatMessage(role="user", content="hello")],
+        session_id="s1",
+        tools=None,
+        tool_choice=None,
+        response_format=None,
+        user=None,
+    )
+    chats_mod._SESSION_OWNERS.clear()
+    try:
+        _account, _sid, context_seq, _prompt, _tool_mode, _cached = await openai_mod._acquire_and_build(pool, req, tools=None, tool_choice=None)
+        assert context_seq
+        assert chats_mod._SESSION_OWNERS == {"s1": "k:key-1"}
+        other_key = SimpleNamespace(**{**req.__dict__})
+        monkeypatch.setattr(chats_mod, "_caller_scope", lambda: "key-2")
+        with pytest.raises(Exception) as excinfo:
+            await openai_mod._acquire_and_build(pool, other_key, tools=None, tool_choice=None)
+        assert excinfo.value.status_code == 403
+    finally:
+        chats_mod._SESSION_OWNERS.clear()
 
 
 async def test_acquire_and_build_requires_tools_arguments():
@@ -770,9 +880,13 @@ async def test_runtime_error():
     assert excinfo.value.status_code == 503
 
 
+def admin_headers() -> dict[str, str]:
+    return {"x-api-key": settings.admin_token}
+
+
 def test_health_no_pools():
     client = TestClient(app)
-    resp = client.get("/health")
+    resp = client.get("/health", headers=admin_headers())
     client.close()
     assert resp.status_code == 200
     data = resp.json()
@@ -789,7 +903,7 @@ def test_health_with_pools():
     app.state.deepseek_models = [{"id": "default", "name": "Instant", "owned_by": "deepseek", "model_type": "chat"}]
     try:
         client = TestClient(app)
-        data = client.get("/health").json()
+        data = client.get("/health", headers=admin_headers()).json()
         client.close()
         assert data["deepseek"]
         assert data["qwen"]
@@ -797,6 +911,30 @@ def test_health_with_pools():
         assert data["qwen_stats"] == {"accounts": 2, "models": 0}
     finally:
         app.state.deepseek_models = []
+
+
+def test_health_without_admin_token_reveals_nothing():
+    pool = MagicMock()
+    pool.stats.return_value = {"accounts": 2, "healthy": 2, "broken": 0}
+    app.state.pool = pool
+    app.state.qwen_pool = pool
+    app.state.deepseek_models = [{"id": "default", "name": "Instant", "owned_by": "deepseek", "model_type": "chat"}]
+    try:
+        client = TestClient(app)
+        for headers in ({}, {"x-api-key": "wrong-token"}, {"Authorization": "Bearer wrong-token"}):
+            resp = client.get("/health", headers=headers)
+            assert resp.status_code == 200
+            assert resp.json() == {"status": "ok"}
+        client.close()
+    finally:
+        app.state.deepseek_models = []
+
+
+def test_health_accepts_admin_token_as_bearer():
+    client = TestClient(app)
+    data = client.get("/health", headers={"Authorization": f"Bearer {settings.admin_token}"}).json()
+    client.close()
+    assert "deepseek_stats" in data
 
 
 def test_usage_endpoint_disabled():
@@ -811,15 +949,24 @@ def test_usage_endpoint_snapshot():
     from danyapi.usage import UsageTracker
 
     tracker = UsageTracker()
-    tracker.record("deepseek", "deepseek-v4.1-flash", 10, 20, 30, user="alice")
+    tracker.record("deepseek", "deepseek-v4.1-flash", 10, 20, 30, user="alice", session_id="s1")
     app.state.usage = tracker
     client = TestClient(app)
-    data = client.get("/v1/usage").json()
+    public = client.get("/v1/usage").json()
+    wrong = client.get("/v1/usage", headers={"x-api-key": "wrong-token"}).json()
+    admin = client.get("/v1/usage", headers=admin_headers()).json()
     client.close()
-    assert data["totals"] == {"requests": 1, "prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}
-    assert data["by_model"]["deepseek-v4.1-flash"]["requests"] == 1
-    assert data["by_user"]["alice"]["requests"] == 1
-    assert len(data["recent"]) == 1
+    assert set(public) == {"totals", "by_model"}
+    assert public["totals"] == {"requests": 1, "prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}
+    assert public["by_model"]["deepseek-v4.1-flash"]["requests"] == 1
+    assert wrong == public
+    body = json.dumps(public)
+    assert "alice" not in body
+    assert "s1" not in body
+    assert admin["by_user"]["alice"]["requests"] == 1
+    assert len(admin["recent"]) == 1
+    assert admin["recent"][0]["session_id"] == "s1"
+    assert admin["by_provider"]["deepseek"]["requests"] == 1
 
 
 def test_health_includes_usage():
@@ -829,9 +976,11 @@ def test_health_includes_usage():
     tracker.record("qwen", "qwen3.8-max", 5, 7, 12)
     app.state.usage = tracker
     client = TestClient(app)
-    data = client.get("/health").json()
+    data = client.get("/health", headers=admin_headers()).json()
+    public = client.get("/health").json()
     client.close()
     assert data["usage"] == {"requests": 1, "prompt_tokens": 5, "completion_tokens": 7, "total_tokens": 12}
+    assert public == {"status": "ok"}
 
 
 def test_list_models():
@@ -1084,14 +1233,37 @@ def test_image_url_string_form():
 
 
 def test_file_too_large():
+    assert openai_mod.MAX_FILE_SIZE == openai_mod.MAX_ATTACHMENT_TOTAL_SIZE
     req = SimpleNamespace(
         messages=[],
         files=[SimpleNamespace(name="big.bin", content=b64.b64encode(b"x" * (openai_mod.MAX_FILE_SIZE + 1)).decode(), content_type="application/octet-stream")],
     )
-    atts = openai_mod._collect_attachments(req)
     with pytest.raises(Exception) as excinfo:
-        openai_mod._validate_attachments(atts)
-    assert excinfo.value.status_code == 400
+        openai_mod._collect_attachments(req)
+    assert excinfo.value.status_code == 413
+    with pytest.raises(Exception) as excinfo:
+        openai_mod._validate_attachments([SimpleNamespace(data=b"x" * (openai_mod.MAX_FILE_SIZE + 1), name="big.bin")])
+    assert excinfo.value.status_code == 413
+
+
+def test_file_total_size_capped_across_files():
+    chunk = b64.b64encode(b"x" * (openai_mod.MAX_ATTACHMENT_TOTAL_SIZE // 4)).decode()
+    half = b64.b64encode(b"x" * (openai_mod.MAX_ATTACHMENT_TOTAL_SIZE // 2)).decode()
+
+    def _files(count: int) -> list[SimpleNamespace]:
+        return [SimpleNamespace(name=f"part{index}.bin", content=chunk, content_type="application/octet-stream") for index in range(count)]
+
+    assert len(openai_mod._collect_attachments(SimpleNamespace(messages=[], files=_files(3)))) == 3
+    with pytest.raises(Exception) as excinfo:
+        openai_mod._collect_attachments(SimpleNamespace(messages=[], files=_files(5)))
+    assert excinfo.value.status_code == 413
+    mixed = SimpleNamespace(
+        messages=[openai_mod.ChatMessage(role="user", content=[{"type": "image_url", "image_url": f"data:image/png;base64,{half}"}])],
+        files=_files(3),
+    )
+    with pytest.raises(Exception) as excinfo:
+        openai_mod._collect_attachments(mixed)
+    assert excinfo.value.status_code == 413
 
 
 async def test_fresh_pow_upload_error():
@@ -2377,6 +2549,15 @@ async def test_add_tokens_qwen_hot_add(monkeypatch, tmp_path):
         settings.qwen_tokens = saved_qw
         app.state.qwen_models = saved_models
         app.state.qwen_pool = None
+
+
+def test_docs_mount_serves_only_dashboard_assets():
+    client = TestClient(app)
+    for asset in ("", "index.html", "style.css", "script.js", "deepseek-logo.svg", "qwen-logo.svg"):
+        assert client.get(f"/docs/{asset}").status_code == 200
+    for hidden in ("setup.py", "start.py", "token_utility.py", "install.sh", "__pycache__/setup.cpython-314.pyc", "../app.py"):
+        assert client.get(f"/docs/{hidden}").status_code == 404
+    client.close()
 
 
 def test_split_data_uri_missing_payload():

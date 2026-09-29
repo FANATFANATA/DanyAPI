@@ -18,17 +18,16 @@ from .common import (
     _XML_NESTED_RE,
     _XML_PARAM_RE,
     _XML_STRAY_TOOL_CLOSE_RE,
-    _XML_TOOL_CALL_BLOCK_RE,
     _XML_TOOL_SELFCLOSE_RE,
     _XML_WRAPPER_CLOSE_RE,
     ToolCall,
+    _iter_tool_call_blocks,
 )
 from .dsml import (
     _DSML_INVOKE,
     _DSML_LAX_BLOCK,
     _DSML_LAX_NAME_ATTR,
     _DSML_LAX_OPENANY,
-    _DSML_LAX_PARAMETER,
     _DSML_LAX_SKIP_TAGS,
     _DSML_LAX_TAG,
     _DSML_LAX_TOOLNAME_TAIL,
@@ -46,6 +45,7 @@ from .dsml import (
     _blanked,
     _dsml_present,
     _IntervalSet,
+    _iter_dsml_lax_parameters,
     _scan_xml_pairs,
     _strip_dsml,
     strip_dsml,
@@ -146,12 +146,17 @@ def _xml_tag_attrs(body: str, param_types: dict[str, Any] | None = None) -> dict
 def _iter_xml_call_wrappers(text: str) -> Iterator[tuple[int, int, int, str]]:
     pos = 0
     length = len(text)
+    no_close_after: int | None = None
     while pos < length:
         match = _XML_WRAPPER_OPEN.search(text, pos)
         if match is None:
             return
         content_start = match.end()
-        close = _XML_WRAPPER_CLOSE_RE.search(text, content_start)
+        if no_close_after is None or content_start < no_close_after:
+            close = _XML_WRAPPER_CLOSE_RE.search(text, content_start)
+            no_close_after = content_start if close is None else None
+        else:
+            close = None
         if close is None:
             close = _XML_WRAPPER_OPEN.search(text, content_start)
         end = length if close is None else close.start()
@@ -166,6 +171,36 @@ def _schema_xml_patterns(tool_name: str) -> tuple[re.Pattern[str], re.Pattern[st
         re.compile(rf"<{escaped}(?=[\s/>])([^>]*?)>(.*?)</{escaped}>", re.DOTALL | re.IGNORECASE),
         re.compile(rf"<{escaped}(?=[\s/>])([^>]*?)/>", re.DOTALL | re.IGNORECASE),
     )
+
+
+@lru_cache(maxsize=512)
+def _schema_xml_open_re(tool_name: str) -> re.Pattern[str]:
+    return re.compile(rf"<{re.escape(tool_name)}(?=[\s/>])([^>]*?)(/?)>", re.IGNORECASE)
+
+
+@lru_cache(maxsize=512)
+def _schema_xml_close_re(tool_name: str) -> re.Pattern[str]:
+    return re.compile(rf"</{re.escape(tool_name)}>", re.IGNORECASE)
+
+
+def _iter_schema_xml_pairs(tool_name: str, text: str) -> Iterator[tuple[int, int, str, str]]:
+    open_re = _schema_xml_open_re(tool_name)
+    close_re = _schema_xml_close_re(tool_name)
+    pos = 0
+    while True:
+        open_match = open_re.search(text, pos)
+        if open_match is None:
+            return
+        attrs = open_match.group(1)
+        if open_match.group(2) == "/":
+            yield open_match.start(), open_match.end(), attrs, ""
+            pos = open_match.end()
+            continue
+        close = close_re.search(text, open_match.end())
+        if close is None:
+            return
+        yield open_match.start(), close.end(), attrs, text[open_match.end() : close.start()]
+        pos = close.end()
 
 
 def _parse_xml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | None = None) -> tuple[list[ToolCall] | None, str]:
@@ -208,15 +243,14 @@ def _parse_xml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | N
         calls.append(ToolCall.create(tool_name, arguments))
         blank(start, end)
         consumed.add(start, end)
-    for match in _XML_TOOL_CALL_BLOCK_RE.finditer(text):
-        parsed = _extract_json_object(match.group(1))
+    for start, end, block_body in _iter_tool_call_blocks(text):
+        parsed = _extract_json_object(block_body)
         if parsed is None:
             continue
         obj, _, _ = parsed
         extracted = _extract_calls(obj)
         if extracted:
             calls.extend(extracted)
-            start, end = match.span()
             blank(start, end)
             consumed.add(start, end)
     for start, content_start, end, inner in _iter_xml_call_wrappers(text):
@@ -310,16 +344,15 @@ def _parse_xml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | N
         if not isinstance(tool_name, str) or not tool_name:
             continue
         param_types = raw_types if isinstance(raw_types, dict) else None
-        open_pattern, selfclose_pattern = _schema_xml_patterns(tool_name)
-        for match in open_pattern.finditer(text):
-            start, end = match.span()
+        for start, end, attrs_text, element_body in _iter_schema_xml_pairs(tool_name, text):
             if consumed.contains(start, end):
                 continue
-            merged = _xml_tag_attrs(match.group(1), param_types)
-            merged.update(_xml_invoke_arguments(match.group(2), param_types) or {})
+            merged = _xml_tag_attrs(attrs_text, param_types)
+            merged.update(_xml_invoke_arguments(element_body, param_types) or {})
             calls.append(ToolCall.create(tool_name, merged))
             consumed.add(start, end)
             blank(start, end)
+        selfclose_pattern = _schema_xml_patterns(tool_name)[1]
         for match in selfclose_pattern.finditer(text):
             start, end = match.span()
             if consumed.contains(start, end):
@@ -343,9 +376,7 @@ def _parse_xml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | N
     seen = _IntervalSet()
     for start, end, self_closed, bare_raw_name, attrs, body in bare_candidates:
         raw_name = bare_raw_name
-        if seen.contains(start, end):
-            continue
-        if consumed.contains(start, end):
+        if seen.contains(start, end) or consumed.contains(start, end):
             continue
         seen.add(start, end)
         param_types = _schema_for_name(tool_schemas, raw_name)
@@ -387,6 +418,7 @@ def _parse_bare_array_calls(text: str) -> list[ToolCall] | None:
     return calls or None
 
 
+_MAX_PARSE_TEXT = 256 * 1024
 _MAX_JSON_SCAN = 200_000
 _MAX_JSON_CANDIDATES = 2000
 _JSON_KEY_START = frozenset("_-.'" + "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
@@ -405,6 +437,8 @@ def _iter_json_objects(text: str) -> Iterator[tuple[dict, int, int]]:
         while probe < length and text[probe] in " \t\r\n":
             probe += 1
         if probe < length and text[probe] != '"' and text[probe] != "}" and text[probe] not in _JSON_KEY_START:
+            scanned += probe - start + 1
+            attempts += 1
             i = start + 1
             continue
         depth = 0
@@ -633,7 +667,7 @@ def _parse_dsml_lax_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]
     block = block_match.group("body") if block_match is not None else text
     opens = list(_DSML_LAX_OPENANY.finditer(block))
     invokes = [o for o in opens if o.group("tagname").strip().lower() not in _DSML_LAX_SKIP_TAGS]
-    params = list(_DSML_LAX_PARAMETER.finditer(block))
+    params = list(_iter_dsml_lax_parameters(block))
     calls: list[ToolCall] = []
     for index, invoke in enumerate(invokes):
         tool_name = _lax_tool_name(invoke.group("attrs"))
@@ -647,27 +681,26 @@ def _parse_dsml_lax_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]
             continue
         param_types = _schema_for_name(tool_schemas, tool_name)
         params_by_call: dict[str, Any] = {}
-        for param in params:
-            if param.start() <= invoke.start():
+        for param_start, _param_end, param_name, param_value in params:
+            if param_start <= invoke.start():
                 continue
-            if index + 1 < len(invokes) and param.start() >= invokes[index + 1].start():
+            if index + 1 < len(invokes) and param_start >= invokes[index + 1].start():
                 continue
-            key = param.group("name").strip()
-            _xml_set_param(params_by_call, key, _xml_value(param.group("value"), (param_types or {}).get(key)))
+            _xml_set_param(params_by_call, param_name, _xml_value(param_value, (param_types or {}).get(param_name)))
         calls.append(ToolCall.create(tool_name, params_by_call))
     if not calls and block_match is not None and params:
-        inferred = _infer_tool_name_from_schemas({item.group("name").strip() for item in params}, tool_schemas)
+        inferred = _infer_tool_name_from_schemas({item[2] for item in params}, tool_schemas)
         if inferred is not None:
             param_types = _schema_for_name(tool_schemas, inferred)
             inferred_params: dict[str, Any] = {}
-            for param in params:
-                key = param.group("name").strip()
-                inferred_params[key] = _xml_value(param.group("value"), (param_types or {}).get(key))
+            for _param_start, _param_end, param_name, param_value in params:
+                inferred_params[param_name] = _xml_value(param_value, (param_types or {}).get(param_name))
             calls.append(ToolCall.create(inferred, inferred_params))
     if not calls:
         return None
     spans: list[tuple[int, int]] = [(o.start(), o.end()) for o in _DSML_LAX_OPENANY.finditer(text)]
-    spans.extend((p.start(), p.end()) for p in _DSML_LAX_PARAMETER.finditer(text))
+    body_offset = block_match.start("body") if block_match is not None else 0
+    spans.extend((start + body_offset, end + body_offset) for start, end, _name, _value in params)
     spans.sort()
     wrapper_parts: list[str] = []
     cursor = 0
@@ -690,9 +723,12 @@ def _parse_tool_calls_impl(
     text: str,
     tool_schemas: dict[str, dict[str, Any]] | None,
     report: dict[str, Any] | None,
+    stripped: str | None = None,
 ) -> tuple[list[ToolCall], str] | None:
     if not text or not text.strip():
         return None
+    if len(text) > _MAX_PARSE_TEXT:
+        text = text[:_MAX_PARSE_TEXT]
     dsml_parsed = _parse_dsml_tool_calls(text, tool_schemas)
     if dsml_parsed is not None:
         if report is not None:
@@ -703,7 +739,8 @@ def _parse_tool_calls_impl(
         if report is not None:
             report["strategies"].append("dsml_lax")
         return dsml_lax_parsed
-    stripped = _strip_fences(_strip_dsml(text))
+    if stripped is None:
+        stripped = _strip_fences(_strip_dsml(text))
     extracted = _extract_json_object(stripped)
     if extracted is not None:
         obj, start, end = extracted
@@ -786,7 +823,7 @@ def parse_tool_calls_debug(
         "fixes": [],
         "warnings": [],
     }
-    result = _parse_tool_calls_impl(text, tool_schemas, report)
+    result = _parse_tool_calls_impl(text, tool_schemas, report, stripped[:_MAX_PARSE_TEXT])
     if result is not None:
         calls, wrapper = result
         normalized = [(call, _normalize_call_name(call.name, tool_schemas)) for call in calls]

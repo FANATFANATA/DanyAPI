@@ -12,6 +12,8 @@ import time
 from contextlib import suppress
 from pathlib import Path
 
+from .config import CREDENTIAL_ENV_NAMES
+
 log = logging.getLogger("danyapi.pow")
 
 _MASK64 = (1 << 64) - 1
@@ -48,12 +50,14 @@ _ROUNDS = 23
 _ROUND_CONSTANTS = _RC[1 : _ROUNDS + 1]
 
 _PYTHON_SOLVE_LIMIT = 2_000_000
+_SOLVER_DIFFICULTY_LIMIT = _PYTHON_SOLVE_LIMIT
 _PYTHON_SOLVE_BUDGET_SEC = 5.0
 _PYTHON_BUDGET_CHECK_INTERVAL = 1024
 
 _SOLVER_TIMEOUT_SEC = 60.0
+_SOLVE_TOTAL_BUDGET_SEC = 90.0
 
-_SOLVER_ENV_DENYLIST = frozenset({"DEEPSEEK_TOKENS", "QWEN_TOKENS", "BYOK", "BYOK_MODE", "DANYAPI_BYOK_MODE"})
+_SOLVER_ENV_DENYLIST = frozenset({"BYOK", "BYOK_MODE", "DANYAPI_BYOK_MODE"}) | frozenset(CREDENTIAL_ENV_NAMES)
 
 
 def _parse_number(value):
@@ -235,13 +239,13 @@ def _find_native_solver() -> Path | None:
     return None
 
 
-def solve_python(challenge_hex: str, salt: str, expire_at: int, difficulty: int, budget: float = _PYTHON_SOLVE_BUDGET_SEC) -> int | None:
+def solve_python(challenge_hex: str, salt: str, expire_at: int, difficulty: int, timeout: float = _PYTHON_SOLVE_BUDGET_SEC) -> int | None:
     prefix = f"{salt}_{expire_at}_".encode()
     target = bytes.fromhex(challenge_hex)
     limit = max(0, min(int(difficulty), _PYTHON_SOLVE_LIMIT))
     if limit == 0:
         return None
-    deadline = time.monotonic() + budget
+    deadline = time.monotonic() + timeout
     check = _PYTHON_BUDGET_CHECK_INTERVAL
     pfx_len = len(prefix)
     max_width = len(str(limit - 1))
@@ -268,7 +272,14 @@ def _solver_env() -> dict[str, str]:
     return {key: value for key, value in os.environ.items() if key not in _SOLVER_ENV_DENYLIST}
 
 
-def _run_solver(script: Path, challenge_hex: str, salt: str, expire_at: int, difficulty: int) -> int | None:
+def _run_solver(
+    script: Path,
+    challenge_hex: str,
+    salt: str,
+    expire_at: int,
+    difficulty: int,
+    timeout: float = _SOLVER_TIMEOUT_SEC,
+) -> int | None:
     payload = {
         "challenge": challenge_hex,
         "salt": salt,
@@ -282,12 +293,12 @@ def _run_solver(script: Path, challenge_hex: str, salt: str, expire_at: int, dif
             input=json.dumps(payload),
             capture_output=True,
             text=True,
-            timeout=_SOLVER_TIMEOUT_SEC,
+            timeout=timeout,
             check=False,
             env=_solver_env(),
         )
     except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(f"{script.name} timed out after {_SOLVER_TIMEOUT_SEC:g}s") from exc
+        raise RuntimeError(f"{script.name} timed out after {timeout:g}s") from exc
     except OSError as exc:
         raise RuntimeError(f"{script.name} is not executable: {exc}") from exc
     if proc.returncode != 0:
@@ -306,28 +317,40 @@ def _run_solver(script: Path, challenge_hex: str, salt: str, expire_at: int, dif
     return answer
 
 
-def solve_native(challenge_hex: str, salt: str, expire_at: int, difficulty: int) -> int | None:
+def solve_native(challenge_hex: str, salt: str, expire_at: int, difficulty: int, timeout: float = _SOLVER_TIMEOUT_SEC) -> int | None:
     native = _find_native_solver()
     if native is None:
         raise FileNotFoundError("native pow_solver binary not built")
-    return _run_solver(native, challenge_hex, salt, expire_at, difficulty)
+    return _run_solver(native, challenge_hex, salt, expire_at, difficulty, timeout)
 
 
-def solve_node(challenge_hex: str, salt: str, expire_at: int, difficulty: int) -> int | None:
+def solve_node(challenge_hex: str, salt: str, expire_at: int, difficulty: int, timeout: float = _SOLVER_TIMEOUT_SEC) -> int | None:
     if not _NODE_SOLVER.exists():
         raise FileNotFoundError("pow_solver.js not found")
-    return _run_solver(_NODE_SOLVER, challenge_hex, salt, expire_at, difficulty)
+    return _run_solver(_NODE_SOLVER, challenge_hex, salt, expire_at, difficulty, timeout)
 
 
 async def solve_challenge(challenge_hex: str, salt: str, expire_at: int, difficulty: int) -> int | None:
+    deadline = time.monotonic() + _SOLVE_TOTAL_BUDGET_SEC
     for solver in (solve_native, solve_node, solve_python):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            log.warning("pow solve budget of %gs exhausted before %s", _SOLVE_TOTAL_BUDGET_SEC, solver.__name__)
+            return None
+        budget = min(_PYTHON_SOLVE_BUDGET_SEC, remaining) if solver is solve_python else min(_SOLVER_TIMEOUT_SEC, remaining)
         try:
-            answer = await asyncio.to_thread(solver, challenge_hex, salt, expire_at, difficulty)
-            if answer is not None:
-                return answer
+            answer = await asyncio.to_thread(solver, challenge_hex, salt, expire_at, difficulty, budget)
         except Exception as exc:
             log.warning("pow solver %s failed (%s), trying next", solver.__name__, exc)
+            continue
+        if answer is not None:
+            return answer
     return None
+
+
+def _consume_task_result(task: asyncio.Task) -> None:
+    with suppress(asyncio.CancelledError):
+        task.exception()
 
 
 class PowManager:
@@ -348,6 +371,9 @@ class PowManager:
             raise RuntimeError("pow challenge has invalid expire_at")
         if difficulty is None or difficulty <= 0:
             raise RuntimeError("pow challenge has invalid difficulty")
+        if difficulty > _SOLVER_DIFFICULTY_LIMIT:
+            log.warning("pow difficulty %d exceeds the solver limit, clamped to %d", difficulty, _SOLVER_DIFFICULTY_LIMIT)
+            difficulty = _SOLVER_DIFFICULTY_LIMIT
         answer = await solve_challenge(
             challenge["challenge"],
             challenge["salt"],
@@ -370,20 +396,25 @@ class PowManager:
     async def _ensure_build(self, fetch) -> dict:
         current = self._building
         if current is None or current.done():
-            self._building = asyncio.create_task(self._build(fetch))
-            current = self._building
+            current = asyncio.create_task(self._build(fetch))
+            current.add_done_callback(_consume_task_result)
+            self._building = current
         try:
-            return await asyncio.shield(current)
-        except Exception:
-            if current is self._building and current.done():
-                self._building = None
+            await asyncio.wait({current})
+        except asyncio.CancelledError:
             raise
+        if current is self._building and current.done():
+            self._building = None
+        return current.result()
 
     async def _refill_if_empty(self, fetch) -> None:
         try:
+            if self._header is not None:
+                return
+            header = await self._ensure_build(fetch)
             async with self._lock:
                 if self._header is None:
-                    self._header = await self._ensure_build(fetch)
+                    self._header = header
         except Exception as exc:
             log.warning("pow prefetch failed: %s", exc)
         finally:
@@ -399,10 +430,11 @@ class PowManager:
         self._refill = asyncio.create_task(self._refill_if_empty(fetch))
 
     def close(self) -> None:
-        current = self._refill
-        self._refill = None
-        if current is not None and not current.done():
-            current.cancel()
+        for name in ("_refill", "_building"):
+            current: asyncio.Task | None = getattr(self, name)
+            setattr(self, name, None)
+            if current is not None and not current.done():
+                current.cancel()
 
     async def make_header(self, fetch) -> dict:
         async with self._lock:

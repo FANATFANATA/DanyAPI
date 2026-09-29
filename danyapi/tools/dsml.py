@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import re
-from bisect import bisect_right
-from collections.abc import Iterator
+import threading
+from bisect import bisect_left, bisect_right
+from collections.abc import Callable, Iterator
 from functools import lru_cache
 
 from .common import _XML_STRAY_TOOL_CLOSE_RE, _XML_WRAPPER_CLOSE_RE
@@ -55,20 +56,13 @@ _DSML_HIDDEN_NAMES = (
     r"ds_rephrase|ds_translate|ds_bilingual|ds_inner|ds_header|ds_web_search|"
     r"search|result|reference|quote"
 )
-_DSML_HIDDEN_PATS = tuple(
-    re.compile(
-        rf"<{_DSML_MARKER}\s*{name}\b[^<>]*>.*?</{_DSML_MARKER}\s*{name}\s*>",
-        re.DOTALL | re.IGNORECASE,
-    )
-    for name in _DSML_HIDDEN_NAMES.split("|")
-)
-_DSML_HIDDEN_NAKED_PATS = tuple(
-    re.compile(
-        rf"{_DSML_MARKER}\s*<{name}\b[^<>]*>.*?</{name}>\s*{_DSML_MARKER}",
-        re.DOTALL | re.IGNORECASE,
-    )
-    for name in _DSML_HIDDEN_NAMES.split("|")
-)
+_DSML_HIDDEN_TAGS = tuple(_DSML_HIDDEN_NAMES.split("|"))
+_DSML_HIDDEN_PATS = tuple(re.compile(rf"<{_DSML_MARKER}\s*{name}\b[^<>]*>", re.IGNORECASE) for name in _DSML_HIDDEN_TAGS)
+_DSML_HIDDEN_CLOSE_PATS = tuple(re.compile(rf"</{_DSML_MARKER}\s*{name}\s*>", re.IGNORECASE) for name in _DSML_HIDDEN_TAGS)
+_DSML_HIDDEN_GUARDS = tuple(re.compile(rf"{name}", re.IGNORECASE) for name in _DSML_HIDDEN_TAGS)
+_DSML_HIDDEN_NAKED_PATS = tuple(re.compile(rf"{_DSML_MARKER}\s*<{name}\b[^<>]*>", re.IGNORECASE) for name in _DSML_HIDDEN_TAGS)
+_DSML_HIDDEN_NAKED_CLOSE_PATS = tuple(re.compile(rf"</{name}>\s*{_DSML_MARKER}", re.IGNORECASE) for name in _DSML_HIDDEN_TAGS)
+_DSML_HIDDEN_NAKED_GUARDS = _DSML_HIDDEN_GUARDS
 _DSML_EQUALS = r"=\uff1d"
 _DSML_LAX_MARKER = rf"(?:{_DSML_MARKER}|{_DSML_RUN})"
 _DSML_LAX_SKIP_TAGS = frozenset(
@@ -95,6 +89,14 @@ _DSML_LAX_PARAMETER = re.compile(
     rf"(?:</?{_DSML_LAX_MARKER}\s*parameter\s*>|/?\s*parameter\s*>|</?parameter\s*>|/?parameter\s*>)",
     re.DOTALL | re.IGNORECASE,
 )
+_DSML_LAX_PARAMETER_HEAD = re.compile(
+    rf"(?:<{_DSML_LAX_MARKER}\s*)?parameter\b\s+name\s*[{_DSML_EQUALS}]\s*",
+    re.IGNORECASE,
+)
+_DSML_LAX_PARAMETER_END = re.compile(
+    rf"(?:</?{_DSML_LAX_MARKER}\s*parameter\s*>|/?\s*parameter\s*>|</?parameter\s*>|/?parameter\s*>)",
+    re.IGNORECASE,
+)
 _XML_SELFCLOSE = re.compile(r"<([a-zA-Z_][a-zA-Z0-9_-]*)\b([^<>]*?)/>", re.DOTALL | re.IGNORECASE)
 _XML_OPEN_TAG_SCAN = re.compile(r"<\s*([a-zA-Z_][a-zA-Z0-9_-]*)\b([^<>]*)>", re.IGNORECASE)
 
@@ -112,6 +114,78 @@ def _find_xml_close(text: str, name: str, start: int, name_space: bool, tail_spa
     return match.start(), match.end()
 
 
+def _next_at(positions: list[int], start: int) -> int:
+    index = bisect_left(positions, start)
+    return positions[index] if index < len(positions) else -1
+
+
+def _lax_unquoted_candidates(name_start: int, limit: int, greater: list[int]) -> Iterator[tuple[int, int]]:
+    first = bisect_left(greater, limit)
+    if first < len(greater) and limit > name_start:
+        yield limit, greater[first]
+    for index in range(first - 1, -1, -1):
+        gt = greater[index]
+        if gt <= name_start:
+            return
+        yield gt, gt
+
+
+def _lax_parameter_bounds(
+    text: str,
+    name_start: int,
+    spans: list[tuple[int, int]],
+    greater: list[int],
+    quotes: dict[str, list[int]],
+) -> tuple[str, int, int] | None:
+    quote = text[name_start : name_start + 1]
+    if quote in quotes:
+        closing = _next_at(quotes[quote], name_start + 1)
+        if closing < name_start + 2:
+            return None
+        greater_at = _next_at(greater, closing + 1)
+        if greater_at == -1:
+            return None
+        name = text[name_start + 1 : closing]
+        tag_end = greater_at + 1
+        term = bisect_left(spans, (tag_end, 0))
+        if term >= len(spans):
+            return None
+        return name, term, tag_end
+    quote_at = -1
+    for positions in quotes.values():
+        found = _next_at(positions, name_start)
+        if found != -1 and (quote_at == -1 or found < quote_at):
+            quote_at = found
+    limit = len(text) if quote_at == -1 else quote_at
+    for name_end, gt in _lax_unquoted_candidates(name_start, limit, greater):
+        tag_end = gt + 1
+        term = bisect_left(spans, (tag_end, 0))
+        if term < len(spans):
+            return text[name_start:name_end], term, tag_end
+    return None
+
+
+def _iter_dsml_lax_parameters(text: str) -> Iterator[tuple[int, int, str, str]]:
+    if _DSML_LAX_PARAMETER_HEAD.search(text) is None:
+        return
+    spans = [match.span() for match in _DSML_LAX_PARAMETER_END.finditer(text)]
+    if not spans:
+        return
+    greater = [index for index, char in enumerate(text) if char == ">"]
+    quotes = {char: [index for index, current in enumerate(text) if current == char] for char in ('"', "'")}
+    resume = 0
+    for head in _DSML_LAX_PARAMETER_HEAD.finditer(text):
+        if head.start() < resume:
+            continue
+        bounds = _lax_parameter_bounds(text, head.end(), spans, greater, quotes)
+        if bounds is None:
+            continue
+        name, term, tag_end = bounds
+        end = spans[term][1]
+        resume = end
+        yield head.start(), end, name.strip(), text[tag_end : spans[term][0]]
+
+
 def _scan_xml_pairs(
     text: str,
     name_filter: frozenset[str] | None = None,
@@ -122,21 +196,28 @@ def _scan_xml_pairs(
     length = len(text)
     last_lt = -1
     last_gt = -1
+    close_memo: dict[str, tuple[int, tuple[int, int] | None]] = {}
     while pos < length:
         open_match = _XML_OPEN_TAG_SCAN.search(text, pos)
         if open_match is None:
             return
         name = open_match.group(1)
-        if name_filter is not None and name.lower() not in name_filter:
+        lowered = name.lower()
+        if name_filter is not None and lowered not in name_filter:
             pos = open_match.end()
             continue
         attrs = open_match.group(2)
         if (attrs if not attrs[-1:].isspace() else attrs.rstrip()).endswith("/"):
             pos = open_match.end()
             continue
-        close = _find_xml_close(text, name, open_match.end(), name_space, tail_space)
+        body_start = open_match.end()
+        memo = close_memo.get(lowered)
+        if memo is not None and memo[0] <= body_start and (memo[1] is None or memo[1][0] >= body_start):
+            close = memo[1]
+        else:
+            close = _find_xml_close(text, name, body_start, name_space, tail_space)
+            close_memo[lowered] = (body_start, close)
         if close is None:
-            body_start = open_match.end()
             if name_filter is None:
                 pos = body_start
                 continue
@@ -154,7 +235,7 @@ def _scan_xml_pairs(
                 continue
             close = (trunc, trunc)
         close_start, end = close
-        yield open_match.start(), end, name, attrs, text[open_match.end() : close_start]
+        yield open_match.start(), end, name, attrs, text[body_start:close_start]
         pos = end
 
 
@@ -384,27 +465,52 @@ def _replace_dsml_tag(match: re.Match) -> str:
     return " "
 
 
-def _strip_dsml(text: str) -> str:
+_DSML_STRIP_ROUNDS = 10
+
+
+def _strip_markers(
+    text: str,
+    drop_hidden_spans: bool,
+    drop_tail: bool,
+    normalise_xml: bool,
+    tag_replacement: str | Callable[[re.Match[str]], str],
+) -> str:
     if not text:
         return text
+    if not _dsml_present(text):
+        return _drop_dangling(text) if drop_tail else text
     result = text
-    if not _dsml_present(result):
-        return result
-    for _ in range(10):
-        updated = _DSML_BLOCK.sub(" ", result)
+    for _ in range(_DSML_STRIP_ROUNDS):
+        updated = _drop_spans(result, _hidden_spans(result)) if drop_hidden_spans else result
+        updated = _DSML_BLOCK.sub(" ", updated)
         updated = _DSML_WRAP.sub(" ", updated)
-        for pattern in _DSML_HIDDEN_PATS:
-            updated = pattern.sub(" ", updated)
-        for pattern in _DSML_HIDDEN_NAKED_PATS:
-            updated = pattern.sub(" ", updated)
+        for pattern, guard, close_pattern in zip(_DSML_HIDDEN_PATS, _DSML_HIDDEN_GUARDS, _DSML_HIDDEN_CLOSE_PATS, strict=True):
+            if guard.search(updated) is not None:
+                updated = _drop_regex_spans(updated, pattern, close_pattern)
+        for pattern, guard, close_pattern in zip(_DSML_HIDDEN_NAKED_PATS, _DSML_HIDDEN_NAKED_GUARDS, _DSML_HIDDEN_NAKED_CLOSE_PATS, strict=True):
+            if guard.search(updated) is not None:
+                updated = _drop_regex_spans(updated, pattern, close_pattern)
         if updated == result:
             break
         result = updated
         if not _dsml_present(result):
             break
-    result = _DSML_XML_NORMALIZE.sub(r"<\1\2>", result)
-    result = _DSML_TAG.sub(_replace_dsml_tag, result)
+    if drop_tail:
+        result = _drop_dangling(result)
+    if normalise_xml:
+        result = _DSML_XML_NORMALIZE.sub(r"<\1\2>", result)
+    result = _DSML_TAG.sub(tag_replacement, result)
     return _DSML_NAKED.sub(" ", result)
+
+
+def _strip_dsml(text: str) -> str:
+    return _strip_markers(
+        text,
+        drop_hidden_spans=False,
+        drop_tail=False,
+        normalise_xml=True,
+        tag_replacement=_replace_dsml_tag,
+    )
 
 
 def strip_dsml(text: str) -> str:
@@ -437,6 +543,7 @@ _DSML_DANGLING = re.compile(
 _DSML_DANGLING_MAX = 40
 _DSML_CLOSE_CACHE: dict[str, re.Pattern[str]] = {}
 _DSML_CLOSE_CACHE_MAX = 64
+_DSML_CLOSE_CACHE_LOCK = threading.Lock()
 
 
 def _in_dsml_run(char: str) -> bool:
@@ -579,11 +686,15 @@ def _dsml_tag_at(text: str, start: int) -> tuple[int, str, bool, bool] | None:
 
 def _dsml_close_pattern(name: str) -> re.Pattern[str]:
     pattern = _DSML_CLOSE_CACHE.get(name)
-    if pattern is None:
-        pattern = re.compile(rf"<\s*[^<>]*?\b{re.escape(name)}\b[^<>]*>", re.IGNORECASE)
-        if len(_DSML_CLOSE_CACHE) >= _DSML_CLOSE_CACHE_MAX:
-            _DSML_CLOSE_CACHE.clear()
-        _DSML_CLOSE_CACHE[name] = pattern
+    if pattern is not None:
+        return pattern
+    with _DSML_CLOSE_CACHE_LOCK:
+        pattern = _DSML_CLOSE_CACHE.get(name)
+        if pattern is None:
+            pattern = re.compile(rf"<\s*[^<>]*?\b{re.escape(name)}\b[^<>]*>", re.IGNORECASE)
+            while len(_DSML_CLOSE_CACHE) >= _DSML_CLOSE_CACHE_MAX:
+                _DSML_CLOSE_CACHE.pop(next(iter(_DSML_CLOSE_CACHE)))
+            _DSML_CLOSE_CACHE[name] = pattern
     return pattern
 
 
@@ -679,6 +790,29 @@ def _drop_spans(text: str, spans: list[tuple[int, int]]) -> str:
     return "".join(parts)
 
 
+def _drop_regex_spans(text: str, open_pattern: re.Pattern[str], close_pattern: re.Pattern[str]) -> str:
+    closes = [(match.start(), match.end()) for match in close_pattern.finditer(text)]
+    if not closes:
+        return text
+    spans: list[tuple[int, int]] = []
+    pos = 0
+    index = 0
+    dead_from = len(text) + 1
+    while True:
+        open_match = open_pattern.search(text, pos)
+        if open_match is None or open_match.end() >= dead_from:
+            break
+        while index < len(closes) and closes[index][0] < open_match.end():
+            index += 1
+        if index >= len(closes):
+            dead_from = open_match.end()
+            pos = open_match.start() + 1
+            continue
+        spans.append((open_match.start(), closes[index][1]))
+        pos = closes[index][1]
+    return _drop_spans(text, spans)
+
+
 def _drop_dangling(text: str) -> str:
     look = len(text) - _DSML_DANGLING_MAX
     if look <= 0:
@@ -689,28 +823,13 @@ def _drop_dangling(text: str) -> str:
 
 
 def _strip_output(text: str, drop_tail: bool = True) -> str:
-    if not text:
-        return text
-    if not _dsml_present(text):
-        return _drop_dangling(text) if drop_tail else text
-    result = text
-    for _ in range(10):
-        updated = _drop_spans(result, _hidden_spans(result))
-        updated = _DSML_BLOCK.sub(" ", updated)
-        updated = _DSML_WRAP.sub(" ", updated)
-        for pattern in _DSML_HIDDEN_PATS:
-            updated = pattern.sub(" ", updated)
-        for pattern in _DSML_HIDDEN_NAKED_PATS:
-            updated = pattern.sub(" ", updated)
-        if updated == result:
-            break
-        result = updated
-        if not _dsml_present(result):
-            break
-    if drop_tail:
-        result = _drop_dangling(result)
-    result = _DSML_TAG.sub(" ", result)
-    return _DSML_NAKED.sub(" ", result)
+    return _strip_markers(
+        text,
+        drop_hidden_spans=True,
+        drop_tail=drop_tail,
+        normalise_xml=False,
+        tag_replacement=" ",
+    )
 
 
 class DsmlFilter:

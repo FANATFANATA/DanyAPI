@@ -100,20 +100,82 @@ async def test_extract_api_key_multipart_without_field():
 
 async def test_extract_api_key_multipart_malformed_body():
     request = _make_request(headers={"Content-Type": "multipart/form-data; boundary=zzz"}, body=b"garbage")
-    assert await openai_mod._extract_request_api_key(request) is None
+    with pytest.raises(openai_mod.HTTPException) as excinfo:
+        await openai_mod._extract_request_api_key(request)
+    assert excinfo.value.status_code == 400
+    assert "malformed multipart request body" in excinfo.value.detail
 
 
-async def test_byok_pool_for_multipart_401():
+async def test_extract_api_key_multipart_oversized_body():
+    body = b'--zzz\r\nContent-Disposition: form-data; name="api_key"\r\n\r\n' + b"x" * 4096
+    request = _make_request(
+        headers={"Content-Type": "multipart/form-data; boundary=zzz", "content-length": str(byok_mod.BYOK_FORM_MAX_BYTES + 1)},
+        body=body,
+    )
+    with pytest.raises(openai_mod.HTTPException) as excinfo:
+        await openai_mod._extract_request_api_key(request)
+    assert excinfo.value.status_code == 413
+
+
+async def test_extract_api_key_multipart_bad_content_length():
+    request = _make_request(
+        headers={"Content-Type": "multipart/form-data; boundary=zzz", "content-length": "abc"},
+        body=b"x",
+    )
+    with pytest.raises(openai_mod.HTTPException) as excinfo:
+        await openai_mod._extract_request_api_key(request)
+    assert excinfo.value.status_code == 400
+
+
+async def test_byok_pool_for_multipart_400():
     request = _make_request(headers={"Content-Type": "multipart/form-data; boundary=zzz"}, body=b"garbage")
     with pytest.raises(openai_mod.HTTPException) as excinfo:
         await openai_mod._byok_pool_for("qwen", request)
-    assert excinfo.value.status_code == 401
+    assert excinfo.value.status_code == 400
 
 
 async def test_byok_pool_for_missing_key_401():
     with pytest.raises(openai_mod.HTTPException) as excinfo:
         await openai_mod._byok_pool_for("deepseek", _make_request(headers={}))
     assert excinfo.value.status_code == 401
+    assert excinfo.value.detail == byok_mod._INVALID_KEY_DETAIL.format(provider="deepseek")
+
+
+async def test_byok_pool_for_missing_and_rejected_keys_are_indistinguishable(monkeypatch):
+    monkeypatch.setattr(settings, "cache_enabled", False)
+    missing = _make_request(headers={})
+    with pytest.raises(openai_mod.HTTPException) as missing_exc:
+        await openai_mod._byok_pool_for("deepseek", missing)
+
+    monkeypatch.setattr(openai_mod.DeepSeekClient, "check_auth", AsyncMock(return_value=False))
+    rejected = _make_request(headers={"Authorization": "Bearer rejected-key"})
+    with pytest.raises(openai_mod.HTTPException) as rejected_exc:
+        await openai_mod._byok_pool_for("deepseek", rejected)
+
+    assert missing_exc.value.status_code == rejected_exc.value.status_code == 401
+    assert missing_exc.value.detail == rejected_exc.value.detail
+
+
+async def test_byok_pool_for_transport_failure_is_503(monkeypatch):
+    monkeypatch.setattr(settings, "cache_enabled", False)
+
+    async def boom(self):
+        raise OSError("network down")
+
+    monkeypatch.setattr(openai_mod.DeepSeekClient, "check_auth", boom)
+    request = _make_request(headers={"Authorization": "Bearer unreachable-key"})
+    with pytest.raises(openai_mod.HTTPException) as excinfo:
+        await openai_mod._byok_pool_for("deepseek", request)
+    assert excinfo.value.status_code == 503
+    assert excinfo.value.detail == byok_mod._UNREACHABLE_DETAIL.format(provider="deepseek")
+
+
+async def test_byok_pool_for_rejects_more_than_the_key_limit():
+    request = _make_request(headers={"Authorization": "Bearer " + ",".join(f"k{index}" for index in range(byok_mod.BYOK_MAX_KEYS + 1))})
+    with pytest.raises(openai_mod.HTTPException) as excinfo:
+        await openai_mod._byok_pool_for("deepseek", request)
+    assert excinfo.value.status_code == 400
+    assert str(byok_mod.BYOK_MAX_KEYS) in excinfo.value.detail
 
 
 async def test_byok_pool_deepseek_builds_and_caches(monkeypatch):
@@ -339,24 +401,33 @@ def test_image_edits_byok_auth_from_api_key_field(monkeypatch):
     assert openai_mod._byok_cache_key(["form-key"]) in app.state.byok_pools["qwen"]
 
 
-def test_health_reports_byok_mode():
+def test_health_detail_reports_byok_mode():
     app.state.byok = True
-    client = TestClient(app)
-    payload = client.get("/health").json()
-    client.close()
-    assert payload["byok"] is True
-    assert payload["byok_pools"]["deepseek"] == 0
-    assert payload["byok_pools"]["qwen"] == 0
+    detail = openai_mod._health_detail(True, app.state.byok_pools)
+    assert detail["byok"] is True
+    assert detail["byok_pools"]["deepseek"] == 0
+    assert detail["byok_pools"]["qwen"] == 0
     for provider in openai_mod.BYOK_PROVIDERS:
-        assert payload[provider] is True
-        assert payload[f"{provider}_stats"]["pools"] == 0
-    assert payload["byok_api_key_required"] == {
+        assert detail[provider] is True
+        assert detail[f"{provider}_stats"]["pools"] == 0
+    assert detail["byok_api_key_required"] == {
         "deepseek": True,
         "qwen": True,
         "gigachat": True,
         "alice": False,
         "duckai": False,
     }
+
+
+def test_health_hides_byok_details_from_an_anonymous_caller():
+    app.state.byok = True
+    client = TestClient(app)
+    payload = client.get("/health").json()
+    client.close()
+    assert payload == {"status": "ok"}
+    assert "byok" not in payload
+    assert "byok_pools" not in payload
+    assert not [key for key in payload if key.endswith("_stats")]
 
 
 def test_health_byok_reports_pool_stats():
@@ -368,17 +439,41 @@ def test_health_byok_reports_pool_stats():
     saved_deepseek = list(getattr(app.state, "deepseek_models", None) or [])
     app.state.deepseek_models = []
     try:
-        client = TestClient(app)
-        payload = client.get("/health").json()
-        client.close()
-        assert payload["byok_pools"]["deepseek"] == 1
-        assert payload["deepseek_stats"] == {"pools": 1, "accounts": 2, "healthy": 2, "broken": 0, "models": 0}
-        assert payload["alice_stats"]["pools"] == 1
-        assert payload["alice_stats"]["accounts"] == 2
+        detail = openai_mod._health_detail(True, app.state.byok_pools)
+        assert detail["byok_pools"]["deepseek"] == 1
+        assert detail["deepseek_stats"] == {"pools": 1, "accounts": 2, "healthy": 2, "broken": 0, "models": 0}
+        assert detail["alice_stats"]["pools"] == 1
+        assert detail["alice_stats"]["accounts"] == 2
     finally:
         app.state.byok_pools["deepseek"].clear()
         app.state.byok_alice_pool = None
         app.state.deepseek_models = saved_deepseek
+
+
+async def test_keyless_pool_is_registered_under_byok_pools(monkeypatch):
+    monkeypatch.setattr(byok_mod.AliceClient, "check_auth", AsyncMock(return_value=True))
+    monkeypatch.setattr(byok_mod, "refresh_provider_models", AsyncMock(return_value=None))
+    saved = byok_mod._ALICE_BYOK_POOL[0]
+    byok_mod._ALICE_BYOK_POOL[0] = None
+    app.state.byok_alice_pool = None
+    try:
+        pool = await openai_mod._byok_pool_for("alice", _make_request(headers={}))
+        assert app.state.byok_pools["alice"][byok_mod.KEYLESS_POOL_KEY] is pool
+        assert app.state.byok_alice_pool is pool
+        assert pool.healthy
+    finally:
+        byok_mod._ALICE_BYOK_POOL[0] = saved
+        app.state.byok_alice_pool = None
+        app.state.byok_pools["alice"].pop(byok_mod.KEYLESS_POOL_KEY, None)
+
+
+async def test_byok_key_lock_is_per_key_not_per_provider():
+    first = byok_mod._key_lock("deepseek", "k1")
+    second = byok_mod._key_lock("deepseek", "k2")
+    third = byok_mod._key_lock("qwen", "k1")
+    assert first is not second
+    assert first is not third
+    assert byok_mod._key_lock("deepseek", "k1") is first
 
 
 async def test_byok_alice_needs_no_api_key(monkeypatch):

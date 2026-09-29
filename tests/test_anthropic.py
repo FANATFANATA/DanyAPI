@@ -142,6 +142,18 @@ def _named(frames, name):
     return [payload for event, payload in frames if event == name]
 
 
+def _block_events(frames):
+    return [(event, payload["index"]) for event, payload in frames if event in ("content_block_start", "content_block_delta", "content_block_stop")]
+
+
+def _tool_starts(frames):
+    return [payload for event, payload in frames if event == "content_block_start" and payload["content_block"]["type"] == "tool_use"]
+
+
+def _tool_deltas(frames):
+    return [payload for event, payload in frames if event == "content_block_delta" and payload["delta"]["type"] == "input_json_delta"]
+
+
 @pytest.fixture(autouse=True)
 def clean_state():
     saved = (getattr(app.state, "pool", None), getattr(app.state, "qwen_pool", None))
@@ -159,8 +171,8 @@ def zero_backoff():
     retry_mod.RETRY_BACKOFF_SEC = orig
 
 
-def _info(model="claude-sonnet-4-5"):
-    return ant.RequestInfo(model=model, upstream_model="default", max_tokens=100)
+def _info(model="claude-sonnet-4-5", **kwargs):
+    return ant.RequestInfo(model=model, max_tokens=100, **kwargs)
 
 
 async def _agen_chunks(*texts: str):
@@ -223,9 +235,36 @@ def test_normalize_messages_tool_use_and_result():
             {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "tu1", "content": "42"}]},
         ]
     )
+    assert len(messages) == 2
     assert messages[0]["tool_calls"][0]["id"] == "tu1"
     assert messages[0]["tool_calls"][0]["function"]["arguments"] == '{"a": 1}'
     assert messages[1] == {"role": "tool", "tool_call_id": "tu1", "content": "42"}
+
+
+def test_normalize_messages_tool_result_only_message_adds_no_trailing_user_message():
+    messages = ant.normalize_messages(
+        [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "tu1", "name": "f", "input": {}}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "tu1", "content": "42"}]},
+        ]
+    )
+    assert [message["role"] for message in messages] == ["user", "assistant", "tool"]
+
+
+def test_normalize_messages_tool_error_result_is_prefixed():
+    messages = ant.normalize_messages([{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "tu1", "content": "bad", "is_error": True}]}])
+    assert messages == [{"role": "tool", "tool_call_id": "tu1", "content": "[tool_error] bad"}]
+
+
+def test_normalize_messages_rejects_unknown_block_type():
+    with pytest.raises(ant.AnthropicInputError):
+        ant.normalize_messages([{"role": "user", "content": [{"type": "mystery", "value": 1}]}])
+
+
+def test_normalize_messages_skips_ignorable_block_types():
+    messages = ant.normalize_messages([{"role": "assistant", "content": [{"type": "mcp_tool_result", "content": "x"}, {"type": "text", "text": "ok"}]}])
+    assert messages == [{"role": "assistant", "content": "ok"}]
 
 
 def test_normalize_messages_skips_thinking_blocks():
@@ -271,9 +310,49 @@ def test_convert_stop_sequences():
     assert ant.convert_stop_sequences(None) is None
 
 
-def test_convert_stop_sequences_limit():
+def test_convert_stop_sequences_accepts_long_list_and_rejects_non_strings():
+    long_list = [f"seq-{index}" for index in range(32)]
+    assert ant.convert_stop_sequences(long_list) == long_list
     with pytest.raises(ant.AnthropicInputError):
-        ant.convert_stop_sequences(["a", "b", "c", "d", "e"])
+        ant.convert_stop_sequences([1])
+    with pytest.raises(ant.AnthropicInputError):
+        ant.convert_stop_sequences(["ok", ""])
+    with pytest.raises(ant.AnthropicInputError):
+        ant.convert_stop_sequences([None])
+
+
+def test_convert_stop_sequences_rejects_non_list():
+    with pytest.raises(ant.AnthropicInputError):
+        ant.convert_stop_sequences(5)
+
+
+def test_endpoint_accepts_long_stop_sequences():
+    app.state.pool = make_pool(_ds_sse("Hi"))
+    client = TestClient(app)
+    r = client.post(
+        "/v1/messages",
+        json={
+            "model": "deepseek-v4.1-flash",
+            "max_tokens": 10,
+            "stop_sequences": [f"s{index}" for index in range(32)],
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
+    client.close()
+    assert r.status_code == 200
+    assert r.json()["type"] == "message"
+
+
+def test_endpoint_rejects_non_string_stop_sequence():
+    app.state.pool = make_pool(_ds_sse("Hi"))
+    client = TestClient(app)
+    r = client.post(
+        "/v1/messages",
+        json={"model": "deepseek-v4.1-flash", "max_tokens": 10, "stop_sequences": ["ok", 5], "messages": [{"role": "user", "content": "hi"}]},
+    )
+    client.close()
+    assert r.status_code == 400
+    assert r.json() == {"type": "error", "error": {"type": "invalid_request_error", "message": "stop_sequences[1] must be a non-empty string"}}
 
 
 def test_as_max_tokens():
@@ -282,7 +361,42 @@ def test_as_max_tokens():
     with pytest.raises(ant.AnthropicInputError):
         ant.as_max_tokens(0)
     with pytest.raises(ant.AnthropicInputError):
+        ant.as_max_tokens(-1)
+    with pytest.raises(ant.AnthropicInputError):
         ant.as_max_tokens("x")
+    with pytest.raises(ant.AnthropicInputError):
+        ant.as_max_tokens(10.7)
+    with pytest.raises(ant.AnthropicInputError):
+        ant.as_max_tokens(True)
+
+
+def test_convert_tools_rejects_invalid_entries():
+    with pytest.raises(ant.AnthropicInputError):
+        ant.convert_tools(["nope"])
+    with pytest.raises(ant.AnthropicInputError):
+        ant.convert_tools([{"description": "d"}])
+    with pytest.raises(ant.AnthropicInputError):
+        ant.convert_tools([{"name": ""}])
+    with pytest.raises(ant.AnthropicInputError):
+        ant.convert_tools([{"name": 5}])
+
+
+def test_build_chat_request_validates_sampling_params():
+    base = {"messages": [{"role": "user", "content": "hi"}]}
+    assert ant.build_chat_request({**base, "temperature": 0.0}, "m")["temperature"] == 0.0
+    assert ant.build_chat_request({**base, "top_p": 1}, "m")["top_p"] == 1.0
+    assert ant.build_chat_request({**base, "top_k": 5.0}, "m")["top_k"] == 5
+    for field, value in (("temperature", 1.5), ("top_p", -0.1), ("top_p", "0.5"), ("top_k", 0), ("top_k", 5.5), ("top_k", True)):
+        with pytest.raises(ant.AnthropicInputError):
+            ant.build_chat_request({**base, field: value}, "m")
+
+
+def test_as_text_is_depth_bounded():
+    nested: object = "leaf"
+    for _ in range(ant.MAX_TEXT_DEPTH + 20):
+        nested = [{"content": nested}]
+    assert ant._as_text(nested) == ""
+    assert ant._as_text([{"text": "a"}, {"content": ["b", {"text": "c"}]}]) == "abc"
 
 
 def test_build_chat_request_full():
@@ -342,8 +456,11 @@ def test_build_content_tool_use_decodes_arguments():
     assert blocks == [{"type": "tool_use", "id": "c1", "name": "f", "input": {"a": 1}}]
 
 
-def test_build_content_empty_falls_back():
-    assert ant.build_content({"message": {"content": ""}}) == [{"type": "text", "text": ""}]
+def test_build_content_empty_returns_no_blocks():
+    assert ant.build_content({"message": {"content": ""}}) == []
+    assert ant.build_content({"message": {}}) == []
+    assert ant.build_content({}) == []
+    assert ant.build_content({"message": {"content": "hi"}}) == [{"type": "text", "text": "hi"}]
 
 
 def test_usage_maps_provider_fields():
@@ -367,14 +484,40 @@ def test_build_message_shape():
     assert message["type"] == "message"
     assert message["role"] == "assistant"
     assert message["model"] == "claude-sonnet-4-5"
+    assert message["content"] == [{"type": "text", "text": "hi"}]
     assert message["stop_reason"] == "end_turn"
     assert message["stop_sequence"] is None
     assert message["usage"] == {"input_tokens": 4, "output_tokens": 2}
 
 
-def test_build_message_error_maps_to_end_turn():
-    message = ant.build_message(_info(), "msg_1", {"error": {"message": "boom"}, "choices": []})
+def test_build_message_reports_matched_stop_sequence():
+    message = ant.build_message(
+        _info(stop_sequences=["END", "STOP"]),
+        "msg_1",
+        {"choices": [{"message": {"content": "say END now"}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 4, "completion_tokens": 2}},
+    )
+    assert message["stop_reason"] == "stop_sequence"
+    assert message["stop_sequence"] == "END"
+
+
+def test_build_message_stop_reason_ignores_unmatched_stop_sequences():
+    message = ant.build_message(
+        _info(stop_sequences=["NOPE"]),
+        "msg_1",
+        {"choices": [{"message": {"content": "hi"}, "finish_reason": "stop"}]},
+    )
     assert message["stop_reason"] == "end_turn"
+    assert message["stop_sequence"] is None
+
+
+def test_build_message_error_maps_to_end_turn():
+    message = ant.build_message(
+        _info(), "msg_1", {"error": {"message": "boom"}, "choices": [{"message": {"content": "partial"}, "finish_reason": "tool_calls"}]}
+    )
+    assert message["stop_reason"] == "end_turn"
+    assert message["stop_sequence"] is None
+    assert message["content"] == [{"type": "text", "text": "partial"}]
+    assert message["usage"] == {"input_tokens": 0, "output_tokens": 0}
 
 
 def test_count_input_tokens_includes_system():
@@ -515,10 +658,14 @@ def test_translate_stream_thinking_block():
 
     frames = _frames("".join(asyncio.run(run())))
     starts = _named(frames, "content_block_start")
-    assert starts[0]["content_block"]["type"] == "thinking"
+    assert [payload["content_block"] for payload in starts] == [
+        {"type": "thinking", "thinking": "", "signature": ""},
+        {"type": "text", "text": ""},
+    ]
     deltas = _named(frames, "content_block_delta")
     assert deltas[0]["delta"] == {"type": "thinking_delta", "thinking": "think"}
     assert deltas[1]["delta"] == {"type": "text_delta", "text": "Hi"}
+    assert _named(frames, "message_delta")[0]["delta"] == {"stop_reason": "end_turn", "stop_sequence": None}
 
 
 def test_translate_stream_tool_use_block():
@@ -530,11 +677,84 @@ def test_translate_stream_tool_use_block():
         return [line async for line in stream]
 
     frames = _frames("".join(asyncio.run(run())))
-    starts = _named(frames, "content_block_start")
+    assert _tool_starts(frames) == [{"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "c1", "name": "f", "input": {}}}]
+    assert _tool_deltas(frames) == [{"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": '{"a":1}'}}]
+    assert _block_events(frames) == [
+        ("content_block_start", 0),
+        ("content_block_delta", 0),
+        ("content_block_stop", 0),
+    ]
+    assert _named(frames, "message_delta")[0]["delta"] == {"stop_reason": "tool_use", "stop_sequence": None}
+
+
+def test_translate_stream_tool_use_starts_once_when_id_repeats():
+    text = _sse(
+        json.dumps({"choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "id": "c1", "function": {"name": "f", "arguments": "{"}}]}}]}),
+        json.dumps({"choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "id": "c1", "function": {"arguments": '"a":1}'}}]}}]}),
+        json.dumps({"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}),
+    )
+
+    async def run():
+        stream = ant.translate_stream(_agen_chunks(text), _info(), "msg_1")
+        return [line async for line in stream]
+
+    frames = _frames("".join(asyncio.run(run())))
+    starts = _tool_starts(frames)
+    assert len(starts) == 1
     assert starts[0]["content_block"] == {"type": "tool_use", "id": "c1", "name": "f", "input": {}}
-    deltas = _named(frames, "content_block_delta")
-    assert deltas[0]["delta"] == {"type": "input_json_delta", "partial_json": '{"a":1}'}
+    assert [(payload["index"], payload["delta"]["partial_json"]) for payload in _tool_deltas(frames)] == [(0, "{"), (0, '"a":1}')]
+
+
+def test_translate_stream_tool_use_starts_without_provider_id():
+    text = _sse(
+        json.dumps({"choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "function": {"name": "search", "arguments": "{}"}}]}}]}),
+        json.dumps({"choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "function": {"arguments": '{"q":"x"}'}}]}}]}),
+        json.dumps({"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}),
+    )
+
+    async def run():
+        stream = ant.translate_stream(_agen_chunks(text), _info(), "msg_1")
+        return [line async for line in stream]
+
+    frames = _frames("".join(asyncio.run(run())))
+    starts = _tool_starts(frames)
+    assert len(starts) == 1
+    assert starts[0]["content_block"]["name"] == "search"
+    assert starts[0]["content_block"]["id"].startswith("call_")
+    assert [(payload["index"], payload["delta"]["partial_json"]) for payload in _tool_deltas(frames)] == [(0, "{}"), (0, '{"q":"x"}')]
     assert _named(frames, "message_delta")[0]["delta"]["stop_reason"] == "tool_use"
+
+
+def test_translate_stream_tool_use_keyed_by_call_index():
+    text = _sse(
+        json.dumps(
+            {
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [
+                                {"index": 0, "id": "a", "function": {"name": "fa", "arguments": "{}"}},
+                                {"index": 1, "id": "b", "function": {"name": "fb", "arguments": "{}"}},
+                            ]
+                        },
+                    }
+                ]
+            }
+        ),
+        json.dumps({"choices": [{"index": 0, "delta": {"tool_calls": [{"index": 1, "function": {"arguments": '{"x":1}'}}]}}]}),
+        json.dumps({"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}),
+    )
+
+    async def run():
+        stream = ant.translate_stream(_agen_chunks(text), _info(), "msg_1")
+        return [line async for line in stream]
+
+    frames = _frames("".join(asyncio.run(run())))
+    starts = [(payload["index"], payload["content_block"]["id"], payload["content_block"]["name"]) for payload in _tool_starts(frames)]
+    assert starts == [(0, "a", "fa"), (1, "b", "fb")]
+    assert [(payload["index"], payload["delta"]["partial_json"]) for payload in _tool_deltas(frames)] == [(0, "{}"), (1, "{}"), (1, '{"x":1}')]
+    assert [payload["index"] for event, payload in frames if event == "content_block_stop"] == [0, 1]
 
 
 def test_translate_stream_error_event():
@@ -545,9 +765,15 @@ def test_translate_stream_error_event():
         return [line async for line in stream]
 
     frames = _frames("".join(asyncio.run(run())))
-    errors = _named(frames, "error")
-    assert errors[0]["error"] == {"type": "api_error", "message": "boom"}
-    assert "message_stop" not in [event for event, _ in frames]
+    assert [event for event, _ in frames] == ["message_start", "error"]
+    assert _named(frames, "error")[0]["error"] == {"type": "api_error", "message": "boom"}
+
+
+def test_error_message_does_not_forward_non_dict_error():
+    assert ant._error_message({"message": "boom"}) == ("api_error", "boom")
+    assert ant._error_message({"message": 5}) == ("api_error", "upstream stream error")
+    assert ant._error_message({}) == ("api_error", "upstream stream error")
+    assert ant._error_message("secret token") == ("api_error", "upstream stream error")
 
 
 def test_translate_stream_closes_upstream():
@@ -567,8 +793,101 @@ def test_translate_stream_closes_upstream():
         stream = ant.translate_stream(Stream(), _info(), "msg_1")
         return [line async for line in stream]
 
-    asyncio.run(run())
+    frames = _frames("".join(asyncio.run(run())))
     assert closed["value"] is True
+    assert _named(frames, "message_delta")[0]["delta"] == {"stop_reason": "end_turn", "stop_sequence": None}
+
+
+def test_translate_stream_upstream_exception_closes_blocks_and_errors():
+    async def gen():
+        yield _sse(json.dumps({"choices": [{"index": 0, "delta": {"content": "hi"}}]}))
+        yield _sse(json.dumps({"choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "id": "c1", "function": {"name": "f", "arguments": "{}"}}]}}]}))
+        raise RuntimeError("upstream died")
+
+    collected: list[str] = []
+
+    async def run():
+        async for line in ant.translate_stream(gen(), _info(), "msg_1"):
+            collected.append(line)
+
+    with pytest.raises(RuntimeError, match="upstream died"):
+        asyncio.run(run())
+
+    frames = _frames("".join(collected))
+    assert [event for event, _ in frames] == [
+        "message_start",
+        "content_block_start",
+        "content_block_delta",
+        "content_block_stop",
+        "content_block_start",
+        "content_block_delta",
+        "content_block_stop",
+        "error",
+    ]
+    assert _named(frames, "error")[0]["error"] == {"type": "api_error", "message": "upstream stream failed"}
+
+
+def test_translate_stream_decodes_bytes_chunks():
+    chunk = b'data: {"choices": [{"index": 0, "delta": {"content": "hi"}, "finish_reason": "stop"}]}\n\n'
+
+    async def gen():
+        yield chunk
+
+    async def run():
+        stream = ant.translate_stream(gen(), _info(), "msg_1")
+        return [line async for line in stream]
+
+    frames = _frames("".join(asyncio.run(run())))
+    assert [payload["delta"]["text"] for payload in _named(frames, "content_block_delta")] == ["hi"]
+    assert _named(frames, "message_delta")[0]["delta"] == {"stop_reason": "end_turn", "stop_sequence": None}
+
+
+def test_translate_stream_merges_usage_across_chunks():
+    text = _sse(
+        json.dumps({"choices": [{"index": 0, "delta": {"content": "hi"}}], "usage": {"prompt_tokens": 42}}),
+        json.dumps({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}], "usage": {"completion_tokens": 9}}),
+    )
+
+    async def run():
+        stream = ant.translate_stream(_agen_chunks(text), _info(prompt_tokens=17), "msg_1")
+        return [line async for line in stream]
+
+    frames = _frames("".join(asyncio.run(run())))
+    assert _named(frames, "message_start")[0]["message"]["usage"] == {"input_tokens": 17, "output_tokens": 0}
+    assert _named(frames, "message_delta")[0]["usage"] == {"input_tokens": 42, "output_tokens": 9}
+
+
+def test_translate_stream_awaits_async_on_complete():
+    seen: list[tuple] = []
+
+    async def on_complete(reason, usage):
+        seen.append((reason, dict(usage)))
+
+    text = _sse(
+        json.dumps({"choices": [{"index": 0, "delta": {"content": "hi"}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 5, "completion_tokens": 3}})
+    )
+
+    async def run():
+        stream = ant.translate_stream(_agen_chunks(text), _info(), "msg_1", on_complete)
+        return [line async for line in stream]
+
+    frames = _frames("".join(asyncio.run(run())))
+    assert seen == [("end_turn", {"input_tokens": 5, "output_tokens": 3})]
+    assert _named(frames, "message_delta")[0]["usage"] == {"input_tokens": 5, "output_tokens": 3}
+
+
+def test_translate_stream_reports_matched_stop_sequence():
+    text = _sse(
+        json.dumps({"choices": [{"index": 0, "delta": {"content": "say END now"}}]}),
+        json.dumps({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}),
+    )
+
+    async def run():
+        stream = ant.translate_stream(_agen_chunks(text), _info(stop_sequences=["END"]), "msg_1")
+        return [line async for line in stream]
+
+    frames = _frames("".join(asyncio.run(run())))
+    assert _named(frames, "message_delta")[0]["delta"] == {"stop_reason": "stop_sequence", "stop_sequence": "END"}
 
 
 def test_endpoint_stream_length_maps_to_max_tokens():
@@ -647,11 +966,12 @@ def test_translate_stream_closes_thinking_before_text():
         return [line async for line in stream]
 
     frames = _frames("".join(asyncio.run(run())))
-    order = [(event, payload.get("index")) for event, payload in frames if event in ("content_block_start", "content_block_stop")]
-    assert order == [
+    assert _block_events(frames) == [
         ("content_block_start", 0),
+        ("content_block_delta", 0),
         ("content_block_stop", 0),
         ("content_block_start", 1),
+        ("content_block_delta", 1),
         ("content_block_stop", 1),
     ]
 
@@ -665,21 +985,48 @@ def test_translate_stream_closes_text_before_tool_use():
         return [line async for line in stream]
 
     frames = _frames("".join(asyncio.run(run())))
-    types = [payload["content_block"]["type"] for event, payload in frames if event == "content_block_start"]
-    assert types == ["thinking", "text", "tool_use"]
-    stopped = [payload["index"] for event, payload in frames if event == "content_block_stop"]
-    assert stopped[:2] == [0, 1]
+    assert [payload["content_block"]["type"] for event, payload in frames if event == "content_block_start"] == ["thinking", "text", "tool_use"]
+    assert _block_events(frames) == [
+        ("content_block_start", 0),
+        ("content_block_delta", 0),
+        ("content_block_stop", 0),
+        ("content_block_start", 1),
+        ("content_block_delta", 1),
+        ("content_block_stop", 1),
+        ("content_block_start", 2),
+        ("content_block_delta", 2),
+        ("content_block_stop", 2),
+    ]
+    assert _named(frames, "message_delta")[0]["delta"] == {"stop_reason": "tool_use", "stop_sequence": None}
 
 
 def test_translate_stream_keeps_known_input_tokens():
     chunk = json.dumps({"choices": [{"index": 0, "delta": {"content": "hi"}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 0, "completion_tokens": 5}})
-    info = ant.RequestInfo(model="claude-sonnet-4-5", upstream_model="default", max_tokens=100, prompt_tokens=17)
+    info = _info(prompt_tokens=17)
 
     async def run():
         stream = ant.translate_stream(_agen_chunks(f"data: {chunk}\n\n"), info, "msg_1")
         return [line async for line in stream]
 
     frames = _frames("".join(asyncio.run(run())))
+    assert _named(frames, "message_start")[0]["message"]["usage"] == {"input_tokens": 17, "output_tokens": 0}
     usage = _named(frames, "message_delta")[0]["usage"]
     assert usage["input_tokens"] == 17
     assert usage["output_tokens"] == 5
+
+
+def test_endpoint_stream_counts_system_prompt_once():
+    system = "you are a helpful assistant with a long system prompt that repeats itself many times over"
+    app.state.pool = make_pool(_ds_sse("Hello"))
+    client = TestClient(app)
+    with client.stream(
+        "POST",
+        "/v1/messages",
+        json={"model": "deepseek-v4.1-flash", "max_tokens": 10, "stream": True, "system": system, "messages": [{"role": "user", "content": "hi"}]},
+    ) as r:
+        text = "".join(r.iter_text())
+    client.close()
+    reported = _named(_frames(text), "message_start")[0]["message"]["usage"]["input_tokens"]
+    once = ant.count_input_tokens([{"role": "system", "content": system}, {"role": "user", "content": "hi"}], None)
+    assert reported == once
+    assert reported < once + ant.estimate_tokens(system)

@@ -10,7 +10,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from danyapi.config import CREDENTIAL_ENV_NAMES
 from danyapi.pow import (
+    _PYTHON_SOLVE_BUDGET_SEC,
+    _SOLVE_TOTAL_BUDGET_SEC,
+    _SOLVER_DIFFICULTY_LIMIT,
+    _SOLVER_ENV_DENYLIST,
+    _SOLVER_TIMEOUT_SEC,
     _find_native_solver,
     _run_solver,
     _solver_env,
@@ -352,14 +358,23 @@ def test_run_solver_invalid_answer_repr_is_truncated():
 
 
 def test_solver_env_drops_secrets(monkeypatch):
-    for name in ("DEEPSEEK_TOKENS", "QWEN_TOKENS", "BYOK", "BYOK_MODE", "DANYAPI_BYOK_MODE"):
+    for name in CREDENTIAL_ENV_NAMES:
         monkeypatch.setenv(name, "secret-value")
     monkeypatch.setenv("DANYAPI_HOST", "127.0.0.1")
     env = _solver_env()
-    for name in ("DEEPSEEK_TOKENS", "QWEN_TOKENS", "BYOK", "BYOK_MODE", "DANYAPI_BYOK_MODE"):
+    for name in CREDENTIAL_ENV_NAMES:
         assert name not in env
     assert env["DANYAPI_HOST"] == "127.0.0.1"
     assert os.environ["DEEPSEEK_TOKENS"] == "secret-value"
+
+
+def test_solver_env_denylist_is_the_credential_tuple(monkeypatch):
+    assert set(CREDENTIAL_ENV_NAMES) <= _SOLVER_ENV_DENYLIST
+    for name in ("BYOK", "BYOK_MODE", "DANYAPI_BYOK_MODE", "GIGACHAT_KEYS", "DANYAPI_ADMIN_TOKEN"):
+        assert name in _SOLVER_ENV_DENYLIST
+    for name in _SOLVER_ENV_DENYLIST:
+        monkeypatch.setenv(name, "secret-value")
+    assert _solver_env() == {key: value for key, value in os.environ.items() if key not in _SOLVER_ENV_DENYLIST}
 
 
 def test_run_solver_passes_scrubbed_env():
@@ -371,14 +386,173 @@ def test_run_solver_passes_scrubbed_env():
 
 def test_solve_python_respects_budget():
     salt = "S" * 140
-    assert solve_python("00" * 32, salt, 1, 100, budget=0.0) is None
+    assert solve_python("00" * 32, salt, 1, 100, timeout=0.0) is None
 
 
 def test_solve_python_budget_expires_mid_search():
     salt = "S" * 140
     ticks = iter([0.0, 0.0] + [1.0] * 200)
     with patch("danyapi.pow.time.monotonic", side_effect=lambda: next(ticks)):
-        assert solve_python("00" * 32, salt, 1, 100000, budget=0.5) is None
+        assert solve_python("00" * 32, salt, 1, 100000, timeout=0.5) is None
+
+
+def test_solve_python_timeout_is_the_fifth_parameter():
+    salt = "S" * 140
+    assert solve_python("00" * 32, salt, 1, 100, 0.0) is None
+    assert solve_python("00" * 32, salt, 1, 100, timeout=0.0) is None
+
+
+class _FakeClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+
+def _recording_solver(clock: _FakeClock, seen: list, name: str, cost: float):
+    def solver(challenge_hex, salt, expire_at, difficulty, budget):
+        seen.append((name, clock.now, budget, difficulty))
+        clock.now += cost
+        return None
+
+    return solver
+
+
+def test_solve_challenge_gives_each_solver_at_most_the_remaining_time():
+    clock = _FakeClock()
+    seen: list = []
+    with (
+        patch("danyapi.pow.time", clock),
+        patch("danyapi.pow.solve_native", new=_recording_solver(clock, seen, "native", 40.0)),
+        patch("danyapi.pow.solve_node", new=_recording_solver(clock, seen, "node", 40.0)),
+        patch("danyapi.pow.solve_python", new=_recording_solver(clock, seen, "python", 0.0)),
+    ):
+        assert asyncio.run(solve_challenge("c", "s", 1, 10)) is None
+    assert [item[0] for item in seen] == ["native", "node", "python"]
+    assert seen[0][2] == pytest.approx(_SOLVER_TIMEOUT_SEC)
+    assert seen[1][2] == pytest.approx(_SOLVE_TOTAL_BUDGET_SEC - 40.0)
+    assert seen[2][2] == pytest.approx(_PYTHON_SOLVE_BUDGET_SEC)
+    for _name, started_at, budget, _difficulty in seen:
+        assert budget <= max(_SOLVE_TOTAL_BUDGET_SEC - started_at, 0.0)
+    assert clock.now <= _SOLVE_TOTAL_BUDGET_SEC
+
+
+def test_solve_challenge_bounds_the_whole_chain_by_the_total_budget():
+    clock = _FakeClock()
+    seen: list = []
+
+    def burn_whole_budget(challenge_hex, salt, expire_at, difficulty, budget):
+        seen.append(("solver", clock.now, budget, difficulty))
+        clock.now += budget
+        return None
+
+    def burn_native(*args):
+        return burn_whole_budget(*args)
+
+    def burn_node(*args):
+        return burn_whole_budget(*args)
+
+    def burn_python(*args):
+        return burn_whole_budget(*args)
+
+    with (
+        patch("danyapi.pow.time", clock),
+        patch("danyapi.pow.solve_native", new=burn_native),
+        patch("danyapi.pow.solve_node", new=burn_node),
+        patch("danyapi.pow.solve_python", new=burn_python),
+    ):
+        assert asyncio.run(solve_challenge("c", "s", 1, 10)) is None
+    assert [item[2] for item in seen] == [pytest.approx(_SOLVER_TIMEOUT_SEC), pytest.approx(_SOLVE_TOTAL_BUDGET_SEC - _SOLVER_TIMEOUT_SEC)]
+    assert clock.now == pytest.approx(_SOLVE_TOTAL_BUDGET_SEC)
+    assert clock.now < _SOLVER_TIMEOUT_SEC * 3
+
+
+def test_solve_challenge_python_gets_at_most_its_own_cap():
+    clock = _FakeClock()
+    seen: list = []
+    with (
+        patch("danyapi.pow.time", clock),
+        patch("danyapi.pow.solve_native", new=_recording_solver(clock, seen, "native", 0.0)),
+        patch("danyapi.pow.solve_node", new=_recording_solver(clock, seen, "node", 0.0)),
+        patch("danyapi.pow.solve_python", new=_recording_solver(clock, seen, "python", 0.0)),
+    ):
+        assert asyncio.run(solve_challenge("c", "s", 1, 10)) is None
+    assert seen[0][2] == pytest.approx(_SOLVER_TIMEOUT_SEC)
+    assert seen[1][2] == pytest.approx(_SOLVER_TIMEOUT_SEC)
+    assert seen[2][2] == pytest.approx(_PYTHON_SOLVE_BUDGET_SEC)
+    assert _PYTHON_SOLVE_BUDGET_SEC < _SOLVER_TIMEOUT_SEC
+
+
+def _solve_with_seen_solvers(difficulty: int) -> list:
+    from danyapi.pow import PowManager
+
+    seen: list = []
+    clock = _FakeClock()
+
+    async def run():
+        pm = PowManager()
+
+        async def fetch_ok():
+            challenge = _valid_challenge()
+            challenge["difficulty"] = difficulty
+            return challenge
+
+        with (
+            patch("danyapi.pow.time", clock),
+            patch("danyapi.pow.solve_native", new=_recording_solver(clock, seen, "native", 0.0)),
+            patch("danyapi.pow.solve_node", new=_recording_solver(clock, seen, "node", 0.0)),
+            patch("danyapi.pow.solve_python", new=_recording_solver(clock, seen, "python", 0.0)),
+            pytest.raises(RuntimeError),
+        ):
+            await pm.make_header(fetch_ok)
+
+    asyncio.run(run())
+    return seen
+
+
+def test_pow_manager_clamps_difficulty_for_every_solver():
+    seen = _solve_with_seen_solvers(_SOLVER_DIFFICULTY_LIMIT * 1000)
+    assert [item[0] for item in seen] == ["native", "node", "python"]
+    for _name, _started_at, _budget, difficulty in seen:
+        assert difficulty == _SOLVER_DIFFICULTY_LIMIT
+
+
+def test_pow_manager_passes_a_sane_difficulty_through_unchanged():
+    seen = _solve_with_seen_solvers(64)
+    for _name, _started_at, _budget, difficulty in seen:
+        assert difficulty == 64
+
+
+def test_close_cancels_the_in_flight_build():
+    from danyapi.pow import PowManager
+
+    async def run():
+        pm = PowManager()
+        building = asyncio.create_task(asyncio.sleep(5))
+        pm._building = building
+        pm.close()
+        assert pm._building is None
+        with pytest.raises(asyncio.CancelledError):
+            await building
+
+    asyncio.run(run())
+
+
+def test_ensure_build_propagates_the_build_failure():
+    from danyapi.pow import PowManager
+
+    async def run():
+        pm = PowManager()
+
+        async def fetch_bad():
+            raise RuntimeError("no challenge")
+
+        with pytest.raises(RuntimeError):
+            await pm._ensure_build(fetch_bad)
+        assert pm._building is None
+
+    asyncio.run(run())
 
 
 def test_native_matches_python():

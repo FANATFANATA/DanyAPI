@@ -198,8 +198,17 @@ BOOKMARKLET_SOURCE = r"""
     return null;
   }
   var token = find();
-  location.href = "http://127.0.0.1:__PORT__/collect?p=" + encodeURIComponent(p) +
-    "&t=" + encodeURIComponent(token || "");
+  fetch("http://127.0.0.1:__PORT__/collect", {
+    method: "POST",
+    mode: "cors",
+    cache: "no-store",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ provider: p, token: token || "" })
+  }).then(function () {
+    setTimeout(function () { try { window.close(); } catch (e) {} }, 200);
+  }, function () {
+    setTimeout(function () { try { window.close(); } catch (e) {} }, 200);
+  });
 })()
 """
 
@@ -975,6 +984,9 @@ class Handler(BaseHTTPRequestHandler):
             elif parts.path == "/results":
                 self._send(render_results_page().encode())
             elif parts.path == "/collect":
+                if self._allowed_origin() is None:
+                    self._send(b"forbidden", 403, "text/plain; charset=utf-8")
+                    return
                 qs = parse_qs(parts.query)
                 provider = (qs.get("p") or [""])[0]
                 token = (qs.get("t") or [""])[0].strip()

@@ -4,8 +4,9 @@ import json
 import logging
 import time
 import uuid
+from collections import OrderedDict
 from functools import partial
-from typing import Any
+from typing import Any, NoReturn
 
 from fastapi import HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -16,8 +17,8 @@ from ..alice import api as alice_api
 from ..duckai import api as duckai_api
 from ..gigachat import api as gigachat_api
 from ..qwen import api as qwen_api
-from .attachments import _collect_attachments, _validate_attachments
-from .byok import _byok_pool_for
+from .attachments import MAX_ATTACHMENT_TOTAL_SIZE, _collect_attachments, _validate_attachments
+from .byok import _byok_caller_id, _byok_pool_for, _extract_request_api_key
 from .core import _acquire_account
 from .deepseek import _collect_non_stream, _stream_openai
 from .images import _b64encode
@@ -37,18 +38,52 @@ CHAT_HANDLERS = {
     "duckai": "_chat_completions_duckai",
 }
 
+MAX_COMPLETION_PROMPTS = 8
+MAX_MESSAGES_PER_REQUEST = 2000
+MAX_CHAT_BODY_BYTES = 3 * MAX_ATTACHMENT_TOTAL_SIZE
+MAX_PROVIDER_ERROR_CHARS = 300
+
+GIGACHAT_UNSUPPORTED_PARAMS = ("n", "presence_penalty", "frequency_penalty", "logit_bias")
+ALICE_UNSUPPORTED_PARAMS = ("n", "top_p", "presence_penalty", "frequency_penalty", "logit_bias")
+DUCKAI_UNSUPPORTED_PARAMS = ("n", "top_p", "presence_penalty", "frequency_penalty", "logit_bias")
+
+_SESSION_OWNERS: OrderedDict[str, str] = OrderedDict()
+MAX_SESSION_OWNERS = 4096
+
+
+def _chat_handler(provider: str) -> Any:
+    name = CHAT_HANDLERS.get(provider)
+    if name is None:
+        raise HTTPException(404, f"Unknown provider: {provider}")
+    call = globals().get(name)
+    if not callable(call):
+        raise HTTPException(500, f"chat handler for {provider} is not callable")
+    return call
+
+
+def _check_chat_request_limits(req: ChatCompletionRequest, request: Request) -> None:
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > MAX_CHAT_BODY_BYTES:
+                raise HTTPException(413, f"request body too large, max {MAX_CHAT_BODY_BYTES // (1024 * 1024)} MB")
+        except ValueError:
+            raise HTTPException(400, "invalid content-length header") from None
+    if len(req.messages) > MAX_MESSAGES_PER_REQUEST:
+        raise HTTPException(400, f"too many messages: max {MAX_MESSAGES_PER_REQUEST} per request")
+
 
 @app.post("/v1/chat/completions")
 async def chat_completions(req: ChatCompletionRequest, request: Request) -> Any:
+    _check_chat_request_limits(req, request)
     return await _dispatch_chat(req, request)
 
 
 async def _chat_dispatcher(model: str, request: Request) -> Any:
     provider = _resolve_provider(model)
-    name = CHAT_HANDLERS.get(provider)
-    if name is None:
-        raise HTTPException(404, f"Unknown provider: {provider}")
-    call = globals()[name]
+    call = _chat_handler(provider)
+    if provider == "deepseek" and getattr(app.state, "deepseek_models", None):
+        _resolve_model(model)
     if not _byok_mode():
         return call
     pool = await _byok_pool_for(provider, request)
@@ -60,18 +95,42 @@ async def _dispatch_chat(req: ChatCompletionRequest, request: Request) -> Any:
     return await dispatch(req)
 
 
+def _caller_scope() -> str:
+    return _byok_caller_id()
+
+
+def _bind_session_owner(session_id: str, owner: str) -> None:
+    if not session_id or not owner:
+        return
+    known = _SESSION_OWNERS.get(session_id)
+    if known is not None and known != owner:
+        log.warning("rejected session_id reuse across callers")
+        raise HTTPException(403, "session_id belongs to another client")
+    if known is None:
+        _SESSION_OWNERS[session_id] = owner
+        while len(_SESSION_OWNERS) > MAX_SESSION_OWNERS:
+            _SESSION_OWNERS.popitem(last=False)
+    else:
+        _SESSION_OWNERS.move_to_end(session_id)
+
+
 def _completion_prompts(prompt: Any) -> list[str]:
     if isinstance(prompt, str):
+        if not prompt.strip():
+            raise HTTPException(400, "prompt must not be empty")
         return [prompt]
     if isinstance(prompt, list):
         prompts: list[str] = []
         for item in prompt:
             if isinstance(item, str):
-                prompts.append(item)
+                text = item
             elif isinstance(item, list):
-                prompts.append(" ".join(str(token) for token in item))
+                text = " ".join(str(token) for token in item)
             else:
                 raise HTTPException(400, "prompt must be a string, a list of strings, or a list of token lists")
+            if not text.strip():
+                raise HTTPException(400, "prompt must not contain empty strings")
+            prompts.append(text)
         if not prompts:
             raise HTTPException(400, "prompt must not be empty")
         return prompts
@@ -79,6 +138,8 @@ def _completion_prompts(prompt: Any) -> list[str]:
 
 
 def _completion_chat_request(req: CompletionRequest, prompt_text: str, stream: bool, prompt_count: int) -> ChatCompletionRequest:
+    if req.suffix is not None:
+        raise HTTPException(400, "suffix is not supported by the upstream providers")
     return ChatCompletionRequest(
         model=req.model,
         messages=[ChatMessage(role="user", content=prompt_text)],
@@ -96,15 +157,45 @@ def _completion_chat_request(req: CompletionRequest, prompt_text: str, stream: b
     )
 
 
+def _legacy_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for item in content:
+        if not isinstance(item, dict):
+            continue
+        text = item.get("text")
+        if isinstance(text, str) and text:
+            parts.append(text)
+    return "".join(parts)
+
+
 def _legacy_choice_from_chat(chat_choice: dict, index: int) -> dict:
-    message = chat_choice.get("message") or {}
-    text = message.get("content") if isinstance(message, dict) else ""
+    message = chat_choice.get("message")
+    if not isinstance(message, dict):
+        message = {}
     return {
         "index": index,
-        "text": text if isinstance(text, str) else "",
+        "text": _legacy_text(message.get("content")),
         "logprobs": None,
         "finish_reason": chat_choice.get("finish_reason") or "stop",
     }
+
+
+def _exception_detail(exc: BaseException) -> str:
+    if isinstance(exc, HTTPException) and isinstance(exc.detail, str):
+        return exc.detail
+    return str(exc)
+
+
+def _safe_error_message(value: Any) -> str:
+    text = value if isinstance(value, str) else json.dumps(value, default=str) if not isinstance(value, (int, float, bool)) else str(value)
+    text = text.strip()
+    if len(text) > MAX_PROVIDER_ERROR_CHARS:
+        text = text[:MAX_PROVIDER_ERROR_CHARS]
+    return text or "upstream error"
 
 
 def _translate_chat_chunk_to_completion(chunk: dict) -> dict:
@@ -119,19 +210,35 @@ def _translate_chat_chunk_to_completion(chunk: dict) -> dict:
         piece["usage"] = chunk["usage"]
     if "error" in chunk:
         error = chunk["error"]
-        piece["error"] = {"message": error.get("message") if isinstance(error, dict) else error}
-    for choice in chunk.get("choices") or []:
-        delta = choice.get("delta") or {}
-        text = delta.get("content") if isinstance(delta, dict) else ""
+        message = error.get("message") if isinstance(error, dict) else error
+        piece["error"] = {"message": _safe_error_message(message)}
+    raw_choices = chunk.get("choices")
+    if not isinstance(raw_choices, list):
+        raw_choices = []
+    for choice in raw_choices:
+        if not isinstance(choice, dict):
+            continue
+        delta = choice.get("delta")
+        if not isinstance(delta, dict):
+            delta = {}
+        text = delta.get("content")
+        index = choice.get("index")
         piece["choices"].append(
             {
-                "index": choice.get("index", 0),
+                "index": index if isinstance(index, int) and not isinstance(index, bool) else 0,
                 "text": text if isinstance(text, str) else "",
                 "logprobs": None,
                 "finish_reason": choice.get("finish_reason"),
             }
         )
     return piece
+
+
+def _usage_count(usage: dict, field: str) -> int:
+    value = usage.get(field)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0
+    return int(value)
 
 
 async def _translate_completion_stream(chat_gen):
@@ -154,17 +261,34 @@ async def _translate_completion_stream(chat_gen):
 
 
 async def _completions_stream(req: CompletionRequest, prompts: list[str], dispatch: Any):
-    for prompt_text in prompts:
-        chat_req = _completion_chat_request(req, prompt_text, True, len(prompts))
-        chat_resp = await dispatch(chat_req)
-        async for line in _translate_completion_stream(chat_resp.body_iterator):
-            yield line
+    for index, prompt_text in enumerate(prompts):
+        try:
+            chat_req = _completion_chat_request(req, prompt_text, True, len(prompts))
+            chat_resp = await dispatch(chat_req)
+            async for line in _translate_completion_stream(chat_resp.body_iterator):
+                yield line
+        except Exception as exc:
+            detail = _exception_detail(exc)
+            log.warning("completions prompt #%d of %d failed: %s: %s", index + 1, len(prompts), type(exc).__name__, exc)
+            yield _sse(
+                {
+                    "id": f"cmpl-{uuid.uuid4().hex}",
+                    "object": "text_completion",
+                    "created": int(time.time()),
+                    "model": req.model,
+                    "choices": [],
+                    "error": {"message": _safe_error_message(detail)},
+                }
+            )
+            break
     yield "data: [DONE]\n\n"
 
 
 @app.post("/v1/completions")
 async def completions(req: CompletionRequest, request: Request) -> Any:
     prompts = _completion_prompts(req.prompt)
+    if len(prompts) > MAX_COMPLETION_PROMPTS:
+        raise HTTPException(400, f"too many prompts: max {MAX_COMPLETION_PROMPTS} per request")
     dispatch = await _chat_dispatcher(req.model, request)
     if req.stream:
         return StreamingResponse(
@@ -183,7 +307,10 @@ async def completions(req: CompletionRequest, request: Request) -> Any:
     for prompt_text in prompts:
         chat_req = _completion_chat_request(req, prompt_text, False, len(prompts))
         chat_dict = await dispatch(chat_req)
-        prompt_choices = chat_dict.get("choices") or []
+        prompt_choices = chat_dict.get("choices")
+        if not isinstance(prompt_choices, list):
+            prompt_choices = []
+        prompt_choices = [choice for choice in prompt_choices if isinstance(choice, dict)]
         choices.extend(_legacy_choice_from_chat(choice, base_index + i) for i, choice in enumerate(prompt_choices))
         base_index += len(prompt_choices)
         if not completion_id:
@@ -191,9 +318,9 @@ async def completions(req: CompletionRequest, request: Request) -> Any:
         created = chat_dict.get("created", created)
         u = chat_dict.get("usage")
         if isinstance(u, dict):
-            prompt_tokens += int(u.get("prompt_tokens") or 0)
-            completion_tokens += int(u.get("completion_tokens") or 0)
-            total_tokens += int(u.get("total_tokens") or 0)
+            prompt_tokens += _usage_count(u, "prompt_tokens")
+            completion_tokens += _usage_count(u, "completion_tokens")
+            total_tokens += _usage_count(u, "total_tokens")
     return {
         "id": completion_id or f"cmpl-{uuid.uuid4().hex}",
         "object": "text_completion",
@@ -208,14 +335,24 @@ async def completions(req: CompletionRequest, request: Request) -> Any:
     }
 
 
-@app.post("/v1/embeddings")
-async def embeddings_not_supported() -> dict:
+@app.post("/v1/embeddings", response_model=None)
+async def embeddings_not_supported(request: Request) -> NoReturn:
+    await _reject_unsupported_endpoint(request, "embeddings")
     raise HTTPException(501, "embeddings are not supported by DanyAPI")
 
 
-@app.post("/v1/moderations")
-async def moderations_not_supported() -> dict:
+@app.post("/v1/moderations", response_model=None)
+async def moderations_not_supported(request: Request) -> NoReturn:
+    await _reject_unsupported_endpoint(request, "moderations")
     raise HTTPException(501, "moderations are not supported by DanyAPI")
+
+
+async def _reject_unsupported_endpoint(request: Request, endpoint: str) -> None:
+    if not _byok_mode():
+        return
+    token = await _extract_request_api_key(request)
+    if not token:
+        raise HTTPException(401, f"api key is required in byok mode, {endpoint} cannot be used without one")
 
 
 def _can_reuse_session(account: Any, session_id: str | None, **kwargs: Any) -> bool:
@@ -254,6 +391,15 @@ def _materialize_tools(req: ChatCompletionRequest) -> tuple[Any, Any]:
     return tools, tool_choice
 
 
+def _request_scope(req: ChatCompletionRequest) -> str | None:
+    user = getattr(req, "user", None)
+    if isinstance(user, str) and user:
+        return f"u:{user}"
+    if _byok_mode() and _caller_scope():
+        return f"k:{_caller_scope()}"
+    return None
+
+
 async def _acquire_and_build(
     pool: AccountPool,
     req: ChatCompletionRequest,
@@ -262,8 +408,11 @@ async def _acquire_and_build(
     tools: Any,
     tool_choice: Any,
 ) -> tuple[Any, str | None, tuple[str, ...], str, bool, Any]:
-    context_seq = toolemu.context_sequence(req.messages, user=getattr(req, "user", None))
+    scope = _request_scope(req)
+    context_seq = toolemu.context_sequence(req.messages, user=scope) if scope else ()
     if req.session_id:
+        if scope:
+            _bind_session_owner(req.session_id, scope)
         account, existing_sid = await _acquire_account(pool, req.session_id)
         if existing_sid is None:
             existing_sid = req.session_id
@@ -306,9 +455,7 @@ async def _chat_completions_deepseek(req: ChatCompletionRequest, pool: AccountPo
     attachments = _collect_attachments(req)
     _validate_attachments(attachments)
 
-    max_tokens = getattr(req, "max_tokens", None)
-    if max_tokens is None:
-        max_tokens = getattr(req, "max_completion_tokens", None)
+    max_tokens = _max_tokens_of(req)
 
     common = {
         "account": account,
@@ -373,9 +520,7 @@ async def _chat_completions_qwen(req: ChatCompletionRequest, pool: AccountPool |
                 raise HTTPException(400, "qwen only supports image attachments, use deepseek for files")
             prompt = f"{prompt}\n![image](data:{att.content_type};base64,{await _b64encode(att.data)})"
 
-    max_tokens = getattr(req, "max_tokens", None)
-    if max_tokens is None:
-        max_tokens = getattr(req, "max_completion_tokens", None)
+    max_tokens = _max_tokens_of(req)
 
     common = {
         "account": account,
@@ -420,12 +565,23 @@ def _max_tokens_of(req: ChatCompletionRequest) -> int | None:
     return max_tokens
 
 
+def _reject_unsupported_params(req: ChatCompletionRequest, provider: str, params: tuple[str, ...]) -> None:
+    for name in params:
+        value = getattr(req, name, None)
+        if value is None or (isinstance(value, (list, dict)) and not value):
+            continue
+        if name == "n" and value == 1:
+            continue
+        raise HTTPException(400, f"{provider} does not support the {name} parameter")
+
+
 async def _chat_completions_gigachat(req: ChatCompletionRequest, pool: AccountPool | None = None) -> Any:
     if pool is None:
         pool = getattr(app.state, "gigachat_pool", None)
     if pool is None:
         raise HTTPException(503, "gigachat provider is not configured")
 
+    _reject_unsupported_params(req, "gigachat", GIGACHAT_UNSUPPORTED_PARAMS)
     tools, tool_choice = _materialize_tools(req)
     account, existing_sid = await _acquire_account(pool, req.session_id)
     max_tokens = _max_tokens_of(req)
@@ -470,6 +626,7 @@ async def _chat_completions_alice(req: ChatCompletionRequest, pool: AccountPool 
 
     if getattr(req, "files", None):
         raise HTTPException(400, "alice does not support file attachments")
+    _reject_unsupported_params(req, "alice", ALICE_UNSUPPORTED_PARAMS)
     account, existing_sid = await _acquire_account(pool, req.session_id)
 
     common = {
@@ -501,6 +658,7 @@ async def _chat_completions_duckai(req: ChatCompletionRequest, pool: AccountPool
 
     if getattr(req, "files", None):
         raise HTTPException(400, "duckai does not support file attachments, send images inline instead")
+    _reject_unsupported_params(req, "duck.ai", DUCKAI_UNSUPPORTED_PARAMS)
     account, existing_sid = await _acquire_account(pool, req.session_id)
 
     tools, tool_choice = _materialize_tools(req)
@@ -529,3 +687,12 @@ async def _chat_completions_duckai(req: ChatCompletionRequest, pool: AccountPool
         return await duckai_api.collect_non_stream(**common)
     except AccountPoolBusy:
         raise HTTPException(429, "all accounts are busy, try again later") from None
+
+
+def _validate_chat_handlers() -> None:
+    missing = sorted(name for name in CHAT_HANDLERS.values() if name not in globals())
+    if missing:
+        raise RuntimeError(f"CHAT_HANDLERS references undefined handlers: {', '.join(missing)}")
+
+
+_validate_chat_handlers()

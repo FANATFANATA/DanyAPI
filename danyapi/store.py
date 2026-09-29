@@ -8,6 +8,7 @@ import tempfile
 import threading
 import time
 import weakref
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -21,9 +22,14 @@ _MAX_AFFINITY = 8192
 
 _FLUSH_WAIT_INTERVAL = 0.5
 _FLUSH_MAX_WAIT = 5.0
+_FLUSH_DEBOUNCE = 0.25
+_MAX_STORE_BYTES = 64 * 1024 * 1024
+_FLUSH_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="danyapi-cache")
 
 _PATH_LOCKS: weakref.WeakValueDictionary[str, threading.Lock] = weakref.WeakValueDictionary()
 _PATH_LOCKS_GUARD = threading.Lock()
+_LIVE_STORES: dict[str, weakref.ReferenceType[JsonStore]] = {}
+_LIVE_STORES_GUARD = threading.Lock()
 
 
 def _path_write_lock(path: Path) -> threading.Lock:
@@ -36,6 +42,18 @@ def _path_write_lock(path: Path) -> threading.Lock:
         return lock
 
 
+class _StoreState:
+    __slots__ = ("data", "lock")
+
+    def __init__(self) -> None:
+        self.data: dict[str, Any] = {}
+        self.lock = threading.Lock()
+
+
+_STATES: dict[str, _StoreState] = {}
+_STATES_GUARD = threading.Lock()
+
+
 def _fsync_dir(path: Path) -> None:
     if os.name == "nt":
         return
@@ -44,6 +62,15 @@ def _fsync_dir(path: Path) -> None:
         os.fsync(fd)
     finally:
         os.close(fd)
+
+
+def _report_flush_failure(future: Any) -> None:
+    try:
+        exc = future.exception()
+    except (asyncio.CancelledError, asyncio.InvalidStateError):
+        return
+    if exc is not None:
+        log.warning("cache flush failed: %s", exc)
 
 
 def cache_root() -> Path:
@@ -63,30 +90,52 @@ class JsonStore:
     def __init__(self, name: str, scope: str | None = None, maxsize: int = 0) -> None:
         self._scope = scope
         self._maxsize = max(0, int(maxsize))
-        self._data: dict[str, Any] = {}
-        self._lock = threading.Lock()
+        self._state = _StoreState()
+        self._lock = self._state.lock
+        self._data = self._state.data
         self._pending = False
         self._dirty = False
+        self._removed = False
+        self._generation = 0
         self._idle = threading.Event()
         self._idle.set()
         self._path: Path | None = None
-        if scope:
+        if scope and settings.cache_enabled:
             safe = "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in f"{name}-{scope}")
             self._path = cache_root() / f"{safe}.json"
+            with _STATES_GUARD:
+                shared = _STATES.get(str(self._path))
+                if shared is not None:
+                    self._state = shared
+                    self._lock = shared.lock
+                    self._data = shared.data
+                else:
+                    _STATES[str(self._path)] = self._state
+            self._register_live(self._path)
             self._load()
+
+    def _register_live(self, path: Path) -> None:
+        with _LIVE_STORES_GUARD:
+            existing = _LIVE_STORES.get(str(path))
+            if existing is not None and existing() is not None and existing() is not self:
+                log.warning("another JsonStore instance already holds %s, both share one in-memory snapshot", path)
+            _LIVE_STORES[str(path)] = weakref.ref(self)
 
     @property
     def enabled(self) -> bool:
-        return self._path is not None
+        return self._path is not None and not self._removed
 
     def _load(self) -> None:
         if self._path is None:
             return
         try:
+            if self._path.stat().st_size > _MAX_STORE_BYTES:
+                log.warning("cache file %s is larger than %d bytes and was ignored", self._path, _MAX_STORE_BYTES)
+                return
             raw = self._path.read_text(encoding="utf-8")
         except FileNotFoundError:
             return
-        except (OSError, UnicodeError) as exc:
+        except (OSError, UnicodeError, MemoryError, ValueError) as exc:
             log.warning("cache read failed for %s: %s", self._path, exc)
             return
         try:
@@ -97,8 +146,10 @@ class JsonStore:
         if not isinstance(data, dict):
             log.warning("cache file %s has unexpected root type %s and was ignored", self._path, type(data).__name__)
             return
-        self._data = data
-        self._evict()
+        with self._lock:
+            self._data.clear()
+            self._data.update(data)
+            self._evict()
 
     def _evict(self) -> None:
         while self._maxsize > 0 and len(self._data) > self._maxsize:
@@ -106,7 +157,7 @@ class JsonStore:
 
     def _commit(self, data: Any) -> None:
         path = self._path
-        if path is None:
+        if path is None or self._removed:
             return
         tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
         try:
@@ -118,7 +169,7 @@ class JsonStore:
                     os.fsync(handle.fileno())
                 os.replace(tmp, path)
                 _fsync_dir(path.parent)
-        except (OSError, TypeError, ValueError) as exc:
+        except (OSError, TypeError, ValueError, MemoryError) as exc:
             log.warning("cache write failed for %s: %s", path, exc)
             try:
                 tmp.unlink(missing_ok=True)
@@ -126,7 +177,7 @@ class JsonStore:
                 pass
 
     def _write(self) -> None:
-        if self._path is None:
+        if self._path is None or self._removed:
             return
         with self._lock:
             snapshot = dict(self._data)
@@ -135,16 +186,31 @@ class JsonStore:
     def _flush_background(self) -> None:
         while True:
             with self._lock:
-                if not self._dirty:
+                generation = self._generation
+            deadline = time.monotonic() + _FLUSH_DEBOUNCE
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                time.sleep(min(0.01, remaining))
+            with self._lock:
+                if self._removed or not self._dirty:
+                    self._dirty = False
                     self._pending = False
                     self._idle.set()
                     return
-                self._dirty = False
                 snapshot = dict(self._data)
+                settled = self._generation == generation
             self._commit(snapshot)
+            if settled:
+                with self._lock:
+                    self._dirty = False
+                    self._pending = False
+                    self._idle.set()
+                return
 
     def _note_changed(self) -> None:
-        if self._path is None:
+        if self._path is None or self._removed:
             return
         try:
             loop = asyncio.get_running_loop()
@@ -153,18 +219,21 @@ class JsonStore:
             return
         with self._lock:
             self._dirty = True
+            self._generation += 1
             if self._pending:
                 return
             self._pending = True
             self._idle.clear()
         try:
-            loop.run_in_executor(None, self._flush_background)
+            future = loop.run_in_executor(_FLUSH_EXECUTOR, self._flush_background)
         except RuntimeError:
             with self._lock:
                 self._dirty = False
                 self._pending = False
                 self._idle.set()
             self._write()
+            return
+        future.add_done_callback(_report_flush_failure)
 
     def flush(self, timeout: float = _FLUSH_MAX_WAIT) -> None:
         if self._path is None:
@@ -185,10 +254,10 @@ class JsonStore:
             return self._data.get(key, default)
 
     def set(self, key: str, value: Any) -> None:
-        if self._path is not None:
+        if self._path is not None and not self._removed:
             try:
                 json.dumps(value, ensure_ascii=False)
-            except (TypeError, ValueError) as exc:
+            except (TypeError, ValueError, RecursionError, MemoryError) as exc:
                 log.warning("cache value for %s is not serialisable and was not stored: %s", key, exc)
                 return
         with self._lock:
@@ -222,8 +291,10 @@ class JsonStore:
         self._note_changed()
 
     def remove(self) -> None:
-        if self._path is None:
+        path = self._path
+        if path is None:
             return
+        self._removed = True
         self.flush()
         with self._lock:
             self._data.clear()
@@ -231,9 +302,9 @@ class JsonStore:
             self._pending = False
             self._idle.set()
         try:
-            self._path.unlink(missing_ok=True)
+            path.unlink(missing_ok=True)
         except OSError as exc:
-            log.warning("cache file delete failed for %s: %s", self._path, exc)
+            log.warning("cache file delete failed for %s: %s", path, exc)
 
     def items(self) -> list[tuple[str, Any]]:
         with self._lock:

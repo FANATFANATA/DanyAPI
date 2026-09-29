@@ -894,25 +894,18 @@ async def _stream_openai(
         dsml_filter = toolemu.DsmlFilter()
         reasoning_filter = toolemu.DsmlFilter()
 
-        def reasoning_piece(piece: str | None, *, final: bool = False) -> str:
+        def reasoning_piece(piece: str, *, final: bool = False) -> str:
             if stop_hit:
                 return ""
             if final:
                 return reasoning_filter.flush()
-            if piece is None:
-                return ""
             return reasoning_filter.feed(piece)
 
-        def content_piece(piece: str | None, *, final: bool = False) -> str:
+        def content_piece(piece: str, *, final: bool = False) -> str:
             nonlocal stop_hit
             if stop_hit:
                 return ""
-            if final:
-                text = dsml_filter.flush()
-            else:
-                if piece is None:
-                    return ""
-                text = dsml_filter.feed(piece)
+            text = dsml_filter.flush() if final else dsml_filter.feed(piece)
             if stop_filter is None:
                 return budget.feed(text)
             filtered, hit = stop_filter.feed(text)
@@ -1252,11 +1245,11 @@ async def _stream_openai(
                 finish = _done_finish(rec.status)
 
         if not tool_call_deltas:
-            tail_text = content_piece(None, final=True)
+            tail_text = content_piece("", final=True)
             if tail_text:
                 yield _chunk({"content": tail_text})
 
-        tail_reason = reasoning_piece(None, final=True)
+        tail_reason = reasoning_piece("", final=True)
         if tail_reason:
             yield _chunk({"reasoning_content": tail_reason})
 

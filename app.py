@@ -4,10 +4,25 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 MIN_PYTHON = (3, 10)
 ROOT = Path(__file__).resolve().parent
+
+
+def create_private(target: Path, data: bytes) -> None:
+    fd, tmp_name = tempfile.mkstemp(dir=str(target.parent), prefix=target.name + ".", suffix=".tmp")
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+        os.replace(tmp, target)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    if os.name != "nt":
+        os.chmod(target, 0o600)
 
 
 def ensure_env() -> None:
@@ -16,12 +31,20 @@ def ensure_env() -> None:
         return
     example = ROOT / ".env.example"
     if example.exists():
-        shutil.copyfile(example, env_file)
+        create_private(env_file, example.read_bytes())
         print("Created .env from .env.example")
         print("Fill in DEEPSEEK_TOKENS / QWEN_TOKENS and run again.")
         sys.exit(1)
     print("No .env or .env.example found.", file=sys.stderr)
     sys.exit(1)
+
+
+def _report_compiler_failure(compiler: str, result: subprocess.CompletedProcess[str]) -> None:
+    detail = (result.stderr or result.stdout or "").strip()
+    print(f"Native pow_solver build with {compiler} failed (exit {result.returncode}).", file=sys.stderr)
+    if detail:
+        print(detail, file=sys.stderr)
+    print("The Python and Node fallbacks still solve challenges, just slower.", file=sys.stderr)
 
 
 def build_solver() -> None:
@@ -72,7 +95,10 @@ def build_solver() -> None:
             f"/Fe:{bin_path}",
         ]
         res = subprocess.run(cmd, capture_output=True, text=True, check=False)
-        success = res.returncode == 0
+        if res.returncode == 0:
+            success = True
+        else:
+            _report_compiler_failure(chosen_compiler, res)
     else:
         cmd_fast = [
             chosen_compiler,
@@ -87,6 +113,7 @@ def build_solver() -> None:
         if res.returncode == 0:
             success = True
         else:
+            _report_compiler_failure(chosen_compiler, res)
             cmd_compat = [
                 chosen_compiler,
                 "-O3",
@@ -96,27 +123,32 @@ def build_solver() -> None:
                 str(bin_path),
             ]
             res2 = subprocess.run(cmd_compat, capture_output=True, text=True, check=False)
-            success = res2.returncode == 0
+            if res2.returncode == 0:
+                success = True
+            else:
+                _report_compiler_failure(chosen_compiler, res2)
 
-    if success:
-        if not is_win:
-            os.chmod(bin_path, 0o755)
-        dest_dirs = [ROOT, ROOT / "danyapi", ROOT / "danyapi" / "solver", ROOT / "danyapi" / "deepseek"]
-        for d in dest_dirs:
-            if d.exists():
-                dst = d / bin_name
-                if dst.resolve() != bin_path.resolve():
-                    shutil.copy2(bin_path, dst)
-                    if not is_win:
-                        os.chmod(dst, 0o755)
-        for d in [ROOT, src_path.parent, bin_path.parent]:
-            obj = d / "pow_solver.obj"
-            if obj.exists():
-                try:
-                    obj.unlink()
-                except OSError:
-                    pass
-        print(f"Native pow_solver compiled via {chosen_compiler} ({bin_name})")
+    if not success:
+        return
+
+    if not is_win:
+        os.chmod(bin_path, 0o755)
+    dest_dirs = [ROOT, ROOT / "danyapi", ROOT / "danyapi" / "solver", ROOT / "danyapi" / "deepseek"]
+    for d in dest_dirs:
+        if d.exists():
+            dst = d / bin_name
+            if dst.resolve() != bin_path.resolve():
+                shutil.copy2(bin_path, dst)
+                if not is_win:
+                    os.chmod(dst, 0o755)
+    for d in [ROOT, src_path.parent, bin_path.parent]:
+        obj = d / "pow_solver.obj"
+        if obj.exists():
+            try:
+                obj.unlink()
+            except OSError:
+                pass
+    print(f"Native pow_solver compiled via {chosen_compiler} ({bin_name})")
 
 
 def main() -> None:
@@ -131,7 +163,11 @@ def main() -> None:
     sys.path.insert(0, str(ROOT))
 
     ensure_env()
-    build_solver()
+    try:
+        build_solver()
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"Native pow_solver build skipped: {exc}", file=sys.stderr)
+        print("The Python and Node fallbacks still solve challenges, just slower.", file=sys.stderr)
 
     from dotenv import load_dotenv
 

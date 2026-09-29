@@ -39,11 +39,17 @@ def provider_needs_api_key(provider: str) -> bool:
 
 
 def provider_models(provider: str) -> list[dict]:
-    return list(getattr(app.state, MODEL_ATTRS[provider], None) or [])
+    attr = MODEL_ATTRS.get(provider)
+    if attr is None:
+        return []
+    return list(getattr(app.state, attr, None) or [])
 
 
 def provider_pool(provider: str) -> Any:
-    return getattr(app.state, POOL_ATTRS_BY_PROVIDER[provider], None)
+    attr = POOL_ATTRS_BY_PROVIDER.get(provider)
+    if attr is None:
+        return None
+    return getattr(app.state, attr, None)
 
 
 def _blank_byok_state() -> dict[str, Any]:
@@ -58,7 +64,7 @@ def _blank_byok_stores() -> dict[str, dict[str, list[JsonStore]]]:
     return {provider: {} for provider in BYOK_PROVIDERS}
 
 
-async def _byok_pools_state() -> dict[str, dict[str, Any]]:
+def _byok_pools_state() -> dict[str, dict[str, Any]]:
     pools = getattr(app.state, "byok_pools", None)
     if pools is None:
         pools = _blank_byok_state()
@@ -66,7 +72,7 @@ async def _byok_pools_state() -> dict[str, dict[str, Any]]:
     return pools
 
 
-async def _byok_locks_state() -> dict[str, asyncio.Lock]:
+def _byok_locks_state() -> dict[str, asyncio.Lock]:
     locks = getattr(app.state, "byok_locks", None)
     if locks is None:
         locks = _blank_byok_locks()
@@ -74,7 +80,7 @@ async def _byok_locks_state() -> dict[str, asyncio.Lock]:
     return locks
 
 
-async def _byok_auth_state() -> dict[str, dict[str, Any]]:
+def _byok_auth_state() -> dict[str, dict[str, Any]]:
     auth = getattr(app.state, "byok_auth", None)
     if auth is None:
         auth = _blank_byok_state()
@@ -82,7 +88,7 @@ async def _byok_auth_state() -> dict[str, dict[str, Any]]:
     return auth
 
 
-async def _byok_stores_state() -> dict[str, dict[str, list[JsonStore]]]:
+def _byok_stores_state() -> dict[str, dict[str, list[JsonStore]]]:
     stores = getattr(app.state, "byok_stores", None)
     if stores is None:
         stores = _blank_byok_stores()

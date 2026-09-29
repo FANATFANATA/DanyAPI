@@ -81,10 +81,31 @@ def test_normalize_item_function_call_dict_arguments():
 def test_normalize_item_function_call_output():
     items = resp._normalize_item({"type": "function_call_output", "call_id": "c", "output": "42"})
     assert items == [{"role": "tool", "tool_call_id": "c", "content": "42"}]
+    by_id = resp._normalize_item({"type": "function_call_output", "id": "c", "output": 42})
+    assert by_id == [{"role": "tool", "tool_call_id": "c", "content": "42"}]
+
+
+def test_normalize_item_function_call_output_without_call_id():
+    broken = (
+        {"type": "function_call_output", "output": "42"},
+        {"type": "function_call_output", "id": "", "output": "42"},
+        {"type": "function_call_output", "call_id": 7},
+    )
+    for item in broken:
+        with pytest.raises(resp.ResponsesInputError):
+            resp._normalize_item(item)
 
 
 def test_normalize_item_reasoning():
-    assert resp._normalize_item({"type": "reasoning"}) == []
+    with pytest.raises(resp.ResponsesInputError):
+        resp._normalize_item({"type": "reasoning"})
+
+
+def test_normalize_item_unreplayable_provider_items():
+    for item_type in ("reasoning", "item_reference", "web_search_call", "file_search_call", "code_interpreter_call"):
+        with pytest.raises(resp.ResponsesInputError) as excinfo:
+            resp._normalize_item({"type": item_type})
+        assert item_type in str(excinfo.value)
 
 
 def test_normalize_item_message_default_role():
@@ -122,6 +143,48 @@ def test_normalize_input_list():
 def test_normalize_input_invalid():
     with pytest.raises(resp.ResponsesInputError):
         resp.normalize_input(123)
+
+
+def test_ensure_input_present_keeps_valid_input():
+    messages = [{"role": "user", "content": "hi"}]
+    assert resp.ensure_input_present(messages) is messages
+    tool_calls = [{"role": "assistant", "content": "", "tool_calls": [{"id": "c", "type": "function", "function": {"name": "f", "arguments": "{}"}}]}]
+    assert resp.ensure_input_present(tool_calls) is tool_calls
+
+
+def test_ensure_input_present_rejects_empty_input():
+    for value in ([], "hi", [{}], [{"role": "user", "content": ""}], [{"role": "user", "content": "   "}], [{"role": "user", "content": []}]):
+        with pytest.raises(resp.ResponsesInputError):
+            resp.ensure_input_present(value)
+
+
+def test_validate_tool_chain_accepts_answered_calls():
+    resp.validate_tool_chain(
+        [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "f", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "42"},
+            {"role": "assistant", "content": "done"},
+        ]
+    )
+    resp.validate_tool_chain(5)
+
+
+def test_validate_tool_chain_rejects_unmatched_tool_result():
+    with pytest.raises(resp.ResponsesInputError):
+        resp.validate_tool_chain([{"role": "tool", "tool_call_id": "c1", "content": "42"}])
+    with pytest.raises(resp.ResponsesInputError) as excinfo:
+        resp.validate_tool_chain(
+            [
+                {"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "f", "arguments": "{}"}}]},
+                {"role": "tool", "tool_call_id": "c2", "content": "42"},
+            ]
+        )
+    assert "c2" in str(excinfo.value)
+    with pytest.raises(resp.ResponsesInputError):
+        resp.validate_tool_chain([{"role": "assistant", "content": "", "tool_calls": [5, {"id": ""}]}, {"role": "tool", "tool_call_id": "", "content": "42"}])
+    with pytest.raises(resp.ResponsesInputError):
+        resp.validate_tool_chain([{"role": "assistant", "content": "", "tool_calls": [5]}, {"role": "tool", "tool_call_id": "c1", "content": "42"}])
 
 
 def test_convert_tools_non_list():
@@ -213,6 +276,33 @@ def test_extract_response_format_strict_and_description():
     assert fmt["json_schema"]["description"] == "d"
 
 
+def test_usage_total_is_recomputed_from_parts():
+    usage = resp._usage_to_responses({"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 999})
+    assert usage is not None
+    assert usage["input_tokens"] == 5
+    assert usage["output_tokens"] == 2
+    assert usage["total_tokens"] == 7
+    assert resp._usage_to_responses(None) is None
+    empty = resp._usage_to_responses({"total_tokens": 999})
+    assert empty is not None
+    assert empty["total_tokens"] == 0
+
+
+def test_build_response_object_usage_by_status():
+    info = resp.RequestInfo(model="m")
+    for status in ("completed", "incomplete", "failed"):
+        reported = resp.build_response_object(info, "r", 1, output=[], status=status)["usage"]
+        assert reported == {
+            "input_tokens": 0,
+            "input_tokens_details": {"cached_tokens": 0},
+            "output_tokens": 0,
+            "output_tokens_details": {"reasoning_tokens": 0},
+            "total_tokens": 0,
+        }
+    for status in ("in_progress", "queued"):
+        assert resp.build_response_object(info, "r", 1, output=[], status=status)["usage"] is None
+
+
 def test_reasoning_text_from_output_variants():
     assert resp._reasoning_text_from_output(5) == ""
     out = [
@@ -257,6 +347,11 @@ def test_messages_from_output_calls():
     output = [{"type": "function_call", "call_id": "c", "name": "f", "arguments": "{}"}]
     messages = resp.messages_from_output(output)
     assert messages[-1]["tool_calls"][0]["id"] == "c"
+
+
+def test_messages_from_output_reasoning_only_is_empty():
+    output = [{"id": "rs_1", "type": "reasoning", "summary": [{"type": "summary_text", "text": "think"}]}]
+    assert resp.messages_from_output(output) == []
 
 
 def test_input_message_item_tool_role():
@@ -311,6 +406,29 @@ def test_input_items_from_messages_variants():
     assert len(items) == 1
 
 
+def test_input_items_from_messages_ids_are_stable_and_unique():
+    messages = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "hello", "reasoning_content": "think"},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "function": {"name": "f", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "c1", "content": "42"},
+        {"role": "user", "content": "hi"},
+    ]
+    first = resp.input_items_from_messages(messages)
+    second = resp.input_items_from_messages(messages)
+    assert [item["id"] for item in first] == [item["id"] for item in second]
+    assert len({item["id"] for item in first}) == len(first)
+    assert first[0]["id"].startswith("msg_")
+    duplicate = [item for item in first if item.get("content") == [{"type": "input_text", "text": "hi", "annotations": []}]]
+    assert len(duplicate) == 2
+    assert duplicate[0]["id"] != duplicate[1]["id"]
+    outputs = [item for item in first if item["type"] == "function_call_output"]
+    assert len(outputs) == 1
+    assert outputs[0]["call_id"] == "c1"
+    assert outputs[0]["output"] == "42"
+    assert [item["type"] for item in first] == ["message", "reasoning", "message", "message", "function_call", "function_call_output", "message"]
+
+
 def test_response_from_chat_invalid():
     with pytest.raises(HTTPException) as excinfo:
         resp.response_from_chat(5, resp.RequestInfo(model="m"), "r", 1)
@@ -363,13 +481,36 @@ def test_iter_sse_payloads_done():
 
 def test_error_payload_dict():
     payload = resp._error_payload({"message": "bad"})
-    assert payload["message"] == "bad"
+    assert payload == {"type": "server_error", "code": None, "message": "bad", "param": None}
+    typed = resp._error_payload({"type": "rate_limit_error", "code": "rate_limit_exceeded", "message": "slow", "param": "model"})
+    assert typed == {"type": "rate_limit_error", "code": "rate_limit_exceeded", "message": "slow", "param": "model"}
+    assert resp._error_payload({"message": 5}) == {"type": "server_error", "code": None, "message": "stream error", "param": None}
+
+
+def test_error_payload_does_not_expose_upstream_finish_reason():
+    payload = resp._error_payload({"message": "reduced", "finish_reason": "response_incomplete", "code": 42})
+    assert payload == {"type": "server_error", "code": None, "message": "reduced", "param": None}
+    assert "finish_reason" not in json.dumps(payload)
 
 
 def test_error_payload_non_dict():
     payload = resp._error_payload("boom")
     assert payload["type"] == "server_error"
-    assert payload["message"] == "boom"
+    assert payload["message"] == "stream error"
+    assert payload["code"] is None
+    assert payload["param"] is None
+    assert "boom" not in json.dumps(payload)
+    for value in (None, 5, ["boom"], b"boom"):
+        assert resp._error_payload(value)["message"] == "stream error"
+
+
+def test_response_error_normalises_to_code_message():
+    assert resp._response_error(None) is None
+    assert resp._response_error({"message": "bad"}) == {"code": None, "message": "bad"}
+    assert resp._response_error({"message": "bad", "finish_reason": "server_busy", "param": "model"}) == {"code": None, "message": "bad"}
+    assert resp._response_error({"message": "bad", "code": "rate_limit_exceeded"}) == {"code": "rate_limit_exceeded", "message": "bad"}
+    assert resp._response_error("boom") == {"code": None, "message": "upstream request failed"}
+    assert resp._response_error({}) == {"code": None, "message": "upstream request failed"}
 
 
 def test_stream_state_reasoning_and_message():

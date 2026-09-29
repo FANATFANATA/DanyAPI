@@ -64,6 +64,12 @@ def record_usage(
         tracker.record(provider, model, prompt_tokens, completion_tokens, total_tokens, user=user, session_id=session_id)
 
 
+def _usage_count(usage: Any, key: str) -> int:
+    if not isinstance(usage, dict):
+        return 0
+    return _as_count(usage.get(key))
+
+
 def record_usage_dict(
     provider: str,
     model: str,
@@ -74,9 +80,9 @@ def record_usage_dict(
     record_usage(
         provider,
         model,
-        usage["prompt_tokens"],
-        usage["completion_tokens"],
-        usage["total_tokens"],
+        _usage_count(usage, "prompt_tokens"),
+        _usage_count(usage, "completion_tokens"),
+        _usage_count(usage, "total_tokens"),
         user=user,
         session_id=session_id,
     )
@@ -215,7 +221,7 @@ class UsageTracker:
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
             data = self._snapshot_locked()
-            data["recent"] = list(self._recent)
+            data["recent"] = [dict(entry) for entry in self._recent]
             return data
 
     def flush(self) -> None:
@@ -224,7 +230,7 @@ class UsageTracker:
         try:
             with self._lock:
                 data = self._snapshot_locked()
-                recent = list(self._recent)
+                recent = [dict(entry) for entry in self._recent]
                 self._last_recent_persist = time.time()
                 self._last_usage_persist = self._last_recent_persist
             self._store.set("usage", data)

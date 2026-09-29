@@ -8,7 +8,7 @@ import sys
 from logging.handlers import QueueHandler, QueueListener, RotatingFileHandler
 from pathlib import Path
 
-DEFAULT_FORMAT = "(%(asctime)s) %(message)s"
+DEFAULT_FORMAT = "(%(asctime)s) %(levelname)s %(name)s %(message)s"
 DEFAULT_DATEFMT = "%H:%M:%S"
 RESET = "\033[0m"
 LEVEL_COLORS = {
@@ -19,6 +19,8 @@ LEVEL_COLORS = {
 }
 SUCCESS_COLOR = "\033[32m"
 SUCCESS_PATTERN = re.compile(r"\b(ok|ready|success)\b", re.IGNORECASE)
+_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+_CONTROL_ESCAPES = {"\n": "\\n", "\r": "\\r", "\t": "\\t"}
 LIFECYCLE_MESSAGES = {
     "Waiting for application startup.",
     "Application startup complete.",
@@ -37,6 +39,12 @@ _FILE_QUEUE_MAX = 10000
 _FALLBACK_LEVEL_NAMES = {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG", "NOTSET"}
 
 
+def escape_control(message: str) -> str:
+    if not message:
+        return message
+    return _CONTROL_RE.sub(lambda match: _CONTROL_ESCAPES.get(match.group(0), f"\\x{ord(match.group(0)):02x}"), message)
+
+
 def _level_names() -> set[str]:
     get_mapping = getattr(logging, "getLevelNamesMapping", None)
     if get_mapping is not None:
@@ -46,6 +54,7 @@ def _level_names() -> set[str]:
 
 _LEVEL_NAMES = _level_names()
 _queue_listeners: list[QueueListener] = []
+_file_handler_state: dict[str, tuple[str, int, int]] = {}
 
 
 def _resolve_level(level: str | None) -> str:
@@ -76,17 +85,38 @@ def _make_file_handler(log_file: str, max_bytes: int, backup_count: int) -> Rota
         backupCount=backup_count,
         encoding="utf-8",
     )
-    handler.setFormatter(logging.Formatter(DEFAULT_FORMAT, DEFAULT_DATEFMT))
+    handler.setFormatter(_EscapingFormatter(DEFAULT_FORMAT, DEFAULT_DATEFMT))
     return handler
+
+
+def _record_message(record: logging.LogRecord) -> str:
+    cached = getattr(record, "_danyapi_message", None)
+    if isinstance(cached, str):
+        return cached
+    if isinstance(record.msg, str) and not record.args:
+        message = record.msg
+    else:
+        try:
+            message = record.getMessage()
+        except Exception:
+            message = f"{record.msg!r} {record.args!r}"
+            _set_record_message(record, message)
+            return message
+    record._danyapi_message = message  # type: ignore[attr-defined]
+    return message
+
+
+def _set_record_message(record: logging.LogRecord, message: str) -> None:
+    record.msg = message
+    record.args = ()
+    record._danyapi_message = message  # type: ignore[attr-defined]
 
 
 class _LifecycleFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         if record.name == "uvicorn.access":
             return False
-        if isinstance(record.msg, str) and not record.args:
-            return self._apply(record, record.msg)
-        return self._apply(record, record.getMessage())
+        return self._apply(record, _record_message(record))
 
     def _apply(self, record: logging.LogRecord, message: str) -> bool:
         if message in LIFECYCLE_MESSAGES:
@@ -94,8 +124,7 @@ class _LifecycleFilter(logging.Filter):
         if message.startswith(LIFECYCLE_PREFIXES):
             return False
         if UVICORN_RUNNING in message:
-            record.msg = message.replace(UVICORN_RUNNING, DANYAPI_RUNNING)
-            record.args = ()
+            _set_record_message(record, message.replace(UVICORN_RUNNING, DANYAPI_RUNNING))
         return True
 
 
@@ -103,7 +132,13 @@ def _is_success(message: str) -> bool:
     return SUCCESS_PATTERN.search(message) is not None
 
 
-class _ColorFormatter(logging.Formatter):
+class _EscapingFormatter(logging.Formatter):
+    def formatMessage(self, record: logging.LogRecord) -> str:
+        _set_record_message(record, _record_message(record))
+        return escape_control(super().formatMessage(record))
+
+
+class _ColorFormatter(_EscapingFormatter):
     def __init__(self) -> None:
         super().__init__(DEFAULT_FORMAT, DEFAULT_DATEFMT)
         stream = sys.stderr if sys.stderr is not None else sys.stdout
@@ -114,7 +149,7 @@ class _ColorFormatter(logging.Formatter):
         if not self._use_color:
             return text
         color = LEVEL_COLORS.get(record.levelname, "")
-        if record.levelname == "INFO" and _is_success(str(record.msg)):
+        if record.levelname == "INFO" and _is_success(_record_message(record)):
             color = SUCCESS_COLOR
         if not color:
             return text
@@ -122,11 +157,13 @@ class _ColorFormatter(logging.Formatter):
 
 
 class _DroppingQueueHandler(QueueHandler):
+    dropped = 0
+
     def enqueue(self, record: logging.LogRecord) -> None:
         try:
             self.queue.put_nowait(record)
         except queue.Full:
-            return
+            type(self).dropped += 1
 
 
 def _has_handler(root: logging.Logger, name: str) -> bool:
@@ -165,6 +202,22 @@ def _enable_windows_vt() -> None:
         logging.getLogger(__name__).debug("failed to enable windows VT mode", exc_info=True)
 
 
+def _find_handler(root: logging.Logger, name: str) -> logging.Handler | None:
+    for handler in root.handlers:
+        if getattr(handler, "name", None) == name:
+            return handler
+    return None
+
+
+def _drop_file_handler(root: logging.Logger) -> None:
+    handler = _find_handler(root, FILE_HANDLER_NAME)
+    if handler is None:
+        return
+    root.removeHandler(handler)
+    _DroppingQueueHandler.dropped = 0
+    handler.close()
+
+
 def configure() -> None:
     from danyapi.config import settings
 
@@ -176,8 +229,12 @@ def configure() -> None:
     level = _resolve_level(settings.log_level)
     root = logging.getLogger()
     root.setLevel(level)
+    for handler in root.handlers:
+        if getattr(handler, "name", None) in (CONSOLE_HANDLER_NAME, FILE_HANDLER_NAME):
+            handler.setLevel(level)
 
-    if not _has_handler(root, CONSOLE_HANDLER_NAME):
+    console = _find_handler(root, CONSOLE_HANDLER_NAME)
+    if console is None:
         console = logging.StreamHandler()
         console.name = CONSOLE_HANDLER_NAME
         console.setLevel(level)
@@ -185,32 +242,39 @@ def configure() -> None:
         console.addFilter(_LifecycleFilter())
         root.addHandler(console)
 
-    if settings.log_file and not _has_handler(root, FILE_HANDLER_NAME):
-        path = Path(settings.log_file)
-        if path.is_dir():
-            logging.getLogger(__name__).warning(
-                "log file %s is a directory, using console only",
-                path,
-            )
-        else:
-            try:
-                file_target = _make_file_handler(
-                    str(path),
-                    _coerce_max_bytes(settings.log_max_bytes),
-                    _coerce_backup_count(settings.log_backup_count),
-                )
-            except OSError as exc:
-                logging.getLogger(__name__).warning("cannot open log file %s: %s, using console only", path, exc)
-            else:
-                queue_for_file: queue.Queue[logging.LogRecord] = queue.Queue(maxsize=_FILE_QUEUE_MAX)
-                queue_handler = _DroppingQueueHandler(queue_for_file)
-                queue_handler.name = FILE_HANDLER_NAME
-                queue_handler.setLevel(level)
-                queue_handler.addFilter(_LifecycleFilter())
-                listener = QueueListener(queue_for_file, file_target)
-                listener.start()
-                _queue_listeners.append(listener)
-                root.addHandler(queue_handler)
+    target = settings.log_file
+    max_bytes = _coerce_max_bytes(settings.log_max_bytes)
+    backup_count = _coerce_backup_count(settings.log_backup_count)
+    existing = _find_handler(root, FILE_HANDLER_NAME)
+    if not target:
+        _drop_file_handler(root)
+        _file_handler_state.clear()
+        return
+    if existing is not None and _file_handler_state.get("target") == (target, max_bytes, backup_count):
+        return
+    _drop_file_handler(root)
+    path = Path(target)
+    if path.is_dir():
+        logging.getLogger(__name__).warning(
+            "log file %s is a directory, using console only",
+            path,
+        )
+        return
+    try:
+        file_target = _make_file_handler(target, max_bytes, backup_count)
+    except OSError as exc:
+        logging.getLogger(__name__).warning("cannot open log file %s: %s, using console only", path, exc)
+        return
+    queue_for_file: queue.Queue[logging.LogRecord] = queue.Queue(maxsize=_FILE_QUEUE_MAX)
+    queue_handler = _DroppingQueueHandler(queue_for_file)
+    queue_handler.name = FILE_HANDLER_NAME
+    queue_handler.setLevel(level)
+    queue_handler.addFilter(_LifecycleFilter())
+    listener = QueueListener(queue_for_file, file_target)
+    listener.start()
+    _queue_listeners.append(listener)
+    root.addHandler(queue_handler)
+    _file_handler_state["target"] = (target, max_bytes, backup_count)
 
 
 def uvicorn_log_config() -> dict:
@@ -237,6 +301,8 @@ def shutdown() -> None:
             logging.getLogger(__name__).warning("log queue listener did not stop: %s", exc)
             break
         _queue_listeners.pop()
+    if _DroppingQueueHandler.dropped:
+        logging.getLogger(__name__).warning("%d log record(s) were dropped because the file log queue was full", _DroppingQueueHandler.dropped)
 
 
 atexit.register(shutdown)

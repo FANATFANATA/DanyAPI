@@ -6,18 +6,29 @@ import re
 from collections.abc import Iterator
 from typing import Any
 
-from .common import _ARGS_ALIASES, _FENCES_RE, _NAME_ALIASES, ToolCall
+from .common import _ARGS_ALIASES, _FENCE_CLOSE, _FENCE_OPEN_RE, _NAME_ALIASES, ToolCall
 
 
 def _strip_fences(text: str) -> str:
     stripped = text.strip()
-    match = _FENCES_RE.match(stripped)
-    if match:
-        return match.group(1).strip()
-    return stripped
+    if not stripped.startswith(_FENCE_CLOSE):
+        return stripped
+    open_match = _FENCE_OPEN_RE.match(stripped)
+    body_start = open_match.end() if open_match is not None else len(stripped)
+    close = len(stripped) - len(_FENCE_CLOSE)
+    if close < body_start or not stripped.startswith(_FENCE_CLOSE, close):
+        return stripped
+    if close > body_start and stripped[close - 1] == "\n":
+        close -= 1
+    return stripped[body_start:close].strip()
+
+
+_TRAILING_COMMA_RE = re.compile(r",\s*[}\]]")
 
 
 def _strip_trailing_commas(text: str) -> str:
+    if _TRAILING_COMMA_RE.search(text) is None:
+        return text
     out: list[str] = []
     i = 0
     n = len(text)
@@ -53,6 +64,8 @@ def _strip_trailing_commas(text: str) -> str:
 
 
 def _normalize_single_quotes(text: str) -> str:
+    if "'" not in text:
+        return text
     out: list[str] = []
     in_double = False
     in_single = False
@@ -100,13 +113,23 @@ def _normalize_single_quotes(text: str) -> str:
 
 
 _NUMBER_RE = re.compile(r"-?\d+(\.\d+)?([eE][+-]?\d+)?")
-_BARE_LITERALS = frozenset({"true", "false", "null"})
+_SEPARATED_NUMBER_RE = re.compile(r"-?\d[\d_]*(\.\d[\d_]*)?([eE][+-]?\d[\d_]*)?")
+_NON_FINITE_RE = re.compile(r"[+-]?(nan|inf(inity)?)", re.IGNORECASE)
+_BARE_LITERALS = frozenset({"true", "false", "null", "nan", "inf", "+nan", "-nan", "+inf", "-inf", "+infinity", "-infinity", "infinity"})
+
+
+def _canonical_number(token: str) -> str:
+    if "_" not in token:
+        return token
+    return token.replace("_", "")
 
 
 def _is_bare_literal(token: str) -> bool:
     if token.lower() in _BARE_LITERALS:
         return True
-    return _NUMBER_RE.fullmatch(token) is not None
+    if _NUMBER_RE.fullmatch(token) is not None:
+        return True
+    return _SEPARATED_NUMBER_RE.fullmatch(token) is not None
 
 
 _URL_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*://")
@@ -215,6 +238,11 @@ def _normalize_bare_json(text: str) -> str | None:
             prev = '"'
             changed = True
             continue
+        if _is_bare_literal(token):
+            canonical = _canonical_number(token)
+            if canonical != token:
+                token = canonical
+                changed = True
         prev = token
         out.append(token)
     if not changed:
@@ -345,8 +373,6 @@ def _extract_json_object(text: str) -> tuple[dict, int, int] | None:
     start, end = bounds
     try:
         obj = _loads_lenient(stripped[start : end + 1])
-        if not isinstance(obj, dict):
-            return None
     except ValueError:
         return None
     return obj, start, end

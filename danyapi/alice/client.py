@@ -7,16 +7,15 @@ import logging
 import re
 import time
 import uuid
-from collections.abc import AsyncIterator
-from typing import Any, cast
+from typing import Any
 
 import websockets
 from websockets.exceptions import WebSocketException
+from websockets.typing import Origin
 
 log = logging.getLogger("danyapi.alice")
 
 WS_URL = "wss://uniproxy.alice.yandex.net/uni.ws"
-LEGACY_WS_URL = "wss://uniproxy.alice.ya.ru/uni.ws"
 ORIGIN = "https://alice.yandex.ru"
 ORIGIN_DOMAIN = "alice.yandex.ru"
 
@@ -43,10 +42,15 @@ SCENARIO_NAME = "Dialogovo"
 STACK_SCENARIO_NAME = "dialogovo"
 
 HANDSHAKE_TIMEOUT = 20.0
-FRAME_TIMEOUT = 90.0
 PING_TIMEOUT = 30.0
 MAX_CONTINUATIONS = 24
 HARD_MAX_PROMPT = 6000
+MAX_PENDING_FRAMES = 64
+CONTINUATION_DELAY = 0.05
+TRIM_ELLIPSIS = "\n...\n"
+MIN_PROMPT_TAIL = 512
+REFUSAL_MAX_LEN = 240
+REFUSAL_MARKER_SLACK = 48
 
 MODEL_NAMES = {
     "alice": "Alice AI (Yandex)",
@@ -105,14 +109,20 @@ def _text_of(content: Any) -> str:
 def fold_messages(messages: Any) -> str:
     lines: list[str] = []
     for message in messages or []:
-        role = getattr(message, "role", None) or (message.get("role") if isinstance(message, dict) else "user")
+        if isinstance(message, dict):
+            role = message.get("role")
+            text = message.get("content")
+        else:
+            role = getattr(message, "role", None)
+            text = getattr(message, "content", None)
+        if not isinstance(role, str) or not role:
+            role = "user"
         if role == "developer":
             role = "system"
-        text = _text_of(getattr(message, "content", None) if not isinstance(message, dict) else message.get("content"))
-        text = text.strip()
+        text = _text_of(text).strip()
         if not text:
             continue
-        lines.append(f"{str(role).capitalize()}: {text}")
+        lines.append(f"{role.capitalize()}: {text}")
     if not lines:
         return "Hello"
     return "\n".join(lines)
@@ -122,7 +132,16 @@ def trim_prompt(prompt: str) -> str:
     text = prompt or ""
     if len(text) <= HARD_MAX_PROMPT:
         return text
-    return text[-HARD_MAX_PROMPT:]
+    tail_len = max(MIN_PROMPT_TAIL, HARD_MAX_PROMPT // 8)
+    head_len = HARD_MAX_PROMPT - tail_len - len(TRIM_ELLIPSIS)
+    trimmed = text[:head_len] + TRIM_ELLIPSIS + text[-tail_len:]
+    log.warning(
+        "alice prompt trimmed from %d to %d chars, dropped %d chars from the middle",
+        len(text),
+        len(trimmed),
+        len(text) - len(trimmed),
+    )
+    return trimmed
 
 
 def is_placeholder(text: str) -> bool:
@@ -133,8 +152,20 @@ def is_placeholder(text: str) -> bool:
 
 
 def looks_like_refusal(text: str) -> bool:
-    lowered = (text or "").lower()
-    return any(marker in lowered for marker in AUTH_FINISH_MARKERS + EMPTY_MARKERS + TIMEOUT_MARKERS)
+    lowered = " ".join((text or "").lower().split())
+    if not lowered:
+        return False
+    short = len(lowered) <= REFUSAL_MAX_LEN
+    for marker in AUTH_FINISH_MARKERS + EMPTY_MARKERS + TIMEOUT_MARKERS:
+        found = lowered.find(marker)
+        if found < 0 or found > REFUSAL_MARKER_SLACK:
+            continue
+        if short:
+            return True
+        tail = lowered[found + len(marker) :]
+        if tail[:1] in ("", ".", "!", "?", ",", ";", ":", " "):
+            return True
+    return False
 
 
 class AliceError(Exception):
@@ -149,12 +180,16 @@ class _Directive:
     __slots__ = ("name", "payload")
 
     def __init__(self, raw: Any) -> None:
-        if isinstance(raw, dict):
-            self.name = raw.get("name") if isinstance(raw.get("name"), str) else ""
-            self.payload = raw.get("payload") if isinstance(raw.get("payload"), dict) else {}
-        else:
-            self.name = ""
-            self.payload = {}
+        self.name: str = ""
+        self.payload: dict = {}
+        if not isinstance(raw, dict):
+            return
+        name = raw.get("name")
+        if isinstance(name, str):
+            self.name = name
+        payload = raw.get("payload")
+        if isinstance(payload, dict):
+            self.payload = payload
 
 
 class AliceStream:
@@ -176,10 +211,14 @@ class AliceClient:
         self.url = url
         self.timeout = float(timeout)
         self.app_version = app_version
+        self.origin: Origin = Origin(ORIGIN)
+        self.frame_timeout = max(1.0, min(self.timeout / 2.0, PING_TIMEOUT))
+        self.handshake_timeout = max(1.0, min(self.timeout / 3.0, HANDSHAKE_TIMEOUT))
+        self.request_timeout = max(1.0, self.timeout)
         self._ws: Any = None
         self._reader: asyncio.Task | None = None
         self._sync = asyncio.Event()
-        self._frames: asyncio.Queue = asyncio.Queue()
+        self._frames: asyncio.Queue = asyncio.Queue(maxsize=MAX_PENDING_FRAMES)
         self._send_lock = asyncio.Lock()
         self._seq = 1
         self._uuid = new_id()
@@ -209,9 +248,12 @@ class AliceClient:
     async def _send(self, message: dict) -> None:
         ws = self._ws
         if ws is None:
-            raise AliceError(CONNECT_FAILED, "socket is not connected")
+            raise AliceError(CONNECT_FAILED, "socket is not connected", retryable=True)
         async with self._send_lock:
-            await ws.send(json.dumps(message, ensure_ascii=False))
+            try:
+                await ws.send(json.dumps(message, ensure_ascii=False))
+            except (WebSocketException, OSError, RuntimeError) as exc:
+                raise AliceError(CONNECT_DROPPED, f"alice socket write failed: {exc}", retryable=True) from exc
 
     def _application(self) -> dict:
         return {
@@ -343,9 +385,10 @@ class AliceClient:
                 await self._frames.put(directive)
         except asyncio.CancelledError:
             raise
-        except (WebSocketException, OSError, RuntimeError) as exc:
-            log.debug("alice socket closed: %s", exc)
-            await self._frames.put(None)
+        except BaseException as exc:
+            log.debug("alice socket reader stopped: %r", exc)
+            with contextlib.suppress(Exception):
+                await self._frames.put(None)
 
     async def _ensure_connected(self) -> None:
         if self._ws is not None and self._reader is not None and not self._reader.done():
@@ -353,41 +396,50 @@ class AliceClient:
         await self._close()
         self._closed = False
         self._sync = asyncio.Event()
-        self._frames = asyncio.Queue()
+        self._frames = asyncio.Queue(maxsize=MAX_PENDING_FRAMES)
         self._seq = 1
         self._uuid = new_id()
         self._last_request_id = None
         self._stack_session_id = None
         try:
             self._ws = await asyncio.wait_for(
-                websockets.connect(self.url, origin=cast("Any", ORIGIN), ping_interval=None, open_timeout=25.0),
-                timeout=25.0,
+                websockets.connect(
+                    self.url,
+                    origin=self.origin,
+                    ping_interval=self.frame_timeout,
+                    ping_timeout=self.frame_timeout,
+                    close_timeout=5.0,
+                    open_timeout=self.request_timeout,
+                ),
+                timeout=self.request_timeout,
             )
         except (OSError, WebSocketException, asyncio.TimeoutError) as exc:
             raise AliceError(CONNECT_FAILED, f"could not reach alice: {exc}", retryable=True) from exc
         self._reader = asyncio.create_task(self._read_loop())
-        await self._send(
-            {
-                "event": {
-                    "header": {
-                        "namespace": "System",
-                        "name": "SynchronizeState",
-                        "messageId": new_id(),
-                        "seqNumber": 1,
-                    },
-                    "payload": {
-                        "auth_token": new_id(),
-                        "uuid": self._uuid,
-                        "vins": {"application": {"app_id": APP_ID, "platform": PLATFORM}},
-                    },
-                }
-            }
-        )
         try:
-            await asyncio.wait_for(self._sync.wait(), timeout=HANDSHAKE_TIMEOUT)
-        except asyncio.TimeoutError as exc:
+            await self._send(
+                {
+                    "event": {
+                        "header": {
+                            "namespace": "System",
+                            "name": "SynchronizeState",
+                            "messageId": new_id(),
+                            "seqNumber": 1,
+                        },
+                        "payload": {
+                            "auth_token": new_id(),
+                            "uuid": self._uuid,
+                            "vins": {"application": {"app_id": APP_ID, "platform": PLATFORM}},
+                        },
+                    }
+                }
+            )
+            await asyncio.wait_for(self._sync.wait(), timeout=self.handshake_timeout)
+        except (AliceError, OSError, WebSocketException, asyncio.TimeoutError) as exc:
             await self._close()
-            raise AliceError(CONNECT_FAILED, "alice did not confirm the session", retryable=True) from exc
+            reason = exc.message if isinstance(exc, AliceError) else str(exc)
+            code = exc.code if isinstance(exc, AliceError) else CONNECT_FAILED
+            raise AliceError(code, f"alice handshake failed: {reason}", retryable=True) from exc
 
     @staticmethod
     def _extract(directive: dict, stream: AliceStream) -> None:
@@ -401,8 +453,6 @@ class AliceClient:
         text = ""
         for raw in response.get("directives") or []:
             item = _Directive(raw)
-            if not isinstance(item.payload, dict):
-                continue
             value = item.payload.get("text")
             if isinstance(value, str) and value:
                 text = value
@@ -437,10 +487,15 @@ class AliceClient:
                 stream.done = True
 
     async def _pump(self, message: dict, stream: AliceStream) -> None:
+        deadline = time.monotonic() + self.request_timeout
         await self._send(message)
-        for _ in range(MAX_CONTINUATIONS):
+        for index in range(MAX_CONTINUATIONS):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                log.warning("alice continuation deadline of %.0fs reached after %d steps", self.request_timeout, index)
+                raise AliceError(UPSTREAM_TIMEOUT, "alice did not answer within the request budget", retryable=True)
             try:
-                directive = await asyncio.wait_for(self._frames.get(), timeout=PING_TIMEOUT)
+                directive = await asyncio.wait_for(self._frames.get(), timeout=min(self.frame_timeout, remaining))
             except asyncio.TimeoutError as exc:
                 raise AliceError(UPSTREAM_TIMEOUT, "alice did not answer in time", retryable=True) from exc
             if directive is None:
@@ -462,8 +517,10 @@ class AliceClient:
             if stream.done:
                 return
             continuation, _ = self._continuation_message()
+            await asyncio.sleep(CONTINUATION_DELAY)
             await self._send(continuation)
-        raise AliceError(EMPTY_ANSWER, "alice produced no answer after continuations", retryable=True)
+        detail = f": {stream.placeholder}" if stream.placeholder else ""
+        raise AliceError(EMPTY_ANSWER, f"alice produced no answer after continuations{detail}", retryable=True)
 
     async def ask(self, prompt: str) -> AliceStream:
         text = trim_prompt(prompt)
@@ -473,25 +530,17 @@ class AliceClient:
         stream = AliceStream()
         message, _ = self._prompt_message(text)
         await self._pump(message, stream)
-        if not stream.content:
-            if stream.placeholder:
-                raise AliceError(EMPTY_ANSWER, f"alice answered with a placeholder: {stream.placeholder}", retryable=True)
-            raise AliceError(EMPTY_ANSWER, "alice returned an empty answer", retryable=True)
         if looks_like_refusal(stream.content):
             raise AliceError(EMPTY_ANSWER, f"alice declined to answer: {stream.content[:160]}", retryable=True)
         log.debug("alice answered %d chars, version=%s", len(stream.content), stream.version or "unknown")
         return stream
-
-    async def stream_ask(self, prompt: str) -> AsyncIterator[AliceStream]:
-        stream = await self.ask(prompt)
-        yield stream
 
     async def check_auth(self) -> bool:
         try:
             await self._ensure_connected()
         except AliceError:
             return False
-        return self._ws is not None
+        return self._ws is not None and self._reader is not None and not self._reader.done()
 
     async def fetch_models(self) -> list[dict]:
         return [
@@ -503,13 +552,6 @@ class AliceClient:
             }
             for alias, name in MODEL_NAMES.items()
         ]
-
-    async def fetch_version(self) -> str:
-        try:
-            stream = await self.ask("Привет")
-        except AliceError:
-            return ""
-        return stream.version
 
     async def resolve_version(self) -> str:
         try:

@@ -8,6 +8,7 @@ from fastapi import HTTPException
 
 import danyapi.api.chats as chats_mod
 import danyapi.api.deepseek as deepseek_mod
+import danyapi.api.models as models_mod
 import danyapi.api.openai as openai_mod
 import danyapi.api.retry as retry_mod
 from danyapi.api.openai import ChatMessage, _collect_non_stream, _stream_openai, app
@@ -561,9 +562,9 @@ def test_model_type_mapping():
         }
     ]
     try:
-        assert openai_mod._resolve_model("default") == "default"
-        assert openai_mod._resolve_model("default-thinking") == "default"
-        assert openai_mod._resolve_model("deepseek-v4.1-flash") == "default"
+        assert models_mod._resolve_model("default") == "default"
+        assert models_mod._resolve_model("default-thinking") == "default"
+        assert models_mod._resolve_model("deepseek-v4.1-flash") == "default"
         assert openai_mod._default_deepseek_model_type() == "default"
     finally:
         app.state.deepseek_models = []
@@ -571,13 +572,13 @@ def test_model_type_mapping():
 
 def test_model_type_mapping_unknown_model():
     with pytest.raises(HTTPException) as excinfo:
-        openai_mod._resolve_model("nope")
+        models_mod._resolve_model("nope")
     assert excinfo.value.status_code == 404
 
 
 def test_model_type_mapping_falls_back_to_upstream_default():
     try:
-        assert openai_mod._resolve_model("deepseek-v4.1-flash") == "default"
+        assert models_mod._resolve_model("deepseek-v4.1-flash") == "default"
     finally:
         app.state.deepseek_models = []
 

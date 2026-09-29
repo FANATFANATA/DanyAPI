@@ -1,18 +1,24 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
-from itertools import chain
 from typing import Any
 
 _CJK_RANGES = ((0x3400, 0x4DBF), (0x4E00, 0x9FFF), (0xF900, 0xFAFF), (0x3040, 0x30FF), (0xAC00, 0xD7AF))
-_CJK_TABLE = dict.fromkeys(chain.from_iterable(range(lo, hi + 1) for lo, hi in _CJK_RANGES))
+_CJK_RE = re.compile("[" + "".join(f"{chr(low)}-{chr(high)}" for low, high in _CJK_RANGES) + "]")
+_CJK_MATCH_RE = _CJK_RE.match
 _IMAGE_TOKEN_COST = 85
+MESSAGE_OVERHEAD_TOKENS = 3
+
+
+def _is_cjk(char: str) -> bool:
+    return _CJK_MATCH_RE(char) is not None
 
 
 def _cjk_count(text: str) -> int:
     if text.isascii():
         return 0
-    return len(text) - len(text.translate(_CJK_TABLE))
+    return sum(1 for _ in _CJK_RE.finditer(text))
 
 
 def _units(cjk: int, other: int) -> int:
@@ -37,7 +43,7 @@ def _head_length(word: str, budget: int) -> int:
     cjk = 0
     length = 0
     for char in word:
-        candidate_cjk = cjk + _cjk_count(char)
+        candidate_cjk = cjk + 1 if _is_cjk(char) else cjk
         if _units(candidate_cjk, length + 1 - candidate_cjk) > budget:
             break
         cjk = candidate_cjk
@@ -103,6 +109,8 @@ class StreamBudget:
         text = "".join(self._chunks)
         trimmed = self._trim(text, self._budget)
         if trimmed == text:
+            self.done = True
+            self._chunks = [text]
             return piece
         self.done = True
         self._chunks = [trimmed]
@@ -112,16 +120,21 @@ class StreamBudget:
         return trimmed[len(previous) :]
 
 
-def count_message_tokens(message: Any) -> int:
+def _message_fields(message: Any) -> tuple[Any, Any] | None:
     if isinstance(message, dict):
-        content = message.get("content")
-        tool_calls = message.get("tool_calls")
-    elif hasattr(message, "content"):
-        content = getattr(message, "content", None)
-        tool_calls = getattr(message, "tool_calls", None)
-    else:
+        return message.get("content"), message.get("tool_calls")
+    content = getattr(message, "content", None)
+    if content is None and getattr(message, "tool_calls", None) is None:
+        return None
+    return content, getattr(message, "tool_calls", None)
+
+
+def count_message_tokens(message: Any) -> int:
+    fields = _message_fields(message)
+    if fields is None:
         return 0
-    tokens = 3
+    content, tool_calls = fields
+    tokens = MESSAGE_OVERHEAD_TOKENS
     if isinstance(content, str):
         tokens += estimate_tokens(content)
     elif isinstance(content, list):

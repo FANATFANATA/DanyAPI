@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 
 from danyapi.accounts import AccountPool
 from danyapi.api.models import _resolve_provider
-from danyapi.api.openai import app
+from danyapi.api.openai import app, settings
 from danyapi.api.schemas import ChatMessage
 from danyapi.duckai import api as duckai_api
 from danyapi.duckai import attest
@@ -124,9 +124,13 @@ def test_handler_registry_covers_duckai():
 
 
 def test_health_reports_duckai():
-    body = TestClient(app).get("/health").json()
+    body = TestClient(app).get("/health", headers={"x-api-key": settings.admin_token}).json()
     assert "duckai" in body
     assert body["duckai"] is False
+
+
+def test_health_hides_duckai_without_admin_token():
+    assert TestClient(app).get("/health").json() == {"status": "ok"}
 
 
 def test_models_endpoint_includes_duckai():
@@ -247,6 +251,24 @@ def test_duckai_surfaces_reasoning_and_tool_calls():
     assert message["reasoning_content"] == "thinking"
     assert message["tool_calls"][0]["function"]["name"] == "lookup"
     assert resp.json()["choices"][0]["finish_reason"] == "tool_calls"
+
+
+def test_duckai_no_image_hint_matches_only_capability_failures():
+    from danyapi.duckai.api import NO_IMAGE_HINT, _detail_for
+
+    for message in ("Model does not support image input", "unsupported image type", "no image support for this model"):
+        assert _detail_for(DuckAIError(400, message)) == f"{NO_IMAGE_HINT}: {message}"
+    unrelated = "tool could not process image bytes from the request"
+    detail = _detail_for(DuckAIError(500, unrelated))
+    assert NO_IMAGE_HINT not in detail
+    assert unrelated in detail
+
+
+def test_duckai_hints_do_not_disclose_internals():
+    for hint in (BLOCKED_HINT, duckai_api.ENTRYPOINT_HINT):
+        assert "jsa_solver" not in hint
+        assert "x-fe-version" not in hint.lower()
+    assert "did not pass DuckDuckGo's check" in BLOCKED_HINT
 
 
 def test_duckai_challenge_maps_to_403_with_hint():

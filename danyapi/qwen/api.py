@@ -7,6 +7,7 @@ import re
 import time
 import uuid
 from collections.abc import AsyncIterator, Iterable, Iterator
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -23,8 +24,7 @@ from ..api.retry import (
 )
 from ..api.shaping import _apply_limits, _bounded_choices, _max_calls, _usage_with_details
 from ..config import settings
-from ..deepseek.stream import IncrementalSSE
-from ..sseutil import StreamStopFilter, split_stop
+from ..sseutil import IncrementalSSE, StreamStopFilter, split_stop
 from ..tokens import StreamBudget, estimate_tokens, trim_to_tokens
 from ..usage import record_usage_dict
 from .client import QwenClient, QwenError
@@ -33,6 +33,8 @@ from .stream import QwenStreamReconstructor, error_code
 log = logging.getLogger("danyapi.qwen.api")
 
 AUTH_HTTP_STATUSES = {401, 403}
+
+CONTEXT_LIMIT_MESSAGE = "context length exceeded: conversation too long, start a new conversation"
 
 RETRYABLE_ERROR_CODES = {
     "Too_Many_Requests",
@@ -202,8 +204,6 @@ async def _send_completion(
             search=search,
             chat_type=chat_type,
         )
-    except httpx.HTTPStatusError as exc:
-        raise HTTPException(exc.response.status_code, exc.response.text[:500]) from exc
     except httpx.HTTPError as exc:
         raise HTTPException(502, f"Qwen request failed: {exc}") from exc
 
@@ -249,14 +249,9 @@ def _is_retryable_error(rec: QwenStreamReconstructor) -> bool:
     return bool(rec.error and error_code(rec.error) in RETRYABLE_ERROR_CODES and not rec.has_content)
 
 
-def _error_detail(rec: QwenStreamReconstructor) -> dict:
+def _error_detail(rec: QwenStreamReconstructor) -> str:
     err = rec.error or {}
-    return {
-        "error": {
-            "message": err.get("details") or err.get("message") or "Qwen server error, try again later",
-            "code": err.get("code"),
-        }
-    }
+    return str(err.get("details") or err.get("message") or "Qwen server error, try again later")
 
 
 def _sse(data: dict) -> str:
@@ -321,7 +316,7 @@ def _accumulate_usage(session, rec: QwenStreamReconstructor, prompt: str = "", c
     }
 
 
-def _commit_usage(account, session, session_key: str, rec: QwenStreamReconstructor, model: str, prompt: str, user) -> dict:
+def _commit_usage(account, session, session_key: str | None, rec: QwenStreamReconstructor, model: str, prompt: str, user) -> dict:
     usage = _accumulate_usage(session, rec, prompt, completion_text=rec.content or rec.reasoning)
     account.sessions.touch_last_message(session_key, rec.response_id)
     record_usage_dict("qwen", model, usage, user=user, session_id=session_key)
@@ -366,118 +361,189 @@ def _build_limited_message(
     return message, limit_finish
 
 
-async def _collect_response(
-    account: Any,
-    pool: Any,
-    session: Any,
-    session_key: str | None,
+@dataclass
+class _CollectRequest:
+    account: Any
+    pool: Any
+    existing_sid: str | None
+    model_id: str
+    context_seq: tuple[str, ...] | None
+    messages: list[Any] | None
+    tools: Any
+    tool_choice: Any
+    response_format: Any
+    cached_session: Any
+    prompt: str
+    tool_mode: bool
+    tool_schemas: Any
+    thinking: bool = False
+    search: bool = False
+    chat_type: str = "t2t"
+    session: Any = None
+    session_key: str | None = None
+    prompt_with_images: str = ""
+    had_cached_session: bool = False
+    prepared: bool = False
+
+    def rebuild_prompt(self) -> None:
+        if self.messages is None:
+            return
+        self.prompt, self.tool_mode = toolemu.build_prompt(self.messages, self.tools, self.tool_choice, False, self.response_format)
+        self.tool_schemas = toolemu.tool_schema_map(self.tools)
+        self.prompt_with_images = _append_image_markdown(self.prompt, self.messages)
+
+
+def _make_request(
+    account,
+    pool,
+    existing_sid,
     prompt: str,
     model_id: str,
     thinking: bool,
     search: bool,
-    chat_type: str,
-    existing_sid: str | None,
+    tool_mode: bool,
+    tool_schemas: Any,
     context_seq: tuple[str, ...] | None,
     messages: list[Any] | None,
     tools: Any,
     tool_choice: Any,
     response_format: Any,
-    had_cached_session: bool,
-    tool_mode: bool,
-    tool_schemas: Any,
-) -> tuple[QwenStreamReconstructor, Any, Any, str, bool, Any]:
+    cached_session: Any,
+    chat_type: str = "t2t",
+) -> _CollectRequest:
+    return _CollectRequest(
+        account=account,
+        pool=pool,
+        existing_sid=existing_sid,
+        model_id=model_id,
+        context_seq=context_seq,
+        messages=messages,
+        tools=tools,
+        tool_choice=tool_choice,
+        response_format=response_format,
+        cached_session=cached_session,
+        prompt=prompt,
+        tool_mode=tool_mode,
+        tool_schemas=tool_schemas,
+        thinking=thinking,
+        search=search,
+        chat_type=chat_type,
+        prompt_with_images=_append_image_markdown(prompt, messages),
+    )
+
+
+async def _ensure_prepared(req: _CollectRequest) -> None:
+    if req.prepared:
+        return
+    req.had_cached_session = bool(req.existing_sid) and req.account.sessions.get(req.existing_sid) is not None
+    req.session, req.session_key = await _prepare_session(req.account, req.pool, req.existing_sid, req.model_id, req.context_seq)
+    req.prepared = True
+    if req.messages is not None and (req.session_key != req.existing_sid or req.session is not req.cached_session):
+        try:
+            req.rebuild_prompt()
+        except ValueError:
+            pass
+
+
+def _detail_text(exc: HTTPException) -> str:
+    return exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+
+
+async def _collect_response(req: _CollectRequest, lock, lock_timeout) -> QwenStreamReconstructor:
     stop_response_id: str | None = None
     stale_rebuilt = False
     attempt = 0
     rec: QwenStreamReconstructor | None = None
-    prompt_with_images = _append_image_markdown(prompt, messages)
     try:
         while True:
-            try:
-                resp = await _send_completion(
-                    account.client,
-                    session,
-                    prompt_with_images,
-                    model_id,
-                    thinking,
-                    search,
-                    chat_type,
-                )
-            except ContextLimitError:
-                _drop_session(pool, account, session_key)
-                raise HTTPException(
-                    400,
-                    "context length exceeded: conversation too long, start a new conversation",
-                ) from None
-            except HTTPException as exc:
-                if exc.status_code in AUTH_HTTP_STATUSES:
-                    account.mark_broken()
-                if exc.status_code in STALE_SESSION_STATUSES and had_cached_session and not stale_rebuilt and messages is not None:
-                    stale_rebuilt = True
-                    _drop_session(pool, account, session_key)
-                    try:
-                        prompt, tool_mode = toolemu.build_prompt(messages, tools, tool_choice, False, response_format)
-                        tool_schemas = toolemu.tool_schema_map(tools)
-                    except ValueError as build_exc:
-                        raise exc from build_exc
-                    prompt_with_images = _append_image_markdown(prompt, messages)
-                    log.warning(
-                        "qwen chat %s is stale (%s), rebuilt full history into a fresh chat",
-                        session_key,
-                        exc.status_code,
-                    )
-                    session, session_key = await _prepare_session(account, pool, existing_sid, model_id, context_seq)
-                    stop_response_id = None
-                    continue
-                if _is_retryable_http(exc) and attempt < MAX_RETRIES:
-                    attempt += 1
-                    delay = _retry_delay(attempt)
-                    log.warning(
-                        "qwen provider error (%s), retry %d/%d in %.1fs",
-                        exc.status_code,
-                        attempt,
-                        MAX_RETRIES,
-                        delay,
-                    )
-                    await asyncio.sleep(delay)
-                    continue
-                raise
-            rec = QwenStreamReconstructor()
-            incremental = IncrementalSSE()
-            try:
-                async for chunk in resp.aiter_bytes():
-                    for event in incremental.feed(chunk):
-                        rec.handle(event)
-                for event in incremental.finish():
-                    rec.handle(event)
-                rec.finalize()
-            except (httpx.HTTPError, RuntimeError) as exc:
-                raise HTTPException(502, f"Stream processing failed: {exc}") from exc
-            finally:
-                if rec.response_id:
-                    stop_response_id = rec.response_id
+            delay = 0.0
+            result: QwenStreamReconstructor | None = None
+            async with account_lock(lock, lock_timeout):
+                await _ensure_prepared(req)
                 try:
-                    await resp.aclose()
-                except Exception as exc:
-                    log.debug("response close failed: %s", exc)
-            if _is_retryable_error(rec) and attempt < MAX_RETRIES:
-                attempt += 1
-                delay = _retry_delay(attempt)
-                log.warning(
-                    "qwen retryable error (%s), retry %d/%d in %.1fs",
-                    error_code(rec.error),
-                    attempt,
-                    MAX_RETRIES,
-                    delay,
-                )
-                await _try_stop_stream(account.client, session.id, stop_response_id)
-                await asyncio.sleep(delay)
+                    resp = await _send_completion(
+                        req.account.client,
+                        req.session,
+                        req.prompt_with_images,
+                        req.model_id,
+                        req.thinking,
+                        req.search,
+                        req.chat_type,
+                    )
+                except ContextLimitError:
+                    _drop_session(req.pool, req.account, req.session_key)
+                    raise HTTPException(400, CONTEXT_LIMIT_MESSAGE) from None
+                except HTTPException as exc:
+                    if exc.status_code in AUTH_HTTP_STATUSES:
+                        req.account.mark_broken()
+                    if exc.status_code in STALE_SESSION_STATUSES and req.had_cached_session and not stale_rebuilt and req.messages is not None:
+                        stale_rebuilt = True
+                        _drop_session(req.pool, req.account, req.session_key)
+                        try:
+                            req.rebuild_prompt()
+                        except ValueError as build_exc:
+                            raise exc from build_exc
+                        log.warning(
+                            "qwen chat %s is stale (%s), rebuilt full history into a fresh chat",
+                            req.session_key,
+                            exc.status_code,
+                        )
+                        req.session, req.session_key = await _prepare_session(req.account, req.pool, req.existing_sid, req.model_id, req.context_seq)
+                        stop_response_id = None
+                    elif _is_retryable_http(exc) and attempt < MAX_RETRIES:
+                        attempt += 1
+                        delay = _retry_delay(attempt)
+                        log.warning(
+                            "qwen provider error (%s), retry %d/%d in %.1fs",
+                            exc.status_code,
+                            attempt,
+                            MAX_RETRIES,
+                            delay,
+                        )
+                    else:
+                        raise
+                else:
+                    rec = QwenStreamReconstructor()
+                    incremental = IncrementalSSE()
+                    try:
+                        async for chunk in resp.aiter_bytes():
+                            for event in incremental.feed(chunk):
+                                rec.handle(event)
+                        for event in incremental.finish():
+                            rec.handle(event)
+                        rec.finalize()
+                    except (httpx.HTTPError, RuntimeError) as exc:
+                        raise HTTPException(502, f"Stream processing failed: {exc}") from exc
+                    finally:
+                        if rec.response_id:
+                            stop_response_id = rec.response_id
+                        try:
+                            await resp.aclose()
+                        except Exception as exc:
+                            log.debug("response close failed: %s", exc)
+                    if _is_retryable_error(rec) and attempt < MAX_RETRIES:
+                        attempt += 1
+                        delay = _retry_delay(attempt)
+                        log.warning(
+                            "qwen retryable error (%s), retry %d/%d in %.1fs",
+                            error_code(rec.error),
+                            attempt,
+                            MAX_RETRIES,
+                            delay,
+                        )
+                        await _try_stop_stream(req.account.client, req.session.id, stop_response_id)
+                    else:
+                        result = rec
+            if result is None:
+                if delay > 0:
+                    await asyncio.sleep(delay)
                 continue
-            return rec, session, session_key, prompt, tool_mode, tool_schemas
+            return result
     except BaseException:
         if rec is not None and rec.response_id:
             stop_response_id = rec.response_id
-        await _try_stop_stream(account.client, session.id, stop_response_id)
+        session_id = str(req.session.id) if req.session is not None else ""
+        await _try_stop_stream(req.account.client, session_id, stop_response_id)
         raise
 
 
@@ -505,48 +571,34 @@ async def collect_non_stream(
     parallel_tool_calls: bool | None = None,
     cached_session=None,
 ):
+    req = _make_request(
+        account,
+        pool,
+        existing_sid,
+        prompt,
+        model_id,
+        thinking,
+        search,
+        tool_mode,
+        tool_schemas,
+        context_seq,
+        messages,
+        tools,
+        tool_choice,
+        response_format,
+        cached_session,
+    )
+    rec = await _collect_response(req, lock, settings.acquire_timeout)
     async with account_lock(lock, settings.acquire_timeout):
-        had_cached_session = bool(existing_sid) and account.sessions.get(existing_sid) is not None
-        session, session_key = await _prepare_session(account, pool, existing_sid, model_id, context_seq)
-        if (session_key != existing_sid or session is not cached_session) and messages is not None:
-            try:
-                prompt, tool_mode = toolemu.build_prompt(messages, tools, tool_choice, False, response_format)
-            except ValueError:
-                pass
-            tool_schemas = toolemu.tool_schema_map(tools)
-        rec, session, session_key, prompt, tool_mode, tool_schemas = await _collect_response(
-            account,
-            pool,
-            session,
-            session_key,
-            prompt,
-            model_id,
-            thinking,
-            search,
-            "t2t",
-            existing_sid,
-            context_seq,
-            messages,
-            tools,
-            tool_choice,
-            response_format,
-            had_cached_session,
-            tool_mode,
-            tool_schemas,
-        )
-
-        if _is_context_limit(rec) and not rec.has_content:
-            _drop_session(pool, account, session_key)
-            raise HTTPException(
-                400,
-                "context length exceeded: conversation too long, start a new conversation",
-            )
-        usage = _commit_usage(account, session, session_key, rec, model, prompt, user)
+        if _is_context_limit(rec):
+            _drop_session(pool, account, req.session_key)
+            raise HTTPException(400, CONTEXT_LIMIT_MESSAGE)
+        usage = _commit_usage(account, req.session, req.session_key, rec, model, req.prompt, user)
 
         if not rec.has_content and rec.error:
             raise HTTPException(_error_status(error_code(rec.error)), _error_detail(rec))
 
-        message, finish = _build_limited_message(rec, tool_mode, tool_schemas, max_tokens, stop, parallel_tool_calls)
+        message, finish = _build_limited_message(rec, req.tool_mode, req.tool_schemas, max_tokens, stop, parallel_tool_calls)
         response = {
             "id": f"chatcmpl-{uuid.uuid4().hex}",
             "object": "chat.completion",
@@ -555,7 +607,7 @@ async def collect_non_stream(
             "system_fingerprint": "fp_danyapi",
             "choices": [{"index": 0, "message": message, "finish_reason": finish, "logprobs": None}],
             "usage": _usage_with_details(usage, rec.reasoning),
-            "session_id": session_key,
+            "session_id": req.session_key,
         }
         choices = _bounded_choices(n)
         if choices > 1:
@@ -591,183 +643,194 @@ async def stream_openai(
 ):
     chunk_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
+    req = _make_request(
+        account,
+        pool,
+        existing_sid,
+        prompt,
+        model_id,
+        thinking,
+        search,
+        tool_mode,
+        tool_schemas,
+        context_seq,
+        messages,
+        tools,
+        tool_choice,
+        response_format,
+        cached_session,
+    )
 
-    async with account_lock(lock, settings.acquire_timeout):
-        had_cached_session = bool(existing_sid) and account.sessions.get(existing_sid) is not None
-        try:
-            session, session_key = await _prepare_session(account, pool, existing_sid, model_id, context_seq)
-        except HTTPException as exc:
-            detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
-            for line in _stream_error_lines(chunk_id, created, model, detail):
-                yield line
-            return
+    content_buf = ""
+    content_shown_len = 0
+    tool_hidden = False
+    role_sent = False
+    got_content = False
+    budget = StreamBudget(max_tokens, trim_to_tokens)
+    stop_markers = split_stop(stop)
+    stop_hit = False
+    dsml_filter = toolemu.DsmlFilter()
+    stop_filter = StreamStopFilter(stop_markers) if stop_markers else None
+    reasoning_filter = toolemu.DsmlFilter()
 
-        if (session_key != existing_sid or session is not cached_session) and messages is not None:
-            try:
-                prompt, tool_mode = toolemu.build_prompt(messages, tools, tool_choice, False, response_format)
-            except ValueError:
-                pass
-            tool_schemas = toolemu.tool_schema_map(tools)
+    def content_piece(piece: str | None) -> str:
+        nonlocal stop_hit
+        if stop_hit:
+            return ""
+        text = dsml_filter.feed(piece)
+        if stop_filter is None:
+            return budget.feed(text)
+        filtered, hit = stop_filter.feed(text)
+        if hit:
+            stop_hit = True
+        return budget.feed(filtered)
 
-        rec: QwenStreamReconstructor | None = None
-        content_buf = ""
-        content_shown_len = 0
-        tool_hidden = False
-        role_sent = False
-        got_content = False
-        budget = StreamBudget(max_tokens, trim_to_tokens)
-        stop_markers = split_stop(stop)
-        stop_hit = False
-        dsml_filter = toolemu.DsmlFilter()
-        stop_filter = StreamStopFilter(stop_markers) if stop_markers else None
-        reasoning_filter = toolemu.DsmlFilter()
-
-        def content_piece(piece: str | None) -> str:
-            nonlocal stop_hit
-            if stop_hit:
-                return ""
-            text = dsml_filter.feed(piece)
-            if stop_filter is None:
-                return budget.feed(text)
-            filtered, hit = stop_filter.feed(text)
-            if hit:
-                stop_hit = True
+    def flush_piece() -> str:
+        nonlocal stop_hit
+        if stop_hit:
+            return ""
+        text = dsml_filter.flush()
+        if stop_filter is None:
+            return budget.feed(text)
+        filtered, hit = stop_filter.feed(text)
+        if hit:
+            stop_hit = True
             return budget.feed(filtered)
+        return budget.feed(filtered) + budget.feed(stop_filter.flush())
 
-        def flush_piece() -> str:
-            nonlocal stop_hit
-            if stop_hit:
-                return ""
-            text = dsml_filter.flush()
-            if stop_filter is None:
-                return budget.feed(text)
-            filtered, hit = stop_filter.feed(text)
-            if hit:
-                stop_hit = True
-                return budget.feed(filtered)
-            return budget.feed(filtered) + budget.feed(stop_filter.flush())
+    def done_finish() -> str:
+        if stop_hit:
+            return "stop"
+        return "length" if budget.done else "stop"
 
-        def done_finish() -> str:
-            if stop_hit:
-                return "stop"
-            return "length" if budget.done else "stop"
+    def reasoning_piece(piece: str | None) -> str:
+        return reasoning_filter.feed(piece)
 
-        def reasoning_piece(piece: str | None) -> str:
-            return reasoning_filter.feed(piece)
+    def flush_reasoning() -> str:
+        return reasoning_filter.flush()
 
-        def flush_reasoning() -> str:
-            return reasoning_filter.flush()
-
-        def role_line() -> str:
-            return _sse(
-                {
-                    "id": chunk_id,
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": model,
-                    "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
-                }
-            )
-
-        def delta_line(delta: dict, index: int = 0) -> str:
-            return _sse(
-                {
-                    "id": chunk_id,
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": model,
-                    "choices": [{"index": index, "delta": delta, "finish_reason": None}],
-                }
-            )
-
-        def finish_line(finish: str, index: int = 0) -> str:
-            payload = {
+    def role_line() -> str:
+        return _sse(
+            {
                 "id": chunk_id,
                 "object": "chat.completion.chunk",
                 "created": created,
                 "model": model,
-                "choices": [{"index": index, "delta": {}, "finish_reason": finish}],
+                "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
             }
-            if session_key:
-                payload["session_id"] = session_key
-            return _sse(payload)
+        )
 
-        def extra_choice_lines(finish: str, count: int, tool_deltas: list[dict]) -> Iterator[str]:
-            for extra_index in range(1, count):
-                if tool_deltas:
-                    for delta in tool_deltas:
-                        yield delta_line(delta, extra_index)
-                elif budget.text:
-                    yield delta_line({"content": budget.text}, extra_index)
-                yield finish_line(finish, extra_index)
+    def delta_line(delta: dict, index: int = 0) -> str:
+        return _sse(
+            {
+                "id": chunk_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [{"index": index, "delta": delta, "finish_reason": None}],
+            }
+        )
 
-        async def pump(source: QwenStreamReconstructor, events: Iterable[Any]) -> AsyncIterator[str]:
-            nonlocal content_buf, content_shown_len, tool_hidden, got_content, role_sent
-            for event in events:
-                source.handle(event)
-                c_diff, r_diff = source.take_diffs()
-                if not (c_diff or r_diff):
-                    continue
-                got_content = True
-                if not role_sent:
-                    role_sent = True
-                    yield role_line()
-                delta: dict = {}
-                if c_diff:
-                    if tool_mode:
-                        content_buf += c_diff
-                        shown, content_shown_len, tool_hidden = toolemu.tool_visible(content_buf, content_shown_len, tool_hidden, tool_schemas)
-                        allowed = content_piece(shown)
-                        if allowed:
-                            delta["content"] = allowed
-                    else:
-                        allowed = content_piece(c_diff)
-                        if allowed:
-                            delta["content"] = allowed
-                if r_diff:
-                    reason = reasoning_piece(r_diff)
-                    if reason:
-                        delta["reasoning_content"] = reason
-                if delta:
-                    yield delta_line(delta)
+    def finish_line(finish: str, index: int = 0) -> str:
+        payload = {
+            "id": chunk_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model,
+            "choices": [{"index": index, "delta": {}, "finish_reason": finish}],
+        }
+        if req.session_key:
+            payload["session_id"] = req.session_key
+        return _sse(payload)
 
-        stop_response_id: str | None = None
-        stale_rebuilt = False
-        attempt = 0
-        prompt_with_images = _append_image_markdown(prompt, messages)
-        while True:
+    def extra_choice_lines(finish: str, count: int, tool_deltas: list[dict]) -> Iterator[str]:
+        for extra_index in range(1, count):
+            if tool_deltas:
+                for delta in tool_deltas:
+                    yield delta_line(delta, extra_index)
+            elif budget.text:
+                yield delta_line({"content": budget.text}, extra_index)
+            yield finish_line(finish, extra_index)
+
+    async def pump(source: QwenStreamReconstructor, events: Iterable[Any]) -> AsyncIterator[str]:
+        nonlocal content_buf, content_shown_len, tool_hidden, got_content, role_sent
+        for event in events:
+            source.handle(event)
+            c_diff, r_diff = source.take_diffs()
+            if not (c_diff or r_diff):
+                continue
+            delta: dict = {}
+            if c_diff:
+                if req.tool_mode:
+                    content_buf += c_diff
+                    shown, content_shown_len, tool_hidden = toolemu.tool_visible(content_buf, content_shown_len, tool_hidden, req.tool_schemas)
+                    allowed = content_piece(shown)
+                    if allowed:
+                        delta["content"] = allowed
+                else:
+                    allowed = content_piece(c_diff)
+                    if allowed:
+                        delta["content"] = allowed
+            if r_diff:
+                reason = reasoning_piece(r_diff)
+                if reason:
+                    delta["reasoning_content"] = reason
+            if not delta:
+                continue
+            if not role_sent:
+                role_sent = True
+                yield role_line()
+            got_content = True
+            yield delta_line(delta)
+
+    stop_response_id: str | None = None
+    stale_rebuilt = False
+    attempt = 0
+    rec: QwenStreamReconstructor
+    while True:
+        delay = 0.0
+        async with account_lock(lock, settings.acquire_timeout):
             try:
-                resp = await _send_completion(account.client, session, prompt_with_images, model_id, thinking, search)
+                await _ensure_prepared(req)
+            except HTTPException as exc:
+                for line in _stream_error_lines(chunk_id, created, model, _detail_text(exc), req.session_key):
+                    yield line
+                return
+            try:
+                resp = await _send_completion(
+                    account.client,
+                    req.session,
+                    req.prompt_with_images,
+                    model_id,
+                    thinking,
+                    search,
+                )
             except ContextLimitError:
-                _drop_session(pool, account, session_key)
-                for line in _stream_context_limit_lines(chunk_id, created, model, session_key):
+                _drop_session(pool, account, req.session_key)
+                for line in _stream_context_limit_lines(chunk_id, created, model, req.session_key):
                     yield line
                 return
             except HTTPException as exc:
                 if exc.status_code in AUTH_HTTP_STATUSES:
                     account.mark_broken()
-                if exc.status_code in STALE_SESSION_STATUSES and had_cached_session and not stale_rebuilt and messages is not None:
+                if exc.status_code in STALE_SESSION_STATUSES and req.had_cached_session and not stale_rebuilt and messages is not None:
                     stale_rebuilt = True
-                    _drop_session(pool, account, session_key)
+                    _drop_session(pool, account, req.session_key)
                     try:
-                        prompt, tool_mode = toolemu.build_prompt(messages, tools, tool_choice, False, response_format)
-                        tool_schemas = toolemu.tool_schema_map(tools)
+                        req.rebuild_prompt()
                     except ValueError:
-                        detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
-                        for line in _stream_error_lines(chunk_id, created, model, detail, session_key):
+                        for line in _stream_error_lines(chunk_id, created, model, _detail_text(exc), req.session_key):
                             yield line
                         return
-                    prompt_with_images = _append_image_markdown(prompt, messages)
                     log.warning(
                         "qwen chat %s is stale (%s), rebuilt full history into a fresh chat",
-                        session_key,
+                        req.session_key,
                         exc.status_code,
                     )
                     try:
-                        session, session_key = await _prepare_session(account, pool, existing_sid, model_id, context_seq)
+                        req.session, req.session_key = await _prepare_session(account, pool, existing_sid, model_id, context_seq)
                     except HTTPException as prep_exc:
-                        detail = prep_exc.detail if isinstance(prep_exc.detail, str) else str(prep_exc.detail)
-                        for line in _stream_error_lines(chunk_id, created, model, detail, session_key):
+                        for line in _stream_error_lines(chunk_id, created, model, _detail_text(prep_exc), req.session_key):
                             yield line
                         return
                     stop_response_id = None
@@ -782,133 +845,138 @@ async def stream_openai(
                         MAX_RETRIES,
                         delay,
                     )
-                    await asyncio.sleep(delay)
-                    continue
-                detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
-                for line in _stream_error_lines(chunk_id, created, model, detail, session_key):
-                    yield line
-                return
-            rec = QwenStreamReconstructor()
-            incremental = IncrementalSSE()
-            got_content = False
-            role_sent = False
-            content_shown_len = 0
-            tool_hidden = False
-            stopped = False
-            stop_hit = False
-            dsml_filter = toolemu.DsmlFilter()
-            stop_filter = StreamStopFilter(stop_markers) if stop_markers else None
-            reasoning_filter = toolemu.DsmlFilter()
-            try:
-                async for chunk in resp.aiter_bytes():
-                    async for line in pump(rec, incremental.feed(chunk)):
+                else:
+                    for line in _stream_error_lines(chunk_id, created, model, _detail_text(exc), req.session_key):
                         yield line
-                for event in incremental.finish():
-                    async for line in pump(rec, [event]):
-                        yield line
-            except BaseException:
-                stopped = True
-                if rec.response_id:
-                    stop_response_id = rec.response_id
-                await _try_stop_stream(account.client, session.id, stop_response_id)
-                raise
-            finally:
-                if rec.response_id:
-                    stop_response_id = rec.response_id
-                try:
-                    await resp.aclose()
-                except Exception as exc:
-                    log.debug("response close failed: %s", exc)
-                    if not stopped:
-                        await _try_stop_stream(account.client, session.id, stop_response_id)
-            if got_content:
-                break
-            if _is_retryable_error(rec) and attempt < MAX_RETRIES:
-                attempt += 1
-                delay = _retry_delay(attempt)
-                log.warning(
-                    "qwen retryable error (%s), retry %d/%d in %.1fs",
-                    error_code(rec.error),
-                    attempt,
-                    MAX_RETRIES,
-                    delay,
-                )
-                await _try_stop_stream(account.client, session.id, stop_response_id)
-                await asyncio.sleep(delay)
-                continue
-            break
-
-        assert rec is not None
-        if _is_context_limit(rec) and not rec.has_content:
-            _drop_session(pool, account, session_key)
-            for line in _stream_context_limit_lines(chunk_id, created, model, session_key):
-                yield line
-            return
-        usage = _commit_usage(account, session, session_key, rec, model, prompt, user)
-
-        if not rec.has_content and rec.error:
-            err = rec.error
-            code = error_code(rec.error)
-            for line in _stream_error_lines(
-                chunk_id,
-                created,
-                model,
-                err.get("details") or err.get("message") or "Qwen server error, try again later",
-                session_key,
-                code,
-                code or "error",
-            ):
-                yield line
-            return
-
-        tool_deltas: list[dict] = []
-        if tool_mode:
-            parsed = toolemu.parse_tool_calls(content_buf, tool_schemas)
-            tool_calls = parsed[0] if parsed is not None else []
-            if tool_calls:
-                if _max_calls(parallel_tool_calls) is not None:
-                    tool_calls = tool_calls[: _max_calls(parallel_tool_calls)]
-                tool_deltas = toolemu.tool_call_deltas(tool_calls)
-                for delta in tool_deltas:
-                    yield delta_line(delta)
-                finish = "tool_calls"
+                    return
             else:
-                remainder = content_piece(content_buf[content_shown_len:])
-                if remainder:
-                    yield delta_line({"content": remainder})
-                finish = done_finish()
-        else:
-            finish = done_finish()
+                rec = QwenStreamReconstructor()
+                incremental = IncrementalSSE()
+                got_content = False
+                role_sent = False
+                content_buf = ""
+                content_shown_len = 0
+                tool_hidden = False
+                budget = StreamBudget(max_tokens, trim_to_tokens)
+                stopped = False
+                stop_hit = False
+                dsml_filter = toolemu.DsmlFilter()
+                stop_filter = StreamStopFilter(stop_markers) if stop_markers else None
+                reasoning_filter = toolemu.DsmlFilter()
+                try:
+                    async for chunk in resp.aiter_bytes():
+                        async for line in pump(rec, incremental.feed(chunk)):
+                            yield line
+                    for event in incremental.finish():
+                        async for line in pump(rec, [event]):
+                            yield line
+                    rec.finalize()
+                except BaseException:
+                    stopped = True
+                    if rec.response_id:
+                        stop_response_id = rec.response_id
+                    await _try_stop_stream(account.client, req.session.id, stop_response_id)
+                    raise
+                finally:
+                    if rec.response_id:
+                        stop_response_id = rec.response_id
+                    try:
+                        await resp.aclose()
+                    except Exception as exc:
+                        log.debug("response close failed: %s", exc)
+                        if not stopped:
+                            await _try_stop_stream(account.client, req.session.id, stop_response_id)
+                if got_content:
+                    break
+                if _is_retryable_error(rec) and attempt < MAX_RETRIES:
+                    attempt += 1
+                    delay = _retry_delay(attempt)
+                    log.warning(
+                        "qwen retryable error (%s), retry %d/%d in %.1fs",
+                        error_code(rec.error),
+                        attempt,
+                        MAX_RETRIES,
+                        delay,
+                    )
+                    await _try_stop_stream(account.client, req.session.id, stop_response_id)
+                else:
+                    break
+        if delay > 0:
+            await asyncio.sleep(delay)
 
-        if not tool_deltas:
-            remainder = flush_piece()
+    usage: dict = {}
+    context_limited = False
+    async with account_lock(lock, settings.acquire_timeout):
+        if _is_context_limit(rec):
+            _drop_session(pool, account, req.session_key)
+            context_limited = True
+        else:
+            usage = _commit_usage(account, req.session, req.session_key, rec, model, req.prompt, user)
+    if context_limited:
+        for line in _stream_context_limit_lines(chunk_id, created, model, req.session_key):
+            yield line
+        return
+
+    if not rec.has_content and rec.error:
+        for line in _stream_error_lines(
+            chunk_id,
+            created,
+            model,
+            _error_detail(rec),
+            req.session_key,
+            error_code(rec.error),
+        ):
+            yield line
+        return
+
+    tool_deltas: list[dict] = []
+    if req.tool_mode:
+        parsed = toolemu.parse_tool_calls(content_buf, req.tool_schemas)
+        tool_calls = parsed[0] if parsed is not None else []
+        if tool_calls:
+            if _max_calls(parallel_tool_calls) is not None:
+                tool_calls = tool_calls[: _max_calls(parallel_tool_calls)]
+            tool_deltas = toolemu.tool_call_deltas(tool_calls)
+            for delta in tool_deltas:
+                yield delta_line(delta)
+            finish = "tool_calls"
+        else:
+            remainder = content_piece(content_buf[content_shown_len:])
             if remainder:
                 yield delta_line({"content": remainder})
+            finish = done_finish()
+    else:
+        finish = done_finish()
 
-        reason_tail = flush_reasoning()
-        if reason_tail:
-            yield delta_line({"reasoning_content": reason_tail})
+    if not tool_deltas:
+        remainder = flush_piece()
+        if remainder:
+            yield delta_line({"content": remainder})
 
-        if not role_sent:
-            role_sent = True
-            yield role_line()
+    reason_tail = flush_reasoning()
+    if reason_tail:
+        yield delta_line({"reasoning_content": reason_tail})
 
-        yield finish_line(finish)
-        for line in extra_choice_lines(finish, _bounded_choices(n), tool_deltas):
-            yield line
-        if include_usage:
-            usage_payload = {
-                "id": chunk_id,
-                "object": "chat.completion.chunk",
-                "created": created,
-                "model": model,
-                "usage": _usage_with_details(usage, rec.reasoning),
-                "choices": [],
-            }
-            if session_key:
-                usage_payload["session_id"] = session_key
-            yield _sse(usage_payload)
-        yield "data: [DONE]\n\n"
+    if not role_sent:
+        role_sent = True
+        yield role_line()
+
+    yield finish_line(finish)
+    for line in extra_choice_lines(finish, _bounded_choices(n), tool_deltas):
+        yield line
+    if include_usage:
+        usage_payload = {
+            "id": chunk_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model,
+            "usage": _usage_with_details(usage, rec.reasoning),
+            "choices": [],
+        }
+        if req.session_key:
+            usage_payload["session_id"] = req.session_key
+        yield _sse(usage_payload)
+    yield "data: [DONE]\n\n"
 
 
 async def collect_image(
@@ -922,37 +990,30 @@ async def collect_image(
     context_seq: tuple[str, ...] | None = None,
     user=None,
 ):
+    req = _make_request(
+        account,
+        pool,
+        existing_sid,
+        prompt,
+        model_id,
+        False,
+        False,
+        False,
+        None,
+        context_seq,
+        None,
+        None,
+        None,
+        None,
+        None,
+        "t2i",
+    )
+    rec = await _collect_response(req, lock, settings.acquire_timeout)
     async with account_lock(lock, settings.acquire_timeout):
-        session, session_key = await _prepare_session(account, pool, existing_sid, model_id, context_seq)
-        had_cached_session = bool(existing_sid) and account.sessions.get(existing_sid) is not None
-        rec, session, session_key, _prompt, _tool_mode, _tool_schemas = await _collect_response(
-            account,
-            pool,
-            session,
-            session_key,
-            prompt,
-            model_id,
-            False,
-            False,
-            "t2i",
-            existing_sid,
-            context_seq,
-            None,
-            None,
-            None,
-            None,
-            had_cached_session,
-            False,
-            None,
-        )
-
-        if _is_context_limit(rec) and not rec.has_content:
-            _drop_session(pool, account, session_key)
-            raise HTTPException(
-                400,
-                "context length exceeded: conversation too long, start a new conversation",
-            )
-        usage = _commit_usage(account, session, session_key, rec, model, prompt, user)
+        if _is_context_limit(rec):
+            _drop_session(pool, account, req.session_key)
+            raise HTTPException(400, CONTEXT_LIMIT_MESSAGE)
+        usage = _commit_usage(account, req.session, req.session_key, rec, model, req.prompt, user)
 
         if not rec.has_content and rec.error:
             raise HTTPException(_error_status(error_code(rec.error)), _error_detail(rec))
@@ -961,5 +1022,5 @@ async def collect_image(
             "image_urls": rec.image_urls,
             "revised_prompt": toolemu.strip_dsml(rec.content or ""),
             "usage": usage,
-            "session_id": session_key,
+            "session_id": req.session_key,
         }

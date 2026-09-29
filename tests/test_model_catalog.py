@@ -175,8 +175,8 @@ async def test_store_models_deepseek_then_resolve_and_route():
     client = MagicMock()
     client.fetch_models = AsyncMock(return_value=DEEPSEEK_RAW)
     await openai_mod._store_models("deepseek", client)
-    assert openai_mod._resolve_model("default") == "default"
-    assert openai_mod._resolve_model("expert-thinking") == "expert"
+    assert models_mod._resolve_model("default") == "default"
+    assert models_mod._resolve_model("expert-thinking") == "expert"
     assert openai_mod._resolve_provider("expert") == "deepseek"
     assert openai_mod._resolve_provider("default-thinking") == "deepseek"
     assert openai_mod._default_deepseek_model_type() == "default"
@@ -186,13 +186,17 @@ async def test_legacy_alias_resolves_to_live_default():
     client = MagicMock()
     client.fetch_models = AsyncMock(return_value=DEEPSEEK_RAW)
     await openai_mod._store_models("deepseek", client)
-    assert openai_mod._resolve_model("deepseek-v4.1-flash") == "default"
+    assert models_mod._resolve_model("deepseek-v4.1-flash") == "default"
+    assert models_mod._resolve_model("deepseek-v4.1-flash-thinking") == "default"
     assert openai_mod._resolve_provider("deepseek-v4.1-flash") == "deepseek"
 
 
 async def test_resolve_model_unknown_raises_404():
     with pytest.raises(HTTPException) as excinfo:
-        openai_mod._resolve_model("nope")
+        models_mod._resolve_model("nope")
+    assert excinfo.value.status_code == 404
+    with pytest.raises(HTTPException) as excinfo:
+        models_mod._resolve_model("nope-thinking")
     assert excinfo.value.status_code == 404
 
 
@@ -382,9 +386,11 @@ def test_health_reports_known_models_per_provider():
     app.state.alice_pool.stats.return_value = {"accounts": 1, "healthy": 1, "broken": 0}
     try:
         client = TestClient(app)
-        payload = client.get("/health").json()
+        payload = client.get("/health", headers={"x-api-key": settings.admin_token}).json()
+        public = client.get("/health").json()
         client.close()
         assert payload["alice"] is True
         assert payload["alice_stats"]["models"] == 2
+        assert public == {"status": "ok"}
     finally:
         app.state.alice_pool = None

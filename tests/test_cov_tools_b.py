@@ -73,8 +73,18 @@ def test_alias_rows_skips_non_string():
 
 
 def test_resolve_alias_none_and_empty_key():
-    assert _resolve_alias("x", None) is None
+    assert _resolve_alias("x", ()) is None
+    assert _resolve_alias("x", {}) is None
     assert _resolve_alias("!!!", {"a": {}}) is None
+    assert _resolve_alias("", {"a": {"_aliases": ["x"]}}) is None
+
+
+def test_resolve_alias_matches_through_a_dict_and_a_seed():
+    schemas = {"known": {"_aliases": ["Other Name", "third"]}}
+    assert _resolve_alias("other name", schemas) == "known"
+    assert _resolve_alias("THIRD", schemas) == "known"
+    assert _resolve_alias("missing", schemas) is None
+    assert _resolve_alias("other name", (("known", ("Other Name", "third")),)) == "known"
 
 
 def test_fuzzy_known_name_short_and_miss():

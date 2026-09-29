@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import contextlib
 import logging
 import time
 import uuid
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 import httpx
@@ -75,7 +77,7 @@ class DeepSeekClient:
     async def aclose(self) -> None:
         await self.http.aclose()
 
-    async def _request_json(self, method: str, path: str, json_error: str, **kwargs) -> dict:
+    async def _request_json(self, method: str, path: str, json_error: str | None = None, **kwargs) -> dict:
         send = self.http.post if method == "POST" else self.http.get
         try:
             resp = await send(path, **kwargs)
@@ -88,21 +90,10 @@ class DeepSeekClient:
         try:
             return resp.json()
         except ValueError as exc:
-            raise DeepSeekError(-1, json_error) from exc
+            raise DeepSeekError(-1, json_error or f"invalid JSON response from {path}: {resp.text[:300]}") from exc
 
     async def _post(self, path: str, json_body: dict | None = None) -> dict:
-        try:
-            resp = await self.http.post(path, json=json_body)
-        except httpx.HTTPError as exc:
-            raise DeepSeekError(-1, f"http request failed: {exc}") from exc
-        try:
-            resp.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            raise DeepSeekError(exc.response.status_code, exc.response.text[:300]) from exc
-        try:
-            return resp.json()
-        except ValueError as exc:
-            raise DeepSeekError(-1, f"invalid JSON response from {path}: {resp.text[:300]}") from exc
+        return await self._request_json("POST", path, json=json_body)
 
     @staticmethod
     def _biz(resp: dict) -> dict:
@@ -155,6 +146,7 @@ class DeepSeekClient:
         models: list[dict] = []
         if not isinstance(configs, list):
             return models
+        disabled: list[str] = []
         for config in configs:
             if not isinstance(config, dict):
                 continue
@@ -162,7 +154,7 @@ class DeepSeekClient:
             if not isinstance(model_type, str) or not model_type:
                 continue
             if not config.get("enabled", True):
-                log.info("deepseek model type %s is disabled upstream, skipping", model_type)
+                disabled.append(model_type)
                 continue
             models.append(
                 {
@@ -176,6 +168,8 @@ class DeepSeekClient:
                     "supports_search": bool(config.get("search_feature")),
                 }
             )
+        if disabled:
+            log.debug("deepseek model types disabled upstream: %s", ", ".join(disabled))
         return models
 
     async def get_user(self) -> dict:
@@ -273,6 +267,34 @@ class DeepSeekClient:
 
     async def delete_session(self, chat_session_id: str) -> None:
         self._biz(await self._post("/api/v0/chat_session/delete", {"chat_session_id": chat_session_id}))
+
+    @contextlib.asynccontextmanager
+    async def stream_completion(
+        self,
+        chat_session_id: str,
+        prompt: str,
+        parent_message_id: str | None,
+        model_type: str = "default",
+        thinking_enabled: bool = False,
+        search_enabled: bool = False,
+        ref_file_ids: list[str] | None = None,
+        pow_headers: dict | None = None,
+    ) -> AsyncIterator[httpx.Response]:
+        resp = await self.completion(
+            chat_session_id,
+            prompt,
+            parent_message_id,
+            model_type,
+            thinking_enabled,
+            search_enabled,
+            ref_file_ids,
+            pow_headers,
+        )
+        try:
+            yield resp
+        finally:
+            with contextlib.suppress(Exception):
+                await resp.aclose()
 
     async def completion(
         self,

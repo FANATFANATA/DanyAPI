@@ -21,6 +21,17 @@ class AccountPoolBusy(Exception):
     pass
 
 
+async def _free_account(candidates: Sequence[Any], timeout: float) -> list[tuple[Any, bool]]:
+    waiters = [asyncio.ensure_future(acct.sem.acquire()) for acct in candidates]
+    try:
+        await asyncio.wait(waiters, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for waiter in waiters:
+            if not waiter.done():
+                waiter.cancel()
+    return [(acct, waiter.done() and not waiter.cancelled() and waiter.exception() is None) for acct, waiter in zip(candidates, waiters, strict=True)]
+
+
 @asynccontextmanager
 async def account_lock(sem: asyncio.Semaphore, max_wait: float | None = None) -> AsyncIterator[None]:
     if max_wait is None:
@@ -61,16 +72,22 @@ class ContextIndex:
         if store is None:
             return
         now = time.monotonic()
+        junk: list[str] = []
         for session_id, record in store.items():
             if not isinstance(session_id, str) or not session_id:
+                junk.append(session_id)
                 continue
             if not isinstance(record, list):
+                junk.append(session_id)
                 continue
             sequence = tuple(item for item in record if isinstance(item, str))
             if not sequence:
+                junk.append(session_id)
                 continue
             self._seqs[session_id] = sequence
             self._touch(session_id, now)
+        for session_id in junk:
+            store.discard(session_id)
         while len(self._seqs) > self._maxsize:
             oldest = next(iter(self._recency))
             self._seqs.pop(oldest, None)
@@ -221,6 +238,7 @@ AccountT = TypeVar("AccountT", bound=_PoolAccount)
 
 class AccountPool(Generic[AccountT]):
     _REVIVE_COOLDOWN = 300.0
+    _REVIVE_AUTH_TIMEOUT = 10.0
 
     def __init__(
         self,
@@ -389,7 +407,7 @@ class AccountPool(Generic[AccountT]):
     async def acquire(self, session_id: str | None, max_wait: float | None = None) -> tuple[AccountT, str | None]:
         healthy = [a for a in self.accounts if not a.broken]
         if not healthy:
-            revived = await self.revive_broken()
+            revived = await self.revive_broken(max_wait)
             if revived is None:
                 if any(getattr(acct, "broken_at", None) is not None for acct in self.accounts):
                     raise AccountPoolBusy()
@@ -428,45 +446,76 @@ class AccountPool(Generic[AccountT]):
                 candidates = self.healthy
             if not candidates:
                 raise AccountPoolBusy()
-            for i, acct in enumerate(candidates):
-                if not acct.sem.locked():
-                    if session_id is not None:
-                        return acct, session_id
-                    self._rr = (i + 1) % len(candidates)
-                    return acct, None
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise AccountPoolBusy()
+            ready = await _free_account(candidates, remaining)
+            for account, held in ready:
+                if not held:
+                    continue
+                account.sem.release()
+                if session_id is not None:
+                    return account, session_id
+                self._rr = (self.accounts.index(account) + 1) % len(candidates)
+                return account, None
             if time.monotonic() >= deadline:
                 raise AccountPoolBusy()
-            await asyncio.sleep(0.05)
 
-    async def revive_broken(self) -> AccountT | None:
+    async def revive_broken(self, max_wait: float | None = None) -> AccountT | None:
         if self._revive_lock.locked():
-            return None
+            timeout = None if max_wait is None else max(0.0, max_wait)
+            try:
+                await asyncio.wait_for(self._revive_lock.acquire(), timeout=timeout)
+            except (TimeoutError, asyncio.TimeoutError):
+                return self._first_healthy()
+            self._revive_lock.release()
+            return self._first_healthy()
         async with self._revive_lock:
-            now = time.monotonic()
-            for acct in self.accounts:
-                if not acct.broken:
-                    continue
-                broken_at = getattr(acct, "broken_at", None)
-                if broken_at is None or now - broken_at < self._REVIVE_COOLDOWN:
-                    continue
-                client = getattr(acct, "client", None)
-                if client is None:
-                    continue
-                try:
-                    ok = await client.check_auth()
-                except Exception:
-                    ok = False
-                if ok:
-                    acct.broken = False
-                    acct.broken_at = None
-                    log.info("%s revived after auth recheck", acct.label)
-                    return acct
-                acct.broken_at = time.monotonic()
+            return await self._revive_pass(max_wait)
+
+    def _first_healthy(self) -> AccountT | None:
+        for account in self.healthy:
+            return account
+        return None
+
+    async def _revive_pass(self, max_wait: float | None) -> AccountT | None:
+        now = time.monotonic()
+        deadline = None if max_wait is None else now + max_wait
+        for acct in self.accounts:
+            if not acct.broken:
+                continue
+            broken_at = getattr(acct, "broken_at", None)
+            if broken_at is None or now - broken_at < self._REVIVE_COOLDOWN:
+                continue
+            client = getattr(acct, "client", None)
+            if client is None:
+                continue
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    log.warning("%s revive budget exhausted after %d account(s)", self.label, len(self.accounts))
+                    return None
+            else:
+                remaining = self._REVIVE_AUTH_TIMEOUT
+            try:
+                ok = await asyncio.wait_for(client.check_auth(), timeout=remaining)
+            except (TimeoutError, asyncio.TimeoutError):
+                log.warning("%s auth recheck timed out", acct.label)
+                ok = False
+            except Exception:
+                ok = False
+            if ok:
+                acct.broken = False
+                acct.broken_at = None
+                log.info("%s revived after auth recheck", acct.label)
+                return acct
+            acct.broken_at = time.monotonic()
         return None
 
     def add_account(self, account: AccountT) -> None:
-        idx = len(self.accounts)
-        self.accounts.append(account)
-        sid = getattr(account, "stable_id", None)
-        if isinstance(sid, str) and sid:
-            self._stable_to_idx[sid] = idx
+        with self._affinity_lock:
+            idx = len(self.accounts)
+            self.accounts.append(account)
+            sid = getattr(account, "stable_id", None)
+            if isinstance(sid, str) and sid:
+                self._stable_to_idx[sid] = idx

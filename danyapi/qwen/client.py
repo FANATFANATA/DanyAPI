@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import datetime
 import logging
+import threading
 import time
 import uuid
 from dataclasses import dataclass
+from typing import Any
 
 import httpx
 
@@ -46,6 +48,7 @@ class _TzCache:
 
 
 _tz_cache = _TzCache()
+_tz_lock = threading.Lock()
 
 
 def timezone_header() -> str:
@@ -57,10 +60,16 @@ def timezone_header() -> str:
 
 def _cached_timezone_header() -> str:
     now = time.monotonic()
-    if now - _tz_cache.ts >= _TIMEZONE_TTL or not _tz_cache.value:
-        _tz_cache.value = timezone_header()
+    if _tz_cache.value and now - _tz_cache.ts < _TIMEZONE_TTL:
+        return _tz_cache.value
+    with _tz_lock:
+        now = time.monotonic()
+        if _tz_cache.value and now - _tz_cache.ts < _TIMEZONE_TTL:
+            return _tz_cache.value
+        value = timezone_header()
+        _tz_cache.value = value
         _tz_cache.ts = now
-    return _tz_cache.value
+        return value
 
 
 @dataclass
@@ -80,6 +89,16 @@ class QwenError(Exception):
         self.message = message
 
 
+def _error_code(value: Any) -> int | str:
+    if isinstance(value, bool):
+        return -1
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, str):
+        return value
+    return -1
+
+
 class QwenClient:
     def __init__(
         self,
@@ -92,10 +111,12 @@ class QwenClient:
         }
         if token:
             headers["Authorization"] = f"Bearer {token}"
+        self._timeout = float(timeout)
+        self._stream_timeout = httpx.Timeout(self._timeout, read=max(self._timeout * 5, 300.0))
         self.http = httpx.AsyncClient(
             base_url=BASE_URL,
             headers=headers,
-            timeout=httpx.Timeout(timeout, read=max(float(timeout) * 5, 300.0)),
+            timeout=httpx.Timeout(self._timeout, read=self._timeout),
             follow_redirects=True,
             limits=httpx.Limits(max_keepalive_connections=20, keepalive_expiry=30.0),
         )
@@ -122,15 +143,24 @@ class QwenClient:
         if not payload.get("success", False):
             data = payload.get("data")
             if isinstance(data, dict) and data.get("code"):
-                raise QwenError(data["code"], data.get("details") or data.get("message") or "")
-            raise QwenError(payload.get("code") or -1, payload.get("details") or payload.get("message") or "request failed")
+                raise QwenError(_error_code(data["code"]), data.get("details") or data.get("message") or "")
+            raise QwenError(
+                _error_code(payload.get("code")),
+                payload.get("details") or payload.get("message") or "request failed",
+            )
         data = payload.get("data")
         return data if isinstance(data, dict) else {}
 
     def _parse_json(self, resp: httpx.Response, path: str) -> dict:
         content_type = resp.headers.get("content-type", "")
         if "json" not in content_type:
-            raise QwenError(-1, f"unexpected non-JSON response from {path}: {resp.text[:200]}")
+            log.warning(
+                "qwen non-JSON response from %s (content-type=%r): %s",
+                path,
+                content_type,
+                resp.text[:200],
+            )
+            raise QwenError(-1, f"unexpected non-JSON response from {path}")
         try:
             payload = resp.json()
         except ValueError as exc:
@@ -249,6 +279,7 @@ class QwenClient:
             params={"chat_id": chat_session_id},
             json=body,
             headers=self._request_headers(headers),
+            timeout=self._stream_timeout,
         )
         return await self.http.send(req, stream=True)
 

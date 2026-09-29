@@ -4,6 +4,9 @@ import asyncio
 import json
 import logging
 import re
+import threading
+import uuid
+from bisect import bisect_left
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -49,7 +52,7 @@ STREAM_CHAT_TITLE = "[CHAT_TITLE:"
 STREAM_DONE = "[DONE]"
 STOP_REASON_PREFIX = "[STOP_REASON:"
 
-EMPTY_CREDENTIAL = ""
+MAX_SSE_LINE_CHARS = 1024 * 1024
 
 DEFAULT_REASONING_EFFORT = "none"
 REASONING_EFFORTS = ("none", "low", "medium")
@@ -143,7 +146,12 @@ FREE_MODEL_IDS = frozenset({"gpt-5.4-mini", "gpt-5.6-luna", "claude-haiku-4-5"})
 
 DEFAULT_MODEL = "gpt-5.4-mini"
 
-CATALOG_ENTRY_RE = re.compile(r'\{model:"(?P<id>[^"]+)"(?P<body>.{0,4000}?)(?=\},\{model:"|\}\]|;\s*var|\}\]\s*=)', re.DOTALL)
+CATALOG_ANCHOR = '{model:"'
+CATALOG_ENTRY_END = '},{model:"'
+CATALOG_TAIL_RE = re.compile(r";\s*var")
+CATALOG_ID_LIMIT = 256
+CATALOG_BODY_LIMIT = 4000
+CATALOG_SCAN_LIMIT = 8 * 1024 * 1024
 CATALOG_FIELD_RE = {
     "name": re.compile(r'modelName:"([^"]*)"'),
     "variant": re.compile(r'modelVariant:(?:"([^"]*)"|null)'),
@@ -170,15 +178,58 @@ def _catalog_efforts(raw: str | None) -> tuple[str, ...]:
     return efforts or REASONING_EFFORTS
 
 
+def _offsets(text: str, needle: str) -> list[int]:
+    found: list[int] = []
+    step = len(needle)
+    pos = text.find(needle)
+    while pos != -1:
+        found.append(pos)
+        pos = text.find(needle, pos + step)
+    return found
+
+
+def _catalog_terminators(text: str) -> list[int]:
+    marks = _offsets(text, CATALOG_ENTRY_END)
+    marks += _offsets(text, "}]")
+    marks += [match.start() for match in CATALOG_TAIL_RE.finditer(text)]
+    marks.sort()
+    return marks
+
+
+def _first_mark(marks: list[int], start: int, limit: int) -> int | None:
+    index = bisect_left(marks, start)
+    if index < len(marks) and marks[index] <= limit:
+        return marks[index]
+    return None
+
+
 def parse_catalog(bundle: str) -> tuple[dict, ...]:
+    text = bundle[:CATALOG_SCAN_LIMIT]
+    anchors = _offsets(text, CATALOG_ANCHOR)
+    if not anchors:
+        return ()
+    quotes = _offsets(text, '"')
+    terminators = _catalog_terminators(text)
     entries: list[dict] = []
-    for match in CATALOG_ENTRY_RE.finditer(bundle):
-        body = match.group("body")
+    cursor = 0
+    for anchor in anchors:
+        if anchor < cursor:
+            continue
+        id_start = anchor + len(CATALOG_ANCHOR)
+        quote = bisect_left(quotes, id_start)
+        if quote >= len(quotes) or quotes[quote] - id_start > CATALOG_ID_LIMIT:
+            continue
+        body_start = quotes[quote] + 1
+        stop = _first_mark(terminators, body_start, body_start + CATALOG_BODY_LIMIT)
+        if stop is None:
+            continue
+        cursor = stop
+        body = text[body_start:stop]
         short_name = _catalog_field(body, "short_name")
         available_to = _catalog_field(body, "available_to")
         if not short_name or not available_to or f".{FREE_TIER}" not in available_to:
             continue
-        model_id = match.group("id")
+        model_id = text[id_start : quotes[quote]]
         name = _catalog_field(body, "name") or short_name
         variant = _catalog_field(body, "variant")
         rank = _catalog_field(body, "cost_rank")
@@ -306,7 +357,7 @@ def parse_event(payload: dict) -> DuckAIEvent:
             event.tool_calls.append(
                 {
                     "index": 0,
-                    "id": payload.get("toolCallId") or f"call_{name}",
+                    "id": payload.get("toolCallId") or f"call_{name}_{uuid.uuid4().hex[:16]}",
                     "type": "function",
                     "function": {"name": name, "arguments": arguments},
                 }
@@ -345,6 +396,32 @@ def parse_control(line: str) -> DuckAIEvent | None:
     return None
 
 
+def _error_for_payload(status: int, payload: Any) -> DuckAIError:
+    message = ""
+    code: int | str = status
+    if isinstance(payload, dict):
+        raw_type = payload.get("type")
+        if isinstance(raw_type, str) and raw_type:
+            code = raw_type
+        raw_message = payload.get("message")
+        if isinstance(raw_message, str) and raw_message:
+            message = raw_message
+        challenge = payload.get("cd")
+        if isinstance(challenge, dict):
+            override = challenge.get("gk")
+            if isinstance(override, str) and override:
+                message = f"{message or 'bot check failed'} (challenge {override})".strip()
+    return DuckAIError(code, message or f"upstream returned {status}")
+
+
+def _reject_oversized_bundle(resp: Any) -> None:
+    declared = resp.headers.get("content-length")
+    if isinstance(declared, str) and declared.isdigit() and int(declared) > CATALOG_SCAN_LIMIT:
+        raise DuckAIError("catalog", f"duck.ai entry bundle is above the {CATALOG_SCAN_LIMIT} byte scan limit")
+    if len(resp.content) > CATALOG_SCAN_LIMIT:
+        raise DuckAIError("catalog", f"duck.ai entry bundle is above the {CATALOG_SCAN_LIMIT} byte scan limit")
+
+
 class DuckAIClient:
     def __init__(
         self,
@@ -354,9 +431,13 @@ class DuckAIClient:
         self.user_agent = user_agent
         self.timeout = float(timeout)
         self._jsa: str = attest.INITIAL_JSA
+        self._jsa_script = ""
+        self._jsa_warm: asyncio.Task[None] | None = None
         self._fe_version: str = ""
         self._jsa_lock = asyncio.Lock()
+        self._refresh_lock = asyncio.Lock()
         self._catalog: tuple[dict, ...] = MODEL_CATALOG
+        self._catalog_lock = threading.Lock()
         self.http = httpx.AsyncClient(
             base_url=BASE_URL,
             headers={
@@ -379,12 +460,14 @@ class DuckAIClient:
             return self._fe_version
         try:
             resp = await self.http.get("/", headers=self._headers({"cache-control": "no-cache"}))
-            tag = FE_VERSION_RE.search(resp.text)
-            sha = FE_SHA_RE.search(resp.text)
         except (httpx.HTTPError, OSError, RuntimeError) as exc:
             log.debug("duckai could not read the build version: %s", exc)
-            self._fe_version = FE_VERSION_FALLBACK
-            return self._fe_version
+            return FE_VERSION_FALLBACK
+        if resp.status_code >= 400:
+            log.debug("duckai build version page answered %d", resp.status_code)
+            return FE_VERSION_FALLBACK
+        tag = FE_VERSION_RE.search(resp.text)
+        sha = FE_SHA_RE.search(resp.text)
         if tag and sha:
             self._fe_version = f"{tag.group(1)}-{sha.group(1)}"
         else:
@@ -393,6 +476,7 @@ class DuckAIClient:
 
     def invalidate_attestation(self) -> None:
         self._jsa = attest.INITIAL_JSA
+        self._jsa_script = ""
 
     def _headers(self, extra: dict[str, str] | None = None) -> dict[str, str]:
         headers = dict(BROWSER_HEADERS)
@@ -412,21 +496,7 @@ class DuckAIClient:
     def _raise_for_payload(status: int, payload: Any) -> None:
         if status < 400:
             return
-        message = ""
-        code: int | str = status
-        if isinstance(payload, dict):
-            raw_type = payload.get("type")
-            if isinstance(raw_type, str) and raw_type:
-                code = raw_type
-            raw_message = payload.get("message")
-            if isinstance(raw_message, str) and raw_message:
-                message = raw_message
-            challenge = payload.get("cd")
-            if isinstance(challenge, dict):
-                override = challenge.get("gk")
-                if isinstance(override, str) and override:
-                    message = f"{message or 'bot check failed'} (challenge {override})".strip()
-        raise DuckAIError(code, message or f"upstream returned {status}")
+        raise _error_for_payload(status, payload)
 
     async def status(self) -> dict:
         resp = await self.http.get(STATUS_PATH, headers=self._headers())
@@ -446,11 +516,36 @@ class DuckAIClient:
 
     async def _refresh_attestation(self, script_b64: str) -> str:
         header = await attest.header_for(script_b64, self.user_agent, BASE_URL)
-        self._jsa = header
+        async with self._jsa_lock:
+            self._jsa = header
         return header
 
+    def _start_attestation_warm(self, script_b64: str) -> None:
+        if not script_b64 or script_b64 == self._jsa_script:
+            return
+        warm = self._jsa_warm
+        if warm is not None and not warm.done():
+            return
+        self._jsa_script = script_b64
+        self._jsa_warm = asyncio.create_task(self._warm_attestation(script_b64))
+
+    async def _warm_attestation(self, script_b64: str) -> None:
+        try:
+            await self._refresh_attestation(script_b64)
+        except attest.AttestationError as exc:
+            log.debug("duckai attestation refresh failed: %s", exc)
+
+    async def _join_attestation_warm(self) -> None:
+        warm = self._jsa_warm
+        if warm is not None and not warm.done():
+            await warm
+        if self._jsa_warm is warm:
+            self._jsa_warm = None
+
     async def attestation(self, force: bool = False) -> str:
-        async with self._jsa_lock:
+        if not force and self._jsa != attest.INITIAL_JSA:
+            return self._jsa
+        async with self._refresh_lock:
             if not force and self._jsa != attest.INITIAL_JSA:
                 return self._jsa
             await self.status()
@@ -461,33 +556,43 @@ class DuckAIClient:
             payload = await self.status()
         except (DuckAIError, httpx.HTTPError, OSError, RuntimeError, attest.AttestationError):
             return False
-        status = payload.get("status")
-        return status is None or str(status) in STATUS_OK_CODES
+        if not payload or "status" not in payload:
+            return False
+        return str(payload.get("status")) in STATUS_OK_CODES
 
     async def fetch_models(self) -> list[dict]:
         catalog = await self._fetch_catalog()
         return [dict(entry) for entry in catalog]
 
     def efforts_for(self, model: str) -> tuple[str, ...]:
-        for entry in self._catalog:
+        with self._catalog_lock:
+            entries = self._catalog
+        for entry in entries:
             if entry["id"] == model:
                 return entry["efforts"]
         return model_efforts(model)
 
+    def _known_catalog(self) -> tuple[dict, ...]:
+        with self._catalog_lock:
+            return self._catalog
+
     async def _fetch_catalog(self) -> tuple[dict, ...]:
+        known = self._known_catalog()
         try:
             page = await self.http.get("/", headers=self._headers({"accept": "text/html"}))
             script = ENTRY_SCRIPT_RE.search(page.text)
             if not script:
                 raise DuckAIError("catalog", "duck.ai entry bundle is not referenced by the page")
             bundle = await self.http.get(script.group("path"), headers=self._headers({"accept": "*/*"}))
+            _reject_oversized_bundle(bundle)
             entries = parse_catalog(bundle.text)
             if not entries:
                 raise DuckAIError("catalog", "duck.ai bundle carries no free model entries")
         except (DuckAIError, httpx.HTTPError, OSError, RuntimeError) as exc:
-            log.warning("duckai catalog fetch failed, keeping %d known models: %s", len(self._catalog), exc)
-            return self._catalog
-        self._catalog = entries
+            log.warning("duckai catalog fetch failed, keeping %d known models: %s", len(known), exc)
+            return known
+        with self._catalog_lock:
+            self._catalog = entries
         log.info("duckai catalog refreshed: %d free models", len(entries))
         return entries
 
@@ -536,20 +641,18 @@ class DuckAIClient:
         except httpx.HTTPError as exc:
             raise DuckAIError(502, f"transport error: {exc}") from exc
         if resp.status_code >= 400:
-            await self._fail(resp)
+            raise await self._fail(resp)
         next_jsa = resp.headers.get(attest.JSA_HEADER)
         if next_jsa and next_jsa != jsa:
-            try:
-                self._jsa = await attest.header_for(next_jsa, self.user_agent, BASE_URL)
-            except attest.AttestationError as exc:
-                log.debug("duckai attestation refresh failed: %s", exc)
+            self._start_attestation_warm(next_jsa)
+        seen_sources: set[str] = set()
         try:
             async for line in _iter_lines(resp):
                 control = parse_control(line)
                 if control is not None:
                     yield control
                     if control.finish is not None:
-                        return
+                        break
                     continue
                 payload = _parse_json(line)
                 if payload is None:
@@ -559,29 +662,49 @@ class DuckAIClient:
                     raise DuckAIError(payload.get("type") or resp.status_code, str(payload.get("message") or "upstream error"))
                 if action != "success":
                     continue
-                yield parse_event(payload)
+                event = parse_event(payload)
+                if event.sources:
+                    fresh: list[dict] = []
+                    for source in event.sources:
+                        if source["url"] in seen_sources:
+                            continue
+                        seen_sources.add(source["url"])
+                        fresh.append(source)
+                    event.sources = fresh
+                yield event
         finally:
             await resp.aclose()
+        await self._join_attestation_warm()
 
-    async def _fail(self, resp: httpx.Response) -> None:
+    async def _fail(self, resp: httpx.Response) -> DuckAIError:
         try:
             await resp.aread()
             payload = resp.json()
         except (ValueError, httpx.HTTPError):
             payload = None
         await resp.aclose()
-        self._raise_for_payload(resp.status_code, payload)
+        return _error_for_payload(resp.status_code, payload)
 
 
 async def _iter_lines(resp: httpx.Response) -> AsyncIterator[str]:
     buffer = ""
     async for chunk in resp.aiter_text():
+        if not chunk:
+            continue
         buffer += chunk
-        while "\n" in buffer:
-            line, _, buffer = buffer.partition("\n")
-            text = _clean_line(line)
+        start = 0
+        while True:
+            end = buffer.find("\n", start)
+            if end == -1:
+                break
+            text = _clean_line(buffer[start:end])
+            start = end + 1
             if text:
                 yield text
+        if start:
+            buffer = buffer[start:]
+        if len(buffer) > MAX_SSE_LINE_CHARS:
+            raise DuckAIError(502, f"duckai sent an SSE line above the {MAX_SSE_LINE_CHARS} character limit without a newline")
     text = _clean_line(buffer)
     if text:
         yield text

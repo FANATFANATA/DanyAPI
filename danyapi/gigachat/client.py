@@ -4,12 +4,14 @@ import asyncio
 import base64
 import binascii
 import logging
+import re
 import time
 import uuid
 from typing import Any
 
 import httpx
 
+from ..api.retry import MAX_RETRIES, RETRY_BACKOFF_MAX_SEC, RETRYABLE_HTTP_STATUSES, _retry_delay
 from .tls import resolve_ca
 
 log = logging.getLogger("danyapi.gigachat")
@@ -31,6 +33,9 @@ TOKEN_ERROR_STATUSES = {400, 401, 403, 429}
 
 IMAGE_MIME_TYPES = frozenset({"image/jpeg", "image/png", "image/tiff", "image/bmp"})
 
+AUTHORIZATION_KEY_BYTES = 36
+AUTHORIZATION_KEY_PATTERN = re.compile(r"[A-Za-z0-9+/]+={0,2}")
+
 EMPTY_CREDENTIAL = ""
 
 
@@ -47,11 +52,17 @@ class GigaChatError(Exception):
 
 def is_authorization_key(value: str) -> bool:
     text = (value or "").strip()
-    if not text:
+    if not text or not AUTHORIZATION_KEY_PATTERN.fullmatch(text):
         return False
     try:
-        base64.b64decode(text, validate=True)
+        decoded = base64.b64decode(text, validate=True)
     except (ValueError, binascii.Error):
+        return False
+    if len(decoded) != AUTHORIZATION_KEY_BYTES:
+        return False
+    try:
+        uuid.UUID(decoded.decode("ascii"))
+    except (UnicodeDecodeError, ValueError):
         return False
     return True
 
@@ -72,6 +83,20 @@ def _expires_at_seconds(value: Any) -> float:
     return number
 
 
+def _retry_after_seconds(resp: httpx.Response) -> float:
+    delay = _retry_delay(1)
+    header = resp.headers.get("Retry-After", "").strip()
+    if not header:
+        return delay
+    try:
+        advertised = float(header)
+    except ValueError:
+        return delay
+    if advertised <= 0.0:
+        return delay
+    return min(advertised, RETRY_BACKOFF_MAX_SEC)
+
+
 class GigaChatClient:
     def __init__(
         self,
@@ -83,22 +108,43 @@ class GigaChatClient:
         self.scope = scope if scope in SCOPES else DEFAULT_SCOPE
         self._token = EMPTY_CREDENTIAL
         self._token_expires_at = 0.0
+        self._token_deferred_until = 0.0
+        self._token_error: tuple[int, str] = (503, "authorization endpoint unavailable")
         self._token_lock = asyncio.Lock()
-        self.http = httpx.AsyncClient(
-            base_url=BASE_URL,
-            headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
-            timeout=httpx.Timeout(timeout, read=max(float(timeout) * 5, 300.0)),
-            follow_redirects=True,
-            limits=httpx.Limits(max_keepalive_connections=20, keepalive_expiry=30.0),
-            verify=resolve_ca(),
-        )
+        self._timeout = timeout
+        self._http: httpx.AsyncClient | None = None
+
+    @property
+    def http(self) -> httpx.AsyncClient:
+        client = self._http
+        if client is None:
+            client = httpx.AsyncClient(
+                base_url=BASE_URL,
+                headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
+                timeout=httpx.Timeout(self._timeout, read=max(float(self._timeout) * 5, 300.0)),
+                follow_redirects=True,
+                limits=httpx.Limits(max_keepalive_connections=20, keepalive_expiry=30.0),
+                verify=resolve_ca(),
+            )
+            self._http = client
+        return client
+
+    @http.setter
+    def http(self, client: httpx.AsyncClient) -> None:
+        self._http = client
 
     async def aclose(self) -> None:
-        await self.http.aclose()
+        client = self._http
+        if client is None:
+            return
+        self._http = None
+        await client.aclose()
 
     def invalidate_token(self) -> None:
         self._token = EMPTY_CREDENTIAL
         self._token_expires_at = 0.0
+        self._token_deferred_until = 0.0
+        self._token_error = (503, "authorization endpoint unavailable")
 
     @staticmethod
     def _request_id() -> str:
@@ -140,24 +186,53 @@ class GigaChatClient:
                 message = raw_message
         raise GigaChatError(code, message or f"upstream returned {status}")
 
+    def _defer_token(self, code: int, message: str) -> None:
+        self._token = EMPTY_CREDENTIAL
+        self._token_expires_at = 0.0
+        self._token_deferred_until = time.time() + TOKEN_RETRY_LIMIT_SEC
+        self._token_error = (code, message)
+
+    def _cached_token(self, now: float, force: bool) -> str | None:
+        if force:
+            return None
+        if self._token and now + TOKEN_EXPIRY_BUFFER_SEC < self._token_expires_at:
+            return self._token
+        if now < self._token_deferred_until:
+            code, message = self._token_error
+            raise GigaChatError(code, message)
+        return None
+
     async def _obtain_token(self, force: bool = False) -> str:
         now = time.time()
-        if not force and self._token and now + TOKEN_EXPIRY_BUFFER_SEC < self._token_expires_at:
-            return self._token
+        cached = self._cached_token(now, force)
+        if cached is not None:
+            return cached
         async with self._token_lock:
             now = time.time()
-            if not force and self._token and now + TOKEN_EXPIRY_BUFFER_SEC < self._token_expires_at:
-                return self._token
-            resp = await self.http.post(
-                AUTH_URL,
-                content=f"scope={self.scope}",
-                headers=self._auth_headers(),
-            )
+            cached = self._cached_token(now, force)
+            if cached is not None:
+                return cached
+            try:
+                resp = await self.http.post(
+                    AUTH_URL,
+                    content=f"scope={self.scope}",
+                    headers=self._auth_headers(),
+                )
+            except httpx.HTTPError as exc:
+                message = f"authorization endpoint transport error: {exc}"
+                self._defer_token(503, message)
+                raise GigaChatError(503, message) from exc
             try:
                 payload = resp.json()
             except ValueError as exc:
                 raise GigaChatError(resp.status_code, "authorization endpoint returned non-JSON") from exc
-            self._raise_for_payload(resp.status_code, payload)
+            try:
+                self._raise_for_payload(resp.status_code, payload)
+            except GigaChatError as exc:
+                if resp.status_code in TOKEN_ERROR_STATUSES:
+                    code = exc.code if isinstance(exc.code, int) else resp.status_code
+                    self._defer_token(code, exc.message)
+                raise
             if not isinstance(payload, dict):
                 raise GigaChatError(resp.status_code, "unexpected authorization payload")
             token = payload.get("access_token")
@@ -166,8 +241,13 @@ class GigaChatClient:
             expires_at = _expires_at_seconds(payload.get("expires_at"))
             if expires_at <= 0.0:
                 expires_at = time.time() + TOKEN_LIFETIME_SEC
+            if expires_at <= time.time() + TOKEN_EXPIRY_BUFFER_SEC:
+                self._defer_token(resp.status_code, "authorization response returned an already expired access_token")
+                raise GigaChatError(resp.status_code, "authorization response returned an already expired access_token")
             self._token = token
             self._token_expires_at = expires_at
+            self._token_deferred_until = 0.0
+            self._token_error = (503, "authorization endpoint unavailable")
             log.info("gigachat access token obtained, valid for %.0fs", expires_at - time.time())
             return token
 
@@ -188,6 +268,7 @@ class GigaChatClient:
         stream: bool = False,
     ) -> httpx.Response:
         attempt = 0
+        retries = 0
         multipart = files is not None or data is not None
         while True:
             token = await self._obtain_token()
@@ -203,12 +284,23 @@ class GigaChatClient:
                 headers=request_headers,
             )
             resp = await self.http.send(req, stream=stream)
-            if resp.status_code not in AUTH_ERROR_STATUSES or attempt >= 1:
+            status = resp.status_code
+            if status in AUTH_ERROR_STATUSES:
+                if attempt < 1:
+                    await resp.aclose()
+                    attempt += 1
+                    self.invalidate_token()
+                    log.warning("gigachat auth rejected, refreshing access token and retrying")
+                    continue
                 return resp
-            await resp.aclose()
-            attempt += 1
-            self.invalidate_token()
-            log.warning("gigachat auth rejected, refreshing access token and retrying")
+            if status in RETRYABLE_HTTP_STATUSES and retries < MAX_RETRIES:
+                retry_after = _retry_after_seconds(resp)
+                await resp.aclose()
+                retries += 1
+                log.warning("gigachat returned %s, retrying in %.1fs (attempt %d)", status, retry_after, retries)
+                await asyncio.sleep(retry_after)
+                continue
+            return resp
 
     async def _json_request(
         self,

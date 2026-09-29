@@ -9,7 +9,7 @@ from danyapi.alice import api as alice_api
 from danyapi.alice.accounts import AliceAccount
 from danyapi.alice.client import AliceClient, AliceStream
 from danyapi.api.models import _resolve_provider
-from danyapi.api.openai import app
+from danyapi.api.openai import app, settings
 from danyapi.gigachat import api as gigachat_api
 from danyapi.gigachat.accounts import GigaChatAccount
 from danyapi.gigachat.client import GigaChatClient
@@ -48,11 +48,15 @@ def test_resolve_provider_rejects_unknown():
 
 
 def test_health_reports_new_providers():
-    body = TestClient(app).get("/health").json()
+    body = TestClient(app).get("/health", headers={"x-api-key": settings.admin_token}).json()
     assert "gigachat" in body
     assert "alice" in body
     assert body["gigachat"] is False
     assert body["alice"] is False
+
+
+def test_health_hides_providers_without_admin_token():
+    assert TestClient(app).get("/health").json() == {"status": "ok"}
 
 
 def test_models_endpoint_includes_new_providers():

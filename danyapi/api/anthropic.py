@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import uuid
@@ -12,13 +13,24 @@ from danyapi.tokens import count_messages_tokens, estimate_tokens
 
 log = logging.getLogger("danyapi.api.anthropic")
 
-API_VERSION = "2023-06-01"
 DEFAULT_MAX_TOKENS = 4096
-MAX_STOP_SEQUENCES = 4
+MAX_TEXT_DEPTH = 8
 
 TEXT_BLOCK_TYPES = {"text", "input_text", "output_text"}
 IMAGE_BLOCK_TYPES = {"image", "image_url", "input_image"}
 SUPPORTED_ROLES = {"user", "assistant"}
+IGNORED_BLOCK_TYPES = {
+    "thinking",
+    "redacted_thinking",
+    "document",
+    "search_result",
+    "server_tool_use",
+    "web_search_tool_result",
+    "mcp_tool_use",
+    "mcp_tool_result",
+    "code_execution_tool_result",
+}
+TOOL_ERROR_PREFIX = "[tool_error] "
 
 STOP_REASONS = {
     "stop": "end_turn",
@@ -27,6 +39,7 @@ STOP_REASONS = {
     "function_call": "tool_use",
     "content_filter": "end_turn",
     "response_incomplete": "max_tokens",
+    "stop_sequence": "stop_sequence",
     "error": "end_turn",
 }
 TRUNCATED_REASONS = {"length", "response_incomplete"}
@@ -40,11 +53,10 @@ class AnthropicInputError(ValueError):
 @dataclass
 class RequestInfo:
     model: str
-    upstream_model: str
     max_tokens: int
     prompt_tokens: int = 0
     metadata: Any = None
-    system_present: bool = False
+    stop_sequences: list[str] | None = None
 
 
 def sse_event(event_type: str, data: dict) -> str:
@@ -55,13 +67,15 @@ def error_body(error_type: str, message: str) -> dict:
     return {"type": "error", "error": {"type": error_type, "message": message}}
 
 
-def _as_text(value: Any) -> str:
+def _as_text(value: Any, depth: int = 0) -> str:
     if value is None:
         return ""
     if isinstance(value, str):
         return value
     if isinstance(value, (int, float, bool)):
         return str(value)
+    if depth >= MAX_TEXT_DEPTH:
+        return ""
     if isinstance(value, list):
         parts: list[str] = []
         for item in value:
@@ -71,18 +85,27 @@ def _as_text(value: Any) -> str:
                 if isinstance(item.get("text"), str):
                     parts.append(item["text"])
                 else:
-                    parts.append(_as_text(item.get("content")))
+                    parts.append(_as_text(item.get("content"), depth + 1))
             else:
-                parts.append(_as_text(item))
+                parts.append(_as_text(item, depth + 1))
         return "".join(parts)
     if isinstance(value, dict):
         if isinstance(value.get("text"), str):
             return value["text"]
         try:
             return json.dumps(value, ensure_ascii=False)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, RecursionError):
             return str(value)
     return str(value)
+
+
+def match_stop_sequence(text: str, stop_sequences: Any) -> str | None:
+    if not isinstance(stop_sequences, list) or not text:
+        return None
+    for sequence in stop_sequences:
+        if isinstance(sequence, str) and sequence and sequence in text:
+            return sequence
+    return None
 
 
 def _image_part(block: dict) -> dict[str, Any]:
@@ -124,10 +147,13 @@ def _tool_use_block(block: dict) -> dict[str, Any]:
 
 
 def _tool_result_block(block: dict) -> dict[str, Any]:
+    text = _as_text(block.get("content"))
+    if block.get("is_error") is True:
+        text = f"{TOOL_ERROR_PREFIX}{text}" if text else TOOL_ERROR_PREFIX.strip()
     return {
         "role": "tool",
         "tool_call_id": block.get("tool_use_id") or block.get("id") or "",
-        "content": _as_text(block.get("content")),
+        "content": text,
     }
 
 
@@ -157,12 +183,12 @@ def _content_blocks(content: Any) -> tuple[str | list[dict], list[dict], list[di
             tool_calls.append(_tool_use_block(block))
         elif block_type == "tool_result":
             tool_results.append(_tool_result_block(block))
-        elif block_type in ("thinking", "redacted_thinking"):
-            continue
-        elif block_type in ("document", "search_result", "server_tool_use", "web_search_tool_result"):
+        elif block_type in IGNORED_BLOCK_TYPES:
             continue
         elif isinstance(block.get("text"), str):
             parts.append({"type": "text", "text": block["text"]})
+        else:
+            raise AnthropicInputError(f"unsupported content block type: {block_type!r}")
     if not parts:
         return "", tool_calls, tool_results
     if all(part.get("type") == "text" for part in parts):
@@ -212,7 +238,7 @@ def normalize_messages(messages: Any) -> list[dict]:
             entry["tool_calls"] = tool_calls
             normalized.append(entry)
             continue
-        if content == "" and not message.get("content"):
+        if content == "":
             continue
         normalized.append({"role": role, "content": content})
     if not normalized:
@@ -224,15 +250,15 @@ def convert_tools(tools: Any) -> list[Any] | None:
     if not isinstance(tools, list):
         return None
     converted: list[dict] = []
-    for tool in tools:
+    for index, tool in enumerate(tools):
         if not isinstance(tool, dict):
-            continue
+            raise AnthropicInputError(f"tools[{index}] must be an object")
         if isinstance(tool.get("function"), dict):
             converted.append(tool)
             continue
         name = tool.get("name")
         if not isinstance(name, str) or not name:
-            continue
+            raise AnthropicInputError(f"tools[{index}] requires a non-empty string name")
         function: dict[str, Any] = {"name": name}
         if isinstance(tool.get("description"), str):
             function["description"] = tool["description"]
@@ -276,34 +302,56 @@ def convert_stop_sequences(stop_sequences: Any) -> Any:
         return [stop_sequences]
     if not isinstance(stop_sequences, list):
         raise AnthropicInputError("stop_sequences must be an array of strings")
-    values = [item for item in stop_sequences if isinstance(item, str) and item]
-    if len(values) > MAX_STOP_SEQUENCES:
-        raise AnthropicInputError(f"stop_sequences accepts at most {MAX_STOP_SEQUENCES} entries")
+    values: list[str] = []
+    for index, item in enumerate(stop_sequences):
+        if not isinstance(item, str) or not item:
+            raise AnthropicInputError(f"stop_sequences[{index}] must be a non-empty string")
+        values.append(item)
     return values or None
 
 
 def as_max_tokens(value: Any) -> int:
     if value is None:
         return DEFAULT_MAX_TOKENS
-    if isinstance(value, bool):
+    if isinstance(value, bool) or not isinstance(value, int):
         raise AnthropicInputError("max_tokens must be an integer")
-    try:
-        number = int(value)
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise AnthropicInputError("max_tokens must be an integer") from exc
-    if number <= 0:
+    if value <= 0:
         raise AnthropicInputError("max_tokens must be greater than 0")
+    return value
+
+
+def _as_ratio(value: Any, field: str) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise AnthropicInputError(f"{field} must be a number")
+    number = float(value)
+    if not 0.0 <= number <= 1.0:
+        raise AnthropicInputError(f"{field} must be between 0 and 1")
     return number
 
 
-def build_chat_request(body: dict[str, Any], upstream_model: str, session_id: str | None = None) -> dict[str, Any]:
+def _as_top_k(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise AnthropicInputError("top_k must be an integer")
+    if isinstance(value, float) and not value.is_integer():
+        raise AnthropicInputError("top_k must be an integer")
+    number = int(value)
+    if number < 1:
+        raise AnthropicInputError("top_k must be greater than 0")
+    return number
+
+
+def build_chat_request(body: dict[str, Any], model: str, session_id: str | None = None) -> dict[str, Any]:
     system = normalize_system(body.get("system"))
     messages = normalize_messages(body.get("messages"))
     tools = convert_tools(body.get("tools"))
     tool_choice = convert_tool_choice(body.get("tool_choice"))
     stop = convert_stop_sequences(body.get("stop_sequences"))
     prefix = [{"role": "system", "content": system}] if system else []
-    payload: dict[str, Any] = {"model": upstream_model, "messages": [*prefix, *messages]}
+    payload: dict[str, Any] = {"model": model, "messages": [*prefix, *messages]}
     payload["stream"] = bool(body.get("stream"))
     payload["max_tokens"] = as_max_tokens(body.get("max_tokens"))
     if tools:
@@ -312,14 +360,14 @@ def build_chat_request(body: dict[str, Any], upstream_model: str, session_id: st
         payload["tool_choice"] = tool_choice
     if stop:
         payload["stop"] = stop
-    temperature = body.get("temperature")
-    if isinstance(temperature, (int, float)) and not isinstance(temperature, bool):
-        payload["temperature"] = float(temperature)
-    top_p = body.get("top_p")
-    if isinstance(top_p, (int, float)) and not isinstance(top_p, bool):
-        payload["top_p"] = float(top_p)
-    top_k = body.get("top_k")
-    if isinstance(top_k, int) and not isinstance(top_k, bool) and top_k > 0:
+    temperature = _as_ratio(body.get("temperature"), "temperature")
+    if temperature is not None:
+        payload["temperature"] = temperature
+    top_p = _as_ratio(body.get("top_p"), "top_p")
+    if top_p is not None:
+        payload["top_p"] = top_p
+    top_k = _as_top_k(body.get("top_k"))
+    if top_k is not None:
         payload["top_k"] = top_k
     metadata = body.get("metadata")
     if isinstance(metadata, dict):
@@ -391,8 +439,12 @@ def build_content(choice: dict) -> list[dict]:
                 }
             )
     if not blocks:
-        blocks.append({"type": "text", "text": ""})
+        return []
     return blocks
+
+
+def _content_text(blocks: list[dict]) -> str:
+    return "".join(block["text"] for block in blocks if block.get("type") == "text" and isinstance(block.get("text"), str))
 
 
 def build_message(info: RequestInfo, message_id: str, response: dict) -> dict:
@@ -401,14 +453,16 @@ def build_message(info: RequestInfo, message_id: str, response: dict) -> dict:
     finish = choice.get("finish_reason")
     if isinstance(response.get("error"), dict):
         finish = "error"
+    content = build_content(choice)
+    stop_sequence = match_stop_sequence(_content_text(content), info.stop_sequences)
     return {
         "id": message_id,
         "type": "message",
         "role": "assistant",
         "model": info.model,
-        "content": build_content(choice),
-        "stop_reason": stop_reason_for(finish),
-        "stop_sequence": None,
+        "content": content,
+        "stop_reason": "stop_sequence" if stop_sequence is not None else stop_reason_for(finish),
+        "stop_sequence": stop_sequence,
         "usage": _usage(response.get("usage")),
     }
 
@@ -420,10 +474,24 @@ def count_input_tokens(messages: Any, system: str | None) -> int:
     return total
 
 
-def _iter_sse_payloads(chunk: Any) -> Iterator[dict | None]:
-    if not isinstance(chunk, str):
+def _decode_chunk(chunk: Any) -> str:
+    if isinstance(chunk, str):
+        return chunk
+    if isinstance(chunk, (bytes, bytearray, memoryview)):
+        raw = bytes(chunk)
+        try:
+            return raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            log.warning("sse payload is not valid utf-8 at byte %d (%s), replaced %d byte(s)", exc.start, exc.reason, len(raw))
+            return raw.decode("utf-8", errors="replace")
+    return ""
+
+
+def iter_sse_payloads(chunk: Any) -> Iterator[dict | None]:
+    text = _decode_chunk(chunk)
+    if not text:
         return
-    for event in parse_sse(chunk):
+    for event in parse_sse(text):
         data = event.data
         if data == "[DONE]":
             yield None
@@ -439,14 +507,17 @@ class _StreamState:
     finished: bool = False
     text_index: int | None = None
     text_open: bool = False
+    text_parts: list[str] = field(default_factory=list)
     thinking_index: int | None = None
     thinking_open: bool = False
     tool_index: dict[int, int] = field(default_factory=dict)
+    tool_calls: dict[int, dict[str, str]] = field(default_factory=dict)
+    tool_started: set[int] = field(default_factory=set)
     next_index: int = 0
     stop_reason: str = "end_turn"
+    stop_sequence: str | None = None
     usage: dict = field(default_factory=lambda: {"input_tokens": 0, "output_tokens": 0})
     has_tool_use: bool = False
-    truncated: bool = False
 
     def emit(self, event_type: str, data: dict) -> str:
         payload = {"type": event_type}
@@ -494,6 +565,7 @@ class _StreamState:
         for index in sorted(self.tool_index.values()):
             yield self.emit("content_block_stop", {"index": index})
         self.tool_index.clear()
+        self.tool_started.clear()
 
     def close_for_tool(self) -> Iterator[str]:
         yield from self.close_thinking()
@@ -523,25 +595,45 @@ class _StreamState:
             self.text_open = True
             self.text_index = self._take_index()
             yield self.emit("content_block_start", {"index": self.text_index, "content_block": {"type": "text", "text": ""}})
+        self.text_parts.append(text)
         yield self.emit("content_block_delta", {"index": self.text_index, "delta": {"type": "text_delta", "text": text}})
 
-    def tool_start(self, slot: int, call: dict) -> int:
+    def tool_start(self, slot: int, call: dict, name: str) -> tuple[int, bool]:
+        identity = self.tool_calls.setdefault(slot, {"id": "", "name": ""})
+        call_id = call.get("id")
+        if isinstance(call_id, str) and call_id and not identity["id"]:
+            identity["id"] = call_id
+        if not identity["id"]:
+            identity["id"] = f"call_{uuid.uuid4().hex[:12]}"
+        if name and not identity["name"]:
+            identity["name"] = name
         index = self.tool_index.get(slot)
         if index is None:
             index = self._take_index()
             self.tool_index[slot] = index
         self.has_tool_use = True
-        return index
+        started = index not in self.tool_started
+        self.tool_started.add(index)
+        return index, started
 
-    def finish(self, reason: str) -> Iterator[str]:
+    def tool_name(self, slot: int) -> str:
+        identity = self.tool_calls.get(slot)
+        return identity["name"] if identity else ""
+
+    def tool_id(self, slot: int) -> str:
+        identity = self.tool_calls.get(slot)
+        return identity["id"] if identity else ""
+
+    def finish(self, reason: str, stop_sequence: str | None) -> Iterator[str]:
         if self.finished:
             return
         self.finished = True
         self.stop_reason = reason
+        self.stop_sequence = stop_sequence
         yield self.emit(
             "message_delta",
             {
-                "delta": {"stop_reason": reason, "stop_sequence": None},
+                "delta": {"stop_reason": self.stop_reason, "stop_sequence": self.stop_sequence},
                 "usage": {"input_tokens": self.usage["input_tokens"], "output_tokens": self.usage["output_tokens"]},
             },
         )
@@ -552,7 +644,30 @@ def _error_message(error: Any) -> tuple[str, str]:
     if isinstance(error, dict):
         message = error.get("message")
         return ("api_error", message if isinstance(message, str) and message else "upstream stream error")
-    return ("api_error", str(error) or "upstream stream error")
+    log.warning("upstream stream produced a non-dict error: %s", type(error).__name__)
+    return ("api_error", "upstream stream error")
+
+
+def _merge_usage(state_usage: dict, usage: Any) -> None:
+    if not isinstance(usage, dict):
+        return
+    prompt = usage.get("prompt_tokens")
+    if not isinstance(prompt, int):
+        prompt = usage.get("input_tokens")
+    completion = usage.get("completion_tokens")
+    if not isinstance(completion, int):
+        completion = usage.get("output_tokens")
+    if isinstance(prompt, int) and prompt > 0:
+        state_usage["input_tokens"] = prompt
+    if isinstance(completion, int) and completion > 0:
+        state_usage["output_tokens"] = completion
+
+
+def _tool_slot(call: dict, position: int) -> int:
+    index = call.get("index")
+    if isinstance(index, bool) or not isinstance(index, int) or index < 0:
+        return position
+    return index
 
 
 async def translate_stream(
@@ -568,82 +683,92 @@ async def translate_stream(
             yield line
         error: dict | None = None
         finish: str | None = None
-        async for chunk in chat_stream:
-            for payload in _iter_sse_payloads(chunk):
-                if payload is None:
-                    continue
-                if isinstance(payload.get("error"), dict):
-                    error = payload["error"]
-                    continue
-                usage = _usage(payload.get("usage"))
-                if usage["output_tokens"]:
-                    state.usage["output_tokens"] = usage["output_tokens"]
-                if usage["input_tokens"]:
-                    state.usage["input_tokens"] = usage["input_tokens"]
-                choices = payload.get("choices")
-                if not isinstance(choices, list):
-                    continue
-                for choice in choices:
-                    if not isinstance(choice, dict):
+        try:
+            async for chunk in chat_stream:
+                for payload in iter_sse_payloads(chunk):
+                    if payload is None:
                         continue
-                    delta = choice.get("delta")
-                    if isinstance(delta, dict):
-                        reasoning = delta.get("reasoning_content")
-                        if isinstance(reasoning, str) and reasoning:
-                            for line in state.thinking_delta(reasoning):
-                                yield line
-                        content = delta.get("content")
-                        if isinstance(content, str) and content:
-                            for line in state.text_delta(content):
-                                yield line
-                        tool_calls = delta.get("tool_calls")
-                        if isinstance(tool_calls, list):
-                            for slot, call in enumerate(tool_calls):
-                                if not isinstance(call, dict):
-                                    continue
-                                function = call.get("function")
-                                if not isinstance(function, dict):
-                                    function = call
-                                for line in state.close_for_tool():
+                    if isinstance(payload.get("error"), dict):
+                        error = payload["error"]
+                        continue
+                    _merge_usage(state.usage, payload.get("usage"))
+                    choices = payload.get("choices")
+                    if not isinstance(choices, list):
+                        continue
+                    for choice in choices:
+                        if not isinstance(choice, dict):
+                            continue
+                        delta = choice.get("delta")
+                        if isinstance(delta, dict):
+                            reasoning = delta.get("reasoning_content")
+                            if isinstance(reasoning, str) and reasoning:
+                                for line in state.thinking_delta(reasoning):
                                     yield line
-                                index = state.tool_start(slot, call)
-                                if call.get("id"):
-                                    yield state.emit(
-                                        "content_block_start",
-                                        {
-                                            "index": index,
-                                            "content_block": {
-                                                "type": "tool_use",
-                                                "id": call.get("id"),
-                                                "name": function.get("name") or "",
-                                                "input": {},
+                            content = delta.get("content")
+                            if isinstance(content, str) and content:
+                                for line in state.text_delta(content):
+                                    yield line
+                            tool_calls = delta.get("tool_calls")
+                            if isinstance(tool_calls, list):
+                                for position, call in enumerate(tool_calls):
+                                    if not isinstance(call, dict):
+                                        continue
+                                    function = call.get("function")
+                                    if not isinstance(function, dict):
+                                        function = call
+                                    for line in state.close_for_tool():
+                                        yield line
+                                    slot = _tool_slot(call, position)
+                                    name = function.get("name")
+                                    index, started = state.tool_start(slot, call, name if isinstance(name, str) else "")
+                                    if started:
+                                        yield state.emit(
+                                            "content_block_start",
+                                            {
+                                                "index": index,
+                                                "content_block": {
+                                                    "type": "tool_use",
+                                                    "id": state.tool_id(slot),
+                                                    "name": state.tool_name(slot),
+                                                    "input": {},
+                                                },
                                             },
-                                        },
-                                    )
-                                arguments = function.get("arguments")
-                                if isinstance(arguments, str) and arguments:
-                                    yield state.emit(
-                                        "content_block_delta",
-                                        {"index": index, "delta": {"type": "input_json_delta", "partial_json": arguments}},
-                                    )
-                    reason = choice.get("finish_reason")
-                    if isinstance(reason, str) and reason:
-                        finish = reason
+                                        )
+                                    arguments = function.get("arguments")
+                                    if isinstance(arguments, str) and arguments:
+                                        yield state.emit(
+                                            "content_block_delta",
+                                            {"index": index, "delta": {"type": "input_json_delta", "partial_json": arguments}},
+                                        )
+                        reason = choice.get("finish_reason")
+                        if isinstance(reason, str) and reason and finish is None:
+                            finish = reason
+        except BaseException as exc:
+            log.warning("anthropic stream aborted by the upstream generator: %s", exc)
+            for line in state.close_all():
+                yield line
+            yield sse_event("error", error_body("api_error", "upstream stream failed"))
+            raise
         for line in state.close_all():
             yield line
         if error is not None:
             error_type, message = _error_message(error)
             yield sse_event("error", error_body(error_type, message))
             return
+        stop_sequence = match_stop_sequence("".join(state.text_parts), info.stop_sequences)
         if finish in TRUNCATED_REASONS:
             reason = "max_tokens"
+        elif stop_sequence is not None:
+            reason = "stop_sequence"
         elif finish in TOOL_CALL_REASONS or (finish is None and state.has_tool_use):
             reason = "tool_use"
         else:
             reason = stop_reason_for(finish)
         if callable(on_complete):
-            on_complete(reason, state.usage)
-        for line in state.finish(reason):
+            outcome = on_complete(reason, state.usage)
+            if inspect.isawaitable(outcome):
+                await outcome
+        for line in state.finish(reason, stop_sequence):
             yield line
     finally:
         closer = getattr(chat_stream, "aclose", None)

@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import os
@@ -169,6 +170,7 @@ def test_flush_default_timeout_is_bounded():
 
 def test_load_logs_read_failure(cache_dir, monkeypatch, caplog):
     store = JsonStore("cov-read", "default")
+    store._path.write_text('{"a": 1}', encoding="utf-8")
 
     def boom(*args, **kwargs):
         raise OSError("denied")
@@ -178,6 +180,105 @@ def test_load_logs_read_failure(cache_dir, monkeypatch, caplog):
         store._load()
     assert any("cache read failed" in record.getMessage() for record in caplog.records)
     assert store._data == {}
+
+
+def test_load_ignores_a_missing_file_without_warning(cache_dir, caplog):
+    store = JsonStore("cov-absent", "default")
+    store._path.unlink(missing_ok=True)
+    with caplog.at_level(logging.WARNING, logger="danyapi.store"):
+        store._load()
+    assert not [record for record in caplog.records if record.name == "danyapi.store"]
+    assert store._data == {}
+
+
+def test_load_ignores_a_file_over_the_size_cap(cache_dir, caplog, monkeypatch):
+    path = store_mod.cache_root() / "huge-scope.json"
+    path.write_text('{"a": 1}', encoding="utf-8")
+    monkeypatch.setattr(store_mod, "_MAX_STORE_BYTES", 4)
+    with caplog.at_level(logging.WARNING, logger="danyapi.store"):
+        store = JsonStore("huge", "scope")
+    assert any("larger than" in record.getMessage() for record in caplog.records)
+    assert len(store) == 0
+
+
+def test_load_survives_memory_error(cache_dir, monkeypatch, caplog):
+    path = store_mod.cache_root() / "oom-scope.json"
+    path.write_text('{"a": 1}', encoding="utf-8")
+
+    def boom(*args, **kwargs):
+        raise MemoryError
+
+    monkeypatch.setattr(Path, "read_text", boom)
+    with caplog.at_level(logging.WARNING, logger="danyapi.store"):
+        store = JsonStore("oom", "scope")
+    assert any("cache read failed" in record.getMessage() for record in caplog.records)
+    assert len(store) == 0
+
+
+def test_two_instances_for_one_path_share_one_snapshot(cache_dir):
+    first = JsonStore("shared", "default")
+    second = JsonStore("shared", "default")
+    assert first._data is second._data
+    first.set("k", "v")
+    assert second.get("k") == "v"
+    second.set("k2", "v2")
+    assert first.get("k2") == "v2"
+    assert len(first) == 2
+    assert len(second) == 2
+
+
+def test_duplicate_instance_is_warned_about(cache_dir, caplog):
+    first = JsonStore("dup", "default")
+    with caplog.at_level(logging.WARNING, logger="danyapi.store"):
+        JsonStore("dup", "default")
+    assert any("already holds" in record.getMessage() for record in caplog.records)
+    assert first.enabled
+
+
+def test_remove_is_authoritative_over_a_later_write(cache_dir):
+    store = JsonStore("remove", "default")
+    store.set("k", "v")
+    assert store._path is not None
+    assert store._path.exists()
+    store.remove()
+    assert not store._path.exists()
+    assert not store.enabled
+    store.set("k", "v2")
+    store.pop("k")
+    store.clear()
+    store._write()
+    store._commit(dict(store._data))
+    store.flush()
+    assert not store._path.exists()
+    assert store.get("k") is None
+
+
+def test_remove_of_a_disabled_store_is_a_noop(cache_dir):
+    store = JsonStore("remove-off", None)
+    store.remove()
+    assert not store.enabled
+
+
+async def test_flush_uses_the_dedicated_single_thread_executor(cache_dir):
+    store = JsonStore("cov-exec", "default")
+    loop = asyncio.get_running_loop()
+    original = loop.run_in_executor
+    seen = []
+
+    def run_in_executor(executor, func, *args):
+        seen.append(executor)
+        return original(executor, func, *args)
+
+    loop.run_in_executor = run_in_executor
+    try:
+        store.set("k", "v")
+        store.flush()
+    finally:
+        loop.run_in_executor = original
+    assert seen == [store_mod._FLUSH_EXECUTOR]
+    assert seen[0] is not loop._default_executor
+    assert store_mod._FLUSH_EXECUTOR._max_workers == 1
+    assert store.get("k") == "v"
 
 
 def test_load_missing_file_is_silent(cache_dir, caplog):

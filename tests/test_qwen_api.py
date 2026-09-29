@@ -39,6 +39,8 @@ THINK_SSE = (
 
 BUSY_SSE = 'data: {"error": {"code": "Too_Many_Requests", "details": "please slow down"}, "response_id": "r1"}\n\n'
 
+NUMERIC_CODE_SSE = 'data: {"error": {"code": 40014, "details": "numeric upstream failure"}, "response_id": "r1"}\n\n'
+
 CTX_SSE = 'data: {"error": {"code": "ContextLengthExceeded", "details": "too long"}, "response_id": "r1"}\n\n'
 
 TOOL_JSON = '{"tool_calls":[{"name":"get_weather","arguments":{"city":"Moscow"}}]}'
@@ -142,6 +144,15 @@ def _content_text(joined: str) -> str:
     for match in re.finditer(r'"content": "((?:[^"\\]|\\.)*)"', joined):
         parts.append(json.loads(f'"{match.group(1)}"'))
     return "".join(parts)
+
+
+def _payloads(joined: str) -> list[dict]:
+    out: list[dict] = []
+    for line in joined.splitlines():
+        if not line.startswith("data: ") or line == "data: [DONE]":
+            continue
+        out.append(json.loads(line[len("data: ") :]))
+    return out
 
 
 async def _send(resp):
@@ -489,12 +500,18 @@ def test_error_detail():
     rec = MagicMock()
     rec.error = {"code": "x", "details": "boom"}
     body = qwen_api._error_detail(rec)
-    assert body["error"]["message"] == "boom"
-    assert body["error"]["code"] == "x"
+    assert body == "boom"
+    assert isinstance(body, str)
     rec2 = MagicMock()
     rec2.error = {}
-    body = qwen_api._error_detail(rec2)
-    assert "error" in body["error"]["message"]
+    body2 = qwen_api._error_detail(rec2)
+    assert body2 == "Qwen server error, try again later"
+    rec3 = MagicMock()
+    rec3.error = {"message": "only message"}
+    assert qwen_api._error_detail(rec3) == "only message"
+    rec4 = MagicMock()
+    rec4.error = None
+    assert qwen_api._error_detail(rec4) == "Qwen server error, try again later"
 
 
 def test_accumulate_usage():
@@ -630,12 +647,147 @@ async def test_waf_html():
     assert "WAF" in str(excinfo.value.detail)
 
 
+OPENAI_FINISH_REASONS = {"stop", "length", "tool_calls", "content_filter", "function_call"}
+STREAM_ERROR_FINISH_REASON = "error"
+
+TOOL_SCHEMA_LIST = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "weather",
+            "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
+        },
+    }
+]
+
+
+async def test_stream_error_lines_carry_the_code_and_a_valid_finish_reason():
+    lines = list(qwen_api._stream_error_lines("id", 0, "m", "slow down", "s", "Too_Many_Requests"))
+    assert len(lines) == 2
+    payload = json.loads(lines[0][len("data: ") :])
+    assert payload["error"] == {"message": "slow down", "code": "Too_Many_Requests"}
+    finish = payload["choices"][0]["finish_reason"]
+    assert finish == STREAM_ERROR_FINISH_REASON
+    assert finish != "Too_Many_Requests"
+    assert lines[1] == "data: [DONE]\n\n"
+
+
+async def test_stream_context_limit_finish_reason_is_an_openai_reason():
+    lines = list(qwen_api._stream_context_limit_lines("id", 0, "m", "s"))
+    payload = json.loads(lines[0][len("data: ") :])
+    assert payload["error"]["code"] == "context_length_exceeded"
+    assert payload["choices"][0]["finish_reason"] in OPENAI_FINISH_REASONS
+
+
+async def test_stream_error_payload_never_reuses_the_upstream_code_as_finish_reason():
+    acct = FakeAccount([])
+    acct.client.completion = AsyncMock(return_value=FakeResp(BUSY_SSE))
+    lines = await _collect(qwen_api.stream_openai(**_args(acct)))
+    joined = "".join(lines)
+    payloads = _payloads(joined)
+    errors = [payload for payload in payloads if "error" in payload]
+    assert errors
+    assert errors[-1]["error"]["message"] == "please slow down"
+    assert errors[-1]["error"]["code"] == "Too_Many_Requests"
+    for payload in payloads:
+        for choice in payload["choices"]:
+            assert choice["finish_reason"] in OPENAI_FINISH_REASONS | {STREAM_ERROR_FINISH_REASON}
+            assert choice["finish_reason"] != "Too_Many_Requests"
+    assert joined.rstrip().endswith("data: [DONE]")
+
+
+async def test_non_stream_error_detail_is_a_plain_string():
+    acct = FakeAccount([])
+    acct.client.completion = AsyncMock(return_value=FakeResp(BUSY_SSE))
+    with pytest.raises(Exception) as excinfo:
+        await qwen_api.collect_non_stream(**_args(acct))
+    assert excinfo.value.status_code == 429
+    assert excinfo.value.detail == "please slow down"
+    assert isinstance(excinfo.value.detail, str)
+
+
+async def test_stream_retry_backoff_does_not_hold_the_account_lock():
+    orig = retry_mod.RETRY_BACKOFF_SEC
+    retry_mod.RETRY_BACKOFF_SEC = 0.2
+    try:
+        order: list[str] = []
+        state = {"n": 0}
+        acct = FakeAccount([])
+        acct.client.stop_stream = AsyncMock()
+
+        async def completion(**kwargs):
+            state["n"] += 1
+            order.append(f"completion-{state['n']}")
+            return FakeResp(BUSY_SSE if state["n"] == 1 else OK_SSE)
+
+        async def probe():
+            async with acct.sem:
+                order.append("probe")
+
+        acct.client.completion = AsyncMock(side_effect=completion)
+        probe_task = asyncio.create_task(probe())
+        lines = await _collect(qwen_api.stream_openai(**_args(acct)))
+        probe_task.cancel()
+        try:
+            await probe_task
+        except asyncio.CancelledError:
+            pass
+        assert _content_text("".join(lines)) == "Hello world"
+        assert order.index("probe") < order.index("completion-2")
+    finally:
+        retry_mod.RETRY_BACKOFF_SEC = orig
+
+
+async def test_stream_tail_is_emitted_after_the_account_lock_is_released():
+    acct = FakeAccount([OK_SSE])
+    lines = await _collect(qwen_api.stream_openai(**_args(acct)))
+    assert lines[-1] == "data: [DONE]\n\n"
+    assert '"finish_reason": "stop"' in lines[-2]
+    assert not acct.sem.locked()
+
+
+async def test_stream_retry_after_hidden_tool_content_does_not_resurrect_stale_text(monkeypatch):
+    monkeypatch.setattr(qwen_api, "_is_retryable_error", lambda rec: True)
+    stale = (
+        'data: {"response.created":{"chat_id":"c1","parent_id":"p0","response_id":"r1"}} \n\n'
+        'data: {"choices": [{"delta": {"role": "assistant", "content": '
+        + json.dumps(TOOL_JSON)
+        + ', "phase": "answer", "status": "typing"}}], "response_id": "r1"}\n\n'
+        'data: {"error": {"code": "Too_Many_Requests", "details": "please slow down"}, "response_id": "r1"}\n\n'
+    )
+    acct = FakeAccount([])
+    acct.client.completion = AsyncMock(side_effect=[FakeResp(stale), FakeResp(OK_SSE)])
+    args = _args(acct, tool_mode=True, tool_schemas=qwen_api.toolemu.tool_schema_map(TOOL_SCHEMA_LIST))
+    lines = await _collect(qwen_api.stream_openai(**args))
+    joined = "".join(lines)
+    assert acct.client.completion.await_count == 2
+    assert _content_text(joined) == "Hello world"
+    assert "Moscow" not in joined
+
+
+async def test_numeric_upstream_code_is_502_and_context_limit_code_is_400():
+    numeric = FakeAccount([])
+    numeric.client.completion = AsyncMock(return_value=FakeResp(NUMERIC_CODE_SSE))
+    with pytest.raises(Exception) as excinfo:
+        await qwen_api.collect_non_stream(**_args(numeric))
+    assert excinfo.value.status_code == 502
+    assert excinfo.value.detail == "numeric upstream failure"
+
+    limited = FakeAccount([])
+    limited.client.completion = AsyncMock(return_value=FakeResp(CTX_SSE))
+    with pytest.raises(Exception) as excinfo2:
+        await qwen_api.collect_non_stream(**_args(limited))
+    assert excinfo2.value.status_code == 400
+
+
 async def test_http_status_error():
     client = MagicMock()
     client.completion = AsyncMock(side_effect=httpx.HTTPStatusError("500", request=MagicMock(), response=MagicMock(status_code=500)))
     with pytest.raises(Exception) as excinfo:
         await qwen_api._send_completion(client, FakeSession(), "p", "m", False, False)
-    assert excinfo.value.status_code == 500
+    assert excinfo.value.status_code == 502
+    assert "Qwen request failed" in excinfo.value.detail
 
 
 async def test_http_error():

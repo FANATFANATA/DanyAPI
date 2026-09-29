@@ -9,6 +9,10 @@ class DeepSeekStreamError(Exception):
     pass
 
 
+ALLOWED_ROLES = frozenset({"user", "assistant", "system", "developer", "tool", "function"})
+ALLOWED_ROLES_TEXT = ", ".join(sorted(ALLOWED_ROLES))
+
+
 class ChatMessage(BaseModel):
     role: str = "user"
     content: Any = ""
@@ -19,9 +23,8 @@ class ChatMessage(BaseModel):
     @field_validator("role")
     @classmethod
     def validate_role(cls, v: str) -> str:
-        allowed_roles = {"user", "assistant", "system", "developer", "tool", "function"}
-        if v not in allowed_roles:
-            raise ValueError(f"Invalid role: {v}. Allowed roles: {allowed_roles}")
+        if v not in ALLOWED_ROLES:
+            raise ValueError(f"Invalid role: {v}. Allowed roles: {ALLOWED_ROLES_TEXT}")
         return v
 
     @field_validator("tool_calls", mode="before")

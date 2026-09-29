@@ -258,9 +258,35 @@ def test_answer_phase_collects_cdn_urls():
 
 def test_error_code_variants():
     assert error_code({"code": "Busy"}) == "Busy"
-    assert error_code({"code": 123}) is None
+    assert error_code({"code": 123}) == "123"
+    assert error_code({"code": 123.0}) == "123"
+    assert error_code({"code": 123.9}) == "123"
+    assert error_code({"code": True}) is None
+    assert error_code({"code": None}) is None
+    assert error_code({"code": ["x"]}) is None
     assert error_code({}) is None
     assert error_code(None) is None
+
+
+def _rec_error(error):
+    rec = QwenStreamReconstructor()
+    rec.error = error
+    return rec
+
+
+def test_numeric_upstream_code_is_preserved_instead_of_reading_as_absent():
+    from danyapi.qwen import api as qwen_api
+
+    rec = _rec_error({"code": 40014, "details": "nope"})
+    code = error_code(rec.error)
+    assert code == "40014"
+    assert code is not None
+    assert code not in (qwen_api.RETRYABLE_ERROR_CODES | qwen_api.AUTH_ERROR_CODES | qwen_api.RATE_LIMIT_ERROR_CODES)
+    assert hash(code)
+    assert qwen_api._error_status(code) == 502
+    assert qwen_api._is_context_limit(rec) is False
+    assert qwen_api._is_retryable_error(rec) is False
+    assert qwen_api._error_detail(rec) == "nope"
 
 
 def test_usage_tokens_defaults():

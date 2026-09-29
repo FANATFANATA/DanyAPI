@@ -33,9 +33,16 @@ curl -X POST https://danyapi.cloudpub.ru/v1/chat/completions \
 ### Endpoints
 
 - `POST /v1/chat/completions` and `POST /v1/completions`: OpenAI compatible
+- `POST /v1/embeddings` and `POST /v1/moderations`
 - `POST /v1/responses`: OpenAI Responses API
+- `GET /v1/responses/{id}`, `DELETE /v1/responses/{id}`, `GET /v1/responses/{id}/input_items` and `POST /v1/responses/{id}/cancel`
 - `POST /v1/messages` and `POST /v1/messages/count_tokens`: Anthropic Messages API
-- `GET /v1/models`, `GET /health`, `GET /v1/usage`
+- `POST /v1/images/generations`, `POST /v1/images/edits` and `POST /v1/images/variations`
+- `POST /v1/tokens`: environment token check, needs `DANYAPI_ADMIN_TOKEN`, see the configuration table
+- `GET /v1/models` and `GET /v1/models/{model_id}`
+- `GET /v1/usage`
+- `GET /health`
+- `GET /`: dashboard, and `GET /docs/`: the documentation site
 
 ## Install & Upgrade
 
@@ -80,13 +87,13 @@ python -m danyapi
 python docs/start.py
 ```
 
-`app.py` and `python -m danyapi` start the server as is. `docs/start.py` first pulls the latest GitHub release (see `DANYAPI_AUTO_UPDATE`), then starts it, and it is what the desktop shortcut runs.
+`app.py` and `python -m danyapi` start the server as is. `docs/start.py` first pulls the latest GitHub release (see `DANYAPI_AUTO_UPDATE`), then starts it, and it is what the desktop shortcut runs. In a git checkout the update is refused and the reason printed when the working tree has uncommitted changes, and the resolved tag commit is compared against the `origin` remote before the checkout is moved.
 
 Defaults: binds `0.0.0.0:8000`, so the API is at `http://127.0.0.1:8000/v1/`, the landing page at `http://127.0.0.1:8000/` and the health check at `http://127.0.0.1:8000/health`.
 
 ## Configuration
 
-All settings live in `.env` at the repo root. `docs/setup.py` writes it for you, and `.env.example` lists every key with its default. `.env` is git-ignored and holds your tokens, so keep it out of version control.
+All settings live in `.env` at the repo root. `docs/setup.py` writes it for you, and `.env.example` lists every key the server reads together with its default, so the shipped example and `danyapi/config.py` are cross-checked by the repository guards. `.env` is git-ignored and holds your tokens, so keep it out of version control.
 
 Credentials:
 
@@ -101,7 +108,7 @@ Credentials:
 | `ALICE_ACCOUNTS` | `1` | Concurrent Alice connections, `1` to `4` |
 | `DUCKAI_ENABLED` | empty | `1` enables the unofficial Duck.ai provider, see the warning below |
 | `DUCKAI_ACCOUNTS` | `1` | Concurrent Duck.ai connections, `1` to `4` |
-| `BYOK` / `BYOK_MODE` / `DANYAPI_BYOK_MODE` | empty | `1` runs in bring-your-own-key mode: DeepSeek, Qwen and GigaChat requests supply their own key, Alice and Duck.ai need none. `GET /health` reports every provider as enabled and reports the per-key pools |
+| `BYOK` / `BYOK_MODE` / `DANYAPI_BYOK_MODE` | empty | `1` runs in bring-your-own-key mode: DeepSeek, Qwen and GigaChat requests supply their own key, Alice and Duck.ai need none. The first name that is set wins. `GET /health` reports every provider as enabled and reports the per-key pools |
 | `DANYAPI_ADMIN_TOKEN` | empty | Bearer token required by `POST /v1/tokens`, empty keeps that endpoint disabled |
 
 Server:
@@ -113,7 +120,7 @@ Server:
 | `DANYAPI_TIMEOUT` | `60` | Upstream request timeout in seconds |
 | `DANYAPI_ACQUIRE_TIMEOUT` | empty | Seconds to wait for a free account, empty means wait forever |
 | `DANYAPI_CORS_ORIGINS` | empty | Comma-separated extra browser origins allowed to call the API |
-| `DANYAPI_AUTO_UPDATE` | `1` | `docs/start.py` updates to the latest GitHub release before starting |
+| `DANYAPI_AUTO_UPDATE` | `1` | `docs/start.py` updates to the latest GitHub release before starting, and skips the update when the working tree is dirty |
 
 Sessions and cache:
 
@@ -191,7 +198,7 @@ Only models the upstream marks enabled are listed, so a DeepSeek model type the 
 
 ## Token utility
 
-The installer asks for provider tokens by hand, but `docs/token_utility.py` reads them out of your browser for you. It starts a small local server on `127.0.0.1:8765`, walks you through DeepSeek and then Qwen, and prints both tokens to copy into `.env`. It needs no dependencies, and nothing leaves your machine.
+The installer asks for provider tokens by hand, but `docs/token_utility.py` reads them out of your browser for you. It starts a small local server on `127.0.0.1:8765`, walks you through DeepSeek and then Qwen, and shows both tokens in the browser at `http://127.0.0.1:8765/results`, where each one has a copy button. Paste them into `.env` yourself; the tool never writes to it. It needs no dependencies, and nothing leaves your machine.
 
 Linux/macOS:
 
@@ -211,7 +218,7 @@ Or run it directly with any Python 3.10+ interpreter:
 python docs/token_utility.py
 ```
 
-Use `--port` to move it off the default port and `--no-browser` to skip opening the page. The server binds to `127.0.0.1` only and stops when you close it.
+Use `--port` to move it off the default port and `--no-browser` to skip opening the page. The server binds to `127.0.0.1` only and keeps running until you stop it with Ctrl+C in the window it runs in, or close that window.
 
 ## Contacts
 

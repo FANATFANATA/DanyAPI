@@ -82,7 +82,7 @@ async def test_tool_parameters_stay_a_json_object_not_a_string():
     _out, specs, _call = await gm.build_messages(
         stub,
         [ChatMessage(role="user", content="hi")],
-        tools=[{"type": "function", "function": {"name": "f", "parameters": {"type": "object", "properties": {"a": {"type": "string"}}}}}] ,
+        tools=[{"type": "function", "function": {"name": "f", "parameters": {"type": "object", "properties": {"a": {"type": "string"}}}}}],
     )
     assert isinstance(specs[0]["parameters"], dict)
 

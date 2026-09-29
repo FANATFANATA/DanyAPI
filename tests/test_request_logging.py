@@ -1,5 +1,7 @@
 import logging
 
+import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 import danyapi.api.core as core_mod
@@ -78,26 +80,132 @@ def _req(headers, client_host="10.0.0.5"):
     return _R()
 
 
-def test_extract_request_body_valid():
-    import asyncio
-
+def _post_request(body: bytes, content_length: bool = True):
     from starlette.requests import Request
 
+    async def receive():
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    headers = [(b"content-type", b"application/json")]
+    if content_length:
+        headers.append((b"content-length", str(len(body)).encode()))
     scope = {
         "type": "http",
         "method": "POST",
         "path": "/v1/chat/completions",
-        "headers": [(b"content-type", b"application/json")],
+        "headers": headers,
         "client": ("1.2.3.4", 1234),
         "server": ("localhost", 8008),
         "scheme": "http",
         "query_string": b"",
         "root_path": "",
     }
-    request = Request(scope, receive=None)
-    request._body = b'{"model": "deepseek-v4.1-flash", "user": "bob"}'
+    return Request(scope, receive=receive)
+
+
+def test_extract_request_body_valid():
+    import asyncio
+
+    request = _post_request(b'{"model": "deepseek-v4.1-flash", "user": "bob"}')
     payload = asyncio.run(openai_mod._extract_request_body(request))
     assert payload == {"model": "deepseek-v4.1-flash", "user": "bob"}
+
+
+def test_extract_request_body_without_a_declared_length_is_not_read():
+    import asyncio
+
+    request = _post_request(b'{"model": "deepseek-v4.1-flash"}', content_length=False)
+    request._body = b'{"model": "deepseek-v4.1-flash"}'
+    payload = asyncio.run(openai_mod._extract_request_body(request))
+    assert payload == {}
+
+
+def test_extract_request_body_rejects_oversized_declared_length(monkeypatch):
+    import asyncio
+
+    monkeypatch.setattr(core_mod, "MAX_REQUEST_BODY", 16)
+    request = _post_request(b"x" * 64)
+    with pytest.raises(HTTPException) as excinfo:
+        asyncio.run(openai_mod._extract_request_body(request))
+    assert excinfo.value.status_code == 413
+    assert "too large" in excinfo.value.detail
+
+
+def test_extract_request_body_truncation_is_separate_from_the_rejection_limit(monkeypatch):
+    import asyncio
+
+    monkeypatch.setattr(core_mod, "MAX_LOGGED_BODY", 8)
+    request = _post_request(b'{"model": "deepseek-v4.1-flash"}')
+    assert asyncio.run(openai_mod._extract_request_body(request)) == {}
+
+
+def test_extract_request_body_ignores_get_and_non_json_bodies():
+    import asyncio
+
+    body = b'{"model": "x"}'
+    request = _post_request(body)
+    request.scope["method"] = "GET"
+    assert asyncio.run(openai_mod._extract_request_body(request)) == {}
+    request = _post_request(b"not json")
+    assert asyncio.run(openai_mod._extract_request_body(request)) == {}
+    request = _post_request(b"[1, 2]")
+    assert asyncio.run(openai_mod._extract_request_body(request)) == {}
+
+
+def test_log_fields_are_capped_and_control_characters_are_removed():
+    request = _req({"user-agent": "curl/8.0\r\nforged line"})
+    details = openai_mod._request_details(request, {"model": "deepseek-v4.1-flash", "user": "bob"})
+    assert "\n" not in details
+    assert "\r" not in details
+    assert "forged line" in details
+    assert details.count("model=") == 1
+
+    long_details = openai_mod._request_details(_req({}), {"model": "a" * 5000, "session_id": "b" * 5000, "user": "c" * 5000})
+    for key in ("model=", "sid=", "user="):
+        value = long_details.split(key, 1)[1].split(" ", 1)[0]
+        assert len(value) <= core_mod.MAX_LOGGED_FIELD
+
+    nul_details = openai_mod._request_details(_req({"user-agent": "a\x00b"}), {"model": "m\x07del"})
+    assert "\x00" not in nul_details
+    assert "\x07" not in nul_details
+
+
+def test_default_format_declares_the_level_and_the_logger_name():
+    import danyapi.logging as logging_mod
+
+    assert "%(levelname)s" in logging_mod.DEFAULT_FORMAT
+    assert "%(name)s" in logging_mod.DEFAULT_FORMAT
+    record = logging.LogRecord("danyapi.api", logging.WARNING, __file__, 1, "a warning", None, None)
+    line = logging_mod.DEFAULT_FORMAT % {
+        "asctime": "10:00:00",
+        "levelname": record.levelname,
+        "name": record.name,
+        "message": record.getMessage(),
+    }
+    assert line == "(10:00:00) WARNING danyapi.api a warning"
+
+
+def test_logged_line_carries_the_level_and_the_logger_name():
+    import danyapi.logging as logging_mod
+
+    record = logging.LogRecord("danyapi.api", logging.WARNING, __file__, 1, "a warning", None, None)
+    formatter = logging_mod._EscapingFormatter(logging_mod.DEFAULT_FORMAT, logging_mod.DEFAULT_DATEFMT)
+    formatted = formatter.format(record)
+    assert " WARNING " in formatted
+    assert " danyapi.api " in formatted
+    assert formatted.endswith("a warning")
+
+
+def test_formatter_escapes_control_characters_in_the_message():
+    import danyapi.logging as logging_mod
+
+    formatter = logging_mod._EscapingFormatter(logging_mod.DEFAULT_FORMAT, logging_mod.DEFAULT_DATEFMT)
+    record = logging.LogRecord("danyapi.api", logging.INFO, __file__, 1, "model=deepseek\nforged line", None, None)
+    formatted = formatter.format(record)
+    assert formatted.count("\n") == 0
+    assert "\\n" in formatted
+    assert "forged line" in formatted
+    assert logging_mod.escape_control("a\x00b\tc") == "a\\x00b\\tc"
 
 
 def test_log_requests_success_via_client(caplog):

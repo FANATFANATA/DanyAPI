@@ -1,6 +1,6 @@
 import asyncio
 import json
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
@@ -291,7 +291,8 @@ async def test_send_completion_status_error():
     client.completion = AsyncMock(side_effect=httpx.HTTPStatusError("x", request=MagicMock(), response=response))
     with pytest.raises(qwen_api.HTTPException) as excinfo:
         await qwen_api._send_completion(client, FakeSession(), "p", "m", False, False)
-    assert excinfo.value.status_code == 500
+    assert excinfo.value.status_code == 502
+    assert "Qwen request failed" in excinfo.value.detail
 
 
 async def test_send_completion_http_error():
@@ -376,11 +377,18 @@ def test_error_detail_variants():
     rec = MagicMock()
     rec.error = {"code": "x", "details": "boom"}
     body = qwen_api._error_detail(rec)
-    assert body["error"]["message"] == "boom"
+    assert body == "boom"
+    assert isinstance(body, str)
     rec2 = MagicMock()
     rec2.error = {}
     body2 = qwen_api._error_detail(rec2)
-    assert body2["error"]["code"] is None
+    assert body2 == "Qwen server error, try again later"
+    rec3 = MagicMock()
+    rec3.error = None
+    assert qwen_api._error_detail(rec3) == "Qwen server error, try again later"
+    rec4 = MagicMock()
+    rec4.error = {"details": "", "message": "fallback"}
+    assert qwen_api._error_detail(rec4) == "fallback"
 
 
 def test_stream_error_lines_with_code():
@@ -909,11 +917,16 @@ async def test_stream_strips_dsml_from_reasoning():
     assert "All done." in joined
 
 
-def test_collect_image_strips_dsml_from_revised_prompt(monkeypatch):
+async def test_collect_image_strips_dsml_from_revised_prompt():
     rec = _rec_with(_DSML_REPLY)
-    monkeypatch.setattr(qwen_api, "_collect_response", AsyncMock(return_value=(rec, FakeSession(), "s1", "p", False, None)))
-    result = asyncio.run(
-        qwen_api.collect_image(
+
+    async def fake_collect(req, lock, lock_timeout):
+        req.session = FakeSession(sid="s1")
+        req.session_key = "s1"
+        return rec
+
+    with patch.object(qwen_api, "_collect_response", AsyncMock(side_effect=fake_collect)):
+        result = await qwen_api.collect_image(
             account=FakeAccount([]),
             pool=MagicMock(),
             existing_sid="s1",
@@ -922,7 +935,35 @@ def test_collect_image_strips_dsml_from_revised_prompt(monkeypatch):
             model="qwen-image-gen",
             model_id="qwen-image-gen",
         )
-    )
+    assert result["revised_prompt"] == "Here is the plan.\n \nAll done."
     assert "DSML" not in result["revised_prompt"]
     assert "secret reasoning" not in result["revised_prompt"]
     assert "All done." in result["revised_prompt"]
+    assert result["session_id"] == "s1"
+
+
+async def test_collect_request_is_a_typed_record_that_rebuilds_its_prompt():
+    req = qwen_api._CollectRequest(
+        account=FakeAccount([]),
+        pool=MagicMock(),
+        existing_sid="s1",
+        model_id="qwen3.8-max",
+        context_seq=None,
+        messages=[{"role": "user", "content": "hi"}],
+        tools=TOOLS,
+        tool_choice=None,
+        response_format=None,
+        cached_session=None,
+        prompt="stale",
+        tool_mode=False,
+        tool_schemas=None,
+    )
+    assert req.prepared is False
+    assert req.session is None
+    assert req.session_key is None
+    assert req.had_cached_session is False
+    assert req.prompt == "stale"
+    req.rebuild_prompt()
+    assert "hi" in req.prompt
+    assert req.tool_mode is True
+    assert set(req.tool_schemas) == {"get_weather"}

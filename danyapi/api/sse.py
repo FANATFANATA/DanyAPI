@@ -6,6 +6,7 @@ import time
 import uuid
 
 from ..accounts import AccountPoolBusy
+from .core import INTERNAL_ERROR_MESSAGE
 
 log = logging.getLogger("danyapi.api")
 
@@ -50,7 +51,7 @@ def _stream_error_sse(
 
 
 def _chunk_id_from_line(line: str) -> str | None:
-    if not line.startswith("data: "):
+    if not isinstance(line, str) or not line.startswith("data: "):
         return None
     payload = line[len("data: ") :].strip()
     if not payload or payload == "[DONE]":
@@ -87,8 +88,7 @@ async def _stream_guard(gen, model: str):
             yield line
     except Exception as exc:
         log.exception("stream generator failed: %s", exc)
-        msg = str(exc) or repr(exc) or "unknown stream error"
-        for line in _stream_error_sse(seen_id or chunk_id, created, model, f"stream error: {msg}"):
+        for line in _stream_error_sse(seen_id or chunk_id, created, model, INTERNAL_ERROR_MESSAGE):
             yield line
     finally:
         await _close_generator(gen)

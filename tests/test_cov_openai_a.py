@@ -5,6 +5,7 @@ from contextlib import ExitStack
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
@@ -14,6 +15,8 @@ import danyapi.api.byok as byok_mod
 import danyapi.api.chats as chats_mod
 import danyapi.api.core as core_mod
 import danyapi.api.envtokens as envtokens_mod
+import danyapi.api.images as images_mod
+import danyapi.api.models as models_mod
 import danyapi.api.openai as openai_mod
 import danyapi.api.retry as retry_mod
 from danyapi.accounts import AccountPoolBusy
@@ -89,14 +92,55 @@ class FakeRequest:
         self._raw_body = body
         self._chunks = stream_chunks or []
         self._body = _body
+        self.consumed: list[int] = []
+        self.body_calls = 0
         self.method = method
 
     async def body(self):
+        self.body_calls += 1
         return self._raw_body
 
     async def stream(self):
         for chunk in self._chunks:
+            self.consumed.append(len(chunk))
             yield chunk
+
+
+class FakeImageResponse:
+    def __init__(self, status_code=200, chunks=(b"abc",), headers=None, url="http://images.test/1.png"):
+        self.status_code = status_code
+        self.chunks = list(chunks)
+        self.headers = headers or {}
+        self.url = httpx.URL(url)
+
+    async def aiter_bytes(self):
+        for chunk in self.chunks:
+            yield chunk
+
+
+class FakeStreamContext:
+    def __init__(self, response):
+        self.response = response
+
+    async def __aenter__(self):
+        return self.response
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+
+class FakeImageClient:
+    def __init__(self, responses=None):
+        self.responses = {url: list(scripted) for url, scripted in (responses or {}).items()}
+        self.calls: list[tuple[str, str, float, bool]] = []
+
+    def stream(self, method, url, timeout=None, follow_redirects=True):
+        self.calls.append((method, str(url), timeout, follow_redirects))
+        scripted = self.responses.get(str(url), [])
+        response = scripted.pop(0) if scripted else FakeImageResponse(status_code=404, url=str(url))
+        if isinstance(response, BaseException):
+            raise response
+        return FakeStreamContext(response)
 
 
 @pytest.fixture(autouse=True)
@@ -236,6 +280,10 @@ def test_lifespan_closes_http_client_and_byok_pools():
     http_client.aclose = AsyncMock()
     with _patch_creds(ds_tokens=["tok"]):
         with TestClient(app):
+            assert set(app.state.byok_pools) == set(openai_mod.BYOK_PROVIDERS)
+            assert set(app.state.byok_locks) == set(openai_mod.BYOK_PROVIDERS)
+            assert set(app.state.byok_auth) == set(openai_mod.BYOK_PROVIDERS)
+            assert set(app.state.byok_stores) == set(openai_mod.BYOK_PROVIDERS)
             app.state.http_client = http_client
             fake_pool = MagicMock()
             fake_pool.accounts = []
@@ -368,6 +416,8 @@ def test_add_tokens_reactivates_qwen(monkeypatch):
 
 
 def test_add_tokens_hot_adds_both(monkeypatch):
+    monkeypatch.setattr(settings, "deepseek_tokens", [])
+    monkeypatch.setattr(settings, "qwen_tokens", [])
     monkeypatch.setattr(envtokens_mod, "_write_env_tokens", AsyncMock())
     monkeypatch.setattr(envtokens_mod, "_read_env_tokens", AsyncMock(return_value=([], [])))
     ds_client = MagicMock()
@@ -387,11 +437,14 @@ def test_add_tokens_hot_adds_both(monkeypatch):
     resp = client.post("/v1/tokens", headers=ADMIN_HEADERS, json={"deepseek_tokens": ["d"], "qwen_tokens": ["q"]})
     client.close()
     assert resp.status_code == 200
+    assert resp.json()["added"] == {"deepseek": 1, "qwen": 1}
     pool.add_account.assert_called_once()
     qwen_pool.add_account.assert_called_once()
 
 
 def test_add_tokens_skips_invalid(monkeypatch):
+    monkeypatch.setattr(settings, "deepseek_tokens", [])
+    monkeypatch.setattr(settings, "qwen_tokens", [])
     monkeypatch.setattr(envtokens_mod, "_write_env_tokens", AsyncMock())
     monkeypatch.setattr(envtokens_mod, "_read_env_tokens", AsyncMock(return_value=([], [])))
     ds_client = MagicMock()
@@ -409,16 +462,70 @@ def test_add_tokens_skips_invalid(monkeypatch):
     client.close()
     assert resp.status_code == 200
     assert resp.json()["skipped"] == {"deepseek": 1, "qwen": 1}
+    assert resp.json()["added"] == {"deepseek": 0, "qwen": 0}
+    assert resp.json()["activated"] == {"deepseek": 0, "qwen": 0}
+    assert resp.json()["reactivated"] == {"deepseek": 0, "qwen": 0}
+    assert resp.json()["message"] == "No valid tokens to add."
+    assert app.state.pool is None
+    assert app.state.qwen_pool is None
 
 
 def test_add_tokens_all_exist(monkeypatch):
-    app.state.pool = None
-    app.state.qwen_pool = None
     monkeypatch.setattr(envtokens_mod, "_read_env_tokens", AsyncMock(return_value=(["a"], ["b"])))
+    ds = SimpleNamespace(stable_id=openai_mod._token_stable_id("a"), broken=False, client=MagicMock())
+    qw = SimpleNamespace(stable_id=openai_mod._token_stable_id("b"), broken=False, client=MagicMock())
+    app.state.pool = SimpleNamespace(accounts=[ds])
+    app.state.qwen_pool = SimpleNamespace(accounts=[qw])
     client = TestClient(app)
     resp = client.post("/v1/tokens", headers=ADMIN_HEADERS, json={"deepseek_tokens": ["a"], "qwen_tokens": ["b"]})
     client.close()
     assert resp.status_code == 400
+    assert resp.json()["error"]["message"] == "all provided tokens already exist"
+    ds.client.check_auth.assert_not_called()
+    qw.client.check_auth.assert_not_called()
+
+
+def test_add_tokens_activates_token_already_in_env_file(monkeypatch):
+    monkeypatch.setattr(settings, "deepseek_tokens", [])
+    monkeypatch.setattr(settings, "qwen_tokens", [])
+    write = AsyncMock()
+    monkeypatch.setattr(envtokens_mod, "_write_env_tokens", write)
+    monkeypatch.setattr(envtokens_mod, "_read_env_tokens", AsyncMock(return_value=(["tok"], [])))
+    ds_client = MagicMock()
+    ds_client.check_auth = AsyncMock(return_value=True)
+    monkeypatch.setattr(envtokens_mod, "DeepSeekClient", MagicMock(return_value=ds_client))
+    app.state.pool = None
+    client = TestClient(app)
+    resp = client.post("/v1/tokens", headers=ADMIN_HEADERS, json={"deepseek_tokens": ["tok"]})
+    client.close()
+    assert resp.status_code == 200
+    assert resp.json()["activated"] == {"deepseek": 1, "qwen": 0}
+    assert resp.json()["added"] == {"deepseek": 0, "qwen": 0}
+    assert resp.json()["message"] == "Tokens reactivated."
+    assert app.state.pool is not None
+    write.assert_not_awaited()
+
+
+def test_add_tokens_does_not_rewrite_env_for_environment_token(monkeypatch):
+    monkeypatch.setattr(settings, "deepseek_tokens", ["envtok"])
+    monkeypatch.setattr(settings, "qwen_tokens", [])
+    write = AsyncMock()
+    monkeypatch.setattr(envtokens_mod, "_write_env_tokens", write)
+    monkeypatch.setattr(envtokens_mod, "_read_env_tokens", AsyncMock(return_value=([], [])))
+    ds_client = MagicMock()
+    ds_client.check_auth = AsyncMock(return_value=True)
+    monkeypatch.setattr(envtokens_mod, "DeepSeekClient", MagicMock(return_value=ds_client))
+    app.state.pool = None
+    client = TestClient(app)
+    resp = client.post("/v1/tokens", headers=ADMIN_HEADERS, json={"deepseek_tokens": ["envtok"]})
+    client.close()
+    assert resp.status_code == 200
+    assert resp.json()["added"] == {"deepseek": 1, "qwen": 0}
+    assert resp.json()["activated"] == {"deepseek": 0, "qwen": 0}
+    write.assert_not_awaited()
+    assert settings.deepseek_tokens == ["envtok"]
+    assert app.state.pool is not None
+    assert len(app.state.pool.accounts) == 1
 
 
 def test_add_tokens_no_tokens():
@@ -443,22 +550,30 @@ def test_add_tokens_bad_item():
 
 
 async def test_read_request_body_invalid_content_length():
+    assert core_mod._declared_body_length(FakeRequest(headers={"content-length": "abc"})) == -1
+    assert core_mod._declared_body_length(FakeRequest(headers={})) == -1
+    assert core_mod._declared_body_length(FakeRequest(headers={"content-length": ""})) == -1
+    assert core_mod._declared_body_length(FakeRequest(headers={"content-length": "12"})) == 12
     req = FakeRequest(headers={"content-length": "abc"}, _body=b"x")
     assert await openai_mod._read_request_body(req, 10) == b"x"
+    streamed = FakeRequest(headers={"content-length": "abc"}, stream_chunks=[b"x"])
+    assert await openai_mod._read_request_body(streamed, 10) == b"x"
 
 
 async def test_read_request_body_header_too_large():
-    req = FakeRequest(headers={"content-length": "100"}, _body=b"x")
+    req = FakeRequest(headers={"content-length": "100"}, stream_chunks=[b"x" * 100])
     with pytest.raises(HTTPException) as excinfo:
         await openai_mod._read_request_body(req, 10)
     assert excinfo.value.status_code == 413
+    assert req.consumed == []
 
 
 async def test_read_request_body_actual_too_large():
-    req = FakeRequest(headers={"content-length": "5"}, body=b"x" * 20)
+    req = FakeRequest(headers={"content-length": "5"}, stream_chunks=[b"x" * 5, b"y" * 6, b"z" * 100])
     with pytest.raises(HTTPException) as excinfo:
         await openai_mod._read_request_body(req, 10)
     assert excinfo.value.status_code == 413
+    assert req.consumed == [5, 6]
 
 
 async def test_read_request_body_cached_too_large():
@@ -469,10 +584,20 @@ async def test_read_request_body_cached_too_large():
 
 
 async def test_read_request_body_stream_too_large():
-    req = FakeRequest(headers={}, stream_chunks=[b"x" * 8, b"y" * 8])
+    req = FakeRequest(headers={}, stream_chunks=[b"x" * 8, b"y" * 8, b"z" * 100])
     with pytest.raises(HTTPException) as excinfo:
         await openai_mod._read_request_body(req, 10)
     assert excinfo.value.status_code == 413
+    assert req.consumed == [8, 8]
+
+
+async def test_read_request_body_streams_and_caches():
+    req = FakeRequest(headers={"content-length": "7"}, stream_chunks=[b'{"a"', b":1}"])
+    assert await openai_mod._read_request_body(req, 10) == b'{"a":1}'
+    assert req._body == b'{"a":1}'
+    req.consumed.clear()
+    assert await openai_mod._read_request_body(req, 10) == b'{"a":1}'
+    assert req.consumed == []
 
 
 def test_parse_logged_body():
@@ -489,23 +614,44 @@ async def test_extract_request_body_variants(monkeypatch):
     assert await openai_mod._extract_request_body(FakeRequest(headers={"content-length": "abc"})) == {}
     assert await openai_mod._extract_request_body(FakeRequest(headers={}, method="GET")) == {}
     assert await openai_mod._extract_request_body(FakeRequest(headers={}, method="POST")) == {}
-    assert await openai_mod._extract_request_body(FakeRequest(headers={}, method="POST", _body=b'{"a":1}')) == {"a": 1}
-    assert await openai_mod._extract_request_body(FakeRequest(headers={"content-length": "7"}, body=b'{"a":1}', method="POST")) == {"a": 1}
+    assert await openai_mod._extract_request_body(FakeRequest(headers={}, method="POST", _body=b'{"a":1}')) == {}
+    assert await openai_mod._extract_request_body(FakeRequest(headers={"content-length": "7"}, method="POST", _body=b'{"a":1}')) == {"a": 1}
+    streamed = FakeRequest(headers={"content-length": "7"}, method="POST", stream_chunks=[b'{"a"', b":1}"])
+    assert await openai_mod._extract_request_body(streamed) == {"a": 1}
+    assert streamed._body == b'{"a":1}'
+    assert streamed.consumed == [4, 3]
+    undeclared = FakeRequest(headers={}, method="POST", stream_chunks=[b'{"a":1}'])
+    assert await openai_mod._extract_request_body(undeclared) == {}
+    assert undeclared.consumed == []
 
 
-async def test_extract_request_body_generic_error():
+async def test_extract_request_body_generic_error(monkeypatch):
     class BadReq(FakeRequest):
-        async def body(self):
+        async def stream(self):
             raise RuntimeError("x")
+            yield b""
 
     assert await openai_mod._extract_request_body(BadReq(headers={"content-length": "7"}, method="POST")) == {}
 
 
 async def test_extract_request_body_http_exception(monkeypatch):
-    monkeypatch.setattr(core_mod, "MAX_REQUEST_BODY", 5)
-    req = FakeRequest(headers={"content-length": "7"}, method="POST", body=b"x" * 7)
+    monkeypatch.setattr(core_mod, "MAX_REQUEST_BODY", openai_mod.MAX_LOGGED_BODY + 1)
+    req = FakeRequest(headers={"content-length": str(openai_mod.MAX_LOGGED_BODY + 2)}, method="POST")
     with pytest.raises(HTTPException) as excinfo:
         await openai_mod._extract_request_body(req)
+    assert excinfo.value.status_code == 413
+    assert req.consumed == []
+
+
+async def test_extract_request_body_rejects_declared_length_over_request_limit():
+    req = FakeRequest(headers={"content-length": str(openai_mod.MAX_REQUEST_BODY + 1)}, method="POST")
+    with pytest.raises(HTTPException) as excinfo:
+        await openai_mod._extract_request_body(req)
+    assert excinfo.value.status_code == 413
+    assert req.consumed == []
+    cached = FakeRequest(headers={"content-length": str(openai_mod.MAX_REQUEST_BODY + 1)}, method="POST", _body=b'{"a":1}')
+    with pytest.raises(HTTPException) as excinfo:
+        await openai_mod._extract_request_body(cached)
     assert excinfo.value.status_code == 413
 
 
@@ -525,17 +671,37 @@ def test_exception_message():
 
 
 def test_request_id_header():
-    assert openai_mod._request_id_header(FakeRequest(headers={"x-request-id": "abc"})) == "abc"
-    generated = openai_mod._request_id_header(FakeRequest(headers={"x-request-id": "x" * 200}))
-    assert len(generated) == 32
+    first = openai_mod._request_id_header(FakeRequest(headers={"x-request-id": "abc"}))
+    assert first != "abc"
+    assert len(first) == 32
+    assert int(first, 16) >= 0
+    second = openai_mod._request_id_header(FakeRequest(headers={"x-request-id": "abc"}))
+    assert second != first
+
+
+def test_client_request_id_is_sanitised_and_capped():
+    assert core_mod._client_request_id(FakeRequest(headers={})) is None
+    assert core_mod._client_request_id(FakeRequest(headers={"x-request-id": "abc"})) == "abc"
+    assert core_mod._client_request_id(FakeRequest(headers={"x-request-id": "a\r\nb\tc\x00d"})) == "a  b c d"
+    assert core_mod._client_request_id(FakeRequest(headers={"x-request-id": "x" * 200})) == "x" * core_mod.MAX_CLIENT_REQUEST_ID
+    assert core_mod._client_request_id(FakeRequest(headers={core_mod.CLIENT_REQUEST_ID_HEADER: "via-client-header"})) == "via-client-header"
+
+
+def test_response_headers_separate_server_and_client_ids():
+    headers = core_mod._response_headers(FakeRequest(headers={"x-request-id": "abc"}), "server-id")
+    assert headers == {"x-request-id": "server-id", core_mod.CLIENT_REQUEST_ID_HEADER: "abc"}
+    assert core_mod._response_headers(FakeRequest(headers={}), "server-id") == {"x-request-id": "server-id"}
 
 
 def test_validation_error_handler():
     client = TestClient(app)
-    resp = client.post("/v1/chat/completions", json={"messages": "notalist"})
+    resp = client.post("/v1/chat/completions", json={"messages": "notalist"}, headers={"x-request-id": "client-id"})
     client.close()
     assert resp.status_code == 400
-    assert "x-request-id" in resp.headers
+    assert resp.headers["x-request-id"] != "client-id"
+    assert len(resp.headers["x-request-id"]) == 32
+    assert resp.headers[core_mod.CLIENT_REQUEST_ID_HEADER] == "client-id"
+    assert resp.json()["error"]["request_id"] == resp.headers["x-request-id"]
 
 
 async def test_http_exception_handler_with_headers():
@@ -602,8 +768,10 @@ async def test_upload_attachments_empty():
 
 
 def test_resolve_model_suffix_unknown():
+    assert not hasattr(openai_mod, "_resolve_model")
+    assert not hasattr(openai_mod, "_upstream_model_for")
     with pytest.raises(HTTPException) as excinfo:
-        openai_mod._resolve_model("nope-thinking")
+        models_mod._resolve_model("nope-thinking")
     assert excinfo.value.status_code == 404
 
 
@@ -655,12 +823,27 @@ async def test_byok_state_helpers(monkeypatch):
     monkeypatch.setattr(app.state, "byok_pools", None, raising=False)
     monkeypatch.setattr(app.state, "byok_locks", None, raising=False)
     monkeypatch.setattr(app.state, "byok_auth", None, raising=False)
-    pools = await openai_mod._byok_pools_state()
-    locks = await openai_mod._byok_locks_state()
-    auth = await openai_mod._byok_auth_state()
-    assert "deepseek" in pools and "qwen" in pools
-    assert "deepseek" in locks
-    assert "deepseek" in auth
+    monkeypatch.setattr(app.state, "byok_stores", None, raising=False)
+    pools = openai_mod._byok_pools_state()
+    locks = openai_mod._byok_locks_state()
+    auth = openai_mod._byok_auth_state()
+    stores = openai_mod._byok_stores_state()
+    for state in (pools, locks, auth, stores):
+        assert set(state) == set(openai_mod.BYOK_PROVIDERS)
+    assert app.state.byok_pools is pools
+    assert app.state.byok_locks is locks
+    assert app.state.byok_auth is auth
+    assert app.state.byok_stores is stores
+    assert openai_mod._byok_pools_state() is pools
+
+
+def test_pool_attrs_follow_provider_map():
+    assert openai_mod.POOL_ATTRS == tuple(openai_mod.POOL_ATTRS_BY_PROVIDER[provider] for provider in openai_mod.BYOK_PROVIDERS)
+
+
+def test_provider_state_for_unknown_provider():
+    assert openai_mod.provider_models("not-a-provider") == []
+    assert openai_mod.provider_pool("not-a-provider") is None
 
 
 def test_cached_auth_variants():
@@ -680,8 +863,10 @@ def test_evict_auth(monkeypatch):
 
 async def test_extract_api_key_variants(monkeypatch):
     body = b'{"api_key":"k1"}'
-    req = FakeRequest(headers={"content-type": "application/json", "content-length": str(len(body))}, body=body)
-    assert await openai_mod._extract_request_api_key(req) == "k1"
+    cached = FakeRequest(headers={"content-type": "application/json", "content-length": str(len(body))}, _body=body)
+    assert await openai_mod._extract_request_api_key(cached) == "k1"
+    assert cached.body_calls == 0
+    assert cached.consumed == []
     assert await openai_mod._extract_request_api_key(FakeRequest(headers={"content-type": "text/plain"})) is None
     assert await openai_mod._extract_request_api_key(FakeRequest(headers={"content-type": "application/json"}, body=b"")) is None
     bad = b"notjson"
@@ -693,6 +878,8 @@ async def test_extract_api_key_variants(monkeypatch):
         await openai_mod._extract_request_api_key(FakeRequest(headers={"content-type": "application/json", "content-length": str(len(nokey))}, body=nokey))
         is None
     )
+    oversized = b'{"api_key":"' + b"x" * (byok_mod.BYOK_MAX_JSON_BODY + 1) + b'"}'
+    assert await openai_mod._extract_request_api_key(FakeRequest(headers={"content-type": "application/json"}, _body=oversized)) is None
 
 
 async def test_extract_api_key_body_raises():
@@ -702,6 +889,9 @@ async def test_extract_api_key_body_raises():
 
     req = RaisingReq(headers={"content-type": "application/json", "content-length": "5"})
     assert await openai_mod._extract_request_api_key(req) is None
+    with_bad_length = FakeRequest(headers={"content-type": "application/json", "content-length": "abc"})
+    assert await openai_mod._extract_request_api_key(with_bad_length) is None
+    assert with_bad_length.body_calls == 0
 
 
 async def test_extract_api_key_http_exception(monkeypatch):
@@ -763,12 +953,35 @@ async def test_close_busy_client_acquires():
 async def test_byok_validate_cached(monkeypatch):
     monkeypatch.setattr(settings, "byok_auth_ttl", 100.0)
     token = "tok"
-    stable = openai_mod._token_stable_id(token)
+    stable = byok_mod._byok_stable_id(token)
+    assert stable != openai_mod._token_stable_id(token)
     monkeypatch.setattr(app.state, "byok_auth", {"deepseek": {stable: (True, time.monotonic())}, "qwen": {}}, raising=False)
     client = MagicMock()
     client.check_auth = AsyncMock(return_value=False)
     assert await openai_mod._byok_validate("deepseek", token, client) is True
     client.check_auth.assert_not_awaited()
+
+
+async def test_byok_validate_caches_verdict(monkeypatch):
+    monkeypatch.setattr(settings, "byok_auth_ttl", 100.0)
+    token = "tok"
+    monkeypatch.setattr(app.state, "byok_auth", {"deepseek": {}, "qwen": {}}, raising=False)
+    client = MagicMock()
+    client.check_auth = AsyncMock(return_value=True)
+    assert await openai_mod._byok_validate("deepseek", token, client) is True
+    assert app.state.byok_auth["deepseek"][byok_mod._byok_stable_id(token)][0] is True
+    assert await openai_mod._byok_validate("deepseek", token, client) is True
+    client.check_auth.assert_awaited_once()
+
+
+async def test_byok_validate_transport_failure_is_not_cached(monkeypatch):
+    monkeypatch.setattr(settings, "byok_auth_ttl", 100.0)
+    token = "tok"
+    monkeypatch.setattr(app.state, "byok_auth", {"deepseek": {}, "qwen": {}}, raising=False)
+    client = MagicMock()
+    client.check_auth = AsyncMock(side_effect=RuntimeError("x"))
+    assert await openai_mod._byok_validate("deepseek", token, client) is False
+    assert byok_mod._byok_stable_id(token) not in app.state.byok_auth["deepseek"]
 
 
 async def test_byok_validate_exception(monkeypatch):
@@ -1063,12 +1276,23 @@ def test_cancel_response_in_progress():
 def test_input_items_fallback():
     app.state.responses_store = None
     store = openai_mod._responses_store()
-    store.set("resp_y", {"public": {"input": [{"role": "user", "content": "hi"}]}})
+    store.set("resp_y", {"public": {"input": [{"role": "user", "content": "hi"}, {"role": "user", "content": "again"}]}})
     client = TestClient(app)
-    resp = client.get("/v1/responses/resp_y/input_items")
+    first = client.get("/v1/responses/resp_y/input_items")
+    second = client.get("/v1/responses/resp_y/input_items")
+    ascending = client.get("/v1/responses/resp_y/input_items?order=asc")
     client.close()
-    assert resp.status_code == 200
-    assert resp.json()["data"]
+    assert first.status_code == 200
+    data = first.json()["data"]
+    assert data
+    assert first.json()["data"] == second.json()["data"]
+    assert first.json()["first_id"] == data[0]["id"]
+    assert first.json()["last_id"] == data[-1]["id"]
+    assert first.json()["has_more"] is False
+    assert len({item["id"] for item in data}) == len(data)
+    assert ascending.json()["data"] == list(reversed(data))
+    assert ascending.json()["first_id"] == ascending.json()["data"][0]["id"]
+    assert [item["content"][0]["text"] for item in data] == ["again", "hi"]
 
 
 def test_image_generations_endpoint_no_pool():
@@ -1123,18 +1347,18 @@ async def test_image_generations_b64(monkeypatch):
     pool.acquire = AsyncMock(return_value=(account, None))
 
     async def fake_collect(**kwargs):
-        return {"image_urls": ["http://x/1.png"], "session_id": "s1", "usage": {"prompt_tokens": 1}}
+        return {"image_urls": ["http://images.test/1.png"], "session_id": "s1", "usage": {"prompt_tokens": 1}}
 
     monkeypatch.setattr(openai_mod.qwen_api, "collect_image", fake_collect)
-    hc = MagicMock()
-    resp = MagicMock()
-    resp.status_code = 200
-    resp.content = b"abc"
-    hc.get = AsyncMock(return_value=resp)
+    monkeypatch.setattr(images_mod, "_host_is_public", lambda host: True)
+    hc = FakeImageClient({"http://images.test/1.png": [FakeImageResponse(chunks=[b"ab", b"c"])]})
     monkeypatch.setattr(app.state, "http_client", hc, raising=False)
     out = await openai_mod._image_generations(openai_mod.ImageGenerationRequest(prompt="x", response_format="b64_json"), pool)
-    assert out["data"][0]["b64_json"]
+    assert out["data"][0]["b64_json"] == base64.b64encode(b"abc").decode()
+    assert "url" not in out["data"][0]
     assert out["usage"] == {"prompt_tokens": 1}
+    assert out["session_id"] == "s1"
+    assert hc.calls == [("GET", "http://images.test/1.png", images_mod.IMAGE_FETCH_TIMEOUT_SEC, False)]
 
 
 async def test_image_generations_fetch_failures(monkeypatch):
@@ -1144,16 +1368,165 @@ async def test_image_generations_fetch_failures(monkeypatch):
     pool.acquire = AsyncMock(return_value=(account, None))
 
     async def fake_collect(**kwargs):
-        return {"image_urls": ["http://x/1.png", "http://x/2.png"], "session_id": None}
+        return {"image_urls": ["http://images.test/1.png", "http://images.test/2.png"], "session_id": None}
 
     monkeypatch.setattr(openai_mod.qwen_api, "collect_image", fake_collect)
-    hc = MagicMock()
-    bad = MagicMock()
-    bad.status_code = 500
-    hc.get = AsyncMock(side_effect=[bad, RuntimeError("net")])
+    monkeypatch.setattr(images_mod, "_host_is_public", lambda host: True)
+    hc = FakeImageClient(
+        {
+            "http://images.test/1.png": [FakeImageResponse(status_code=500)],
+            "http://images.test/2.png": [RuntimeError("net")],
+        }
+    )
+    monkeypatch.setattr(app.state, "http_client", hc, raising=False)
+    with pytest.raises(HTTPException) as excinfo:
+        await openai_mod._image_generations(openai_mod.ImageGenerationRequest(prompt="x", response_format="b64_json"), pool)
+    assert excinfo.value.status_code == 502
+    assert excinfo.value.detail == "image download failed"
+
+
+async def test_image_generations_refuses_non_public_host(monkeypatch):
+    pool = MagicMock()
+    account = MagicMock()
+    account.sem = asyncio.Semaphore(1)
+    pool.acquire = AsyncMock(return_value=(account, None))
+
+    async def fake_collect(**kwargs):
+        return {"image_urls": ["http://169.254.169.254/latest/meta-data/iam/security-credentials/"], "session_id": None}
+
+    monkeypatch.setattr(openai_mod.qwen_api, "collect_image", fake_collect)
+    hc = FakeImageClient()
+    monkeypatch.setattr(app.state, "http_client", hc, raising=False)
+    with pytest.raises(HTTPException) as excinfo:
+        await openai_mod._image_generations(openai_mod.ImageGenerationRequest(prompt="x", response_format="b64_json"), pool)
+    assert excinfo.value.status_code == 502
+    assert hc.calls == []
+    assert "169.254.169.254" not in excinfo.value.detail
+
+
+async def test_image_generations_refuses_non_http_scheme(monkeypatch):
+    pool = MagicMock()
+    account = MagicMock()
+    account.sem = asyncio.Semaphore(1)
+    pool.acquire = AsyncMock(return_value=(account, None))
+
+    async def fake_collect(**kwargs):
+        return {"image_urls": ["file:///etc/passwd"], "session_id": None}
+
+    monkeypatch.setattr(openai_mod.qwen_api, "collect_image", fake_collect)
+    hc = FakeImageClient()
+    monkeypatch.setattr(app.state, "http_client", hc, raising=False)
+    with pytest.raises(HTTPException) as excinfo:
+        await openai_mod._image_generations(openai_mod.ImageGenerationRequest(prompt="x", response_format="b64_json"), pool)
+    assert excinfo.value.status_code == 502
+    assert hc.calls == []
+
+
+async def test_image_generations_follows_public_redirects(monkeypatch):
+    pool = MagicMock()
+    account = MagicMock()
+    account.sem = asyncio.Semaphore(1)
+    pool.acquire = AsyncMock(return_value=(account, None))
+
+    async def fake_collect(**kwargs):
+        return {"image_urls": ["http://images.test/1.png"], "session_id": None}
+
+    monkeypatch.setattr(openai_mod.qwen_api, "collect_image", fake_collect)
+    monkeypatch.setattr(images_mod, "_host_is_public", lambda host: host in ("images.test", "cdn.test"))
+    hc = FakeImageClient(
+        {
+            "http://images.test/1.png": [FakeImageResponse(status_code=302, headers={"location": "http://cdn.test/2.png"})],
+            "http://cdn.test/2.png": [FakeImageResponse(chunks=[b"abc"])],
+        }
+    )
     monkeypatch.setattr(app.state, "http_client", hc, raising=False)
     out = await openai_mod._image_generations(openai_mod.ImageGenerationRequest(prompt="x", response_format="b64_json"), pool)
-    assert all(item.get("url") for item in out["data"])
+    assert out["data"][0]["b64_json"] == base64.b64encode(b"abc").decode()
+    assert [call[:2] for call in hc.calls] == [("GET", "http://images.test/1.png"), ("GET", "http://cdn.test/2.png")]
+    assert all(call[3] is False for call in hc.calls)
+
+
+async def test_image_generations_revalidates_redirect_target(monkeypatch):
+    pool = MagicMock()
+    account = MagicMock()
+    account.sem = asyncio.Semaphore(1)
+    pool.acquire = AsyncMock(return_value=(account, None))
+
+    async def fake_collect(**kwargs):
+        return {"image_urls": ["http://images.test/1.png"], "session_id": None}
+
+    monkeypatch.setattr(openai_mod.qwen_api, "collect_image", fake_collect)
+    monkeypatch.setattr(images_mod, "_host_is_public", lambda host: host == "images.test")
+    hc = FakeImageClient(
+        {
+            "http://images.test/1.png": [FakeImageResponse(status_code=302, headers={"location": "http://169.254.169.254/latest/"})],
+        }
+    )
+    monkeypatch.setattr(app.state, "http_client", hc, raising=False)
+    with pytest.raises(HTTPException) as excinfo:
+        await openai_mod._image_generations(openai_mod.ImageGenerationRequest(prompt="x", response_format="b64_json"), pool)
+    assert excinfo.value.status_code == 502
+    assert [call[1] for call in hc.calls] == ["http://images.test/1.png"]
+
+
+async def test_image_generations_redirect_limit(monkeypatch):
+    pool = MagicMock()
+    account = MagicMock()
+    account.sem = asyncio.Semaphore(1)
+    pool.acquire = AsyncMock(return_value=(account, None))
+
+    async def fake_collect(**kwargs):
+        return {"image_urls": ["http://images.test/1.png"], "session_id": None}
+
+    monkeypatch.setattr(openai_mod.qwen_api, "collect_image", fake_collect)
+    monkeypatch.setattr(images_mod, "_host_is_public", lambda host: True)
+    hops = range(1, images_mod.IMAGE_FETCH_REDIRECTS + 2)
+    script = {f"http://images.test/{hop}.png": [FakeImageResponse(status_code=302, headers={"location": f"http://images.test/{hop + 1}.png"})] for hop in hops}
+    hc = FakeImageClient(script)
+    monkeypatch.setattr(app.state, "http_client", hc, raising=False)
+    with pytest.raises(HTTPException) as excinfo:
+        await openai_mod._image_generations(openai_mod.ImageGenerationRequest(prompt="x", response_format="b64_json"), pool)
+    assert excinfo.value.status_code == 502
+    assert [call[1] for call in hc.calls] == [f"http://images.test/{hop}.png" for hop in hops]
+
+
+async def test_image_generations_download_size_cap(monkeypatch):
+    pool = MagicMock()
+    account = MagicMock()
+    account.sem = asyncio.Semaphore(1)
+    pool.acquire = AsyncMock(return_value=(account, None))
+
+    async def fake_collect(**kwargs):
+        return {"image_urls": ["http://images.test/1.png"], "session_id": None}
+
+    monkeypatch.setattr(openai_mod.qwen_api, "collect_image", fake_collect)
+    monkeypatch.setattr(images_mod, "_host_is_public", lambda host: True)
+    monkeypatch.setattr(images_mod, "MAX_FILE_SIZE", 8)
+    chunks = [b"x" * 4, b"y" * 4, b"z" * 100]
+    hc = FakeImageClient({"http://images.test/1.png": [FakeImageResponse(chunks=chunks)]})
+    monkeypatch.setattr(app.state, "http_client", hc, raising=False)
+    with pytest.raises(HTTPException) as excinfo:
+        await openai_mod._image_generations(openai_mod.ImageGenerationRequest(prompt="x", response_format="b64_json"), pool)
+    assert excinfo.value.status_code == 502
+    assert hc.calls
+
+
+def test_host_is_public_refuses_internal_addresses():
+    internal = (
+        "127.0.0.1",
+        "localhost",
+        "169.254.169.254",
+        "10.1.2.3",
+        "192.168.0.1",
+        "172.16.0.1",
+        "0.0.0.0",
+        "::1",
+        "fd00::1",
+        "224.0.0.1",
+        "not-a-host.invalid",
+    )
+    for host in internal:
+        assert images_mod._host_is_public(host) is False, host
 
 
 async def test_b64encode_variants():
@@ -1181,6 +1554,43 @@ async def test_read_upload_too_large():
     with pytest.raises(HTTPException) as excinfo:
         await openai_mod._read_upload(file)
     assert excinfo.value.status_code == 413
+
+
+async def test_read_upload_stops_reading_at_the_cap(monkeypatch):
+    monkeypatch.setattr(images_mod, "MAX_FILE_SIZE", 100)
+    chunks = [b"x" * 101] + [b"y" * 101] * 100
+    file = SimpleNamespace(read=AsyncMock(side_effect=chunks), content_type="text/plain")
+    with pytest.raises(HTTPException) as excinfo:
+        await openai_mod._read_upload(file)
+    assert excinfo.value.status_code == 413
+    assert file.read.await_count == 1
+
+
+def test_image_edits_rejects_out_of_range_n(monkeypatch):
+    pool = MagicMock()
+    account = MagicMock()
+    account.sem = asyncio.Semaphore(1)
+    pool.acquire = AsyncMock(return_value=(account, None))
+    app.state.qwen_pool = pool
+    collect = AsyncMock(return_value={"image_urls": ["http://x/1.png"], "session_id": None})
+    monkeypatch.setattr(openai_mod.qwen_api, "collect_image", collect)
+    client = TestClient(app)
+    for count in ("0", "99", "-1"):
+        resp = client.post(
+            "/v1/images/edits",
+            files={"image": ("a.png", b"data", "image/png")},
+            data={"prompt": "p", "n": count},
+        )
+        assert resp.status_code == 400, count
+    assert "n" in resp.json()["error"]["message"]
+    ok = client.post(
+        "/v1/images/edits",
+        files={"image": ("a.png", b"data", "image/png")},
+        data={"prompt": "p", "n": "4"},
+    )
+    client.close()
+    assert ok.status_code == 200
+    collect.assert_awaited()
 
 
 def test_image_edit_req():
@@ -1414,10 +1824,58 @@ def test_health_byok(monkeypatch):
     monkeypatch.setattr(app.state, "byok", True, raising=False)
     monkeypatch.setattr(app.state, "byok_pools", {"deepseek": {"a": 1}, "qwen": {}}, raising=False)
     client = TestClient(app)
-    data = client.get("/health").json()
+    assert client.get("/health").json() == {"status": "ok"}
+    assert client.get("/health", headers={"x-api-key": "nope"}).json() == {"status": "ok"}
+    detail = client.get("/health", headers=ADMIN_HEADERS).json()
     client.close()
-    assert data["byok"] is True
-    assert data["byok_pools"]["deepseek"] == 1
+    assert detail["status"] == "ok"
+    assert detail["byok"] is True
+    assert detail["byok_pools"]["deepseek"] == 1
+    assert detail["qwen_stats"] is not None
+
+
+def test_health_without_admin_token_is_minimal(monkeypatch):
+    monkeypatch.setattr(app.state, "byok", False, raising=False)
+    monkeypatch.setattr(app.state, "usage", None, raising=False)
+    client = TestClient(app)
+    assert client.get("/health").json() == {"status": "ok"}
+    assert client.get("/health", headers={"authorization": "Bearer nope"}).json() == {"status": "ok"}
+    assert client.get("/health", headers={"x-api-key": "nope"}).json() == {"status": "ok"}
+    detail = client.get("/health", headers=ADMIN_HEADERS).json()
+    client.close()
+    assert detail["status"] == "ok"
+    assert detail["usage"] is None
+    assert "byok" not in detail
+    expected = set(openai_mod.BYOK_PROVIDERS) | {f"{provider}_stats" for provider in openai_mod.BYOK_PROVIDERS}
+    assert set(detail) >= expected
+
+
+def test_usage_endpoint_is_gated(monkeypatch):
+    tracker = MagicMock()
+    tracker.snapshot.return_value = {
+        "totals": {"requests": 3},
+        "by_model": {"m": {"requests": 3}},
+        "by_provider": {"deepseek": {"requests": 3}},
+        "by_user": {"u": {"requests": 3}},
+        "recent": [{"model": "m"}],
+    }
+    monkeypatch.setattr(app.state, "usage", tracker, raising=False)
+    client = TestClient(app)
+    public = client.get("/v1/usage")
+    admin = client.get("/v1/usage", headers=ADMIN_HEADERS)
+    client.close()
+    assert public.status_code == 200
+    assert public.json() == {"totals": {"requests": 3}, "by_model": {"m": {"requests": 3}}}
+    assert admin.status_code == 200
+    assert "by_provider" in admin.json()
+    assert "recent" in admin.json()
+
+
+def test_usage_endpoint_disabled(monkeypatch):
+    monkeypatch.setattr(app.state, "usage", None, raising=False)
+    client = TestClient(app)
+    assert client.get("/v1/usage").status_code == 404
+    client.close()
 
 
 def test_build_limited_message_tool_mode():
@@ -1475,12 +1933,28 @@ def test_add_tokens_absent_in_byok_mode(monkeypatch):
 
 
 def test_add_tokens_accepts_x_api_key(monkeypatch):
+    monkeypatch.setattr(settings, "deepseek_tokens", [])
+    monkeypatch.setattr(settings, "qwen_tokens", [])
+    write = AsyncMock()
+    monkeypatch.setattr(envtokens_mod, "_write_env_tokens", write)
     monkeypatch.setattr(envtokens_mod, "_read_env_tokens", AsyncMock(return_value=(["tok"], [])))
+    ds_client = MagicMock()
+    ds_client.check_auth = AsyncMock(return_value=True)
+    monkeypatch.setattr(envtokens_mod, "DeepSeekClient", MagicMock(return_value=ds_client))
+    app.state.pool = None
     client = TestClient(app)
     resp = client.post("/v1/tokens", headers={"x-api-key": "test-admin-token"}, json={"deepseek_tokens": ["tok"]})
     client.close()
+    assert resp.status_code == 200
+    assert resp.json()["activated"] == {"deepseek": 1, "qwen": 0}
+    write.assert_not_awaited()
+
+
+def test_add_tokens_rejects_unknown_field():
+    client = TestClient(app)
+    resp = client.post("/v1/tokens", headers=ADMIN_HEADERS, json={"deepseek_tokens": ["x"], "gigachat_keys": ["y"]})
+    client.close()
     assert resp.status_code == 400
-    assert resp.json()["error"]["message"] == "all provided tokens already exist"
 
 
 def test_write_env_tokens_is_atomic(monkeypatch, tmp_path):

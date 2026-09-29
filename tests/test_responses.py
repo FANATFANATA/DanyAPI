@@ -565,7 +565,7 @@ def test_response_from_chat_error_is_failed():
         1,
     )
     assert obj["status"] == "failed"
-    assert obj["error"] == {"message": "bad"}
+    assert obj["error"] == {"code": None, "message": "bad"}
     assert obj["incomplete_details"] is None
 
 
@@ -578,7 +578,7 @@ def test_response_from_chat_reduced_context_incomplete():
     obj = resp.response_from_chat(chat, info, "r", 1)
     assert obj["status"] == "incomplete"
     assert obj["incomplete_details"] == {"reason": "max_output_tokens"}
-    assert obj["error"]["message"] == "reduced"
+    assert obj["error"] == {"code": None, "message": "reduced"}
 
 
 def test_response_from_chat_reduced_context_by_finish_reason_only():
@@ -639,7 +639,7 @@ def test_request_info_has_no_extras_field():
     assert not hasattr(resp.RequestInfo(model="m"), "extras")
 
 
-async def test_translate_stream_error_event_keeps_discriminator():
+async def test_translate_stream_error_event_hides_upstream_finish_reason():
     info = resp.RequestInfo(model="m")
     upstream = FakeUpstream(['data: {"id":"x","error":{"message":"boom","finish_reason":"server_busy"},"choices":[]}\n\n'])
     seen = []
@@ -648,11 +648,15 @@ async def test_translate_stream_error_event_keeps_discriminator():
     assert len(errors) == 1
     assert errors[0]["type"] == "error"
     assert errors[0]["message"] == "boom"
-    assert errors[0]["code"] == "server_busy"
+    assert errors[0]["code"] is None
+    assert "server_busy" not in json.dumps(errors[0])
     failed = [payload for event, payload in frames if event == "response.failed"]
     assert len(failed) == 1
     assert failed[0]["response"]["status"] == "failed"
+    assert failed[0]["response"]["error"] == {"code": None, "message": "boom"}
+    assert "finish_reason" not in json.dumps(failed[0]["response"])
     assert seen and seen[0]["status"] == "failed"
+    assert seen[0]["error"] == {"code": None, "message": "boom"}
     assert upstream.closed
 
 
@@ -674,6 +678,8 @@ async def test_translate_stream_reduced_context_is_incomplete():
     incomplete = _named(frames, "response.incomplete")
     assert incomplete[0]["response"]["status"] == "incomplete"
     assert incomplete[0]["response"]["incomplete_details"] == {"reason": "max_output_tokens"}
+    assert incomplete[0]["response"]["error"] is None
+    assert "response_incomplete" not in json.dumps(incomplete[0]["response"]["incomplete_details"])
     assert seen and seen[0]["status"] == "incomplete"
     assert upstream.closed
 
@@ -768,3 +774,105 @@ async def test_translate_stream_output_order_matches_announced_indices():
     assert added == {0: "message", 1: "reasoning"}
     completed = _named(frames, "response.completed")
     assert [item["type"] for item in completed[0]["response"]["output"]] == [added[index] for index in sorted(added)]
+
+
+async def test_translate_stream_closes_items_in_announced_index_order():
+    info = resp.RequestInfo(model="m")
+    chunks = [
+        'data: {"id":"x","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function",'
+        '"function":{"name":"f","arguments":""}}]},"finish_reason":null}]}\n\n',
+        'data: {"id":"x","choices":[{"index":0,"delta":{"reasoning_content":"think"},"finish_reason":null}]}\n\n',
+        'data: {"id":"x","choices":[{"index":0,"delta":{"content":"answer"},"finish_reason":null}]}\n\n',
+        'data: {"id":"x","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n',
+    ]
+    frames = _frames("".join(await _collect(resp.translate_stream(FakeUpstream(chunks), info, "r", 1))))
+    added = {payload["output_index"]: payload["item"] for event, payload in frames if event == "response.output_item.added"}
+    assert {index: item["type"] for index, item in added.items()} == {0: "function_call", 1: "reasoning", 2: "message"}
+    done = {payload["output_index"]: payload["item"] for event, payload in frames if event == "response.output_item.done"}
+    assert set(done) == set(added)
+    completed = _named(frames, "response.completed")[0]["response"]
+    assert [item["type"] for item in completed["output"]] == ["function_call", "reasoning", "message"]
+    assert [item["id"] for item in completed["output"]] == [added[index]["id"] for index in sorted(added)]
+    assert completed["output"] == [done[index] for index in sorted(done)]
+    assert added[0]["arguments"] == ""
+    assert done[0]["arguments"] == "" and done[0]["status"] == "completed"
+    assert done[2]["status"] == "completed"
+
+
+async def test_translate_stream_merges_usage_chunks():
+    info = resp.RequestInfo(model="m")
+    first = 'data: {"id":"x","choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":null}],"usage":'
+    second = 'data: {"id":"x","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":'
+    upstream = FakeUpstream(
+        [
+            f'{first}{{"prompt_tokens":5,"completion_tokens":0,"cached_tokens":0,"total_tokens":99}}}}\n\n',
+            f'{second}{{"prompt_tokens":0,"completion_tokens":2,"total_tokens":0}}}}\n\n',
+        ]
+    )
+    completed = _named(_frames("".join(await _collect(resp.translate_stream(upstream, info, "r", 1)))), "response.completed")
+    usage = completed[0]["response"]["usage"]
+    assert usage["input_tokens"] == 5
+    assert usage["output_tokens"] == 2
+    assert usage["total_tokens"] == 7
+    assert usage["input_tokens_details"] == {"cached_tokens": 0}
+
+
+async def test_translate_stream_terminal_status_always_carries_usage():
+    info = resp.RequestInfo(model="m")
+    chunks = ['data: {"id":"x","choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":"stop"}]}\n\n']
+    frames = _frames("".join(await _collect(resp.translate_stream(FakeUpstream(chunks), info, "r", 1))))
+    assert _named(frames, "response.created")[0]["response"]["usage"] is None
+    assert _named(frames, "response.in_progress")[0]["response"]["usage"] is None
+    assert _named(frames, "response.completed")[0]["response"]["usage"]["total_tokens"] == 0
+
+
+def test_endpoint_rejects_replayed_reasoning_items():
+    pool, acct = make_pool()
+    app.state.pool = pool
+    client = TestClient(app)
+    resp_obj = client.post(
+        "/v1/responses",
+        json={
+            "model": "deepseek-v4.1-flash",
+            "input": [
+                {"role": "user", "content": "hi"},
+                {"type": "reasoning", "id": "rs_1", "summary": [{"type": "summary_text", "text": "earlier thinking"}]},
+            ],
+        },
+    )
+    client.close()
+    assert resp_obj.status_code == 400
+    assert "reasoning" in resp_obj.json()["error"]["message"]
+    acct.client.completion.assert_not_awaited()
+
+
+def test_endpoint_rejects_unanswered_tool_result():
+    pool, acct = make_pool()
+    app.state.pool = pool
+    client = TestClient(app)
+    resp_obj = client.post(
+        "/v1/responses",
+        json={
+            "model": "deepseek-v4.1-flash",
+            "input": [
+                {"role": "user", "content": "hi"},
+                {"type": "function_call_output", "call_id": "call_unknown", "output": "42"},
+            ],
+        },
+    )
+    client.close()
+    assert resp_obj.status_code == 400
+    assert "call_unknown" in resp_obj.json()["error"]["message"]
+    acct.client.completion.assert_not_awaited()
+
+
+def test_endpoint_rejects_empty_input():
+    pool, acct = make_pool()
+    app.state.pool = pool
+    client = TestClient(app)
+    assert client.post("/v1/responses", json={"model": "deepseek-v4.1-flash", "input": []}).status_code == 400
+    assert client.post("/v1/responses", json={"model": "deepseek-v4.1-flash", "input": "   "}).status_code == 400
+    assert client.post("/v1/responses", json={"model": "deepseek-v4.1-flash", "input": [{"role": "user", "content": ""}]}).status_code == 400
+    assert client.post("/v1/responses", json={"model": "deepseek-v4.1-flash", "input": [{"type": "function_call_output", "output": "42"}]}).status_code == 400
+    client.close()
+    acct.client.completion.assert_not_awaited()
