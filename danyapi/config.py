@@ -218,7 +218,7 @@ class Settings:
         self.timeout = _env_positive_float("DANYAPI_TIMEOUT", 60.0)
         self.acquire_timeout = _env_float_opt("DANYAPI_ACQUIRE_TIMEOUT")
         self.session_cache_size = _env_int("DANYAPI_SESSION_CACHE_SIZE", 128, 1)
-        self.session_ttl = _env_float("DANYAPI_SESSION_TTL_SECONDS", 3600.0, minimum=1.0)
+        self.session_ttl = _env_float("DANYAPI_SESSION_TTL_SECONDS", 3600.0, minimum=0.0)
         self.log_level = _env_str("DANYAPI_LOG_LEVEL", "INFO") or "INFO"
         self.log_file = _env_str("DANYAPI_LOG_FILE")
         self.log_max_bytes = _env_int("DANYAPI_LOG_MAX_BYTES", 10 * 1024 * 1024, 1)

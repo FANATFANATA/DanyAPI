@@ -26,7 +26,7 @@ _FLUSH_DEBOUNCE = 0.25
 _MAX_STORE_BYTES = 64 * 1024 * 1024
 _FLUSH_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="danyapi-cache")
 
-_PATH_LOCKS: weakref.WeakValueDictionary[str, threading.Lock] = weakref.WeakValueDictionary()
+_PATH_LOCKS: dict[str, threading.Lock] = {}
 _PATH_LOCKS_GUARD = threading.Lock()
 _LIVE_STORES: dict[str, weakref.ReferenceType[JsonStore]] = {}
 _LIVE_STORES_GUARD = threading.Lock()

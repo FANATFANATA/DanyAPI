@@ -80,16 +80,13 @@ def test_non_finite_ttl_warns_and_uses_the_default(caplog):
     assert _texts(caplog) == ["DANYAPI_SESSION_TTL_SECONDS=inf is not finite, using 3600.0"]
 
 
-def test_non_positive_ttl_clamps_to_one_second(caplog):
+def test_zero_ttl_never_expires_and_negative_clamps(caplog):
     with caplog.at_level(logging.WARNING):
         zero = _settings_for({"DANYAPI_SESSION_TTL_SECONDS": "0"})
         negative = _settings_for({"DANYAPI_SESSION_TTL_SECONDS": "-30"})
-    assert zero.session_ttl == 1.0
-    assert negative.session_ttl == 1.0
-    assert _texts(caplog) == [
-        "DANYAPI_SESSION_TTL_SECONDS=0.0 is below the minimum 1.0, clamped",
-        "DANYAPI_SESSION_TTL_SECONDS=-30.0 is below the minimum 1.0, clamped",
-    ]
+    assert zero.session_ttl == 0.0
+    assert negative.session_ttl == 0.0
+    assert _texts(caplog) == ["DANYAPI_SESSION_TTL_SECONDS=-30.0 is below the minimum 0.0, clamped"]
 
 
 def test_acquire_timeout_bad_value_warns(caplog):
