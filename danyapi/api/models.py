@@ -16,8 +16,7 @@ from ..deepseek.client import DeepSeekClient
 from ..duckai.client import DuckAIClient
 from ..duckai.client import catalog_models as duckai_catalog_models
 from ..gigachat.client import GigaChatClient
-from ..opencode.client import MODEL_PREFIX as OPENCODE_MODEL_PREFIX
-from ..opencode.client import OpenCodeClient
+from ..opencode import client as opencode_zen
 from ..qwen.client import QwenClient
 from .state import BYOK_PROVIDERS, MODEL_ATTRS, _byok_mode, app, provider_models, provider_pool
 
@@ -33,6 +32,8 @@ STATUS_TO_FINISH_REASON = {
 }
 
 MODEL_CREATED_AT = int(time.time())
+
+OPTIONAL_MODEL_FIELDS = ("free", "context_length", "supports_vision")
 
 PROVIDER_NAMES = BYOK_PROVIDERS
 
@@ -83,7 +84,7 @@ def _probe_client(provider: str, api_key: str | None) -> Any:
     if provider == "gigachat" and api_key:
         return GigaChatClient(key=api_key, scope=settings.gigachat_scope, timeout=settings.timeout)
     if provider == "opencode":
-        return OpenCodeClient(key=api_key or "", timeout=settings.timeout)
+        return opencode_zen.OpenCodeClient(key=api_key or "", timeout=settings.timeout)
     return None
 
 
@@ -169,21 +170,44 @@ async def _fetch_gigachat_models(client: GigaChatClient) -> list[dict]:
     return models
 
 
-async def _fetch_opencode_models(client: OpenCodeClient) -> list[dict]:
+async def _fetch_opencode_models(client: opencode_zen.OpenCodeClient) -> list[dict]:
     raw = await client.fetch_models()
+    catalog: dict = {}
+    try:
+        catalog = await opencode_zen.fetch_catalog(client)
+    except Exception as exc:
+        log.warning("opencode catalog fetch failed, falling back to the bare model list: %s", exc)
+
     models: list[dict] = []
+    skipped = 0
     for entry in raw:
         if not isinstance(entry, dict) or not entry.get("id"):
             continue
         model_id = str(entry["id"])
-        models.append(
-            {
-                "id": model_id,
-                "name": entry.get("name") or model_id,
-                "owned_by": "opencode",
-                "model_type": "chat",
-            }
-        )
+        meta = catalog.get(model_id)
+        if isinstance(meta, dict):
+            if opencode_zen.model_format(meta) != opencode_zen.CHAT_FORMAT:
+                skipped += 1
+                continue
+        record: dict = {
+            "id": model_id,
+            "name": (meta or {}).get("name") or entry.get("name") or model_id,
+            "owned_by": "opencode",
+            "model_type": "chat",
+        }
+        if isinstance(meta, dict):
+            record["free"] = opencode_zen.is_free(meta)
+            window = opencode_zen.context_limit(meta)
+            if window is not None:
+                record["context_length"] = window
+            if "image" in (meta.get("modalities", {}) or {}).get("input", []):
+                record["supports_vision"] = True
+        models.append(record)
+    if skipped:
+        log.info("opencode catalog: %d model(s) hidden, they need a request format this gateway does not serve", skipped)
+    free = sum(1 for m in models if m.get("free"))
+    if free:
+        log.info("opencode catalog: %d of %d served models are on the free tier", free, len(models))
     return models
 
 
@@ -363,6 +387,9 @@ def _models_state() -> list[dict]:
             "name": model.get("name"),
             "model_type": model.get("model_type", "chat"),
         }
+        for optional in OPTIONAL_MODEL_FIELDS:
+            if optional in model:
+                entry[optional] = model[optional]
         models.append(entry)
         if owner == "deepseek":
             for suffix in REASONING_SUFFIXES:
@@ -421,7 +448,7 @@ def _is_deepseek_model(lowered: str) -> bool:
 
 def _resolve_provider(model: str) -> str:
     lowered = model.lower()
-    if lowered.startswith(OPENCODE_MODEL_PREFIX):
+    if lowered.startswith(opencode_zen.MODEL_PREFIX):
         return "opencode"
     if lowered.startswith("qwen"):
         return "qwen"

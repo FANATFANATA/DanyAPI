@@ -8,11 +8,13 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from danyapi.accounts import AccountPool
+from danyapi.api import models as models_mod
 from danyapi.api.core import _acquire_account
 from danyapi.api.models import _resolve_provider
 from danyapi.api.openai import app
 from danyapi.api.schemas import ChatMessage
 from danyapi.api.state import BYOK_PROVIDERS, KEY_OPTIONAL_PROVIDERS, KEYLESS_PROVIDERS, MODEL_ATTRS, POOL_ATTRS_BY_PROVIDER
+from danyapi.opencode import client as client_mod
 from danyapi.opencode import messages as om
 from danyapi.opencode.accounts import OpenCodeAccount
 from danyapi.opencode.api import _status_for
@@ -145,8 +147,143 @@ def test_error_message_is_read_from_the_nested_shape():
 def test_error_detail_carries_the_type_hint():
     detail = OpenCodeError(403, "tier gone", "FreeTierError").detail
     assert detail.startswith("OpenCode Zen error: tier gone")
-    assert "free tier" in detail
+    assert "OPENCODE_KEYS" in detail
+    assert "space-bunny-free" in detail
+    assert "reserved for an authenticated account" in detail
     assert OpenCodeError(500, "").detail == "OpenCode Zen error: 500"
+
+
+def test_the_free_tier_hint_does_not_blame_the_balance():
+    assert "credit" not in client_mod.ERROR_TYPE_HINTS["FreeTierError"]
+    assert "exhausted" not in client_mod.ERROR_TYPE_HINTS["FreeTierError"]
+
+
+CATALOG = {
+    "opencode": {
+        "id": "opencode",
+        "models": {
+            "chatty": {"name": "Chatty", "cost": {"input": 1, "output": 2}, "limit": {"context": 4096}, "modalities": {"input": ["text"]}},
+            "freebie": {"name": "Freebie", "cost": {"input": 0, "output": 0}, "limit": {"context": 8192}, "modalities": {"input": ["text", "image"]}},
+            "responses-only": {"name": "Responses Only", "provider": {"npm": "@ai-sdk/openai"}},
+            "anthropic-only": {"name": "Anthropic Only", "provider": {"npm": "@ai-sdk/anthropic"}},
+            "broken": "not a dict",
+        },
+    }
+}
+
+
+def _catalog_transport(payload=None):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "models.opencode.ai":
+            return httpx.Response(200, json=CATALOG if payload is None else payload)
+        return httpx.Response(200, json={"object": "list", "data": [{"id": k} for k in ("chatty", "freebie", "responses-only", "anthropic-only")]})
+
+    return handler
+
+
+@pytest.mark.asyncio
+async def test_fetch_catalog_reads_the_nested_provider_models(monkeypatch):
+    monkeypatch.setattr(client_mod, "_CATALOG_CACHE", (None, 0.0))
+    client = _client(httpx.MockTransport(_catalog_transport()))
+    catalog = await client_mod.fetch_catalog(client)
+    assert set(catalog) == {"chatty", "freebie", "responses-only", "anthropic-only"}
+    assert catalog["freebie"]["name"] == "Freebie"
+
+
+@pytest.mark.asyncio
+async def test_fetch_catalog_is_cached_across_calls(monkeypatch):
+    monkeypatch.setattr(client_mod, "_CATALOG_CACHE", (None, 0.0))
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(200, json=CATALOG)
+
+    client = _client(httpx.MockTransport(handler))
+    await client_mod.fetch_catalog(client)
+    await client_mod.fetch_catalog(client)
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_fetch_catalog_ignores_a_payload_without_the_provider(monkeypatch):
+    monkeypatch.setattr(client_mod, "_CATALOG_CACHE", (None, 0.0))
+    client = _client(httpx.MockTransport(_catalog_transport({"someone-else": {"models": {"x": {}}}})))
+    assert await client_mod.fetch_catalog(client) == {}
+
+
+@pytest.mark.asyncio
+async def test_fetch_catalog_raises_on_a_non_json_body(monkeypatch):
+    monkeypatch.setattr(client_mod, "_CATALOG_CACHE", (None, 0.0))
+    client = _client(httpx.MockTransport(lambda r: httpx.Response(200, content=b"nope")))
+    with pytest.raises(OpenCodeError):
+        await client_mod.fetch_catalog(client)
+
+
+@pytest.mark.asyncio
+async def test_fetch_catalog_raises_on_an_error_status(monkeypatch):
+    monkeypatch.setattr(client_mod, "_CATALOG_CACHE", (None, 0.0))
+    client = _client(httpx.MockTransport(lambda r: httpx.Response(500, json={"error": {"type": "server_error", "message": "down"}})))
+    with pytest.raises(OpenCodeError):
+        await client_mod.fetch_catalog(client)
+
+
+def test_model_format_defaults_to_chat_and_reads_the_override():
+    assert client_mod.model_format({}) == client_mod.CHAT_FORMAT
+    assert client_mod.model_format({"provider": {}}) == client_mod.CHAT_FORMAT
+    assert client_mod.model_format({"provider": {"npm": "@ai-sdk/openai"}}) == "@ai-sdk/openai"
+    assert client_mod.model_format({"provider": {"npm": ""}}) == client_mod.CHAT_FORMAT
+
+
+def test_is_free_needs_both_directions_at_zero():
+    assert client_mod.is_free({"cost": {"input": 0, "output": 0}}) is True
+    assert client_mod.is_free({"cost": {"input": 0, "output": 1}}) is False
+    assert client_mod.is_free({"cost": {"input": 1, "output": 0}}) is False
+    assert client_mod.is_free({}) is False
+    assert client_mod.is_free({"cost": "junk"}) is False
+
+
+def test_context_limit_only_returns_a_positive_int():
+    assert client_mod.context_limit({"limit": {"context": 4096}}) == 4096
+    assert client_mod.context_limit({"limit": {"context": 0}}) is None
+    assert client_mod.context_limit({"limit": {"context": "4096"}}) is None
+    assert client_mod.context_limit({"limit": {}}) is None
+    assert client_mod.context_limit({}) is None
+
+
+@pytest.mark.asyncio
+async def test_fetcher_hides_models_this_gateway_cannot_serve(monkeypatch):
+    from danyapi.api.models import _fetch_opencode_models
+
+    monkeypatch.setattr(client_mod, "_CATALOG_CACHE", (None, 0.0))
+    client = _client(httpx.MockTransport(_catalog_transport()))
+    models = await _fetch_opencode_models(client)
+    assert [m["id"] for m in models] == ["chatty", "freebie"]
+    assert models[0]["name"] == "Chatty"
+    assert models[0]["free"] is False
+    assert models[0]["context_length"] == 4096
+    assert models[1]["free"] is True
+    assert models[1]["supports_vision"] is True
+    assert "supports_vision" not in models[0]
+
+
+@pytest.mark.asyncio
+async def test_fetcher_survives_a_broken_catalog(monkeypatch):
+    from danyapi.api.models import _fetch_opencode_models
+
+    async def _boom(_client):
+        raise RuntimeError("catalog down")
+
+    monkeypatch.setattr(models_mod.opencode_zen, "fetch_catalog", _boom)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"object": "list", "data": [{"id": "chatty"}, {"id": "freebie"}]})
+
+    client = _client(httpx.MockTransport(handler))
+    models = await _fetch_opencode_models(client)
+    assert [m["id"] for m in models] == ["chatty", "freebie"]
+    assert models[0]["name"] == "chatty"
+    assert "free" not in models[0]
 
 
 def test_error_detail_is_truncated():

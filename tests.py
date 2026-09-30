@@ -72,6 +72,23 @@ YELLOW = "\033[33m"
 RED = "\033[31m"
 RESET = "\033[0m"
 
+USAGE = """usage: python tests.py [-j JOBS] [--full | --lean] [pytest args...]
+
+  -j, --jobs N   run independent checks in N threads
+      --full      also run the slow extra checks: pyright, pylint, flake8,
+                  pyflakes, isort, bandit, vulture, clang-format, clang-tidy,
+                  xenon, pip-audit, pip check
+      --lean      run only the always-on checks (the default)
+  -h, --help      show this message
+
+The default profile is pytest plus the guards that catch the mistakes pytest
+cannot: the repo bans, the env key coverage, the dashboard CSP hash, a byte
+compile, ruff for lint and format, and mypy for types. That is about six
+seconds of overhead on top of pytest. The --full profile adds the rest,
+which is dominated by pyright and pylint and costs about a minute and a
+half on a warm cache.
+"""
+
 STEP_TIMEOUT_SECONDS = 1200.0
 
 STATUS_PASS = "PASS"
@@ -94,9 +111,10 @@ def status_paint(status: str, use_color: bool) -> str:
     return paint(STATUS_FAIL, RED, use_color)
 
 
-def parse_args(argv: list[str]) -> tuple[int, list[str]]:
+def parse_args(argv: list[str]) -> tuple[int, list[str], bool]:
     jobs = 1
     pytest_args: list[str] = []
+    full = False
     i = 0
     while i < len(argv):
         arg = argv[i]
@@ -132,12 +150,23 @@ def parse_args(argv: list[str]) -> tuple[int, list[str]]:
                 raise SystemExit(2) from None
             i += 1
             continue
+        if arg in ("--full", "-f"):
+            full = True
+            i += 1
+            continue
+        if arg == "--lean":
+            full = False
+            i += 1
+            continue
+        if arg in ("-h", "--help"):
+            print(USAGE)
+            raise SystemExit(0)
         pytest_args.append(arg)
         i += 1
     if jobs < 1:
         print(f"tests: job count must be at least 1, got {jobs}", file=sys.stderr)
         raise SystemExit(2)
-    return jobs, pytest_args
+    return jobs, pytest_args, full
 
 
 def iter_guard_targets() -> list[Path]:
@@ -349,8 +378,8 @@ def print_step(result: StepResult, use_color: bool, lock: threading.Lock | None 
         print(text)
 
 
-def build_steps(pytest_args: list[str]) -> list[tuple[str, StepRunner]]:
-    return [
+def build_steps(pytest_args: list[str], full: bool = False) -> list[tuple[str, StepRunner]]:
+    steps: list[tuple[str, StepRunner]] = [
         ("repo guards", check_repo_guards),
         ("py_compile", [sys.executable, "-m", "compileall", "-q", "-f", *PYTHON_TARGETS]),
         ("ruff check", [sys.executable, "-m", "ruff", "check", "."]),
@@ -358,89 +387,111 @@ def build_steps(pytest_args: list[str]) -> list[tuple[str, StepRunner]]:
             "ruff format --check",
             [sys.executable, "-m", "ruff", "format", "--check", "."],
         ),
-        ("isort --check", [sys.executable, "-m", "isort", "--check-only", "."]),
-        ("flake8", [sys.executable, "-m", "flake8"]),
-        ("pyflakes", [sys.executable, "-m", "pyflakes", *PYTHON_TARGETS]),
         ("mypy", [sys.executable, "-m", "mypy", *PYTHON_TARGETS]),
-        (
-            "pyright",
-            [sys.executable, "-m", "pyright", "--pythonpath", sys.executable, *PYTHON_TARGETS],
-        ),
-        (
-            "pylint",
-            [
-                sys.executable,
-                "-m",
-                "pylint",
-                "--errors-only",
-                "--recursive=y",
-                f"--disable={PYLINT_DISABLES}",
-                *PYTHON_TARGETS,
-            ],
-        ),
-        (
-            "bandit",
-            [sys.executable, "-m", "bandit", "-q", "-r", "danyapi", "-s", BANDIT_SKIPS, "-c", "bandit.toml"],
-        ),
-        (
-            "bandit root scripts",
-            [sys.executable, "-m", "bandit", "-q", *ROOT_SCRIPTS, "-s", ROOT_BANDIT_SKIPS, "-c", "bandit.toml"],
-        ),
-        ("vulture", [sys.executable, "-m", "vulture"]),
-        ("clang-format", ["clang-format", "--dry-run", *C_SOURCES]),
-        (
-            "clang-tidy",
-            [
-                "clang-tidy",
-                f"-checks={CLANG_TIDY_CHECKS}",
-                *C_SOURCES,
-                "--",
-                "-std=c11",
-                "-D_CRT_SECURE_NO_WARNINGS",
-            ],
-        ),
-        (
-            "xenon",
-            [
-                sys.executable,
-                "-m",
-                "xenon",
-                "--max-absolute",
-                "F",
-                "--max-modules",
-                "D",
-                "--max-average",
-                "D",
-                "danyapi",
-                *ROOT_SCRIPTS,
-            ],
-        ),
-        (
-            "pip-audit",
-            [
-                sys.executable,
-                "-m",
-                "pip_audit",
-                "--progress-spinner",
-                "off",
-                "--timeout",
-                "90",
-            ],
-        ),
-        ("pip check", [sys.executable, "-m", "pip", "check"]),
-        (
-            "pytest",
-            [
-                sys.executable,
-                "-m",
-                "pytest",
-                "-q",
-                "--cov=danyapi",
-                "--cov-report=term-missing",
-                *pytest_args,
-            ],
-        ),
     ]
+    if not full:
+        steps.append(
+            (
+                "pytest",
+                [
+                    sys.executable,
+                    "-m",
+                    "pytest",
+                    "-q",
+                    "--cov=danyapi",
+                    "--cov-report=term-missing",
+                    *pytest_args,
+                ],
+            )
+        )
+        return steps
+
+    steps.extend(
+        [
+            ("isort --check", [sys.executable, "-m", "isort", "--check-only", "."]),
+            ("flake8", [sys.executable, "-m", "flake8"]),
+            ("pyflakes", [sys.executable, "-m", "pyflakes", *PYTHON_TARGETS]),
+            (
+                "pyright",
+                [sys.executable, "-m", "pyright", "--pythonpath", sys.executable, *PYTHON_TARGETS],
+            ),
+            (
+                "pylint",
+                [
+                    sys.executable,
+                    "-m",
+                    "pylint",
+                    "--errors-only",
+                    "--recursive=y",
+                    f"--disable={PYLINT_DISABLES}",
+                    *PYTHON_TARGETS,
+                ],
+            ),
+            (
+                "bandit",
+                [sys.executable, "-m", "bandit", "-q", "-r", "danyapi", "-s", BANDIT_SKIPS, "-c", "bandit.toml"],
+            ),
+            (
+                "bandit root scripts",
+                [sys.executable, "-m", "bandit", "-q", *ROOT_SCRIPTS, "-s", ROOT_BANDIT_SKIPS, "-c", "bandit.toml"],
+            ),
+            ("vulture", [sys.executable, "-m", "vulture"]),
+            ("clang-format", ["clang-format", "--dry-run", *C_SOURCES]),
+            (
+                "clang-tidy",
+                [
+                    "clang-tidy",
+                    f"-checks={CLANG_TIDY_CHECKS}",
+                    *C_SOURCES,
+                    "--",
+                    "-std=c11",
+                    "-D_CRT_SECURE_NO_WARNINGS",
+                ],
+            ),
+            (
+                "xenon",
+                [
+                    sys.executable,
+                    "-m",
+                    "xenon",
+                    "--max-absolute",
+                    "F",
+                    "--max-modules",
+                    "D",
+                    "--max-average",
+                    "D",
+                    "danyapi",
+                    *ROOT_SCRIPTS,
+                ],
+            ),
+            (
+                "pip-audit",
+                [
+                    sys.executable,
+                    "-m",
+                    "pip_audit",
+                    "--progress-spinner",
+                    "off",
+                    "--timeout",
+                    "90",
+                ],
+            ),
+            ("pip check", [sys.executable, "-m", "pip", "check"]),
+            (
+                "pytest",
+                [
+                    sys.executable,
+                    "-m",
+                    "pytest",
+                    "-q",
+                    "--cov=danyapi",
+                    "--cov-report=term-missing",
+                    *pytest_args,
+                ],
+            ),
+        ]
+    )
+    return steps
 
 
 def main() -> int:
@@ -451,8 +502,8 @@ def main() -> int:
                 reconfigure(errors="replace")
             except (ValueError, OSError):
                 pass
-    jobs, pytest_args = parse_args(sys.argv[1:])
-    steps = build_steps(pytest_args)
+    jobs, pytest_args, full = parse_args(sys.argv[1:])
+    steps = build_steps(pytest_args, full)
     use_color = sys.stdout.isatty()
     run_started = time.monotonic()
     results: list[StepResult] = []
@@ -494,8 +545,10 @@ def main() -> int:
     elif skipped:
         detail = ", ".join(name for name, status, *_rest in results if status == STATUS_SKIP)
         print(f"RESULT: {passed} passed, {skipped} step(s) not run, so this is not a full pass: {detail}")
+    elif not full:
+        print(f"RESULT: PASSED, lean profile only ({len(results)} steps). The slow checks were not run: pass --full.")
     else:
-        print(f"RESULT: ALL CHECKS PASSED ({len(results)} steps)")
+        print(f"RESULT: ALL CHECKS PASSED ({len(results)} steps, lean profile, run with --full for the rest)")
     print(f"total time: {wall_time:.1f}s wall clock across {jobs} job(s)")
     return 1 if failed else 0
 

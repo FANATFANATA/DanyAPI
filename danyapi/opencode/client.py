@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import uuid
 from typing import Any
 
@@ -21,6 +22,16 @@ USER_AGENT = "opencode/1.18.33"
 
 CLIENT_NAME = "danyapi"
 
+CATALOG_URL = "https://models.opencode.ai/api.json"
+
+CATALOG_TTL_SECONDS = 3600.0
+
+CATALOG_PROVIDER = PROVIDER_ID
+
+CHAT_FORMAT = "@ai-sdk/openai-compatible"
+
+FREE_TIER_HINT = "the Zen free tier is reserved for an authenticated account, set OPENCODE_KEYS, only space-bunny-free answers without one"
+
 ERROR_STATUS_BY_TYPE = {
     "AuthError": 401,
     "BillingError": 402,
@@ -35,7 +46,7 @@ ERROR_STATUS_BY_TYPE = {
 ERROR_TYPE_HINTS = {
     "AuthError": "the OpenCode Zen API key is missing or was rejected",
     "BillingError": "the OpenCode Zen account has no usable balance, top it up at https://opencode.ai/zen",
-    "FreeTierError": "the OpenCode Zen free tier for this model is exhausted, use a different model or add credit",
+    "FreeTierError": FREE_TIER_HINT,
     "RegionError": "OpenCode Zen does not serve this model in this region",
     "ModelError": "OpenCode Zen cannot serve this model through the chat completions format",
     "RateLimitError": "OpenCode Zen rate limit reached",
@@ -47,6 +58,10 @@ AUTH_ERROR_TYPES = frozenset({"AuthError"})
 
 MAX_ERROR_CHARS = 300
 
+_CATALOG_CACHE: tuple[dict | None, float] = (None, 0.0)
+
+_CATALOG_LOCK = asyncio.Lock()
+
 
 def upstream_model(model: str) -> str:
     """Strip the ``opencode/`` routing prefix, Zen expects the bare model id."""
@@ -54,6 +69,60 @@ def upstream_model(model: str) -> str:
     if text.lower().startswith(MODEL_PREFIX):
         return text[len(MODEL_PREFIX) :]
     return text
+
+
+def model_format(entry: dict) -> str:
+    """Return the ai-sdk package Zen routes this model through."""
+    provider = entry.get("provider")
+    if isinstance(provider, dict):
+        npm = provider.get("npm")
+        if isinstance(npm, str) and npm:
+            return npm
+    return CHAT_FORMAT
+
+
+def is_free(entry: dict) -> bool:
+    cost = entry.get("cost")
+    if not isinstance(cost, dict):
+        return False
+    return cost.get("input") == 0 and cost.get("output") == 0
+
+
+def context_limit(entry: dict) -> int | None:
+    limit = entry.get("limit")
+    if not isinstance(limit, dict):
+        return None
+    value = limit.get("context")
+    return value if isinstance(value, int) and value > 0 else None
+
+
+async def fetch_catalog(client: OpenCodeClient) -> dict:
+    """Read the models.dev mirror Zen publishes, cached for an hour.
+
+    It carries the per-model request format, cost and context window, none of
+    which ``GET /models`` exposes.
+    """
+    global _CATALOG_CACHE  # noqa: PLW0603
+
+    now = time.monotonic()
+    cached, stored_at = _CATALOG_CACHE
+    if cached is not None and now - stored_at < CATALOG_TTL_SECONDS:
+        return cached
+    async with _CATALOG_LOCK:
+        cached, stored_at = _CATALOG_CACHE
+        if cached is not None and time.monotonic() - stored_at < CATALOG_TTL_SECONDS:
+            return cached
+        resp = await client._request("GET", CATALOG_URL)
+        try:
+            payload = resp.json()
+        except ValueError as exc:
+            raise OpenCodeError(resp.status_code, f"unexpected non-JSON response from {CATALOG_URL}") from exc
+        client._raise_for_payload(resp.status_code, payload)
+        provider = payload.get(CATALOG_PROVIDER)
+        entries = provider.get("models") if isinstance(provider, dict) else None
+        models = {k: v for k, v in entries.items() if isinstance(v, dict)} if isinstance(entries, dict) else {}
+        _CATALOG_CACHE = (models, time.monotonic())
+        return models
 
 
 class OpenCodeError(Exception):
