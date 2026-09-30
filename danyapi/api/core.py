@@ -31,6 +31,8 @@ from ..duckai.accounts import DuckAIAccount
 from ..duckai.client import DuckAIClient
 from ..gigachat.accounts import GigaChatAccount
 from ..gigachat.client import GigaChatClient
+from ..opencode.accounts import OpenCodeAccount
+from ..opencode.client import OpenCodeClient
 from ..qwen.accounts import QwenAccount
 from ..qwen.client import QwenClient
 from ..store import JsonStore
@@ -131,6 +133,7 @@ async def lifespan(app: FastAPI):
     accounts: list[DeepSeekAccount] = []
     qwen_accounts: list[QwenAccount] = []
     gigachat_accounts: list[GigaChatAccount] = []
+    opencode_accounts: list[OpenCodeAccount] = []
     alice_accounts: list[AliceAccount] = []
     duckai_accounts: list[DuckAIAccount] = []
     byok_mode = settings.byok
@@ -172,6 +175,9 @@ async def lifespan(app: FastAPI):
                     gc_key_indexes.append(key_index)
                 except (RuntimeError, OSError) as exc:
                     log.error("gigachat client disabled, CA unusable: %s", exc)
+            oc_clients = [OpenCodeClient(key=key, timeout=settings.timeout) for key in settings.opencode_keys]
+            if not oc_clients and settings.opencode_enabled:
+                oc_clients.append(OpenCodeClient(timeout=settings.timeout))
             alice_clients: list[AliceClient] = []
             if settings.alice_enabled:
                 for _ in range(settings.alice_accounts):
@@ -183,31 +189,34 @@ async def lifespan(app: FastAPI):
             ds_checks = [client.check_auth() for client in ds_clients]
             qw_checks = [client.check_auth() for client in qw_clients]
             gc_checks = [client.check_auth() for client in gc_clients]
+            oc_checks = [client.check_auth() for client in oc_clients]
             alice_checks = [client.check_auth() for client in alice_clients]
             duckai_checks = [client.check_auth() for client in duckai_clients]
-            if ds_checks or qw_checks or gc_checks or alice_checks or duckai_checks:
-                auth_results = await asyncio.gather(
-                    *(ds_checks + qw_checks + gc_checks + alice_checks + duckai_checks),
-                    return_exceptions=True,
-                )
+            groups = (
+                ("deepseek", ds_checks),
+                ("qwen", qw_checks),
+                ("gigachat", gc_checks),
+                ("opencode", oc_checks),
+                ("alice", alice_checks),
+                ("duckai", duckai_checks),
+            )
+            pending = [check for _name, checks in groups for check in checks]
+            auth_by_provider: dict[str, list[bool]] = {name: [] for name, _checks in groups}
+            if pending:
+                auth_results = await asyncio.gather(*pending, return_exceptions=True)
                 for index, outcome in enumerate(auth_results):
                     if isinstance(outcome, BaseException):
                         log.warning("auth check #%d failed: %s", index, outcome)
-                auth_flags = [outcome is True for outcome in auth_results]
-                ds_end = len(ds_checks)
-                qw_end = ds_end + len(qw_checks)
-                gc_end = qw_end + len(gc_checks)
-                ds_auth = auth_flags[:ds_end]
-                qw_auth = auth_flags[ds_end:qw_end]
-                gc_auth = auth_flags[qw_end:gc_end]
-                alice_auth = auth_flags[gc_end:]
-                duckai_auth = auth_flags[gc_end + len(alice_checks) :]
-            else:
-                ds_auth = []
-                qw_auth = []
-                gc_auth = []
-                alice_auth = []
-                duckai_auth = []
+                offset = 0
+                for name, checks in groups:
+                    auth_by_provider[name] = [outcome is True for outcome in auth_results[offset : offset + len(checks)]]
+                    offset += len(checks)
+            ds_auth = auth_by_provider["deepseek"]
+            qw_auth = auth_by_provider["qwen"]
+            gc_auth = auth_by_provider["gigachat"]
+            oc_auth = auth_by_provider["opencode"]
+            alice_auth = auth_by_provider["alice"]
+            duckai_auth = auth_by_provider["duckai"]
             if settings.deepseek_tokens:
                 for i, (token, ds_client, ok) in enumerate(zip(settings.deepseek_tokens, ds_clients, ds_auth, strict=True)):
                     if not ok:
@@ -256,6 +265,15 @@ async def lifespan(app: FastAPI):
                         )
                     )
                 log.info("gigachat accounts ready: %d", len(gigachat_accounts))
+            for i, (oc_client, ok) in enumerate(zip(oc_clients, oc_auth, strict=True)):
+                if not ok:
+                    log.warning("opencode key #%d could not reach the Zen catalog, skipping", i)
+                    await oc_client.aclose()
+                    continue
+                stable_id = _token_stable_id(settings.opencode_keys[i]) if i < len(settings.opencode_keys) else "opencode"
+                opencode_accounts.append(OpenCodeAccount(len(opencode_accounts), oc_client, stable_id=stable_id))
+            if opencode_accounts:
+                log.info("opencode accounts ready: %d", len(opencode_accounts))
             for i, (alice_client, ok) in enumerate(zip(alice_clients, alice_auth, strict=False)):
                 if not ok:
                     log.warning("alice endpoint unreachable, skipping account #%d", i)
@@ -295,6 +313,10 @@ async def lifespan(app: FastAPI):
             app.state.gigachat_pool = AccountPool(gigachat_accounts, label="gigachat")
         else:
             app.state.gigachat_pool = None
+        if opencode_accounts:
+            app.state.opencode_pool = AccountPool(opencode_accounts, label="opencode")
+        else:
+            app.state.opencode_pool = None
         if alice_accounts:
             app.state.alice_pool = AccountPool(alice_accounts, label="alice")
         else:
@@ -303,8 +325,18 @@ async def lifespan(app: FastAPI):
             app.state.duckai_pool = AccountPool(duckai_accounts, label="duckai")
         else:
             app.state.duckai_pool = None
-        if not accounts and not qwen_accounts and not gigachat_accounts and not alice_accounts and not duckai_accounts and not byok_mode:
-            raise RuntimeError("no valid credentials: set DEEPSEEK_TOKENS, QWEN_TOKENS, GIGACHAT_KEYS, ALICE_ENABLED=1 or DUCKAI_ENABLED=1")
+        if (
+            not accounts
+            and not qwen_accounts
+            and not gigachat_accounts
+            and not opencode_accounts
+            and not alice_accounts
+            and not duckai_accounts
+            and not byok_mode
+        ):
+            raise RuntimeError(
+                "no valid credentials: set DEEPSEEK_TOKENS, QWEN_TOKENS, GIGACHAT_KEYS, OPENCODE_KEYS, ALICE_ENABLED=1, OPENCODE_ENABLED=1 or DUCKAI_ENABLED=1"
+            )
         await refresh_models()
         refresh_task = asyncio.create_task(model_refresh_loop())
         try:
@@ -317,7 +349,7 @@ async def lifespan(app: FastAPI):
         http_client = getattr(app.state, "http_client", None)
         if http_client is not None:
             await http_client.aclose()
-        all_accounts: list[Any] = [*accounts, *qwen_accounts, *gigachat_accounts, *alice_accounts, *duckai_accounts]
+        all_accounts: list[Any] = [*accounts, *qwen_accounts, *gigachat_accounts, *opencode_accounts, *alice_accounts, *duckai_accounts]
         for pool_obj in _iter_pools():
             all_accounts.extend(pool_obj.accounts)
         _close_pow_managers(all_accounts)

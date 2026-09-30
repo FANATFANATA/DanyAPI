@@ -28,6 +28,9 @@ from ..gigachat.accounts import GigaChatAccount
 from ..gigachat.client import GigaChatClient, GigaChatError
 from ..gigachat.messages import build_messages, normalize_usage, request_body
 from ..gigachat.tls import resolve_ca
+from ..opencode import api as opencode_api
+from ..opencode.accounts import OpenCodeAccount
+from ..opencode.client import OpenCodeClient, OpenCodeError
 from ..qwen import api as qwen_api
 from ..qwen.accounts import QwenAccount
 from ..qwen.client import QwenClient
@@ -71,6 +74,7 @@ from .chats import (
     _chat_completions_deepseek,
     _chat_completions_duckai,
     _chat_completions_gigachat,
+    _chat_completions_opencode,
     _chat_completions_qwen,
     _chat_dispatcher,
     _completion_chat_request,
@@ -217,6 +221,7 @@ from .models import (
     _fetch_deepseek_models,
     _fetch_duckai_models,
     _fetch_gigachat_models,
+    _fetch_opencode_models,
     _fetch_qwen_models,
     _finish_reason,
     _header_api_key,
@@ -932,6 +937,9 @@ __all__ = [
     "IncrementalSSE",
     "JSONResponse",
     "MessageReconstructor",
+    "OpenCodeAccount",
+    "OpenCodeClient",
+    "OpenCodeError",
     "QwenAccount",
     "QwenClient",
     "Request",
@@ -973,6 +981,7 @@ __all__ = [
     "_chat_completions_deepseek",
     "_chat_completions_duckai",
     "_chat_completions_gigachat",
+    "_chat_completions_opencode",
     "_chat_completions_qwen",
     "_chunk_id_from_line",
     "_close_busy_client",
@@ -1013,6 +1022,7 @@ __all__ = [
     "_fetch_deepseek_models",
     "_fetch_duckai_models",
     "_fetch_gigachat_models",
+    "_fetch_opencode_models",
     "_fetch_qwen_models",
     "_finish_reason",
     "_flush_state_stores",
@@ -1124,6 +1134,7 @@ __all__ = [
     "model_refresh_loop",
     "moderations_not_supported",
     "normalize_usage",
+    "opencode_api",
     "provider_enabled",
     "provider_models",
     "provider_needs_api_key",

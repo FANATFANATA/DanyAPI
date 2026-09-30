@@ -120,7 +120,7 @@ def test_handler_registry_covers_duckai():
     from danyapi.api.chats import CHAT_HANDLERS
 
     assert CHAT_HANDLERS["duckai"] == "_chat_completions_duckai"
-    assert set(CHAT_HANDLERS) == {"deepseek", "qwen", "gigachat", "alice", "duckai"}
+    assert set(CHAT_HANDLERS) == {"deepseek", "qwen", "gigachat", "opencode", "alice", "duckai"}
 
 
 def test_health_reports_duckai():

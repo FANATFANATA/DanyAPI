@@ -24,8 +24,8 @@ TEXTS: dict[str, str] = {
     "header_title": "Token Utilities",
     "header_sub": "DanyAPI uses the internal APIs of DeepSeek and Qwen's free web clients, so it needs your auth tokens."
     "<br>This tool simply helps you to retrieve them."
-    "<br>GigaChat is not handled here: it uses an authorization key from the GigaChat Studio API settings, and"
-    " the unofficial Alice provider needs no credentials at all.",
+    "<br>GigaChat and OpenCode Zen are not handled here: they use API keys you copy from their"
+    " own account pages, and the unofficial Alice provider needs no credentials at all.",
     "step0_heading": "One-time: add the token utility bookmarklet",
     "step0_intro": "<b>Drag</b> this button onto your browser's <b>bookmarks bar</b>,<br>(press Ctrl+Shift+B if you don't see the bar):",
     "bookmarklet_label": "Run DanyAPI token utility",
@@ -75,7 +75,8 @@ TEXTS: dict[str, str] = {
     " running the API locally.<br><br>To support us, you can also add them to the public API instance:"
     ' <a href="{public_url}" target="_blank" rel="noopener">{public_url}</a>',
     "results_other_providers": "Two more providers need no browser token: add a GigaChat authorization key as"
-    " <code>GIGACHAT_KEYS</code> from the Studio API settings, or set <code>ALICE_ENABLED=1</code> for the"
+    " <code>GIGACHAT_KEYS</code> from the Studio API settings and an OpenCode Zen key as"
+    " <code>OPENCODE_KEYS</code> from <code>opencode.ai/auth</code>, or set <code>ALICE_ENABLED=1</code> for the"
     " unofficial keyless Alice provider.",
     "results_public_instance": "Public instance",
     "results_pane_ds": "DeepSeek token",
@@ -1063,7 +1064,7 @@ def serve(port: int = RESULT_PORT, open_browser: bool = True) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Extract DeepSeek & Qwen tokens for DanyAPI (uses your default browser). "
-        "GigaChat needs a Studio authorization key and Alice needs none, so neither is handled here."
+        "GigaChat and OpenCode Zen need their own API keys and Alice needs none, so none are handled here."
     )
     parser.add_argument("--port", type=int, default=RESULT_PORT, help=f"local server port (default {RESULT_PORT})")
     parser.add_argument("--no-browser", action="store_true", help="don't auto-open the browser")
@@ -1078,6 +1079,7 @@ def main() -> None:
     print(" 3. Qwen: same again - then both tokens are shown automatically")
     print()
     print(" GigaChat uses a Studio authorization key instead: set GIGACHAT_KEYS in .env by hand.")
+    print(" OpenCode Zen uses an API key from opencode.ai/auth: set OPENCODE_KEYS in .env by hand.")
     print(" The unofficial Alice provider needs no credentials: set ALICE_ENABLED=1.")
     print()
 

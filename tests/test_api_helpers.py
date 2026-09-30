@@ -1197,10 +1197,15 @@ def test_no_credentials_raises():
         patch.object(settings, "deepseek_tokens", []),
         patch.object(settings, "qwen_tokens", []),
         patch.object(settings, "gigachat_keys", []),
+        patch.object(settings, "opencode_keys", []),
+        patch.object(settings, "opencode_enabled", False),
         patch.object(settings, "alice_enabled", False),
         patch.object(settings, "duckai_enabled", False),
     ):
-        with pytest.raises(RuntimeError, match="DEEPSEEK_TOKENS, QWEN_TOKENS, GIGACHAT_KEYS, ALICE_ENABLED=1 or DUCKAI_ENABLED=1"):
+        with pytest.raises(
+            RuntimeError,
+            match="DEEPSEEK_TOKENS, QWEN_TOKENS, GIGACHAT_KEYS, OPENCODE_KEYS, ALICE_ENABLED=1, OPENCODE_ENABLED=1 or DUCKAI_ENABLED=1",
+        ):
             with TestClient(app):
                 pass
 

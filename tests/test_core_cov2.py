@@ -848,7 +848,7 @@ async def test_rate_limit_pool_swallows_a_body_rejection(monkeypatch):
 
 
 def test_pool_attrs_are_derived_from_the_provider_mapping():
-    assert core.POOL_ATTRS == ("pool", "qwen_pool", "gigachat_pool", "alice_pool", "duckai_pool")
+    assert core.POOL_ATTRS == ("pool", "qwen_pool", "gigachat_pool", "opencode_pool", "alice_pool", "duckai_pool")
     assert core.POOL_ATTRS == tuple(POOL_ATTRS[provider] for provider in BYOK_PROVIDERS)
 
 

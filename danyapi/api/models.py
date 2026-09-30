@@ -16,6 +16,8 @@ from ..deepseek.client import DeepSeekClient
 from ..duckai.client import DuckAIClient
 from ..duckai.client import catalog_models as duckai_catalog_models
 from ..gigachat.client import GigaChatClient
+from ..opencode.client import MODEL_PREFIX as OPENCODE_MODEL_PREFIX
+from ..opencode.client import OpenCodeClient
 from ..qwen.client import QwenClient
 from .state import BYOK_PROVIDERS, MODEL_ATTRS, _byok_mode, app, provider_models, provider_pool
 
@@ -48,6 +50,7 @@ _MODEL_CACHE: dict[str, Any] = {
     "deepseek_ids": None,
     "qwen_ids": None,
     "gigachat_ids": None,
+    "opencode_ids": None,
     "alice_ids": None,
     "duckai_ids": None,
 }
@@ -79,6 +82,8 @@ def _probe_client(provider: str, api_key: str | None) -> Any:
         return DuckAIClient(timeout=settings.timeout)
     if provider == "gigachat" and api_key:
         return GigaChatClient(key=api_key, scope=settings.gigachat_scope, timeout=settings.timeout)
+    if provider == "opencode":
+        return OpenCodeClient(key=api_key or "", timeout=settings.timeout)
     return None
 
 
@@ -164,6 +169,24 @@ async def _fetch_gigachat_models(client: GigaChatClient) -> list[dict]:
     return models
 
 
+async def _fetch_opencode_models(client: OpenCodeClient) -> list[dict]:
+    raw = await client.fetch_models()
+    models: list[dict] = []
+    for entry in raw:
+        if not isinstance(entry, dict) or not entry.get("id"):
+            continue
+        model_id = str(entry["id"])
+        models.append(
+            {
+                "id": model_id,
+                "name": entry.get("name") or model_id,
+                "owned_by": "opencode",
+                "model_type": "chat",
+            }
+        )
+    return models
+
+
 async def _fetch_alice_models(client: Any = None) -> list[dict]:
     return [
         {
@@ -199,6 +222,7 @@ MODEL_FETCHERS: dict[str, Any] = {
     "deepseek": _fetch_deepseek_models,
     "qwen": _fetch_qwen_models,
     "gigachat": _fetch_gigachat_models,
+    "opencode": _fetch_opencode_models,
     "alice": _fetch_alice_models,
     "duckai": _fetch_duckai_models,
 }
@@ -397,6 +421,8 @@ def _is_deepseek_model(lowered: str) -> bool:
 
 def _resolve_provider(model: str) -> str:
     lowered = model.lower()
+    if lowered.startswith(OPENCODE_MODEL_PREFIX):
+        return "opencode"
     if lowered.startswith("qwen"):
         return "qwen"
     if lowered.startswith("gigachat"):

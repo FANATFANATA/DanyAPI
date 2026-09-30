@@ -24,6 +24,7 @@ CREDENTIAL_ENV_NAMES = (
     "GIGACHAT_KEYS",
     "GIGACHAT_SCOPE",
     "DANYAPI_GIGACHAT_SCOPE",
+    "OPENCODE_KEYS",
     "BYOK",
     "BYOK_MODE",
     "DANYAPI_BYOK_MODE",
@@ -35,6 +36,7 @@ _NON_CREDENTIAL_ENV_NAMES = frozenset(
         "DANYAPI_PORT",
         "ALICE_ENABLED",
         "ALICE_ACCOUNTS",
+        "OPENCODE_ENABLED",
         "DUCKAI_ENABLED",
         "DUCKAI_ACCOUNTS",
         "DANYAPI_TIMEOUT",
@@ -206,6 +208,8 @@ class Settings:
         self.qwen_tokens = _env_list("QWEN_TOKENS")
         self.gigachat_keys = _env_list("GIGACHAT_KEYS")
         self.gigachat_scope = _env_first("GIGACHAT_SCOPE", "DANYAPI_GIGACHAT_SCOPE").strip() or "GIGACHAT_API_PERS"
+        self.opencode_keys = _env_list("OPENCODE_KEYS")
+        self.opencode_enabled = _env_on("OPENCODE_ENABLED", "")
         self.alice_enabled = _env_on("ALICE_ENABLED", "")
         self.alice_accounts = _env_int("ALICE_ACCOUNTS", 1, 1, MAX_ALICE_ACCOUNTS)
         self.duckai_enabled = _env_on("DUCKAI_ENABLED", "")

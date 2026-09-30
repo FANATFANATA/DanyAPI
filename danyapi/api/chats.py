@@ -16,6 +16,7 @@ from ..accounts import AccountPool, AccountPoolBusy
 from ..alice import api as alice_api
 from ..duckai import api as duckai_api
 from ..gigachat import api as gigachat_api
+from ..opencode import api as opencode_api
 from ..qwen import api as qwen_api
 from .attachments import MAX_ATTACHMENT_TOTAL_SIZE, _collect_attachments, _validate_attachments
 from .byok import _byok_caller_id, _byok_pool_for, _extract_request_api_key
@@ -34,6 +35,7 @@ CHAT_HANDLERS = {
     "deepseek": "_chat_completions_deepseek",
     "qwen": "_chat_completions_qwen",
     "gigachat": "_chat_completions_gigachat",
+    "opencode": "_chat_completions_opencode",
     "alice": "_chat_completions_alice",
     "duckai": "_chat_completions_duckai",
 }
@@ -44,6 +46,7 @@ MAX_CHAT_BODY_BYTES = 3 * MAX_ATTACHMENT_TOTAL_SIZE
 MAX_PROVIDER_ERROR_CHARS = 300
 
 GIGACHAT_UNSUPPORTED_PARAMS = ("n", "presence_penalty", "frequency_penalty", "logit_bias")
+OPENCODE_UNSUPPORTED_PARAMS = ("n", "logprobs", "top_logprobs")
 ALICE_UNSUPPORTED_PARAMS = ("n", "top_p", "presence_penalty", "frequency_penalty", "logit_bias")
 DUCKAI_UNSUPPORTED_PARAMS = ("n", "top_p", "presence_penalty", "frequency_penalty", "logit_bias")
 
@@ -614,6 +617,45 @@ async def _chat_completions_gigachat(req: ChatCompletionRequest, pool: AccountPo
 
     try:
         return await gigachat_api.collect_non_stream(**common)
+    except AccountPoolBusy:
+        raise HTTPException(429, "all accounts are busy, try again later") from None
+
+
+async def _chat_completions_opencode(req: ChatCompletionRequest, pool: AccountPool | None = None) -> Any:
+    if pool is None:
+        pool = getattr(app.state, "opencode_pool", None)
+    if pool is None:
+        raise HTTPException(503, "opencode provider is not configured (set OPENCODE_KEYS to enable it)")
+
+    if getattr(req, "files", None):
+        raise HTTPException(400, "opencode does not support file attachments, send images inline instead")
+    _reject_unsupported_params(req, "opencode", OPENCODE_UNSUPPORTED_PARAMS)
+    account, existing_sid = await _acquire_account(pool, req.session_id)
+
+    tools, tool_choice = _materialize_tools(req)
+    common = {
+        "account": account,
+        "messages": req.messages,
+        "model": req.model,
+        "tools": tools,
+        "tool_choice": tool_choice,
+        "temperature": req.temperature,
+        "top_p": req.top_p,
+        "max_tokens": _max_tokens_of(req),
+        "stop": getattr(req, "stop", None),
+        "response_format": getattr(req, "response_format", None),
+        "user": getattr(req, "user", None),
+        "session_id": existing_sid,
+    }
+    if req.stream:
+        return StreamingResponse(
+            _stream_guard(opencode_api.stream_openai(include_usage=_include_usage(req), **common), req.model),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    try:
+        return await opencode_api.collect_non_stream(**common)
     except AccountPoolBusy:
         raise HTTPException(429, "all accounts are busy, try again later") from None
 

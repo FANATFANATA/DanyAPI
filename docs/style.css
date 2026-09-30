@@ -697,6 +697,7 @@ hr {
 .landing .model-ds::after { background: #4d6bfe; }
 .landing .model-qw::after { background: var(--l-amber); }
 .landing .model-gc::after { background: #00a085; }
+.landing .model-oc::after { background: #6f5cf0; }
 .landing .model-al::after { background: #fc3f1d; }
 .landing .model-duck::after { background: #de5833; }
 .landing .model-head { display: flex; align-items: center; gap: 1rem; margin-bottom: 1.6rem; }
@@ -712,6 +713,7 @@ hr {
     font-family: var(--font-disp); font-size: 1.6rem; font-weight: 800; line-height: 1;
 }
 .landing .model-logo-tile-gc { background: #e6f7f2; color: #00735c; }
+.landing .model-logo-tile-oc { background: #eeecfd; color: #4b39c9; }
 .landing .model-logo-tile-al { background: #ffeeeb; color: #d63a17; }
 .landing .model-logo-tile-duck { background: #fdefe8; color: #b8431f; }
 .landing .model-logo-ds { display: block; flex-shrink: 0; }

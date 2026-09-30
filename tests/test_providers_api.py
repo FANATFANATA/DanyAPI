@@ -20,7 +20,7 @@ KEY = base64.b64encode(b"id:secret").decode()
 @pytest.fixture(autouse=True)
 def _clean():
     saved = {}
-    for attr in ("gigachat_pool", "alice_pool", "gigachat_models", "alice_models"):
+    for attr in ("gigachat_pool", "opencode_pool", "alice_pool", "gigachat_models", "opencode_models", "alice_models"):
         saved[attr] = getattr(app.state, attr, None)
         setattr(app.state, attr, None)
     app.state.byok = False
@@ -29,7 +29,8 @@ def _clean():
         setattr(app.state, attr, value)
 
 
-def test_resolve_provider_routes_all_four():
+def test_resolve_provider_routes_every_provider():
+    app.state.opencode_models = [{"id": "space-bunny-free", "name": "Space Bunny", "owned_by": "opencode", "model_type": "chat"}]
     assert _resolve_provider("deepseek-v4.1-flash") == "deepseek"
     assert _resolve_provider("qwen3.8-max") == "qwen"
     assert _resolve_provider("GigaChat") == "gigachat"
@@ -37,6 +38,8 @@ def test_resolve_provider_routes_all_four():
     assert _resolve_provider("alice") == "alice"
     assert _resolve_provider("alice-ai") == "alice"
     assert _resolve_provider("yagpt") == "alice"
+    assert _resolve_provider("space-bunny-free") == "opencode"
+    assert _resolve_provider("opencode/space-bunny-free") == "opencode"
 
 
 def test_resolve_provider_rejects_unknown():
@@ -62,10 +65,12 @@ def test_health_hides_providers_without_admin_token():
 def test_models_endpoint_includes_new_providers():
     app.state.gigachat_models = [{"id": "GigaChat", "name": "GigaChat", "owned_by": "gigachat", "model_type": "chat"}]
     app.state.alice_models = [{"id": "alice", "name": "Alice AI", "owned_by": "alice", "model_type": "chat"}]
+    app.state.opencode_models = [{"id": "kimi-k3", "name": "Kimi K3", "owned_by": "opencode", "model_type": "chat"}]
     data = TestClient(app).get("/v1/models").json()["data"]
     owners = {m["id"]: m["owned_by"] for m in data}
     assert owners["GigaChat"] == "gigachat"
     assert owners["alice"] == "alice"
+    assert owners["kimi-k3"] == "opencode"
 
 
 def test_chat_completions_503_when_gigachat_not_configured():
@@ -195,7 +200,7 @@ def test_anthropic_messages_accepts_gigachat_model():
 def test_handler_registry_covers_all_providers():
     from danyapi.api.chats import CHAT_HANDLERS
 
-    assert set(CHAT_HANDLERS) == {"deepseek", "qwen", "gigachat", "alice", "duckai"}
+    assert set(CHAT_HANDLERS) == {"deepseek", "qwen", "gigachat", "opencode", "alice", "duckai"}
 
 
 def test_provider_apis_are_importable():

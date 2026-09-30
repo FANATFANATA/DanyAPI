@@ -82,7 +82,7 @@
             nav_faq: "FAQ",
             hero_badge: "Бесплатно · Open Source · OpenAI-совместимо",
             hero_h1_b: "Ноль затрат.",
-            hero_sub: "DanyAPI - бесплатный OpenAI-совместимый API, который запускает веб-клиенты DeepSeek и Qwen, официальный API GigaChat и неофициальные Alice и Duck.ai на сервере из ваших бесплатных токенов. Без платных ключей и лимитов.",
+            hero_sub: "DanyAPI - бесплатный OpenAI-совместимый API, который запускает веб-клиенты DeepSeek и Qwen, официальный API GigaChat, шлюз OpenCode Zen и неофициальные Alice и Duck.ai на сервере из ваших токенов. Без платных ключей и лимитов.",
             hero_cta_start: "Быстрый старт",
             hero_cta_gh: "на GitHub",
             features_eyebrow: "Возможности",
@@ -104,9 +104,9 @@
             f8_t: "Вложения файлов",
             f8_d: "Изображения и текстовые файлы как base64 или data URI. Vision, OCR и анализ файлов по модели.",
             models_eyebrow: "Модели",
-            models_title: "Четыре провайдера.",
+            models_title: "Шесть провайдеров.",
             models_title_hi: "Один OpenAI API.",
-            models_sub: "Маршрутизация по имени модели - <code>deepseek-*</code>, <code>qwen*</code>, <code>GigaChat*</code>, <code>alice</code> или модель Duck.ai. Все провайдеры опциональны и работают вместе.",
+            models_sub: "Маршрутизация по имени модели - <code>deepseek-*</code>, <code>qwen*</code>, <code>GigaChat*</code>, <code>opencode/*</code>, <code>alice</code> или модель Duck.ai. Все провайдеры опциональны и работают вместе.",
             models_ds_flash: "размышления · поиск · файлы · vision",
             models_ds_pro: "размышления · поиск · файлы · vision",
             models_ds_note: "Список читается из настроек веб-клиента, поэтому показываются только те типы моделей, которые выданы аккаунту. Веб-поиск через флаг <code>search</code>; размышления через суффикс <code>-thinking</code> или флаг <code>thinking</code>.",
@@ -118,12 +118,17 @@
             models_gc_pro: "инструменты · vision",
             models_gc_max: "инструменты · vision",
             models_gc_note: "Официальный API GigaChat с бесплатной фремиум-квотой. Нужен ключ авторизации из Studio. Список моделей читается из аккаунта и обновляется по таймеру. Картинки работают только на Pro, Max и Ultra.",
+            models_oc_gpt: "инструменты · vision",
+            models_oc_claude: "инструменты · vision",
+            models_oc_kimi: "инструменты",
+            models_oc_note_list: "подтягиваются с шлюза",
+            models_oc_note: "Курируемый шлюз моделей OpenCode на opencode.ai/zen с оплатой по токенам. Нужен API-ключ. Часть идентификаторов совпадает с Qwen и DeepSeek, такие нужно писать с префиксом <code>opencode/</code>. Обслуживается только половина каталога с форматом chat completions.",
             models_al_keyless: "без ключа",
             models_al_note: "Неофициальный провайдер, включается через <code>ALICE_ENABLED=1</code>, по умолчанию выключен. У Яндекса нет публичного API, поэтому используется недокументированный внутренний протокол, который может отвалиться в любой момент. Без состояния и без потокового текста, поэтому история сворачивается в один промпт.",
             models_duck_keyless: "без ключа",
             models_duck_note: "Неофициальный провайдер, включается через <code>DUCKAI_ENABLED=1</code>, по умолчанию выключен. У DuckDuckGo нет публичного API, поэтому используется недокументированный внутренний протокол с проверкой отпечатка браузера, который может отвалиться в любой момент. Нужен Node.js на хосте. Прямо отказывает дата-центровым адресам, так что запускайте с домашней или мобильной линии.",
             qs_eyebrow: "Быстрый старт",
-            qs_need: "Нужен только бесплатный токен DeepSeek или Qwen, либо ключ GigaChat из Studio - всё остальное сделает скрипт.",
+            qs_need: "Нужен только бесплатный токен DeepSeek или Qwen, ключ GigaChat из Studio или API-ключ OpenCode Zen - всё остальное сделает скрипт.",
             qs_title: "Запуск за",
             qs_title_hi: "меньше минуты.",
             qs_sub: "Установка одной командой на Windows, Linux и macOS.",
@@ -142,7 +147,7 @@
             q2: "Нужен ли пользователям API-ключ?",
             a2: "При локальном запуске или личном сервере API-ключ не требуется (передайте любое значение). На публичном инстансе (режим BYOK) передайте ваш токен провайдера как Bearer-токен.",
             q3: "Какие провайдеры и модели?",
-            a3: "Списки моделей не захардкожены: DeepSeek (<code>default</code> и другие типы, которые выданы аккаунту), Qwen (<code>qwen3.8-max</code>, <code>qwen3.7-plus</code>, ...), GigaChat (<code>GigaChat-2</code>, <code>GigaChat-2-Pro</code> и другие) и Duck.ai (модели бесплатного тарифа) читаются с эндпоинтов провайдеров и обновляются по таймеру, Alice (<code>alice</code>, <code>yagpt</code>) отдаёт свои алиасы. Маршрутизация по имени модели; все работают одновременно.",
+            a3: "Списки моделей не захардкожены: DeepSeek (<code>default</code> и другие типы, которые выданы аккаунту), Qwen (<code>qwen3.8-max</code>, <code>qwen3.7-plus</code>, ...), GigaChat (<code>GigaChat-2</code>, <code>GigaChat-2-Pro</code> и другие), OpenCode Zen (<code>opencode/gpt-5.6-sol</code>, <code>opencode/kimi-k3</code>, ...) и Duck.ai (модели бесплатного тарифа) читаются с эндпоинтов провайдеров и обновляются по таймеру, Alice (<code>alice</code>, <code>yagpt</code>) отдаёт свои алиасы. Маршрутизация по имени модели; все работают одновременно.",
             q7: "Есть ли лимиты или забанят токен?",
             a7: "Запросы идут через бесплатные веб-клиенты в человекоподобном темпе. Добавьте больше токенов в пул для параллелизма - проект держится в рамках нормального использования, но бесплатные токены - best-effort.",
             q8: "Есть ли учёт использования?",
@@ -289,6 +294,8 @@
                         renderModelList(list, models, "models_al_keyless", t.models_al_keyless);
                     } else if (provider === "gigachat") {
                         renderModelList(list, models, "models_gc_pro", t.models_gc_pro);
+                    } else if (provider === "opencode") {
+                        renderModelList(list, models, "models_oc_note_list", t.models_oc_note_list);
                     } else {
                         renderModelList(list, models, "models_qw_3", t.models_qw_3);
                     }

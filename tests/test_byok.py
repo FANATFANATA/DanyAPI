@@ -414,6 +414,7 @@ def test_health_detail_reports_byok_mode():
         "deepseek": True,
         "qwen": True,
         "gigachat": True,
+        "opencode": True,
         "alice": False,
         "duckai": False,
     }

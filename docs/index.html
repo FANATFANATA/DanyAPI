@@ -4,7 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>DanyAPI</title>
-<meta name="description" content="OpenAI-compatible HTTP API on top of the free web clients chat.deepseek.com and chat.qwen.ai, the free tier of GigaChat, and the unofficial Yandex Alice and Duck.ai endpoints. Runs on your own free provider tokens. Free. FastAPI + Python." />
+<meta name="description" content="OpenAI-compatible HTTP API on top of the free web clients chat.deepseek.com and chat.qwen.ai, the free tier of GigaChat, the OpenCode Zen gateway, and the unofficial Yandex Alice and Duck.ai endpoints. Runs on your own free provider tokens. Free. FastAPI + Python." />
 <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2040%2040'%3E%3Cdefs%3E%3ClinearGradient%20id='g'%20x1='0'%20y1='0'%20x2='1'%20y2='1'%3E%3Cstop%20offset='0'%20stop-color='%236c7bff'/%3E%3Cstop%20offset='1'%20stop-color='%2322d3ee'/%3E%3C/linearGradient%3E%3C/defs%3E%3Cpath%20d='M20%202.5L35%2011V29L20%2037.5L5%2029V11Z'%20fill='none'%20stroke='url(%23g)'%20stroke-width='2.6'%20stroke-linejoin='round'/%3E%3Cpath%20d='M20%2013.5L12.5%2026.5H27.5Z'%20fill='none'%20stroke='url(%23g)'%20stroke-width='1.8'%20stroke-linejoin='round'/%3E%3Ccircle%20cx='20'%20cy='13.5'%20r='3'%20fill='url(%23g)'/%3E%3Ccircle%20cx='12.5'%20cy='26.5'%20r='3'%20fill='url(%23g)'/%3E%3Ccircle%20cx='27.5'%20cy='26.5'%20r='3'%20fill='url(%23g)'/%3E%3C/svg%3E" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -72,7 +72,7 @@
                 </h1>
                 <p class="hero-sub reveal" data-delay="2" data-i18n="hero_sub">
                     A free, OpenAI-compatible API that runs the DeepSeek and Qwen web clients, the official
-                    GigaChat API and the unofficial Alice and Duck.ai endpoints server-side from your own free provider
+                    GigaChat API, the OpenCode Zen gateway and the unofficial Alice and Duck.ai endpoints server-side from your own provider
                     tokens. No paid keys, no quotas.
                 </p>
                 <div class="hero-cta reveal" data-delay="3">
@@ -163,8 +163,8 @@
     <section class="section" id="models">
         <div class="section-head reveal">
             <span class="eyebrow" data-i18n="models_eyebrow">Models</span>
-            <h2 class="section-title" data-i18n="models_title">Four providers.<br /><span class="grad-text" data-i18n="models_title_hi">One OpenAI API.</span></h2>
-            <p class="section-sub" data-i18n="models_sub">Route by model name - <code>deepseek-*</code>, <code>qwen*</code>, <code>GigaChat*</code>, <code>alice</code> or a Duck.ai model. All optional, all can run together.</p>
+            <h2 class="section-title" data-i18n="models_title">Six providers.<br /><span class="grad-text" data-i18n="models_title_hi">One OpenAI API.</span></h2>
+            <p class="section-sub" data-i18n="models_sub">Route by model name - <code>deepseek-*</code>, <code>qwen*</code>, <code>GigaChat*</code>, <code>opencode/*</code>, <code>alice</code> or a Duck.ai model. All optional, all can run together.</p>
         </div>
 
         <div class="models-grid">
@@ -213,6 +213,22 @@
                 <p class="model-note" data-i18n="models_gc_note">Official GigaChat API with a free freemium quota. Needs a Studio authorization key. The list is read from the account and refetched on a timer. Images work on Pro, Max and Ultra only.</p>
             </article>
 
+            <article class="model-card reveal model-oc">
+                <div class="model-head">
+                    <span class="model-logo-tile model-logo-tile-oc"><span class="model-logo-letter">Z</span></span>
+                    <div>
+                        <h3>OpenCode Zen</h3>
+                    </div>
+                </div>
+                <ul class="model-list" data-model-provider="opencode">
+                    <li><code>opencode/gpt-5.6-sol</code> <span class="model-chip" data-i18n="models_oc_gpt">tools · vision</span></li>
+                    <li><code>opencode/claude-sonnet-5</code> <span class="model-chip" data-i18n="models_oc_claude">tools · vision</span></li>
+                    <li><code>opencode/kimi-k3</code> <span class="model-chip" data-i18n="models_oc_kimi">tools</span></li>
+                    <li><code>...</code> <span class="model-chip" data-i18n="models_oc_note_list">fetched live from the gateway</span></li>
+                </ul>
+                <p class="model-note" data-i18n="models_oc_note">The curated OpenCode gateway at opencode.ai/zen, metered per token. Needs an API key. Some ids collide with Qwen or DeepSeek, prefix those with <code>opencode/</code>. Only the chat completions half of the catalogue is served.</p>
+            </article>
+
             <article class="model-card reveal model-al">
                 <div class="model-head">
                     <span class="model-logo-tile model-logo-tile-al"><span class="model-logo-letter">Я</span></span>
@@ -253,7 +269,7 @@
             <p class="section-sub" data-i18n="qs_sub">One-command install on Windows, Linux and macOS. No Python setup gymnastics required.</p>
         </div>
 
-        <p class="section-note reveal" data-i18n="qs_need">All you need is a free DeepSeek or Qwen token, or a GigaChat Studio authorization key - the script does the rest.</p>
+        <p class="section-note reveal" data-i18n="qs_need">All you need is a free DeepSeek or Qwen token, a GigaChat Studio authorization key, or an OpenCode Zen API key - the script does the rest.</p>
         <div class="code-tabs reveal">
             <div class="tab-bar">
                 <button class="tab active" data-tab="install" data-i18n="qs_tab_install">Install</button>
@@ -280,6 +296,7 @@
   -e DEEPSEEK_TOKENS="token1,token2" \
   -e QWEN_TOKENS="token3" \
   -e GIGACHAT_KEYS="<authorization_key>" \
+  -e OPENCODE_KEYS="<zen_api_key>" \
   -e ALICE_ENABLED=1 \
   -e DUCKAI_ENABLED=1 \
   ghcr.io/fanatfanata/danyapi:latest' data-i18n="copy">Copy</button>
@@ -288,6 +305,7 @@
   -e DEEPSEEK_TOKENS=<span class="c-str">"token1,token2"</span> \
   -e QWEN_TOKENS=<span class="c-str">"token3"</span> \
   -e GIGACHAT_KEYS=<span class="c-str">"&lt;authorization_key&gt;"</span> \
+  -e OPENCODE_KEYS=<span class="c-str">"&lt;zen_api_key&gt;"</span> \
   -e ALICE_ENABLED=<span class="c-num">1</span> \
   -e DUCKAI_ENABLED=<span class="c-num">1</span> \
   ghcr.io/fanatfanata/danyapi:latest</code></pre>
@@ -304,7 +322,7 @@
         <div class="faq-list reveal">
             <details class="faq">
                 <summary data-i18n="q1">Is it really free?</summary>
-                <p data-i18n="a1">Yes. DanyAPI uses the internal APIs of the free web clients chat.deepseek.com and chat.qwen.ai through accounts made from your own free provider tokens, plus the free tier of the official GigaChat API. The unofficial Alice and Duck.ai providers need no credentials at all. No billing, no quotas.</p>
+                <p data-i18n="a1">Yes. DanyAPI uses the internal APIs of the free web clients chat.deepseek.com and chat.qwen.ai through accounts made from your own free provider tokens, plus the free tier of the official GigaChat API and the OpenCode Zen gateway. The unofficial Alice and Duck.ai providers need no credentials at all. No billing, no quotas.</p>
             </details>
             <details class="faq">
                 <summary data-i18n="q2">Do my users need an API key?</summary>
@@ -312,7 +330,7 @@
             </details>
             <details class="faq">
                 <summary data-i18n="q3">Which providers and models?</summary>
-                <p data-i18n="a3">Model lists are not hardcoded: DeepSeek (<code>default</code> and whatever other types the account is granted), Qwen (<code>qwen3.8-max</code>, <code>qwen3.7-plus</code>, ...), GigaChat (<code>GigaChat-2</code>, <code>GigaChat-2-Pro</code> and the rest) and Duck.ai (the free tier models) are read from the provider endpoints and refetched on a timer, while Alice (<code>alice</code>, <code>yagpt</code>) serves its own aliases. Route by model name; all of them can run at once.</p>
+                <p data-i18n="a3">Model lists are not hardcoded: DeepSeek (<code>default</code> and whatever other types the account is granted), Qwen (<code>qwen3.8-max</code>, <code>qwen3.7-plus</code>, ...), GigaChat (<code>GigaChat-2</code>, <code>GigaChat-2-Pro</code> and the rest), OpenCode Zen (<code>opencode/gpt-5.6-sol</code>, <code>opencode/kimi-k3</code>, ...) and Duck.ai (the free tier models) are read from the provider endpoints and refetched on a timer, while Alice (<code>alice</code>, <code>yagpt</code>) serves its own aliases. Route by model name; all of them can run at once.</p>
             </details>
             <details class="faq">
                 <summary data-i18n="q7">Are there rate limits or will my token get banned?</summary>

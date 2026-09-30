@@ -609,6 +609,35 @@ def validate_gigachat(creds, defaults):
         creds = collect_gigachat(creds, defaults)
 
 
+def collect_opencode(current, defaults):
+    print()
+    print("[ OpenCode Zen ]")
+    print("  The curated OpenCode model gateway at https://opencode.ai/zen, metered per token.")
+    print("  Sign in at https://opencode.ai/auth and copy the API key. A few models are free")
+    print("  for a limited time and answer without one, everything else needs the key.")
+    keys = read_value(
+        "  OpenCode Zen API keys, comma-separated [" + mask_secrets(current.get("OPENCODE_KEYS", "")) + "]: ",
+        current.get("OPENCODE_KEYS", ""),
+        defaults.get("OPENCODE_KEYS", ""),
+    )
+    values = {"OPENCODE_KEYS": keys}
+    if not keys.strip():
+        print("  No key given: the Zen free tier can still be served, without any key.")
+        enabled = read_value(
+            "  Serve the Zen free tier anyway? yes/no [" + (current.get("OPENCODE_ENABLED", "") or "no") + "]: ",
+            current.get("OPENCODE_ENABLED", ""),
+            defaults.get("OPENCODE_ENABLED", ""),
+        )
+        if enabled.strip().lower() in ("n", "no", "off", "0", "false", "нет"):
+            enabled = ""
+        elif enabled.strip():
+            enabled = "1"
+        values["OPENCODE_ENABLED"] = enabled
+    else:
+        values["OPENCODE_ENABLED"] = current.get("OPENCODE_ENABLED", "") or defaults.get("OPENCODE_ENABLED", "")
+    return values
+
+
 def collect_alice(current, defaults):
     print()
     print("[ Yandex Alice, unofficial ]")
@@ -831,11 +860,13 @@ def main():
     deepseek = validate_provider("DeepSeek", collect_provider("DeepSeek", current, defaults), defaults)
     qwen = validate_provider("Qwen", collect_provider("Qwen", current, defaults), defaults)
     gigachat = validate_gigachat(collect_gigachat(current, defaults), defaults)
+    opencode = collect_opencode(current, defaults)
     alice = collect_alice(current, defaults)
     duckai = collect_duckai(current, defaults)
     values.update(deepseek)
     values.update(qwen)
     values.update(gigachat)
+    values.update(opencode)
     values.update(alice)
     values.update(duckai)
 
@@ -855,11 +886,15 @@ def main():
     has_ds = any(v for v in deepseek.values() if v)
     has_qwen = any(v for v in qwen.values() if v)
     has_gigachat = any(v for v in gigachat.values() if v)
+    has_opencode = any(v for v in opencode.values() if v)
     has_alice = any(v for v in alice.values() if v)
     has_duckai = any(v for v in duckai.values() if v)
-    if not (has_ds or has_qwen or has_gigachat or has_alice or has_duckai):
+    if not (has_ds or has_qwen or has_gigachat or has_opencode or has_alice or has_duckai):
         print("Warning: no provider credentials configured.")
-        print("The server will not start until you add DEEPSEEK_TOKENS, QWEN_TOKENS, GIGACHAT_KEYS, ALICE_ENABLED=1 or DUCKAI_ENABLED=1.")
+        print(
+            "The server will not start until you add DEEPSEEK_TOKENS, QWEN_TOKENS, GIGACHAT_KEYS, OPENCODE_KEYS,"
+            " ALICE_ENABLED=1, OPENCODE_ENABLED=1 or DUCKAI_ENABLED=1."
+        )
 
     if ask("Create a DanyAPI launcher shortcut on the desktop?", True):
         try:

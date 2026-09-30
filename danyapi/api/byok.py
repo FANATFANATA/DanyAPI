@@ -23,12 +23,22 @@ from ..duckai.accounts import DuckAIAccount
 from ..duckai.client import DuckAIClient
 from ..gigachat.accounts import GigaChatAccount
 from ..gigachat.client import GigaChatClient
+from ..opencode.accounts import OpenCodeAccount
+from ..opencode.client import EMPTY_CREDENTIAL, OpenCodeClient
 from ..qwen.accounts import QwenAccount
 from ..qwen.client import QwenClient
 from ..store import JsonStore, cache_root
 from .core import MAX_REQUEST_BODY
 from .models import _header_api_key, refresh_provider_models
-from .state import BYOK_PROVIDERS, _byok_auth_state, _byok_pools_state, _byok_stores_state, app, provider_needs_api_key
+from .state import (
+    BYOK_PROVIDERS,
+    KEY_OPTIONAL_PROVIDERS,
+    _byok_auth_state,
+    _byok_pools_state,
+    _byok_stores_state,
+    app,
+    provider_needs_api_key,
+)
 
 log = logging.getLogger("danyapi.api")
 
@@ -411,6 +421,13 @@ async def _build_byok_pool(provider: str, tokens: list[str], scope: str | None) 
         pool = AccountPool(accounts, label="gigachat")
         await refresh_provider_models("gigachat", accounts[0].client)
         return pool, created
+    if provider == "opencode":
+        accounts = await _byok_opencode_accounts(tokens, "byok")
+        if not accounts:
+            raise _no_valid_key(provider, _auth_indeterminate_count() - before)
+        pool = AccountPool(accounts, label="opencode")
+        await refresh_provider_models("opencode", accounts[0].client)
+        return pool, created
     raise HTTPException(400, f"provider {provider} does not accept a caller supplied api key")
 
 
@@ -460,6 +477,16 @@ async def _byok_gigachat_accounts(tokens: list[str], log_prefix: str) -> list[Gi
         tokens,
         lambda key: GigaChatClient(key=key, scope=settings.gigachat_scope, timeout=settings.timeout),
         lambda index, client, key: GigaChatAccount(index, client, stable_id=_byok_stable_id(key)),
+    )
+
+
+async def _byok_opencode_accounts(tokens: list[str], log_prefix: str) -> list[OpenCodeAccount]:
+    log.debug("%s opencode key set received with %d key(s)", log_prefix, len(tokens))
+    return await _build_accounts(
+        "opencode",
+        tokens,
+        lambda key: OpenCodeClient(key=key, timeout=settings.timeout),
+        lambda index, client, key: OpenCodeAccount(index, client, stable_id=_byok_stable_id(key)),
     )
 
 
@@ -566,6 +593,9 @@ async def _byok_pool_for(provider: str, request: Request) -> AccountPool:
     token = await _extract_request_api_key(request)
     tokens = [t.strip() for t in (token or "").split(",") if t.strip()]
     if not tokens:
+        if provider in KEY_OPTIONAL_PROVIDERS:
+            _CALLER_ID.set("")
+            return await _byok_pool(provider, [EMPTY_CREDENTIAL])
         raise HTTPException(401, _INVALID_KEY_DETAIL.format(provider=provider))
     if len(tokens) > BYOK_MAX_KEYS:
         raise HTTPException(400, f"too many api keys for {provider}: at most {BYOK_MAX_KEYS} keys per request")

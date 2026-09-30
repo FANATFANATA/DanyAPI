@@ -14,7 +14,7 @@ A public instance is already running in production (BYOK_MODE=1):
 
 - API base URL: `https://danyapi.cloudpub.ru/v1/`
 
-Point any OpenAI compatible client at API base URL with a valid tokens, unauthenticated requests are rejected with 401. The API key should be the raw token (e.g. "token1,token2", same in .env). The `alice`, `alice-ai`, `yagpt` and Duck.ai models need no key and are reachable without one; DeepSeek, Qwen and GigaChat models return 401 without a key. `GET /health` reports every provider as enabled in this mode, with `byok_api_key_required` naming the ones that need a key.
+Point any OpenAI compatible client at API base URL with a valid tokens, unauthenticated requests are rejected with 401. The API key should be the raw token (e.g. "token1,token2", same in .env). The `alice`, `alice-ai`, `yagpt` and Duck.ai models need no key and are reachable without one; DeepSeek, Qwen, GigaChat and OpenCode Zen models return 401 without a key. `GET /health` reports every provider as enabled in this mode, with `byok_api_key_required` naming the ones that need a key.
 
 ### Example request
 
@@ -67,6 +67,7 @@ docker run -d -p 8000:8000 \
   -e DEEPSEEK_TOKENS="token1,token2" \
   -e QWEN_TOKENS="token3" \
   -e GIGACHAT_KEYS="<authorization_key>" \
+  -e OPENCODE_KEYS="<zen_api_key>" \
   -e ALICE_ENABLED=1 \
   -e DUCKAI_ENABLED=1 \
   ghcr.io/fanatfanata/danyapi:latest
@@ -104,11 +105,13 @@ Credentials:
 | `GIGACHAT_KEYS` | empty | Comma-separated GigaChat authorization keys, base64 of `client_id:client_secret` from the GigaChat Studio account |
 | `GIGACHAT_SCOPE` | `GIGACHAT_API_PERS` | GigaChat scope: `GIGACHAT_API_PERS`, `GIGACHAT_API_B2B` or `GIGACHAT_API_CORP` |
 | `DANYAPI_GIGACHAT_CA_FILE` | empty | Path to a CA bundle for GigaChat, empty uses the bundled Russian root CA |
+| `OPENCODE_KEYS` | empty | Comma-separated OpenCode Zen API keys from `https://opencode.ai/auth` |
+| `OPENCODE_ENABLED` | empty | `1` serves the Zen free tier without a key, ignored once `OPENCODE_KEYS` is set |
 | `ALICE_ENABLED` | empty | `1` enables the unofficial Yandex Alice provider, see the warning below |
 | `ALICE_ACCOUNTS` | `1` | Concurrent Alice connections, `1` to `4` |
 | `DUCKAI_ENABLED` | empty | `1` enables the unofficial Duck.ai provider, see the warning below |
 | `DUCKAI_ACCOUNTS` | `1` | Concurrent Duck.ai connections, `1` to `4` |
-| `BYOK` / `BYOK_MODE` / `DANYAPI_BYOK_MODE` | empty | `1` runs in bring-your-own-key mode: DeepSeek, Qwen and GigaChat requests supply their own key, Alice and Duck.ai need none. The first name that is set wins. `GET /health` reports every provider as enabled and reports the per-key pools |
+| `BYOK` / `BYOK_MODE` / `DANYAPI_BYOK_MODE` | empty | `1` runs in bring-your-own-key mode: DeepSeek, Qwen, GigaChat and OpenCode Zen requests supply their own key, Alice and Duck.ai need none. The first name that is set wins. `GET /health` reports every provider as enabled and reports the per-key pools |
 | `DANYAPI_ADMIN_TOKEN` | empty | Bearer token required by `POST /v1/tokens`, empty keeps that endpoint disabled |
 
 Server:
@@ -159,7 +162,31 @@ Access tokens live 30 minutes and are refreshed automatically. GigaChat issues i
 
 Differences from the OpenAI API to keep in mind: function calling uses the legacy `functions` plus `function_call` pair, which DanyAPI maps from `tools` for you, there is no `n`, `seed`, `stop` or penalty support, and images are uploaded to the GigaChat file storage first, one image per message and ten per request.
 
-Images work on the Pro, Max and Ultra tiers only. `GigaChat-2` and `GigaChat-3-Lightning` are Lite models and reject attachments; the bridge turns that into a 400 naming the models that accept them instead of a raw upstream error.
+Images work on the Pro, Max and Ultra tiers only. `GigaChat-2` and `GigaChat-3-Lightning` are Lite models and reject attachments; the bridge turns that into a 400 naming the models that accept images instead of a raw upstream error.
+
+## OpenCode Zen
+
+The OpenCode Zen gateway at `https://opencode.ai/zen/v1` is a curated list of models the OpenCode team tested and benchmarked as coding agents, spanning GPT, Claude, Gemini, GLM, Kimi, MiniMax, Qwen and DeepSeek families. The list is read from `GET /models` at startup, so it follows whatever Zen currently serves.
+
+Get a key by signing in at `https://opencode.ai/auth`:
+
+```bash
+OPENCODE_KEYS="<zen_api_key>"
+```
+
+Zen is metered per token rather than free. A few models are on a free or contributor tier for a limited time, and those answer without a key, but a key is what unlocks the catalogue. `GET /models` answers with or without one, so it cannot tell a good key from a bad one: a key is accepted here and only judged on the first real request. A rejected key returns `401`, and the account is set aside and retried on the usual revive cooldown instead of the server refusing to start.
+
+To reach the free tier, set `OPENCODE_ENABLED=1` and leave `OPENCODE_KEYS` empty. That starts one account that sends no `Authorization` header at all, which is the only way in without a key: a placeholder value is not a substitute, because Zen rejects an unrecognised key on the free models too rather than ignoring it. The flag is ignored once `OPENCODE_KEYS` holds anything. In BYOK mode the same rule applies, a caller who sends no key gets the keyless account instead of a `401`.
+
+Two things about routing. Zen model ids collide with the other providers, `qwen3.8-max` and `deepseek-v4.1-flash` are both a real Qwen model and a real Zen model, so a bare model name goes to the Qwen or DeepSeek provider as before. Prefix the id with `opencode/` to force the Zen route, as in `opencode/qwen3.8-max`. Every other Zen id, `space-bunny-free` for instance, resolves on its own with no prefix.
+
+Zen splits its catalogue over three request formats: `chat/completions` for the `@ai-sdk/openai-compatible` models, `responses` for the OpenAI ones and `messages` for the Anthropic ones, and it refuses a model on the wrong format with a `ModelError`. This provider speaks `chat/completions`, so only the compatible half of the catalogue is usable and the rest answers with a `404` naming the format mismatch. `GET /models` lists all of them, so filter on that response if you want to hide the unreachable half.
+
+The upstream sends the model identification headers OpenCode itself sends, `x-opencode-client`, `x-opencode-session` and `x-opencode-request`, along with the OpenCode `User-Agent`. Measured against the live gateway those are not what gates access, and the earlier assumption that they were is wrong: the only header that decides anything is `User-Agent`, because Cloudflare in front of Zen refuses a `Python-urllib` signature with `403 error code: 1010` before the request reaches the API. Any other `User-Agent` gets through. The header set is kept anyway, since it costs nothing and matches what the real client sends.
+
+Upstream errors are typed in the body, `AuthError`, `FreeTierError`, `RegionError`, `ModelError` and `BillingError` among them, and the status is taken from the type rather than the code. That matters because `ModelError` arrives with `401`, and treating the code as authoritative would report a wrong model name as a bad key.
+
+Differences from the OpenAI API to keep in mind: only `chat/completions` is spoken, as above; there is no `n`, `logprobs` or `top_logprobs`; file attachments are rejected, images go inline as `image_url` parts; and system and developer messages are folded into one leading `system` message.
 
 ## Yandex Alice, unofficial
 
@@ -189,12 +216,15 @@ Model lists are not hardcoded. Every provider is asked where it runs and the ans
 | DeepSeek | `model_configs` in the web client settings at `scope=model` | none |
 | Qwen | `GET /api/v2/models/` on the account | a token gives the account list, without one it serves the visitor list |
 | GigaChat | `GET /models` on the official API | authorization key |
+| OpenCode Zen | `GET /models` on the Zen gateway | API key, the free tier answers without one |
 | Duck.ai | the model table in the Duck.ai web bundle, filtered to the free tier | none |
 | Alice | the provider's own aliases, upstream serves no catalog | none |
 
 The lists are fetched at startup and refetched every `DANYAPI_MODELS_REFRESH_SECONDS`, and a fetch that fails or comes back empty keeps the last good list rather than emptying `GET /v1/models`. Send `?refresh=1` to `GET /v1/models`, or pass a key in `Authorization` or `x-api-key`, to force a refetch right now and, for GigaChat, to read the list your own key is granted.
 
 Only models the upstream marks enabled are listed, so a DeepSeek model type the account is not given does not appear. DeepSeek ids are its `model_type` values, `default` today, with a `-thinking` sibling for each that toggles reasoning; `deepseek-v4.1-flash` still resolves as an alias of the default one. In BYOK mode the keyless providers are catalogued from the same endpoints without any key, and GigaChat joins the list as soon as a request arrives with a key.
+
+OpenCode Zen is the one provider with two ways to name the same model. `GET /v1/models` returns the bare id, and a bare id is what routes, but an id that another provider also owns needs the `opencode/` prefix to say which one is meant.
 
 ## Token utility
 
