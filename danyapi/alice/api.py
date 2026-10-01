@@ -11,7 +11,7 @@ from fastapi import HTTPException
 
 from ..accounts import account_lock
 from ..api.retry import MAX_RETRIES, _retry_delay
-from ..api.shaping import _apply_stop
+from ..api.shaping import _apply_limits
 from ..api.sse import _sse, _stream_error_sse
 from ..config import settings
 from ..tokens import estimate_tokens
@@ -21,11 +21,11 @@ from .client import AUTH_REJECTED, CONNECT_FATAL, DEFAULT_MODEL, RETRYABLE_ERROR
 log = logging.getLogger("danyapi.alice.api")
 
 DONE_LINE = "data: [DONE]\n\n"
-BROKEN_ERROR_CODES = {AUTH_REJECTED, CONNECT_FATAL}
+BROKEN_ERROR_CODES = {AUTH_REJECTED}
 
 
 def _status_for(error: AliceError) -> int:
-    if error.code in RETRYABLE_ERRORS or error.code == CONNECT_FATAL:
+    if error.retryable or error.code in RETRYABLE_ERRORS or error.code == CONNECT_FATAL:
         return 502
     return 400
 
@@ -79,6 +79,7 @@ async def collect_non_stream(
     model: str = DEFAULT_MODEL,
     prompt: str | None = None,
     stop: Any = None,
+    max_tokens: int | None = None,
     user: str | None = None,
     session_id: str | None = None,
 ) -> dict:
@@ -88,7 +89,7 @@ async def collect_non_stream(
             stream = await _ask(account, text)
         except AliceError as exc:
             raise _translation_error(exc) from exc
-    content = _apply_stop(stream.content, stop)
+    content, finish = _apply_limits(stream.content, max_tokens, stop)
     usage = _usage_for(text, content)
     record_usage_dict("alice", model, usage, user=user, session_id=session_id)
     return {
@@ -101,7 +102,7 @@ async def collect_non_stream(
             {
                 "index": 0,
                 "message": {"role": "assistant", "content": content},
-                "finish_reason": "stop",
+                "finish_reason": finish,
                 "logprobs": None,
             }
         ],
@@ -129,6 +130,7 @@ async def stream_openai(
     model: str = DEFAULT_MODEL,
     prompt: str | None = None,
     stop: Any = None,
+    max_tokens: int | None = None,
     include_usage: bool = False,
     user: str | None = None,
     session_id: str | None = None,
@@ -138,6 +140,7 @@ async def stream_openai(
     text = prompt if prompt is not None else fold_messages(messages)
 
     content: str = ""
+    finish = "stop"
     error_lines: tuple[str, str] | None = None
     async with account_lock(account.sem, settings.acquire_timeout):
         try:
@@ -145,7 +148,7 @@ async def stream_openai(
         except AliceError as exc:
             error_lines = _stream_error_sse(chunk_id, created, model, f"Alice error: {exc.message}", session_id)
         else:
-            content = _apply_stop(stream.content, stop)
+            content, finish = _apply_limits(stream.content, max_tokens, stop)
 
     if error_lines is not None:
         for line in error_lines:
@@ -153,7 +156,7 @@ async def stream_openai(
         return
 
     yield _chunk(chunk_id, created, model, {"role": "assistant", "content": content})
-    yield _chunk(chunk_id, created, model, {}, "stop")
+    yield _chunk(chunk_id, created, model, {}, finish)
     usage = _usage_for(text, content)
     record_usage_dict("alice", model, usage, user=user, session_id=session_id)
     if include_usage:

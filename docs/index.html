@@ -241,7 +241,7 @@
                     <li><code>alice-ai</code> <span class="model-chip" data-i18n="models_al_keyless">no key needed</span></li>
                     <li><code>yagpt</code> <span class="model-chip" data-i18n="models_al_keyless">no key needed</span></li>
                 </ul>
-                <p class="model-note" data-i18n="models_al_note">Unofficial, opt-in via <code>ALICE_ENABLED=1</code>, off by default. Yandex has no public API here, so it uses an undocumented internal protocol that can break at any time. Stateless and no incremental text, so history is folded into one prompt.</p>
+                <p class="model-note" data-i18n="models_al_note">Unofficial, opt-in via <code>ALICE_ENABLED=1</code>, off by default. Yandex has no public API here, so it uses an undocumented internal protocol that can break at any time. Stateless and no incremental text, so history is folded into one prompt. At least one message is required, tool calls are not supported, and <code>max_tokens</code> trims the answer.</p>
             </article>
 
             <article class="model-card reveal model-duck">

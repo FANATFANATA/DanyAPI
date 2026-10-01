@@ -36,7 +36,7 @@ from danyapi.alice.client import (
     _text_of,
     fold_messages,
     is_placeholder,
-    looks_like_refusal,
+    refusal_marker,
     trim_prompt,
 )
 
@@ -49,6 +49,9 @@ PLAIN_PLACEHOLDER = next(text for text in sorted(client_module.PLACEHOLDER_TEXTS
 
 class _Boom(BaseException):
     pass
+
+
+_EOF = object()
 
 
 class _FakeWS:
@@ -77,6 +80,9 @@ class _FakeWS:
     async def __anext__(self) -> str:
         self.waiting.set()
         item = await self.incoming.get()
+        if item is _EOF:
+            self.ended.set()
+            raise StopAsyncIteration
         if isinstance(item, BaseException):
             self.ended.set()
             raise item
@@ -88,6 +94,9 @@ class _FakeWS:
                 self.incoming.put_nowait(frame)
             else:
                 self.incoming.put_nowait(json.dumps(frame))
+
+    def hang_up(self) -> None:
+        self.incoming.put_nowait(_EOF)
 
 
 class _FakeConnect:
@@ -288,9 +297,9 @@ def test_fold_messages_defaults_a_non_string_role_to_user() -> None:
     assert fold_messages([{"role": None, "content": "hello"}]) == "User: hello"
 
 
-def test_fold_messages_falls_back_to_a_greeting() -> None:
-    assert fold_messages(None) == "Hello"
-    assert fold_messages([{"role": "user", "content": None}]) == "Hello"
+def test_fold_messages_folds_a_bare_namespace_and_yields_nothing_for_empty_input() -> None:
+    assert fold_messages(None) == ""
+    assert fold_messages([{"role": "user", "content": None}]) == ""
     assert fold_messages([SimpleNamespace(content="hi")]) == "User: hi"
 
 
@@ -298,10 +307,10 @@ def test_fold_messages_folds_a_developer_role_into_system() -> None:
     assert fold_messages([{"role": "developer", "content": "rules"}]) == "System: rules"
 
 
-def test_looks_like_refusal_normalises_whitespace_and_case_before_matching() -> None:
-    assert looks_like_refusal(f"  {EMPTY_MARKER.upper()}   ") is True
-    assert looks_like_refusal(f"\n{AUTH_MARKER.upper()}\t") is True
-    assert looks_like_refusal("") is False
+def test_refusal_marker_normalises_whitespace_and_case_before_matching() -> None:
+    assert refusal_marker(f"  {EMPTY_MARKER.upper()}   ") == EMPTY_MARKER
+    assert refusal_marker(f"\n{AUTH_MARKER.upper()}\t") == AUTH_MARKER
+    assert refusal_marker("") == ""
 
 
 def test_extract_uses_a_dialog_update_when_no_directive_text_is_present() -> None:
@@ -337,34 +346,34 @@ def test_trim_prompt_leaves_a_short_prompt_untouched() -> None:
     assert trim_prompt("x" * HARD_MAX_PROMPT) == "x" * HARD_MAX_PROMPT
 
 
-def test_looks_like_refusal_matches_a_canned_line() -> None:
-    assert looks_like_refusal(f"{CAPITALISED_EMPTY_MARKER}.") is True
-    assert looks_like_refusal(f"   {AUTH_MARKER.upper()}   ") is True
+def test_refusal_marker_matches_a_canned_line() -> None:
+    assert refusal_marker(f"{CAPITALISED_EMPTY_MARKER}.") == EMPTY_MARKER
+    assert refusal_marker(f"   {AUTH_MARKER.upper()}   ") == AUTH_MARKER
 
 
-def test_looks_like_refusal_matches_a_long_answer_ending_the_marker_clause() -> None:
+def test_refusal_marker_matches_a_long_answer_ending_the_marker_clause() -> None:
     answer = EMPTY_MARKER + ". " + "y" * 300
     assert len(answer) > 240
-    assert looks_like_refusal(answer) is True
+    assert refusal_marker(answer) == EMPTY_MARKER
 
 
-def test_looks_like_refusal_ignores_a_marker_glued_to_a_word() -> None:
+def test_refusal_marker_ignores_a_marker_glued_to_a_word() -> None:
     answer = EMPTY_MARKER + "x" + " and more " * 40
     assert len(answer) > 240
-    assert looks_like_refusal(answer) is False
+    assert refusal_marker(answer) == ""
 
 
-def test_looks_like_refusal_ignores_a_legitimate_answer_mentioning_it_late() -> None:
+def test_refusal_marker_ignores_a_legitimate_answer_mentioning_it_late() -> None:
     answer = "Tell me a long story about the weather in Moscow today, please. " * 6 + EMPTY_MARKER + "."
     assert len(answer) > 240
     assert answer.find(EMPTY_MARKER) > 48
-    assert looks_like_refusal(answer) is False
+    assert refusal_marker(answer) == ""
 
 
-def test_looks_like_refusal_is_false_for_empty_and_unrelated_text() -> None:
-    assert looks_like_refusal("") is False
-    assert looks_like_refusal("   ") is False
-    assert looks_like_refusal("391") is False
+def test_refusal_marker_is_empty_for_empty_and_unrelated_text() -> None:
+    assert refusal_marker("") == ""
+    assert refusal_marker("   ") == ""
+    assert refusal_marker("391") == ""
 
 
 def test_is_placeholder_rejects_blank_and_dotted_text() -> None:
@@ -506,6 +515,19 @@ async def test_read_loop_signals_every_socket_failure_with_none(error, caplog) -
     assert reader.exception() is None
     assert queue.get_nowait() is None
     assert caplog.messages == [f"alice socket reader stopped: {error!r}"]
+
+
+async def test_read_loop_signals_a_clean_close_to_the_waiting_exchange(caplog) -> None:
+    client, ws = _ready()
+    queue = _exchange(client)
+    reader = asyncio.create_task(client._read_loop())
+    with caplog.at_level(logging.DEBUG, logger="danyapi.alice"):
+        ws.hang_up()
+        await asyncio.wait({reader})
+    assert reader.cancelled() is False
+    assert reader.exception() is None
+    assert queue.get_nowait() is None
+    assert caplog.messages == []
 
 
 async def test_read_loop_drops_frames_that_arrive_outside_an_exchange() -> None:
@@ -885,12 +907,28 @@ async def test_ask_rejects_an_empty_prompt() -> None:
     assert client._ws is None
 
 
-async def test_ask_rejects_a_refusal_as_a_retryable_empty_answer(monkeypatch) -> None:
+async def test_ask_rejects_a_deterministic_refusal_without_retrying(monkeypatch) -> None:
     client, _ws, _connector = await _connected(monkeypatch, _text_output(EMPTY_MARKER))
     with pytest.raises(AliceError) as excinfo:
         await client.ask("hi")
     assert excinfo.value.code == EMPTY_ANSWER
     assert excinfo.value.message == f"alice declined to answer: {EMPTY_MARKER}"
+    assert excinfo.value.retryable is False
+
+
+async def test_ask_rejects_an_auth_finish_refusal_without_retrying(monkeypatch) -> None:
+    client, _ws, _connector = await _connected(monkeypatch, _text_output(f"{AUTH_MARKER}."))
+    with pytest.raises(AliceError) as excinfo:
+        await client.ask("hi")
+    assert excinfo.value.code == EMPTY_ANSWER
+    assert excinfo.value.retryable is False
+
+
+async def test_ask_keeps_a_timeout_refusal_retryable(monkeypatch) -> None:
+    client, _ws, _connector = await _connected(monkeypatch, _text_output(f"{client_module.TIMEOUT_MARKERS[0]}. Я уточню."))
+    with pytest.raises(AliceError) as excinfo:
+        await client.ask("hi")
+    assert excinfo.value.code == EMPTY_ANSWER
     assert excinfo.value.retryable is True
 
 
@@ -977,8 +1015,10 @@ async def test_check_auth_is_false_without_a_reader(monkeypatch) -> None:
     assert await client.check_auth() is False
 
 
-async def test_fetch_models_lists_every_alias() -> None:
-    models = await AliceClient().fetch_models()
+async def test_the_model_catalog_fetcher_lists_every_alias() -> None:
+    from danyapi.api.models import _fetch_alice_models
+
+    models = await _fetch_alice_models()
     assert models == [
         {"id": "alice", "name": "Alice AI (Yandex)", "owned_by": "alice", "model_type": "chat"},
         {"id": "alice-ai", "name": "Alice AI (Yandex)", "owned_by": "alice", "model_type": "chat"},

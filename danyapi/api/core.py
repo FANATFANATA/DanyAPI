@@ -282,7 +282,7 @@ async def lifespan(app: FastAPI):
                     await alice_client.aclose()
                     continue
                 alice_accounts.append(AliceAccount(len(alice_accounts), alice_client, stable_id="alice"))
-            if alice_clients:
+            if alice_accounts:
                 log.info("alice accounts ready: %d", len(alice_accounts))
             for i, (duckai_client, ok) in enumerate(zip(duckai_clients, duckai_auth, strict=False)):
                 if not ok:

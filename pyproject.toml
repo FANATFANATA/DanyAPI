@@ -10,7 +10,7 @@ extend-immutable-calls = ["fastapi.File", "fastapi.Form"]
 
 [tool.ruff.lint.per-file-ignores]
 "danyapi/alice/*.py" = ["RUF001", "RUF002", "RUF003"]
-"tests/test_alice.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_alice*.py" = ["RUF001", "RUF002", "RUF003"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

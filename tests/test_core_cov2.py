@@ -361,6 +361,23 @@ async def test_lifespan_builds_alice_and_duckai_accounts(monkeypatch, caplog):
     assert plan.closed_counts() == [1, 1, 1, 1]
 
 
+async def test_lifespan_does_not_claim_ready_alice_accounts_when_every_probe_fails(monkeypatch, caplog):
+    monkeypatch.setattr(core.settings, "alice_enabled", True)
+    monkeypatch.setattr(core.settings, "alice_accounts", 2)
+    monkeypatch.setattr(core.settings, "duckai_enabled", True)
+    monkeypatch.setattr(core.settings, "duckai_accounts", 1)
+    monkeypatch.setattr(core, "AccountPool", _PoolFactory())
+    plan = _ClientPlan().add("alice", _Spec(auth=False), _Spec(auth=False))
+    plan.add("duckai", _Spec(auth=True))
+    plan.install(monkeypatch)
+    with caplog.at_level(logging.INFO, logger="danyapi.api"):
+        async with _run_lifespan():
+            assert app.state.alice_pool is None
+    messages = [record.getMessage() for record in caplog.records]
+    assert not [message for message in messages if message.startswith("alice accounts ready")]
+    assert "duckai accounts ready: 1" in messages
+
+
 async def test_lifespan_leaves_unused_pools_none(monkeypatch):
     monkeypatch.setattr(core.settings, "deepseek_tokens", ["tok"])
     monkeypatch.setattr(core, "AccountPool", _PoolFactory())

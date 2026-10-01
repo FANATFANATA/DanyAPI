@@ -60,6 +60,13 @@ GROUPS = [
         ],
     ),
     (
+        "Unofficial providers",
+        [
+            ("ALICE_ACCOUNTS", "Concurrent Alice connections to keep open", "int"),
+            ("DUCKAI_ACCOUNTS", "Concurrent Duck.ai connections to keep open", "int"),
+        ],
+    ),
+    (
         "Public instance",
         [
             (

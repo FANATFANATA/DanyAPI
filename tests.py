@@ -77,7 +77,7 @@ USAGE = """usage: python tests.py [-j JOBS] [--full | --lean] [pytest args...]
   -j, --jobs N   run independent checks in N threads
       --full      also run the slow extra checks: pyright, pylint, flake8,
                   pyflakes, isort, bandit, vulture, clang-format, clang-tidy,
-                  xenon, pip-audit, pip check
+                  xenon, pip-audit and a dry run resolve of the requirements
       --lean      run only the always-on checks (the default)
   -h, --help      show this message
 
@@ -474,9 +474,28 @@ def build_steps(pytest_args: list[str], full: bool = False) -> list[tuple[str, S
                     "off",
                     "--timeout",
                     "90",
+                    "--requirement",
+                    "requirements.txt",
+                    "--requirement",
+                    "requirements-dev.txt",
                 ],
             ),
-            ("pip check", [sys.executable, "-m", "pip", "check"]),
+            (
+                "pip requirements resolve",
+                [
+                    sys.executable,
+                    "-m",
+                    "pip",
+                    "install",
+                    "--dry-run",
+                    "--no-deps",
+                    "--quiet",
+                    "-r",
+                    "requirements.txt",
+                    "-r",
+                    "requirements-dev.txt",
+                ],
+            ),
             (
                 "pytest",
                 [

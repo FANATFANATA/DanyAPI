@@ -88,11 +88,18 @@ def test_status_for_reports_upstream_trouble_as_bad_gateway() -> None:
     assert alice_api._status_for(AliceError(1006, "closed", retryable=True)) == 502
     assert alice_api._status_for(AliceError(1009, "timeout", retryable=True)) == 502
     assert alice_api._status_for(AliceError(1011, "alice error: boom")) == 502
+    assert alice_api._status_for(AliceError(1003, "could not reach alice", retryable=True)) == 502
 
 
 def test_status_for_reports_a_non_upstream_error_as_bad_request() -> None:
     assert alice_api._status_for(AliceError(1008, "empty answer")) == 400
     assert alice_api._status_for(AliceError(1003, "handshake failed")) == 400
+
+
+def test_status_for_trusts_the_retryable_flag_over_the_code() -> None:
+    assert alice_api._status_for(AliceError(1008, "no answer after continuations", retryable=True)) == 502
+    assert alice_api._status_for(AliceError(1008, "alice declined to answer", retryable=False)) == 400
+    assert alice_api._status_for(AliceError(1003, "could not reach alice", retryable=False)) == 400
 
 
 def test_usage_for_counts_prompt_and_completion_tokens() -> None:
@@ -141,23 +148,21 @@ async def test_non_retryable_failure_is_raised_without_a_reconnect() -> None:
     assert client.timeline == ["ask"]
 
 
-@pytest.mark.parametrize("code", [1002, 1011])
-async def test_auth_rejected_and_connect_fatal_mark_the_account_broken(code, caplog) -> None:
-    account = _account(_StubClient(errors=[AliceError(code, "boom", retryable=False)]))
+async def test_auth_rejected_marks_the_account_broken(caplog) -> None:
+    account = _account(_StubClient(errors=[AliceError(1002, "boom", retryable=False)]))
     with caplog.at_level(logging.WARNING, logger="danyapi.alice"):
         with pytest.raises(AliceError):
             await alice_api._ask(account, "hi")
     assert account.broken is True
     assert account.broken_at is not None
-    assert _warnings(caplog, "danyapi.alice.api") == [f"alice account #0 marked broken by upstream error {code}: boom"]
+    assert _warnings(caplog, "danyapi.alice.api") == ["alice account #0 marked broken by upstream error 1002: boom"]
     assert _warnings(caplog, "danyapi.alice") == ["alice account #0 marked broken"]
 
 
-@pytest.mark.parametrize("code", [1002, 1011])
-async def test_broken_marking_happens_on_every_attempt(code, instant_backoff, caplog) -> None:
+async def test_broken_marking_happens_on_every_attempt(instant_backoff, caplog) -> None:
     client = _StubClient(
         stream=_stream("391"),
-        errors=[AliceError(code, "boom", retryable=True) for _ in range(2)],
+        errors=[AliceError(1002, "boom", retryable=True) for _ in range(2)],
     )
     instant_backoff(client)
     account = _account(client)
@@ -166,7 +171,22 @@ async def test_broken_marking_happens_on_every_attempt(code, instant_backoff, ca
     assert stream.content == "391"
     assert account.broken is True
     assert client.delays == [1, 2]
-    assert _warnings(caplog, "danyapi.alice.api") == [f"alice account #0 marked broken by upstream error {code}: boom"] * 2
+    assert _warnings(caplog, "danyapi.alice.api") == ["alice account #0 marked broken by upstream error 1002: boom"] * 2
+
+
+async def test_a_transient_upstream_exception_leaves_the_keyless_account_usable(instant_backoff, caplog) -> None:
+    client = _StubClient(
+        stream=_stream("391"),
+        errors=[AliceError(1011, "alice error: upstream exploded", retryable=True)],
+    )
+    instant_backoff(client)
+    account = _account(client)
+    with caplog.at_level(logging.WARNING, logger="danyapi.alice"):
+        stream = await alice_api._ask(account, "hi")
+    assert stream.content == "391"
+    assert account.broken is False
+    assert account.broken_at is None
+    assert _warnings(caplog, "danyapi.alice.api") == []
 
 
 async def test_unattributable_failure_does_not_mark_the_account_broken(caplog) -> None:
@@ -223,6 +243,32 @@ async def test_collect_non_stream_applies_stop_inside_the_lock(monkeypatch) -> N
     )
     assert result["choices"][0]["message"]["content"] == "keep "
     assert client.prompts == ["User: hi"]
+
+
+async def test_collect_non_stream_truncates_to_max_tokens_and_reports_the_length_finish(monkeypatch) -> None:
+    monkeypatch.setattr(alice_api, "record_usage_dict", lambda *args, **kwargs: None)
+    account = _account(_StubClient(stream=_stream("one two three four five six seven eight")))
+    result = await alice_api.collect_non_stream(
+        account,
+        messages=[ChatMessage(role="user", content="hi")],
+        max_tokens=2,
+    )
+    choice = result["choices"][0]
+    assert choice["message"]["content"] == "one two"
+    assert choice["finish_reason"] == "length"
+
+
+async def test_collect_non_stream_reports_stop_when_the_answer_fits_the_budget(monkeypatch) -> None:
+    monkeypatch.setattr(alice_api, "record_usage_dict", lambda *args, **kwargs: None)
+    account = _account(_StubClient(stream=_stream("one two")))
+    result = await alice_api.collect_non_stream(
+        account,
+        messages=[ChatMessage(role="user", content="hi")],
+        max_tokens=64,
+    )
+    choice = result["choices"][0]
+    assert choice["message"]["content"] == "one two"
+    assert choice["finish_reason"] == "stop"
 
 
 async def test_collect_non_stream_prefers_the_raw_prompt_over_folded_messages(monkeypatch) -> None:
@@ -375,3 +421,20 @@ async def test_stream_applies_stop_and_records_usage(monkeypatch) -> None:
     )
     assert recorded[0][1] == {"user": "u2", "session_id": "s3"}
     assert account.sem.locked() is False
+
+
+async def test_stream_truncates_to_max_tokens_and_reports_the_length_finish(monkeypatch) -> None:
+    monkeypatch.setattr(alice_api, "record_usage_dict", lambda *args, **kwargs: None)
+    account = _account(_StubClient(stream=_stream("one two three four five six")))
+    lines = [
+        line
+        async for line in alice_api.stream_openai(
+            account,
+            messages=[ChatMessage(role="user", content="hi")],
+            max_tokens=2,
+        )
+    ]
+    payloads = _payloads(lines)
+    assert payloads[0]["choices"][0]["delta"] == {"role": "assistant", "content": "one two"}
+    assert payloads[1]["choices"][0]["finish_reason"] == "length"
+    assert lines[-1] == alice_api.DONE_LINE

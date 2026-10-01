@@ -837,11 +837,26 @@ async def test_alice_rejects_files_and_the_unsupported_params():
         await chats_mod._chat_completions_alice(_chat(model="yagpt", files=[_file()]), pool=_Pool())
     assert excinfo.value.status_code == 400
     assert excinfo.value.detail == "alice does not support file attachments"
-    for name, value in (("n", 2), ("top_p", 0.5), ("presence_penalty", 0.5), ("frequency_penalty", 0.5), ("logit_bias", {"a": 1})):
+    for name, value in (
+        ("n", 2),
+        ("top_p", 0.5),
+        ("presence_penalty", 0.5),
+        ("frequency_penalty", 0.5),
+        ("logit_bias", {"a": 1}),
+        ("logprobs", True),
+        ("top_logprobs", 3),
+    ):
         with pytest.raises(HTTPException) as excinfo:
             await chats_mod._chat_completions_alice(_chat(model="yagpt", **{name: value}), pool=_Pool())
         assert excinfo.value.status_code == 400
         assert excinfo.value.detail == f"alice does not support the {name} parameter"
+
+
+async def test_alice_rejects_an_empty_message_list():
+    with pytest.raises(HTTPException) as excinfo:
+        await chats_mod._chat_completions_alice(_chat(model="yagpt", messages=[]), pool=_Pool())
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail == "alice needs at least one message"
 
 
 async def test_alice_forwards_only_supported_params(monkeypatch):
@@ -852,10 +867,14 @@ async def test_alice_forwards_only_supported_params(monkeypatch):
         return {"id": "c1", "choices": []}
 
     monkeypatch.setattr(chats_mod.alice_api, "collect_non_stream", collect_non_stream)
-    body = await chats_mod._chat_completions_alice(_chat(model="yagpt", stop=["x"], user="alice", session_id="s1"), pool=_Pool(sid="s1"))
+    body = await chats_mod._chat_completions_alice(
+        _chat(model="yagpt", stop=["x"], max_tokens=64, user="alice", session_id="s1"),
+        pool=_Pool(sid="s1"),
+    )
     assert body == {"id": "c1", "choices": []}
     assert set(captured) <= ALICE_ACCEPTED
     assert captured["session_id"] == "s1"
+    assert captured["max_tokens"] == 64
 
 
 async def test_alice_stream_and_busy_and_missing_pool(monkeypatch):

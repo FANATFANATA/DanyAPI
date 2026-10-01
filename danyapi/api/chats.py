@@ -46,7 +46,7 @@ MAX_PROVIDER_ERROR_CHARS = 300
 
 GIGACHAT_UNSUPPORTED_PARAMS = ("n", "presence_penalty", "frequency_penalty", "logit_bias")
 OPENCODE_UNSUPPORTED_PARAMS = ("n", "logprobs", "top_logprobs")
-ALICE_UNSUPPORTED_PARAMS = ("n", "top_p", "presence_penalty", "frequency_penalty", "logit_bias")
+ALICE_UNSUPPORTED_PARAMS = ("n", "top_p", "presence_penalty", "frequency_penalty", "logit_bias", "logprobs", "top_logprobs")
 DUCKAI_UNSUPPORTED_PARAMS = ("n", "top_p", "presence_penalty", "frequency_penalty", "logit_bias")
 
 _SESSION_OWNERS: OrderedDict[str, str] = OrderedDict()
@@ -681,6 +681,8 @@ async def _chat_completions_alice(req: ChatCompletionRequest, pool: AccountPool 
     if getattr(req, "files", None):
         raise HTTPException(400, "alice does not support file attachments")
     _reject_unsupported_params(req, "alice", ALICE_UNSUPPORTED_PARAMS)
+    if not req.messages:
+        raise HTTPException(400, "alice needs at least one message")
     account, existing_sid = await _acquire_session_account(pool, req)
 
     common = {
@@ -688,6 +690,7 @@ async def _chat_completions_alice(req: ChatCompletionRequest, pool: AccountPool 
         "messages": req.messages,
         "model": req.model,
         "stop": getattr(req, "stop", None),
+        "max_tokens": _max_tokens_of(req),
         "user": getattr(req, "user", None),
         "session_id": existing_sid,
     }

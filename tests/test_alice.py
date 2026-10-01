@@ -9,7 +9,7 @@ from danyapi.alice.client import (
     AliceStream,
     fold_messages,
     is_placeholder,
-    looks_like_refusal,
+    refusal_marker,
     trim_prompt,
 )
 from danyapi.api.schemas import ChatMessage
@@ -45,9 +45,9 @@ def test_fold_messages_maps_developer_to_system():
     assert fold_messages([ChatMessage(role="developer", content="rules")]) == "System: rules"
 
 
-def test_fold_messages_skips_empty_and_defaults():
-    assert fold_messages([]) == "Hello"
-    assert fold_messages([ChatMessage(role="user", content="   ")]) == "Hello"
+def test_fold_messages_skips_empty_and_yields_nothing():
+    assert fold_messages([]) == ""
+    assert fold_messages([ChatMessage(role="user", content="   ")]) == ""
 
 
 def test_fold_messages_handles_content_parts():
@@ -71,9 +71,9 @@ def test_is_placeholder_detects_waiting_text():
     assert is_placeholder("") is False
 
 
-def test_looks_like_refusal_detects_canned_lines():
-    assert looks_like_refusal("На этом устройстве я не могу с Вами познакомиться.") is True
-    assert looks_like_refusal("391") is False
+def test_refusal_marker_detects_canned_lines():
+    assert refusal_marker("На этом устройстве я не могу с Вами познакомиться.") == "не могу с вами познакомиться"
+    assert refusal_marker("391") == ""
 
 
 def test_prompt_message_uses_uuid4_and_empty_dialog_id():
@@ -158,11 +158,11 @@ async def test_pong_payload_shape():
 
 
 def test_error_codes_are_classified():
-    from danyapi.alice.client import RETRYABLE_ERRORS, TERMINAL_ERRORS
+    from danyapi.alice.client import AUTH_REJECTED, CONNECT_FATAL, RETRYABLE_ERRORS
 
     assert 1006 in RETRYABLE_ERRORS
-    assert 1011 not in RETRYABLE_ERRORS
-    assert 1011 in TERMINAL_ERRORS
+    assert CONNECT_FATAL not in RETRYABLE_ERRORS
+    assert AUTH_REJECTED not in RETRYABLE_ERRORS
 
 
 @pytest.mark.asyncio

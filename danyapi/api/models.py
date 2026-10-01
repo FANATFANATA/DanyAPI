@@ -212,6 +212,7 @@ async def _fetch_opencode_models(client: opencode_zen.OpenCodeClient) -> list[di
 
 
 async def _fetch_alice_models(client: Any = None) -> list[dict]:
+    del client
     return [
         {
             "id": alias,

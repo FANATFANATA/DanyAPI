@@ -68,7 +68,6 @@ _VERSION_FALLBACK_RE = re.compile(r'"version"\s*:\s*"([^"]{4,60})"')
 CONNECT_IN_PROGRESS = 1000
 CONNECT_FAILED = 1003
 CONNECT_DROPPED = 1004
-CONNECT_REFUSED = 1005
 CONNECT_LOST = 1006
 CONNECT_FATAL = 1011
 AUTH_REJECTED = 1002
@@ -76,7 +75,6 @@ GOAWAY = 1007
 EMPTY_ANSWER = 1008
 UPSTREAM_TIMEOUT = 1009
 
-TERMINAL_ERRORS = {CONNECT_FATAL, AUTH_REJECTED, EMPTY_ANSWER}
 RETRYABLE_ERRORS = {CONNECT_DROPPED, CONNECT_LOST, CONNECT_IN_PROGRESS, GOAWAY, UPSTREAM_TIMEOUT}
 
 AUTH_FINISH_MARKERS = ("authorization key", "ключ авторизации", "scope is empty", "credentials doesn't match")
@@ -123,8 +121,6 @@ def fold_messages(messages: Any) -> str:
         if not text:
             continue
         lines.append(f"{role.capitalize()}: {text}")
-    if not lines:
-        return "Hello"
     return "\n".join(lines)
 
 
@@ -151,21 +147,21 @@ def is_placeholder(text: str) -> bool:
     return stripped in PLACEHOLDER_TEXTS
 
 
-def looks_like_refusal(text: str) -> bool:
+def refusal_marker(text: str) -> str:
     lowered = " ".join((text or "").lower().split())
     if not lowered:
-        return False
+        return ""
     short = len(lowered) <= REFUSAL_MAX_LEN
     for marker in AUTH_FINISH_MARKERS + EMPTY_MARKERS + TIMEOUT_MARKERS:
         found = lowered.find(marker)
         if found < 0 or found > REFUSAL_MARKER_SLACK:
             continue
         if short:
-            return True
+            return marker
         tail = lowered[found + len(marker) :]
         if tail[:1] in ("", ".", "!", "?", ",", ";", ":", " "):
-            return True
-    return False
+            return marker
+    return ""
 
 
 class AliceError(Exception):
@@ -407,6 +403,8 @@ class AliceClient:
         except BaseException as exc:
             log.debug("alice socket reader stopped: %r", exc)
             self._route(None)
+        else:
+            self._route(None)
 
     async def _ensure_connected(self) -> None:
         if self._ws is not None and self._reader is not None and not self._reader.done():
@@ -552,8 +550,13 @@ class AliceClient:
         stream = AliceStream()
         message, _ = self._prompt_message(text)
         await self._pump(message, stream)
-        if looks_like_refusal(stream.content):
-            raise AliceError(EMPTY_ANSWER, f"alice declined to answer: {stream.content[:160]}", retryable=True)
+        marker = refusal_marker(stream.content)
+        if marker:
+            raise AliceError(
+                EMPTY_ANSWER,
+                f"alice declined to answer: {stream.content[:160]}",
+                retryable=marker in TIMEOUT_MARKERS,
+            )
         log.debug("alice answered %d chars, version=%s", len(stream.content), stream.version or "unknown")
         return stream
 
@@ -563,17 +566,6 @@ class AliceClient:
         except AliceError:
             return False
         return self._ws is not None and self._reader is not None and not self._reader.done()
-
-    async def fetch_models(self) -> list[dict]:
-        return [
-            {
-                "id": alias,
-                "name": name,
-                "owned_by": "alice",
-                "model_type": "chat",
-            }
-            for alias, name in MODEL_NAMES.items()
-        ]
 
     async def resolve_version(self) -> str:
         try:
