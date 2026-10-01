@@ -153,9 +153,10 @@ def _system(name: str) -> dict:
 async def _connected(monkeypatch, *frames: Any) -> tuple[AliceClient, _FakeWS, _FakeConnect]:
     ws = _FakeWS()
     connector = _install_connect(monkeypatch, [ws])
-    ws.feed(_sync_response(), *frames)
+    ws.feed(_sync_response())
     client = AliceClient()
     await client._ensure_connected()
+    ws.feed(*frames)
     return client, ws, connector
 
 
@@ -163,6 +164,20 @@ def _ready(timeout: float = 60.0) -> tuple[AliceClient, _FakeWS]:
     client = AliceClient(timeout=timeout)
     client._ws = _FakeWS()
     return client, client._ws
+
+
+def _seed(monkeypatch, client: AliceClient, *frames: Any) -> asyncio.Queue:
+    queue: asyncio.Queue = asyncio.Queue(maxsize=MAX_PENDING_FRAMES)
+    for frame in frames:
+        queue.put_nowait(frame)
+    monkeypatch.setattr(client, "_begin_exchange", lambda: queue)
+    return queue
+
+
+def _exchange(client: AliceClient, maxsize: int = MAX_PENDING_FRAMES) -> asyncio.Queue:
+    queue: asyncio.Queue = asyncio.Queue(maxsize=maxsize)
+    client._exchange = queue
+    return queue
 
 
 @pytest.fixture
@@ -207,14 +222,21 @@ def test_configured_timeout_is_coerced_to_float() -> None:
     assert client.request_timeout == 90.0
 
 
-async def test_frame_queue_is_bounded_at_construction_and_after_a_reconnect(monkeypatch) -> None:
+async def test_every_exchange_gets_its_own_bounded_queue(monkeypatch) -> None:
     client = AliceClient()
     assert MAX_PENDING_FRAMES == 64
-    assert client._frames.maxsize == MAX_PENDING_FRAMES
-    first = client._frames
+    assert client._exchange is None
+    first = client._begin_exchange()
+    assert first.maxsize == MAX_PENDING_FRAMES
+    assert client._exchange is first
+    client._end_exchange()
+    assert client._exchange is None
+    second = client._begin_exchange()
+    assert second is not first
+    client._end_exchange()
     client, _ws, _connector = await _connected(monkeypatch)
-    assert client._frames is not first
-    assert client._frames.maxsize == MAX_PENDING_FRAMES
+    assert client._exchange is None
+    assert client._begin_exchange().maxsize == MAX_PENDING_FRAMES
 
 
 def test_directive_narrows_name_and_payload_to_concrete_types() -> None:
@@ -417,6 +439,7 @@ async def _blocked(ws: _FakeWS) -> None:
 
 async def test_read_loop_drops_unparsable_and_shapeless_frames(caplog) -> None:
     client, ws = _ready()
+    queue = _exchange(client)
     reader = asyncio.create_task(client._read_loop())
     ws.feed(
         "not json at all",
@@ -427,9 +450,9 @@ async def test_read_loop_drops_unparsable_and_shapeless_frames(caplog) -> None:
         {"directive": {"header": {"name": 5, "namespace": 7}}},
         _text_output("kept", version="v7"),
     )
-    while client._frames.qsize() < 3:
+    while queue.qsize() < 3:
         await asyncio.sleep(0)
-    drained = [client._frames.get_nowait() for _ in range(3)]
+    drained = [queue.get_nowait() for _ in range(3)]
     assert drained == [
         {"header": "not a mapping"},
         {"header": {"name": 5, "namespace": 7}},
@@ -437,7 +460,7 @@ async def test_read_loop_drops_unparsable_and_shapeless_frames(caplog) -> None:
     ]
     reader.cancel()
     await asyncio.wait({reader})
-    assert client._frames.qsize() == 0
+    assert queue.qsize() == 0
     assert ws.sent == []
     assert caplog.records == []
 
@@ -474,25 +497,42 @@ async def test_read_loop_sets_the_sync_event_on_a_state_response() -> None:
 @pytest.mark.parametrize("error", [WebSocketException("closed"), OSError("pipe broke"), RuntimeError("loop is closed"), _Boom("odd")])
 async def test_read_loop_signals_every_socket_failure_with_none(error, caplog) -> None:
     client, ws = _ready()
+    queue = _exchange(client)
     reader = asyncio.create_task(client._read_loop())
     with caplog.at_level(logging.DEBUG, logger="danyapi.alice"):
         ws.feed(error)
         await asyncio.wait({reader})
     assert reader.cancelled() is False
     assert reader.exception() is None
-    assert client._frames.get_nowait() is None
+    assert queue.get_nowait() is None
     assert caplog.messages == [f"alice socket reader stopped: {error!r}"]
+
+
+async def test_read_loop_drops_frames_that_arrive_outside_an_exchange() -> None:
+    client, ws = _ready()
+    reader = asyncio.create_task(client._read_loop())
+    ws.feed(_text_output("stale")["directive"])
+    await ws.waiting.wait()
+    for _ in range(3):
+        await asyncio.sleep(0)
+    assert client._exchange is None
+    queue = _exchange(client)
+    await asyncio.sleep(0)
+    assert queue.qsize() == 0
+    reader.cancel()
+    await asyncio.wait({reader})
 
 
 async def test_read_loop_reraises_cancellation_without_signalling_frames(caplog) -> None:
     client, ws = _ready()
+    queue = _exchange(client)
     reader = asyncio.create_task(client._read_loop())
     await ws.waiting.wait()
     with caplog.at_level(logging.DEBUG, logger="danyapi.alice"):
         reader.cancel()
         await asyncio.wait({reader})
     assert reader.cancelled() is True
-    assert client._frames.qsize() == 0
+    assert queue.qsize() == 0
     assert caplog.messages == []
 
 
@@ -560,14 +600,12 @@ async def test_ensure_connected_reconnects_once_the_reader_died(monkeypatch) -> 
     dead_reader = client._reader
     assert dead_reader is not None
     await asyncio.wait({dead_reader})
-    assert client._frames.get_nowait() == _sync_response()["directive"]
-    assert client._frames.get_nowait() is None
+    assert client._exchange is None
     await client._ensure_connected()
     assert len(connector.calls) == 2
     assert first.closed is True
     assert client._ws is second
-    assert client._frames.maxsize == MAX_PENDING_FRAMES
-    assert client._frames is not first.incoming
+    assert client._exchange is None
 
 
 async def test_ensure_connected_closes_both_halves_when_the_handshake_write_fails(monkeypatch) -> None:
@@ -675,7 +713,7 @@ def test_extract_ignores_a_directive_without_text() -> None:
 
 async def test_pump_returns_the_first_answer(monkeypatch) -> None:
     client, ws = _ready()
-    client._frames.put_nowait(_text_output("391", version="v3")["directive"])
+    _seed(monkeypatch, client, _text_output("391", version="v3")["directive"])
     stream = AliceStream()
     await client._pump({"event": {}}, stream)
     assert stream.content == "391"
@@ -694,8 +732,7 @@ async def test_pump_sends_a_continuation_after_the_continuation_delay(monkeypatc
         await real_sleep(0)
 
     monkeypatch.setattr(asyncio, "sleep", _sleep)
-    client._frames.put_nowait(_system("Progress"))
-    client._frames.put_nowait(_text_output("391")["directive"])
+    _seed(monkeypatch, client, _system("Progress"), _text_output("391")["directive"])
     stream = AliceStream()
     await client._pump({"event": {}}, stream)
     assert stream.content == "391"
@@ -722,8 +759,7 @@ async def test_pump_clamps_every_frame_wait_to_the_remaining_request_budget(monk
         return await real_wait_for(awaitable, timeout)
 
     monkeypatch.setattr(asyncio, "wait_for", _wait_for)
-    client._frames.put_nowait(_system("Progress"))
-    client._frames.put_nowait(_text_output("391")["directive"])
+    _seed(monkeypatch, client, _system("Progress"), _text_output("391")["directive"])
     stream = AliceStream()
     await client._pump({"event": {}}, stream)
     assert stream.content == "391"
@@ -753,9 +789,9 @@ async def test_pump_reports_a_frame_timeout(monkeypatch) -> None:
     assert excinfo.value.retryable is True
 
 
-async def test_pump_reports_a_dropped_connection() -> None:
+async def test_pump_reports_a_dropped_connection(monkeypatch) -> None:
     client, _ws = _ready()
-    client._frames.put_nowait(None)
+    _seed(monkeypatch, client, None)
     with pytest.raises(AliceError) as excinfo:
         await client._pump({"event": {}}, AliceStream())
     assert excinfo.value.code == CONNECT_DROPPED
@@ -763,20 +799,20 @@ async def test_pump_reports_a_dropped_connection() -> None:
     assert excinfo.value.retryable is True
 
 
-@pytest.mark.parametrize("name,code", [("GoAway", GOAWAY), ("InvalidAuth", AUTH_REJECTED)])
-async def test_pump_maps_system_disconnects_to_retryable_errors(name, code) -> None:
+@pytest.mark.parametrize("name,code,retryable", [("GoAway", GOAWAY, True), ("InvalidAuth", AUTH_REJECTED, False)])
+async def test_pump_maps_system_disconnects_to_alice_errors(name, code, retryable, monkeypatch) -> None:
     client, _ws = _ready()
-    client._frames.put_nowait(_system(name)["directive"])
+    _seed(monkeypatch, client, _system(name)["directive"])
     with pytest.raises(AliceError) as excinfo:
         await client._pump({"event": {}}, AliceStream())
     assert excinfo.value.code == code
     assert excinfo.value.message == f"alice sent {name}"
-    assert excinfo.value.retryable is True
+    assert excinfo.value.retryable is retryable
 
 
-async def test_pump_maps_an_event_exception_to_a_fatal_error() -> None:
+async def test_pump_maps_an_event_exception_to_a_fatal_error(monkeypatch) -> None:
     client, _ws = _ready()
-    client._frames.put_nowait({"header": {"namespace": "System", "name": "EventException"}, "payload": {"error": {"message": "internal alice failure"}}})
+    _seed(monkeypatch, client, {"header": {"namespace": "System", "name": "EventException"}, "payload": {"error": {"message": "internal alice failure"}}})
     with pytest.raises(AliceError) as excinfo:
         await client._pump({"event": {}}, AliceStream())
     assert excinfo.value.code == CONNECT_FATAL
@@ -784,19 +820,18 @@ async def test_pump_maps_an_event_exception_to_a_fatal_error() -> None:
     assert excinfo.value.retryable is False
 
 
-async def test_pump_reports_an_event_exception_without_a_message_as_unknown() -> None:
+async def test_pump_reports_an_event_exception_without_a_message_as_unknown(monkeypatch) -> None:
     client, _ws = _ready()
-    client._frames.put_nowait({"header": {"namespace": "System", "name": "EventException"}, "payload": "not a mapping"})
+    _seed(monkeypatch, client, {"header": {"namespace": "System", "name": "EventException"}, "payload": "not a mapping"})
     with pytest.raises(AliceError) as excinfo:
         await client._pump({"event": {}}, AliceStream())
     assert excinfo.value.code == CONNECT_FATAL
     assert excinfo.value.message == "alice error: unknown"
 
 
-async def test_pump_gives_up_after_the_continuation_budget(instant_continuation) -> None:
+async def test_pump_gives_up_after_the_continuation_budget(instant_continuation, monkeypatch) -> None:
     client, ws = _ready()
-    for _ in range(MAX_CONTINUATIONS):
-        client._frames.put_nowait(_silent_output()["directive"])
+    _seed(monkeypatch, client, *[_silent_output()["directive"] for _ in range(MAX_CONTINUATIONS)])
     with pytest.raises(AliceError) as excinfo:
         await client._pump({"event": {}}, AliceStream())
     assert MAX_CONTINUATIONS == 24
@@ -804,13 +839,17 @@ async def test_pump_gives_up_after_the_continuation_budget(instant_continuation)
     assert excinfo.value.message == "alice produced no answer after continuations"
     assert excinfo.value.retryable is True
     assert len(ws.sent) == MAX_CONTINUATIONS + 1
+    assert client._exchange is None
 
 
-async def test_pump_names_the_placeholder_that_never_became_an_answer(instant_continuation) -> None:
+async def test_pump_names_the_placeholder_that_never_became_an_answer(instant_continuation, monkeypatch) -> None:
     client, _ws = _ready()
-    client._frames.put_nowait(_text_output(DOTTED_PLACEHOLDER)["directive"])
-    for _ in range(MAX_CONTINUATIONS - 1):
-        client._frames.put_nowait(_silent_output()["directive"])
+    _seed(
+        monkeypatch,
+        client,
+        _text_output(DOTTED_PLACEHOLDER)["directive"],
+        *[_silent_output()["directive"] for _ in range(MAX_CONTINUATIONS - 1)],
+    )
     with pytest.raises(AliceError) as excinfo:
         await client._pump({"event": {}}, AliceStream())
     assert excinfo.value.code == EMPTY_ANSWER
@@ -852,6 +891,50 @@ async def test_ask_rejects_a_refusal_as_a_retryable_empty_answer(monkeypatch) ->
         await client.ask("hi")
     assert excinfo.value.code == EMPTY_ANSWER
     assert excinfo.value.message == f"alice declined to answer: {EMPTY_MARKER}"
+    assert excinfo.value.retryable is True
+
+
+async def test_ask_never_inherits_a_frame_from_the_previous_exchange(monkeypatch) -> None:
+    client, ws, _connector = await _connected(monkeypatch, _text_output("first answer"), _text_output("second answer"))
+
+    first = await client.ask("q1")
+    ws.feed(_text_output("third answer"))
+    second = await client.ask("q2")
+
+    assert first.content == "first answer"
+    assert second.content == "third answer"
+
+
+async def test_ask_never_inherits_a_goaway_left_by_the_previous_exchange(monkeypatch) -> None:
+    client, ws, _connector = await _connected(monkeypatch, _text_output("answer"), _system("GoAway"))
+    client.frame_timeout = 0.05
+
+    assert (await client.ask("q1")).content == "answer"
+    with pytest.raises(AliceError) as excinfo:
+        await client.ask("q2")
+    assert excinfo.value.code == UPSTREAM_TIMEOUT
+
+    ws.feed(_text_output("fresh answer"))
+    assert (await client.ask("q3")).content == "fresh answer"
+
+
+async def test_ask_reports_an_auth_rejection_without_burning_the_retry_budget(monkeypatch) -> None:
+    client, _ws, _connector = await _connected(monkeypatch, _system("InvalidAuth"))
+
+    with pytest.raises(AliceError) as excinfo:
+        await client.ask("hi")
+
+    assert excinfo.value.code == AUTH_REJECTED
+    assert excinfo.value.retryable is False
+
+
+async def test_ask_reports_a_goaway_as_retryable(monkeypatch) -> None:
+    client, _ws, _connector = await _connected(monkeypatch, _system("GoAway"))
+
+    with pytest.raises(AliceError) as excinfo:
+        await client.ask("hi")
+
+    assert excinfo.value.code == GOAWAY
     assert excinfo.value.retryable is True
 
 

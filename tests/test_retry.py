@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -11,6 +12,8 @@ import danyapi.api.deepseek as deepseek_mod
 import danyapi.api.models as models_mod
 import danyapi.api.openai as openai_mod
 import danyapi.api.retry as retry_mod
+import danyapi.api.sse as sse_mod
+from danyapi.accounts import AccountPoolBusy
 from danyapi.api.openai import ChatMessage, _collect_non_stream, _stream_openai, app
 
 BUSY_SSE = (
@@ -124,11 +127,8 @@ class FakeAccount:
 
 
 @pytest.fixture(autouse=True)
-def zero_backoff():
-    orig = retry_mod.RETRY_BACKOFF_SEC
-    retry_mod.RETRY_BACKOFF_SEC = 0.0
-    yield
-    retry_mod.RETRY_BACKOFF_SEC = orig
+def zero_backoff(monkeypatch):
+    monkeypatch.setattr(retry_mod, "RETRY_BACKOFF_SEC", 0.0)
 
 
 @pytest.fixture
@@ -221,13 +221,13 @@ async def test_stream_emits_error_after_five_too_frequent_cycles(fast_rate_limit
     assert acct.client.completion.await_count == openai_mod.MESSAGE_TOO_FREQUENT_MAX_RETRIES + 1
     assert '"error"' in joined
     assert "Message too frequent" in joined
-    assert '"finish_reason": "error"' not in joined
-    assert '"finish_reason": "stop"' in joined
+    assert '"finish_reason": "error"' in joined
+    assert '"finish_reason": "stop"' not in joined
     assert joined.rstrip().endswith("data: [DONE]")
 
 
 async def test_stream_error_frame_uses_valid_finish_reasons(fast_rate_limit):
-    valid = {"stop", "length", "content_filter", "tool_calls"}
+    valid = {"stop", "length", "content_filter", "tool_calls", "error", "server_error"}
     cases = [
         (TOO_FREQUENT_HINT_SSE, openai_mod.MESSAGE_TOO_FREQUENT_MAX_RETRIES + 1),
         (BUSY_SSE, openai_mod.MAX_RETRIES + 1),
@@ -700,3 +700,81 @@ async def _collect(agen):
     async for item in agen:
         out.append(item)
     return out
+
+
+def test_retry_delay_spreads_the_accounts_that_retry_together(monkeypatch):
+    monkeypatch.setattr(retry_mod, "RETRY_BACKOFF_SEC", 1.0)
+    for attempt in range(1, 4):
+        samples = [retry_mod._retry_delay(attempt) for _ in range(50)]
+        base = min(retry_mod.RETRY_BACKOFF_SEC * (2 ** (attempt - 1)), retry_mod.RETRY_BACKOFF_MAX_SEC)
+        assert min(samples) < base
+        assert max(samples) > base
+        assert max(samples) <= retry_mod.RETRY_BACKOFF_MAX_SEC
+        assert min(samples) >= 0.0
+        assert len(set(samples)) > 1
+    capped = [retry_mod._retry_delay(9) for _ in range(50)]
+    assert max(capped) <= retry_mod.RETRY_BACKOFF_MAX_SEC
+    assert min(capped) < retry_mod.RETRY_BACKOFF_MAX_SEC
+    assert len(set(capped)) > 1
+
+
+def test_retry_delay_uses_the_random_source(monkeypatch):
+    monkeypatch.setattr(retry_mod, "RETRY_BACKOFF_SEC", 1.0)
+    samples = {retry_mod._retry_delay(4) for _ in range(200)}
+    assert len(samples) > 1
+
+
+@pytest.mark.parametrize("hint, expected", [(3, 3.0), ("7.5", 7.5), (0, 0.0), (600, retry_mod.RETRY_BACKOFF_MAX_SEC), (-4, 0.0)])
+def test_retry_delay_honours_a_numeric_retry_after(hint, expected):
+    assert retry_mod._retry_delay(1, hint) == expected
+
+
+@pytest.mark.parametrize("hint", [None, True, "Wed, 21 Oct 2015 07:28:00 GMT", float("nan"), float("inf"), object()])
+def test_retry_delay_ignores_an_unusable_retry_after(monkeypatch, hint):
+    monkeypatch.setattr(retry_mod, "RETRY_BACKOFF_SEC", 1.0)
+    assert retry_mod._retry_delay(1, hint) == pytest.approx(1.0, abs=retry_mod.RETRY_BACKOFF_SEC * retry_mod.RETRY_BACKOFF_JITTER)
+
+
+def test_retry_after_header_is_read_from_a_response():
+    class _Response:
+        def __init__(self, headers):
+            self.headers = headers
+
+    assert retry_mod._retry_after_header(_Response({"retry-after": "5"})) == "5"
+    assert retry_mod._retry_after_header(_Response({})) is None
+    assert retry_mod._retry_after_header(object()) is None
+    assert retry_mod._retry_after_header(SimpleNamespace(headers=None)) is None
+
+
+async def test_stream_guard_does_not_repeat_the_done_sentinel(caplog):
+    async def gen():
+        yield 'data: {"id": "c1", "choices": []}\n\n'
+        yield "data: [DONE]\n\n"
+        raise RuntimeError("boom after the terminator")
+
+    with caplog.at_level(logging.ERROR, logger="danyapi.api"):
+        lines = await _collect(sse_mod._stream_guard(gen(), "m"))
+    assert [line for line in lines if line == "data: [DONE]\n\n"] == ["data: [DONE]\n\n"]
+    assert len(lines) == 2
+    assert any("boom after the terminator" in record.getMessage() for record in caplog.records)
+
+
+async def test_stream_guard_does_not_append_the_done_sentinel_twice_after_a_busy_error(caplog):
+    async def gen():
+        yield "data: [DONE]\n\n"
+        raise AccountPoolBusy()
+
+    with caplog.at_level(logging.WARNING, logger="danyapi.api"):
+        lines = await _collect(sse_mod._stream_guard(gen(), "m"))
+    assert lines == ["data: [DONE]\n\n"]
+
+
+def test_stream_error_frame_defaults_to_an_unambiguous_error_finish():
+    first, done = sse_mod._stream_error_sse("c1", 1, "m", "image download failed")
+    payload = json.loads(first[len("data: ") :].strip())
+    assert payload["choices"] == [{"index": 0, "delta": {}, "finish_reason": "error"}]
+    assert done == sse_mod.DONE_SENTINEL
+    explicit, _ = sse_mod._stream_error_sse("c1", 1, "m", "boom", None, "response_incomplete", "response_incomplete")
+    payload = json.loads(explicit[len("data: ") :].strip())
+    assert payload["error"]["finish_reason"] == "response_incomplete"
+    assert payload["choices"][0]["finish_reason"] == "response_incomplete"

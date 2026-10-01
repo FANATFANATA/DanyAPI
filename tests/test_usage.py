@@ -1,3 +1,6 @@
+import threading
+import time
+
 import pytest
 
 from danyapi import store as store_mod
@@ -149,3 +152,59 @@ def test_flush_persists_recent_before_interval(cache_dir):
 
 def test_flush_without_store_is_noop():
     UsageTracker().flush()
+
+
+class _SlowStore:
+    def __init__(self) -> None:
+        self.data: dict = {}
+        self.delay = 0.0
+
+    def set(self, key, value):
+        pause = self.delay
+        self.delay = 0.0
+        if pause:
+            time.sleep(pause)
+        self.data[key] = value
+
+    def discard(self, key):
+        self.data.pop(key, None)
+
+
+def test_a_concurrent_record_never_rolls_the_persisted_total_back(cache_dir):
+    store = _SlowStore()
+    tracker = UsageTracker(store=None)
+    tracker._store = store
+    tracker._last_usage_persist = 0.0
+    tracker._last_recent_persist = 0.0
+
+    def record():
+        tracker.record("deepseek", "m", 1, 1, 2)
+        tracker._last_usage_persist = 0.0
+        tracker._last_recent_persist = 0.0
+
+    store.delay = 0.3
+    stale = threading.Thread(target=record)
+    stale.start()
+    time.sleep(0.05)
+    record()
+    stale.join(5)
+    assert not stale.is_alive()
+    assert store.data["usage"]["totals"] == {"requests": 2, "prompt_tokens": 2, "completion_tokens": 2, "total_tokens": 4}
+    assert store.data["usage_recent"] == tracker.snapshot()["recent"]
+
+
+def test_a_reset_is_not_undone_by_a_concurrent_record(cache_dir):
+    store = _SlowStore()
+    tracker = UsageTracker(store=None)
+    tracker._store = store
+    tracker._last_usage_persist = 0.0
+    tracker._last_recent_persist = 0.0
+    store.delay = 0.3
+    stale = threading.Thread(target=lambda: tracker.record("deepseek", "m", 1, 1, 2))
+    stale.start()
+    time.sleep(0.05)
+    tracker.reset()
+    stale.join(5)
+    assert not stale.is_alive()
+    assert store.data == {}
+    assert tracker.snapshot()["totals"]["requests"] == 0

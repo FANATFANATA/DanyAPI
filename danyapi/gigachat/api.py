@@ -100,21 +100,43 @@ async def _sleep_backoff(attempt: int) -> None:
     await asyncio.sleep(_retry_delay(attempt + 1))
 
 
+async def _body_bytes(resp: httpx.Response) -> bytes:
+    if not resp.is_stream_consumed:
+        try:
+            await resp.aread()
+        except (httpx.HTTPError, OSError, RuntimeError) as exc:
+            log.debug("gigachat upstream body could not be read: %s", exc)
+            return b""
+    try:
+        return resp.content
+    except (httpx.HTTPError, OSError, RuntimeError):
+        return b""
+
+
 async def _read_json(resp: httpx.Response) -> Any:
     try:
-        return json.loads(resp.content)
+        return json.loads(await _body_bytes(resp))
     except ValueError as exc:
         raise HTTPException(502, "GigaChat returned a malformed response") from exc
 
 
-async def _raise_upstream(resp: httpx.Response, payload: Any) -> None:
+async def _safe_json(resp: httpx.Response) -> Any:
+    try:
+        return json.loads(await _body_bytes(resp))
+    except ValueError:
+        return None
+
+
+async def _raise_upstream(account: Any, resp: httpx.Response, payload: Any) -> None:
     message = ""
     if isinstance(payload, dict) and isinstance(payload.get("message"), str):
         message = payload["message"]
     if not message:
-        text = resp.text[:300] if resp.content else ""
+        text = (await _body_bytes(resp)).decode("utf-8", errors="replace")[:300]
         message = text or f"upstream returned {resp.status_code}"
     error = GigaChatError(resp.status_code, message)
+    if error.is_auth:
+        account.mark_broken()
     raise HTTPException(_status_for(error), _detail_for(error))
 
 
@@ -150,7 +172,7 @@ async def collect_non_stream(
             raise HTTPException(_status_for(exc), _detail_for(exc)) from exc
         try:
             if resp.status_code >= 400:
-                await _raise_upstream(resp, await _safe_json(resp))
+                await _raise_upstream(account, resp, await _safe_json(resp))
             payload = await _read_json(resp)
         finally:
             await resp.aclose()
@@ -176,13 +198,6 @@ async def collect_non_stream(
         "usage": usage,
         "session_id": session_id,
     }
-
-
-async def _safe_json(resp: httpx.Response) -> Any:
-    try:
-        return json.loads(resp.content)
-    except ValueError:
-        return None
 
 
 def _chunk(chunk_id: str, created: int, model: str, delta: dict, finish: str | None = None, usage: dict | None = None) -> str:
@@ -299,7 +314,7 @@ async def stream_openai(
         emitted = False
         try:
             if resp.status_code >= 400:
-                await _raise_upstream(resp, await _safe_json(resp))
+                await _raise_upstream(account, resp, await _safe_json(resp))
             async for event in _iter_sse(resp):
                 usage_raw = event.get("usage")
                 if isinstance(usage_raw, dict):

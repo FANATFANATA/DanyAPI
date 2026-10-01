@@ -966,17 +966,35 @@ def test_nms_name_normalisation_with_many_unknown_keys_is_fast():
     assert len(json.loads(result[0].arguments)) == 400
 
 
-def test_nms_schema_scope_is_a_single_entry_identity_memo():
+def test_nms_schema_scope_is_a_single_entry_value_memo():
     nms._scope_cache.clear()
     schemas = {"a": {"x": "string"}}
     keys, seed = _schema_scope(schemas)
     assert keys == ("a",)
     assert seed == (("a", ()),)
     assert _schema_scope(schemas) == (keys, seed)
-    assert nms._scope_cache[0][0] is schemas
+    assert nms._scope_cache == [(("a",), (("a", ()),))]
     other = {"b": {"y": "string"}}
     assert _schema_scope(other)[0] == ("b",)
-    assert nms._scope_cache[0][0] is other
+    assert nms._scope_cache[0][0] == ("b",)
+    assert nms._schema_scope(other) == nms._schema_scope(other)
+
+
+def test_nms_schema_scope_sees_an_in_place_mutation():
+    nms._scope_cache.clear()
+    schemas = {"ReadFile": {"path": "string"}}
+    assert _normalize_call_name("readfile", schemas) == "ReadFile"
+    schemas["WriteFile"] = {"content": "string"}
+    assert _schema_scope(schemas)[0] == ("ReadFile", "WriteFile")
+    assert _normalize_call_name("writefile", schemas) == "WriteFile"
+
+
+def test_nms_schema_scope_does_not_retain_the_caller_dict():
+    nms._scope_cache.clear()
+    schemas = {"a": {"x": "string"}}
+    _schema_scope(schemas)
+    assert all(not isinstance(value, dict) for value in nms._scope_cache[0])
+    assert all(not isinstance(item, dict) for item in nms._scope_cache[0][1])
 
 
 def test_nms_schema_scope_handles_non_dict_specs():
@@ -1051,12 +1069,21 @@ def test_nms_tool_schema_map_does_not_retain_the_caller_list():
     _tool_schema_map_cache.clear()
     tools = [{"function": {"name": f"t{index}", "parameters": {"properties": {"a": {"type": "string"}}}}} for index in range(5)]
     result = tool_schema_map(tools)
-    entry = _tool_schema_map_cache[id(tools)]
-    assert entry[1] is result
-    assert entry[0] == tuple(id(item) for item in tools)
-    assert all(not isinstance(value, list) for value in entry[1].values())
-    assert tools not in list(entry[1].values())
+    key = nms._tools_signature(tools)
+    assert _tool_schema_map_cache[key] is result
+    assert all(not isinstance(value, list) for value in _tool_schema_map_cache.values())
+    assert tools not in list(_tool_schema_map_cache.values())
     assert result is tool_schema_map(tools)
+
+
+def test_nms_tool_schema_map_cache_key_is_value_derived():
+    _tool_schema_map_cache.clear()
+    first = [{"function": {"name": "t0", "parameters": {"properties": {"a": {"type": "string"}}}}}]
+    second = [{"function": {"name": "t0", "parameters": {"properties": {"a": {"type": "string"}}}}}]
+    assert nms._tools_signature(first) == nms._tools_signature(second)
+    assert tool_schema_map(first) is tool_schema_map(second)
+    assert nms._tools_signature(first) != nms._tools_signature([{"function": {"name": "other"}}])
+    assert all(not isinstance(cache_key, int) for cache_key in _tool_schema_map_cache)
 
 
 def test_nms_tool_schema_map_invalidates_on_mutation():
@@ -1403,21 +1430,13 @@ def test_jf_underscored_numbers_parse_as_numbers():
 
 
 @pytest.mark.parametrize("token", ["NaN", "nan", "-NaN"])
-def test_jf_nan_literals_parse_as_floats_or_are_rejected(token):
-    if token == "NaN":
-        value = jf._loads_lenient(f'{{"n": {token}}}')["n"]
-        assert value != value
-        return
+def test_jf_nan_literals_are_rejected(token):
     with pytest.raises(ValueError, match="invalid json"):
         jf._loads_lenient(f'{{"n": {token}}}')
 
 
 @pytest.mark.parametrize("token", ["Infinity", "-Infinity", "inf", "+inf", "infinity", "-infinity", "+Infinity"])
-def test_jf_infinity_literals_parse_as_floats_or_are_rejected(token):
-    if token in ("Infinity", "-Infinity"):
-        value = jf._loads_lenient(f'{{"n": {token}}}')["n"]
-        assert value == float(token)
-        return
+def test_jf_infinity_literals_are_rejected(token):
     with pytest.raises(ValueError, match="invalid json"):
         jf._loads_lenient(f'{{"n": {token}}}')
 
@@ -1676,8 +1695,8 @@ def test_init_reexports_the_private_surface():
 
 
 def test_init_reexport_count_is_stable():
-    assert len(toolemu.__all__) == 229
-    assert len([name for name in toolemu.__all__ if name.startswith("_")]) == 201
+    assert len(toolemu.__all__) == 236
+    assert len([name for name in toolemu.__all__ if name.startswith("_")]) == 207
 
 
 def test_init_module_is_importable_and_callable():

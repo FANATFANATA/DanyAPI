@@ -18,9 +18,9 @@ from ..duckai import api as duckai_api
 from ..gigachat import api as gigachat_api
 from ..opencode import api as opencode_api
 from ..qwen import api as qwen_api
-from .attachments import MAX_ATTACHMENT_TOTAL_SIZE, _collect_attachments, _validate_attachments
+from .attachments import _collect_attachments, _validate_attachments
 from .byok import _byok_caller_id, _byok_pool_for, _extract_request_api_key
-from .core import _acquire_account
+from .core import MAX_CHAT_BODY_BYTES, _acquire_account
 from .deepseek import _collect_non_stream, _stream_openai
 from .images import _b64encode
 from .models import _is_reasoning_model, _resolve_model, _resolve_provider
@@ -42,7 +42,6 @@ CHAT_HANDLERS = {
 
 MAX_COMPLETION_PROMPTS = 8
 MAX_MESSAGES_PER_REQUEST = 2000
-MAX_CHAT_BODY_BYTES = 3 * MAX_ATTACHMENT_TOTAL_SIZE
 MAX_PROVIDER_ERROR_CHARS = 300
 
 GIGACHAT_UNSUPPORTED_PARAMS = ("n", "presence_penalty", "frequency_penalty", "logit_bias")
@@ -65,13 +64,9 @@ def _chat_handler(provider: str) -> Any:
 
 
 def _check_chat_request_limits(req: ChatCompletionRequest, request: Request) -> None:
-    content_length = request.headers.get("content-length")
-    if content_length:
-        try:
-            if int(content_length) > MAX_CHAT_BODY_BYTES:
-                raise HTTPException(413, f"request body too large, max {MAX_CHAT_BODY_BYTES // (1024 * 1024)} MB")
-        except ValueError:
-            raise HTTPException(400, "invalid content-length header") from None
+    body = getattr(request, "_body", None)
+    if isinstance(body, (bytes, bytearray)) and len(body) > MAX_CHAT_BODY_BYTES:
+        raise HTTPException(413, f"request body too large, max {MAX_CHAT_BODY_BYTES // (1024 * 1024)} MB")
     if len(req.messages) > MAX_MESSAGES_PER_REQUEST:
         raise HTTPException(400, f"too many messages: max {MAX_MESSAGES_PER_REQUEST} per request")
 
@@ -201,7 +196,7 @@ def _safe_error_message(value: Any) -> str:
     return text or "upstream error"
 
 
-def _translate_chat_chunk_to_completion(chunk: dict) -> dict:
+def _translate_chat_chunk_to_completion(chunk: dict, base_index: int = 0) -> dict:
     piece: dict[str, Any] = {
         "id": chunk.get("id", ""),
         "object": "text_completion",
@@ -228,7 +223,7 @@ def _translate_chat_chunk_to_completion(chunk: dict) -> dict:
         index = choice.get("index")
         piece["choices"].append(
             {
-                "index": index if isinstance(index, int) and not isinstance(index, bool) else 0,
+                "index": base_index + (index if isinstance(index, int) and not isinstance(index, bool) else 0),
                 "text": text if isinstance(text, str) else "",
                 "logprobs": None,
                 "finish_reason": choice.get("finish_reason"),
@@ -244,7 +239,7 @@ def _usage_count(usage: dict, field: str) -> int:
     return int(value)
 
 
-async def _translate_completion_stream(chat_gen):
+async def _translate_completion_stream(chat_gen, base_index: int = 0, seen_indexes: dict[int, None] | None = None):
     try:
         async for line in chat_gen:
             if not line.startswith("data: "):
@@ -258,18 +253,27 @@ async def _translate_completion_stream(chat_gen):
             except ValueError:
                 yield line
                 continue
-            yield _sse(_translate_chat_chunk_to_completion(chunk))
+            if seen_indexes is not None:
+                for choice in chunk.get("choices") or ():
+                    if isinstance(choice, dict):
+                        raw = choice.get("index")
+                        seen_indexes[raw if isinstance(raw, int) and not isinstance(raw, bool) else 0] = None
+            yield _sse(_translate_chat_chunk_to_completion(chunk, base_index))
     finally:
         await _close_generator(chat_gen)
 
 
 async def _completions_stream(req: CompletionRequest, prompts: list[str], dispatch: Any):
+    base_index = 0
     for index, prompt_text in enumerate(prompts):
+        prompt_base = base_index
+        seen_indexes: dict[int, None] = {}
         try:
             chat_req = _completion_chat_request(req, prompt_text, True, len(prompts))
             chat_resp = await dispatch(chat_req)
-            async for line in _translate_completion_stream(chat_resp.body_iterator):
+            async for line in _translate_completion_stream(chat_resp.body_iterator, prompt_base, seen_indexes):
                 yield line
+            base_index = prompt_base + max(seen_indexes, default=-1) + 1
         except Exception as exc:
             detail = _exception_detail(exc)
             log.warning("completions prompt #%d of %d failed: %s: %s", index + 1, len(prompts), type(exc).__name__, exc)
@@ -401,6 +405,14 @@ def _request_scope(req: ChatCompletionRequest) -> str | None:
     if _byok_mode() and _caller_scope():
         return f"k:{_caller_scope()}"
     return None
+
+
+async def _acquire_session_account(pool: AccountPool, req: Any) -> tuple[Any, str | None]:
+    if req.session_id:
+        scope = _request_scope(req)
+        if scope:
+            _bind_session_owner(req.session_id, scope)
+    return await _acquire_account(pool, req.session_id)
 
 
 async def _acquire_and_build(
@@ -586,7 +598,7 @@ async def _chat_completions_gigachat(req: ChatCompletionRequest, pool: AccountPo
 
     _reject_unsupported_params(req, "gigachat", GIGACHAT_UNSUPPORTED_PARAMS)
     tools, tool_choice = _materialize_tools(req)
-    account, existing_sid = await _acquire_account(pool, req.session_id)
+    account, existing_sid = await _acquire_session_account(pool, req)
     max_tokens = _max_tokens_of(req)
 
     common = {
@@ -630,7 +642,7 @@ async def _chat_completions_opencode(req: ChatCompletionRequest, pool: AccountPo
     if getattr(req, "files", None):
         raise HTTPException(400, "opencode does not support file attachments, send images inline instead")
     _reject_unsupported_params(req, "opencode", OPENCODE_UNSUPPORTED_PARAMS)
-    account, existing_sid = await _acquire_account(pool, req.session_id)
+    account, existing_sid = await _acquire_session_account(pool, req)
 
     tools, tool_choice = _materialize_tools(req)
     common = {
@@ -669,7 +681,7 @@ async def _chat_completions_alice(req: ChatCompletionRequest, pool: AccountPool 
     if getattr(req, "files", None):
         raise HTTPException(400, "alice does not support file attachments")
     _reject_unsupported_params(req, "alice", ALICE_UNSUPPORTED_PARAMS)
-    account, existing_sid = await _acquire_account(pool, req.session_id)
+    account, existing_sid = await _acquire_session_account(pool, req)
 
     common = {
         "account": account,
@@ -701,7 +713,7 @@ async def _chat_completions_duckai(req: ChatCompletionRequest, pool: AccountPool
     if getattr(req, "files", None):
         raise HTTPException(400, "duckai does not support file attachments, send images inline instead")
     _reject_unsupported_params(req, "duck.ai", DUCKAI_UNSUPPORTED_PARAMS)
-    account, existing_sid = await _acquire_account(pool, req.session_id)
+    account, existing_sid = await _acquire_session_account(pool, req)
 
     tools, tool_choice = _materialize_tools(req)
     common = {

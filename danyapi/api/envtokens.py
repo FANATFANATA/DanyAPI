@@ -225,13 +225,18 @@ def _env_token_list(value: Any, field: str) -> list[str]:
         return []
     if not isinstance(value, list):
         raise HTTPException(400, f"{field} must be a list of strings")
+    if len(value) > MAX_TOKENS_PER_REQUEST:
+        raise HTTPException(400, f"too many tokens in {field}: max {MAX_TOKENS_PER_REQUEST} per request")
     result: list[str] = []
+    seen: set[str] = set()
     for item in value:
         if not isinstance(item, str):
             raise HTTPException(400, f"{field} must contain only strings")
         token = item.strip()
-        if token and token not in result:
-            result.append(_validate_token(token, field))
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        result.append(_validate_token(token, field))
     if len(result) > MAX_TOKENS_PER_REQUEST:
         raise HTTPException(400, f"too many tokens in {field}: max {MAX_TOKENS_PER_REQUEST} per request")
     return result
@@ -309,12 +314,16 @@ def _known_tokens(stored: list[str], loaded: list[str]) -> set[str]:
     return {token for token in [*stored, *loaded] if token}
 
 
+class TokenCheckFailed(Exception):
+    pass
+
+
 async def _check_token_auth(client: Any) -> bool:
     try:
         return bool(await client.check_auth())
     except Exception as exc:
         log.warning("token auth check failed: %s: %s", type(exc).__name__, exc)
-        return False
+        raise TokenCheckFailed(f"token auth check failed: {type(exc).__name__}: {exc}") from exc
 
 
 async def _close_client(client: Any) -> None:
@@ -342,6 +351,7 @@ async def _validated_tokens(
 ) -> tuple[list[tuple[str, str, Any, Any]], int]:
     sem = asyncio.Semaphore(AUTH_CONCURRENCY)
     skipped: list[int] = [0]
+    unchecked: list[str] = []
 
     async def _one(item: tuple[str, str, Any]) -> tuple[str, str, Any, Any] | None:
         token, state, acct = item
@@ -349,10 +359,19 @@ async def _validated_tokens(
             return None
         async with sem:
             if state == _PLAN_BROKEN:
-                return (token, state, acct, acct.client) if await _check_token_auth(acct.client) else None
+                try:
+                    revived = await _check_token_auth(acct.client)
+                except TokenCheckFailed as exc:
+                    unchecked.append(f"{provider}: {exc}")
+                    return None
+                return (token, state, acct, acct.client) if revived else None
             client = factory(token)
             try:
                 accepted = await _check_token_auth(client)
+            except TokenCheckFailed as exc:
+                unchecked.append(f"{provider}: {exc}")
+                await _close_client(client)
+                return None
             except BaseException:
                 _close_client_later(client)
                 raise
@@ -372,6 +391,8 @@ async def _validated_tokens(
             continue
         if result is not None:
             validated.append(result)
+    if unchecked:
+        raise HTTPException(503, f"token auth check could not reach the upstream, retry later: {unchecked[0]}")
     return validated, skipped[0]
 
 

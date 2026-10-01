@@ -37,6 +37,21 @@ def _as_int(value: Any, default: int = 0) -> int:
     return default
 
 
+def _as_float(value: Any, default: float = 0.0) -> float:
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, (int, float)):
+        number = float(value)
+        return number if math.isfinite(number) else default
+    if isinstance(value, str):
+        try:
+            number = float(value.strip())
+        except (TypeError, ValueError):
+            return default
+        return number if math.isfinite(number) else default
+    return default
+
+
 class SessionRegistry:
     def __init__(
         self,
@@ -70,6 +85,16 @@ class SessionRegistry:
 
     def _session_key(self, session_id: str) -> str:
         return f"{self._key_prefix}{session_id}"
+
+    def _idle_seconds(self, session_id: str, now: float) -> float:
+        entry = self._sessions.get(session_id)
+        last_used = entry[1] if entry is not None else now
+        return max(0.0, now - last_used)
+
+    def _record(self, session: Any, session_id: str, now: float) -> dict[str, Any]:
+        record = self._serialize(session)
+        record["idle_seconds"] = round(self._idle_seconds(session_id, now), 3)
+        return record
 
     def _drop_session_lock(self, session_key: str) -> None:
         with self._session_locks_guard_sync:
@@ -127,7 +152,7 @@ class SessionRegistry:
                 session = canonical
             else:
                 by_canonical[session.id] = session
-            self._sessions[session_id] = (session, now)
+            self._sessions[session_id] = (session, now - max(0.0, _as_float(record.get("idle_seconds"))))
         while len(self._sessions) > self._maxsize:
             oldest, _ = self._sessions.popitem(last=False)
             self._store.discard(self._session_key(oldest))
@@ -226,7 +251,7 @@ class SessionRegistry:
                 evicted.append(oldest)
                 self._drop_session_lock(oldest)
             if self._store is not None:
-                record = self._serialize(session)
+                record = self._record(session, new_id, now)
         store = self._store
         if store is not None and record is not None:
             store.set(self._session_key(new_id), record)
@@ -246,7 +271,7 @@ class SessionRegistry:
             if not message_id:
                 return
             self._update_last(session, message_id)
-            record = self._serialize(session) if store is not None else None
+            record = self._record(session, session_id, self._now()) if store is not None else None
         if store is not None and record is not None:
             store.set(self._session_key(session_id), record)
             if session_id != session.id:

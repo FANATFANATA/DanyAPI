@@ -11,6 +11,8 @@ _ARGS_ALIASES = ("arguments", "args", "params", "parameters", "input")
 _NAME_ALIASES = ("name", "tool", "action", "tool_name", "call")
 _JSON_TYPE_ATTRS = frozenset({"string", "boolean", "integer", "number", "object", "array", "null"})
 _TAG_ATTR_MAX = 512
+_INF = float("inf")
+_MAX_SAFE_DEPTH = 64
 
 _FENCES_RE = re.compile(r"^```[a-zA-Z0-9_-]*\s*\n?(.*?)\n?```$", re.DOTALL | re.IGNORECASE)
 _FENCE_OPEN_RE = re.compile(r"^```[a-zA-Z0-9_-]*[ \t]*\r?\n?")
@@ -30,6 +32,31 @@ _XML_STRAY_TOOL_CLOSE_RE = re.compile(
 )
 _XML_TOOL_NAMES = r"invoke|toolinvoke|tool_invoke|use_tool|tool_use|call|function|tool"
 _TOOL_TAG_NAMES = frozenset(name.strip().lower() for name in _XML_TOOL_NAMES.split("|"))
+
+
+def _json_safe(value: Any, depth: int = 0) -> Any:
+    if isinstance(value, float):
+        return value if value == value and value not in (_INF, -_INF) else None
+    if depth >= _MAX_SAFE_DEPTH:
+        return str(value)
+    if isinstance(value, dict):
+        return {(key if isinstance(key, str) else str(key)): _json_safe(item, depth + 1) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item, depth + 1) for item in value]
+    if isinstance(value, (str, int, bool)) or value is None:
+        return value
+    return str(value)
+
+
+def dumps_arguments(value: Any) -> str:
+    try:
+        text = json.dumps(value, ensure_ascii=False, allow_nan=False)
+        text.encode("utf-8")
+    except (TypeError, ValueError, RecursionError, UnicodeEncodeError):
+        return json.dumps(_json_safe(value), ensure_ascii=True, allow_nan=False)
+    return text
+
+
 _XML_TOOL_SELFCLOSE_RE = re.compile(
     rf"<(?:invoke|toolinvoke|tool_invoke|use_tool|tool_use|call|function|tool)\b([^>]{{0,{_TAG_ATTR_MAX}}}?)/>",
     re.DOTALL | re.IGNORECASE,
@@ -73,21 +100,19 @@ class ToolCall:
             if key in arguments and not isinstance(arguments[key], str):
                 if coerced is None:
                     coerced = dict(arguments)
-                coerced[key] = json.dumps(arguments[key], ensure_ascii=False)
+                coerced[key] = dumps_arguments(arguments[key])
         return arguments if coerced is None else coerced
 
     @classmethod
     def create(cls, name: str, arguments: Any) -> ToolCall:
         call_id = f"call_{uuid.uuid4().hex[:12]}"
         arguments = cls._normalise_arguments(name, arguments)
-        if isinstance(arguments, dict):
-            args_text = json.dumps(arguments, ensure_ascii=False)
-        elif isinstance(arguments, str):
+        if isinstance(arguments, str):
             args_text = arguments
-        elif arguments is None:
-            args_text = "{}"
+        elif isinstance(arguments, dict) or arguments is not None:
+            args_text = dumps_arguments(arguments)
         else:
-            args_text = json.dumps(arguments, ensure_ascii=False)
+            args_text = "{}"
         return cls(call_id, name, args_text)
 
 

@@ -8,7 +8,7 @@ import pytest
 from fastapi import HTTPException
 
 import danyapi.api.retry as retry_mod
-from danyapi.api.retry import MAX_RETRIES
+from danyapi.api.retry import MAX_RETRIES, RETRY_BACKOFF_JITTER, RETRY_BACKOFF_MAX_SEC, RETRY_BACKOFF_SEC
 from danyapi.api.schemas import ChatMessage
 from danyapi.duckai import api as duckai_api
 from danyapi.duckai import attest
@@ -38,6 +38,15 @@ from danyapi.duckai.client import DEFAULT_MODEL, DuckAIError, DuckAIEvent
 MODEL = "gpt-5.4-mini"
 
 _REAL_SLEEP_BACKOFF = duckai_api._sleep_backoff
+
+
+def _neutral_jitter(low: float, high: float) -> float:
+    return (low + high) / 2
+
+
+def _retry_delay_bounds(attempt: int) -> tuple[float, float]:
+    base = min(RETRY_BACKOFF_MAX_SEC, RETRY_BACKOFF_SEC * 2 ** (attempt - 1))
+    return max(0.0, base * (1 - RETRY_BACKOFF_JITTER)), min(RETRY_BACKOFF_MAX_SEC, base * (1 + RETRY_BACKOFF_JITTER))
 
 
 class SleepRecorder:
@@ -153,11 +162,15 @@ def _no_backoff(monkeypatch):
     return seen
 
 
-def test_retry_constants_come_from_the_shared_retry_module():
+def test_retry_constants_come_from_the_shared_retry_module(monkeypatch):
+    monkeypatch.setattr(retry_mod, "RETRY_BACKOFF_SEC", RETRY_BACKOFF_SEC)
     assert duckai_api.MAX_RETRIES is retry_mod.MAX_RETRIES
     assert MAX_RETRIES == 5
-    assert ATTESTATION_RETRY_DELAY == retry_mod._retry_delay(1)
     assert RETRY_JITTER == 0.5
+    first_low, first_high = _retry_delay_bounds(1)
+    assert first_low <= ATTESTATION_RETRY_DELAY <= first_high
+    monkeypatch.setattr(retry_mod.random, "uniform", _neutral_jitter)
+    assert retry_mod._retry_delay(1) == RETRY_BACKOFF_SEC
 
 
 def test_status_for_maps_every_error_family():
@@ -444,13 +457,17 @@ async def test_non_retryable_duck_error_raises_without_retrying():
 async def test_sleep_backoff_requests_a_jittered_delay(monkeypatch):
     recorder = SleepRecorder()
     monkeypatch.setattr(duckai_api, "asyncio", recorder)
-    monkeypatch.setattr(duckai_api.random, "random", lambda: 0.25)
-    await _REAL_SLEEP_BACKOFF(0)
-    monkeypatch.setattr(duckai_api.random, "random", lambda: 0.0)
-    await _REAL_SLEEP_BACKOFF(1)
-    monkeypatch.setattr(duckai_api.random, "random", lambda: 1.0)
-    await _REAL_SLEEP_BACKOFF(3)
-    assert recorder.asked == [0.625, 1.0, 8.0]
+    monkeypatch.setattr(retry_mod, "RETRY_BACKOFF_SEC", RETRY_BACKOFF_SEC)
+    rolls = ((0, 0.25), (1, 0.0), (3, 1.0))
+    for attempt, roll in rolls:
+        monkeypatch.setattr(duckai_api.random, "random", lambda roll=roll: roll)
+        await _REAL_SLEEP_BACKOFF(attempt)
+    assert len(recorder.asked) == len(rolls)
+    for asked, (attempt, roll) in zip(recorder.asked, rolls, strict=True):
+        retry_low, retry_high = _retry_delay_bounds(attempt + 1)
+        floor = duckai_api.ATTESTATION_RETRY_DELAY
+        factor = 1.0 - duckai_api.RETRY_JITTER + roll * duckai_api.RETRY_JITTER
+        assert max(floor, retry_low) * factor <= asked <= max(floor, retry_high) * factor
 
 
 async def test_sleep_backoff_uses_the_growing_backoff_floor(monkeypatch):
@@ -459,8 +476,9 @@ async def test_sleep_backoff_uses_the_growing_backoff_floor(monkeypatch):
     monkeypatch.setattr(duckai_api.random, "random", lambda: 1.0)
     monkeypatch.setattr(duckai_api, "ATTESTATION_RETRY_DELAY", 0.25)
     monkeypatch.setattr(retry_mod, "RETRY_BACKOFF_SEC", 4.0)
+    monkeypatch.setattr(retry_mod.random, "uniform", _neutral_jitter)
     await _REAL_SLEEP_BACKOFF(1)
-    assert recorder.asked == [8.0]
+    assert recorder.asked == [min(retry_mod.RETRY_BACKOFF_MAX_SEC, retry_mod.RETRY_BACKOFF_SEC * 2)]
 
 
 async def test_zero_delay_removes_the_wait(monkeypatch):

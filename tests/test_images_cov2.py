@@ -69,6 +69,7 @@ class FakeImageResponse:
         self.headers = headers or {}
         self.url = httpx.URL(url)
         self._chunks = list(chunks)
+        self.extensions: dict = {}
 
     async def aiter_bytes(self):
         for chunk in self._chunks:
@@ -221,6 +222,60 @@ def test_host_is_public_accepts_a_routable_address(public_dns):
 def test_host_is_public_rejects_private_link_local_and_special_ranges():
     for address in ("10.0.0.1", "192.168.1.1", "169.254.169.254", "127.0.0.1", "0.0.0.0", "224.0.0.1", "240.0.0.1", "::1"):
         assert images_mod._host_is_public("blocked.example") is False, address
+
+
+def test_host_is_public_rejects_the_carrier_grade_nat_range(monkeypatch):
+    monkeypatch.setattr(images_mod.socket, "getaddrinfo", _resolve_to("100.64.0.1"))
+    assert images_mod._host_is_public("cgnat.example") is False
+    monkeypatch.setattr(images_mod.socket, "getaddrinfo", _resolve_to("100.127.255.254"))
+    assert images_mod._host_is_public("cgnat.example") is False
+
+
+async def test_download_image_refuses_a_peer_that_rebound_to_a_private_address(public_dns, monkeypatch):
+    class _Stream:
+        def get_extra_info(self, name):
+            return ("127.0.0.1", 80) if name == "server_addr" else None
+
+    response = FakeImageResponse(chunks=[b"ab"])
+    response.extensions = {"network_stream": _Stream()}
+    client = FakeImageClient([response])
+    with pytest.raises(ValueError) as excinfo:
+        await images_mod._download_image(client, "https://a.example/i.png")
+    assert str(excinfo.value) == "image host resolved to a non-public address on connect"
+
+
+def test_peer_is_public_without_a_stream_or_an_address():
+    assert images_mod._peer_is_public(FakeImageResponse()) is True
+    assert images_mod._peer_is_public(SimpleNamespace(extensions={})) is True
+    assert images_mod._peer_is_public(SimpleNamespace(extensions={"network_stream": object()})) is True
+
+    class _NoPeer:
+        def get_extra_info(self, name):
+            return None
+
+    assert images_mod._peer_is_public(SimpleNamespace(extensions={"network_stream": _NoPeer()})) is True
+
+
+def test_peer_is_public_rejects_multicast_and_a_non_ip_peer():
+    class _Stream:
+        def __init__(self, value):
+            self.value = value
+
+        def get_extra_info(self, name):
+            return self.value
+
+    assert images_mod._peer_is_public(SimpleNamespace(extensions={"network_stream": _Stream(("224.0.0.1", 80))})) is False
+    assert images_mod._peer_is_public(SimpleNamespace(extensions={"network_stream": _Stream("not-an-ip")})) is False
+    assert images_mod._peer_is_public(SimpleNamespace(extensions={"network_stream": _Stream(("93.184.216.34", 80))})) is True
+
+
+class _Boom:
+    def get_extra_info(self, name):
+        raise RuntimeError("stream gone")
+
+
+def test_peer_is_public_tolerates_a_broken_stream():
+    assert images_mod._peer_is_public(SimpleNamespace(extensions={"network_stream": _Boom()})) is True
 
 
 def test_host_is_public_rejects_unresolvable_hosts(monkeypatch):
@@ -530,6 +585,27 @@ async def test_image_generations_without_urls_is_502(monkeypatch, public_dns):
     assert excinfo.value.detail == "image generation returned no data"
 
 
+async def test_image_generations_lets_every_sibling_download_finish_before_failing(monkeypatch, public_dns):
+    pool, _account = _pool()
+    _install_collect_image(monkeypatch, [{"image_urls": ["https://a.example/1.png", "https://a.example/2.png"], "usage": None}])
+    finished: list[str] = []
+
+    async def download(_hc, url):
+        if url.endswith("1.png"):
+            raise ValueError("first image failed")
+        await asyncio.sleep(0.01)
+        finished.append(url)
+        return b"second"
+
+    monkeypatch.setattr(images_mod, "_download_image", download)
+    monkeypatch.setattr(images_mod, "_image_http_client", AsyncMock(return_value=FakeImageClient()))
+    req = ImageGenerationRequest(prompt="a cat", response_format="b64_json")
+    with pytest.raises(HTTPException) as excinfo:
+        await images_mod._image_generations(req, pool)
+    assert excinfo.value.status_code == 502
+    assert finished == ["https://a.example/2.png"]
+
+
 async def test_image_generations_translates_a_busy_pool_to_429(monkeypatch):
     from danyapi.accounts import AccountPoolBusy
 
@@ -683,3 +759,48 @@ def test_image_generations_endpoint_uses_the_request_pool(monkeypatch, public_dn
 
 def test_qwen_unavailable_message_is_shared_with_the_pool_lookup():
     assert images_mod.QWEN_UNAVAILABLE_MESSAGE == "qwen provider is not configured (required for image generation)"
+
+
+def test_byok_multipart_upload_stays_readable_after_the_api_key_is_taken(monkeypatch):
+    import danyapi.api.byok as byok_mod
+    from danyapi.config import settings
+
+    pool, _account = _pool()
+    monkeypatch.setattr(settings, "byok", True)
+    monkeypatch.setattr(images_mod, "_byok_mode", lambda: True)
+
+    async def fake_build(provider, tokens, scope):
+        assert tokens == ["sk-test"]
+        return pool, []
+
+    monkeypatch.setattr(byok_mod, "_build_byok_pool", fake_build)
+    monkeypatch.setattr(byok_mod, "refresh_provider_models", AsyncMock(return_value=[]))
+    collect = AsyncMock(return_value={"image_urls": [], "usage": None})
+    monkeypatch.setattr(qwen_api, "collect_image", collect)
+    client = TestClient(app)
+    try:
+        edits = client.post(
+            "/v1/images/edits",
+            files={"image": ("a.png", b"raw-png", "image/png")},
+            data={"prompt": "make it blue", "api_key": "sk-test"},
+        )
+    finally:
+        client.close()
+    assert edits.status_code == 502
+    assert "![image](data:image/png;base64," in collect.await_args.kwargs["prompt"]
+
+
+async def test_image_generations_bind_the_session_owner(monkeypatch):
+    import danyapi.api.chats as chats_mod
+
+    monkeypatch.setattr(chats_mod, "_request_scope", lambda req: "k:caller-a")
+    monkeypatch.setattr(chats_mod, "_byok_mode", lambda: True)
+    chats_mod._SESSION_OWNERS.clear()
+    _install_collect_image(monkeypatch, [{"image_urls": [], "usage": None}])
+    with pytest.raises(HTTPException):
+        await images_mod._image_generations(ImageGenerationRequest(model="qwen-image-gen", prompt="cat", session_id="img-sid"), pool=_pool()[0])
+    assert chats_mod._SESSION_OWNERS["img-sid"] == "k:caller-a"
+    monkeypatch.setattr(chats_mod, "_request_scope", lambda req: "k:caller-b")
+    with pytest.raises(HTTPException) as excinfo:
+        await images_mod._image_generations(ImageGenerationRequest(model="qwen-image-gen", prompt="cat", session_id="img-sid"), pool=_pool()[0])
+    assert excinfo.value.status_code == 403

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import hmac
 import io
 import json
 import re
+import secrets
 import sys
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -15,6 +17,8 @@ if stdout_encoding and stdout_encoding.lower() not in ("utf-8", "utf8"):
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 RESULT_PORT = 8765
+SESSION_ID = secrets.token_urlsafe(32)
+SESSION_PARAM = "sid"
 
 DEEPSEEK_URL = "https://chat.deepseek.com/"
 QWEN_URL = "https://chat.qwen.ai/auth?action=signin"
@@ -87,8 +91,6 @@ TEXTS: dict[str, str] = {
     "results_footer_again": "Run utility again",
     "results_footer_docs": "Docs",
     "results_footer_github": "GitHub",
-    "popup_title": "Token received",
-    "popup_message": "Token received - you can close this tab and return to the DanyAPI page.",
 }
 
 STATE: dict[str, Any] = {
@@ -481,6 +483,11 @@ SETUP_PAGE = r"""<!DOCTYPE html>
 
 <script>
 const T = __TEXTS_JSON__;
+const SID = "__SESSION_ID__";
+const SESSION_PARAM = "__SESSION_PARAM__";
+function sessionUrl(path) {
+  return path + "?" + SESSION_PARAM + "=" + encodeURIComponent(SID);
+}
 function tfmt(key, provider) {
   return T[key].replace("{provider}", provider.charAt(0).toUpperCase() + provider.slice(1));
 }
@@ -565,7 +572,7 @@ function finish() {
   if (finishing) return;
   finishing = true;
   goTo(3);
-  setTimeout(() => { location.href = "/results"; }, 1200);
+  setTimeout(() => { location.href = sessionUrl("/results"); }, 1200);
 }
 let finishing = false;
 
@@ -581,7 +588,7 @@ document.getElementById("btn-next0").addEventListener("click", () => {
 
 async function poll() {
   try {
-    const r = await fetch("/status");
+    const r = await fetch(sessionUrl("/status"));
     const s = await r.json();
     let changed = false;
     for (const p of ["deepseek", "qwen"]) {
@@ -859,6 +866,8 @@ def render_setup_page(port: int = RESULT_PORT) -> str:
             "HAS_DEEPSEEK": "true" if STATE["deepseek"] else "false",
             "HAS_QWEN": "true" if STATE["qwen"] else "false",
             "TEXTS_JSON": _TEXTS_JSON,
+            "SESSION_ID": SESSION_ID,
+            "SESSION_PARAM": SESSION_PARAM,
         },
     )
 
@@ -879,26 +888,10 @@ def render_results_page() -> str:
     )
 
 
-SUCCESS_PAGE = r"""<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>__popup_title__</title></head>
-<body style="background:#06070c;color:#9aa3b5;font-family:-apple-system,'Segoe UI',Roboto,sans-serif;margin:0;padding:24px;font-size:13px">
-<script>try { window.close(); } catch (e) {}</script>
-<span id="fb" style="display:none">__popup_message__</span>
-<script>
- setTimeout(function () {
-   try { window.close(); } catch (e) {}
-   document.getElementById("fb").style.display = "inline";
- }, 250);
-</script>
-</body></html>
-"""
-
-_SUCCESS_PAGE_STATIC = _apply_texts(SUCCESS_PAGE)
-
-
 def register_token(provider: str, token: str) -> bool:
     if provider not in ("deepseek", "qwen"):
         return False
+
     if token and re.fullmatch(r"\S{16,4096}", token):
         STATE[provider] = token
         STATE[provider + "_failed"] = False
@@ -939,6 +932,12 @@ class Handler(BaseHTTPRequestHandler):
         port = self.serve_port
         return {f"http://127.0.0.1:{port}", f"http://localhost:{port}", f"http://[::1]:{port}"}
 
+    def _session_ok(self, query: str) -> bool:
+        from urllib.parse import parse_qs
+
+        given = (parse_qs(query).get(SESSION_PARAM) or [""])[0]
+        return bool(given) and hmac.compare_digest(given, SESSION_ID)
+
     def _allowed_origin(self) -> str | None:
         origin = self.headers.get("Origin")
         if not origin or origin not in self.allowed_origins | self._own_origins():
@@ -974,28 +973,20 @@ class Handler(BaseHTTPRequestHandler):
         self._send(b"", 204, "text/plain; charset=utf-8")
 
     def do_GET(self) -> None:
-        from urllib.parse import parse_qs, urlsplit
+        from urllib.parse import urlsplit
 
         parts = urlsplit(self.path)
         try:
+            if parts.path in ("/status", "/results"):
+                if not self._session_ok(parts.query):
+                    self._send(b"forbidden", 403, "text/plain; charset=utf-8")
+                    return
             if parts.path == "/status":
                 status = {p: bool(STATE[p]) for p in ("deepseek", "qwen")}
                 status.update({p + "_failed": bool(STATE[p + "_failed"]) for p in ("deepseek", "qwen")})
                 self._send(json.dumps(status).encode(), ctype="application/json")
             elif parts.path == "/results":
                 self._send(render_results_page().encode())
-            elif parts.path == "/collect":
-                if self._allowed_origin() is None:
-                    self._send(b"forbidden", 403, "text/plain; charset=utf-8")
-                    return
-                qs = parse_qs(parts.query)
-                provider = (qs.get("p") or [""])[0]
-                token = (qs.get("t") or [""])[0].strip()
-                if provider not in ("deepseek", "qwen"):
-                    self._send(b"unknown provider", 400, "text/plain; charset=utf-8")
-                    return
-                register_token(provider, token)
-                self._send(_SUCCESS_PAGE_STATIC.encode())
             else:
                 self._send(render_setup_page(port=self.serve_port).encode())
         except OSError:
@@ -1059,6 +1050,9 @@ def serve(port: int = RESULT_PORT, open_browser: bool = True) -> None:
         pass
     finally:
         server.server_close()
+        for key in ("deepseek", "qwen"):
+            STATE[key] = None
+            STATE[key + "_failed"] = False
 
 
 def main() -> None:

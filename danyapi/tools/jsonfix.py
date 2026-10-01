@@ -252,6 +252,14 @@ def _normalize_bare_json(text: str) -> str | None:
     return "".join(out)
 
 
+def _reject_constant(name: str) -> Any:
+    raise ValueError(f"non-finite json constant: {name}")
+
+
+def _json_loads(text: str) -> Any:
+    return json.loads(text, parse_constant=_reject_constant)
+
+
 def _json_candidates(text: str) -> Iterator[str]:
     yield text
     no_trailing = _strip_trailing_commas(text)
@@ -261,18 +269,29 @@ def _json_candidates(text: str) -> Iterator[str]:
     if normalized != no_trailing:
         yield normalized
     bare = _normalize_bare_json(normalized)
-    if bare is not None and bare != normalized:
-        yield bare
-    fixed = _fix_unbalanced_json(normalized)
-    if fixed is not None and fixed != normalized:
-        yield fixed
+    if bare is None or bare == normalized:
+        yield from _unbalanced_candidates(normalized)
+        return
+    yield bare
+    yield from _unbalanced_candidates(bare)
+    yield from _unbalanced_candidates(normalized)
+
+
+def _unbalanced_candidates(text: str) -> Iterator[str]:
+    fixed = _fix_unbalanced_json(text)
+    if fixed is None or fixed == text:
+        return
+    yield fixed
+    trimmed = _strip_trailing_commas(fixed)
+    if trimmed != fixed:
+        yield trimmed
 
 
 def _loads_lenient(text: str) -> Any:
     text = text.strip()
     for candidate in _json_candidates(text):
         try:
-            return json.loads(candidate)
+            return _json_loads(candidate)
         except (json.JSONDecodeError, TypeError, ValueError, RecursionError):
             continue
     raise ValueError("invalid json")
@@ -479,7 +498,11 @@ def _coerce_scalar(value: str, json_type: Any) -> Any:
             number = float(value)
         except ValueError:
             return value
-        return number if math.isfinite(number) else value
+        if not math.isfinite(number):
+            return value
+        if json_type == "integer" and not number.is_integer():
+            return value
+        return number
     if json_type == "boolean":
         low = value.strip().lower()
         if low == "true":

@@ -18,6 +18,7 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: write
+      actions: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -72,10 +73,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           SHA: ${{ github.sha }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           for attempt in $(seq 1 60); do
-            runs=$(gh run list --repo "${{ github.repository }}" --workflow ci.yml --commit "$SHA" \
+            runs=$(gh run list --repo "$REPO" --workflow ci.yml --commit "$SHA" \
               --json status,conclusion --jq '.[] | "\(.status) \(.conclusion)"' || true)
             if [ -z "$runs" ]; then
               echo "waiting for the CI run to appear, attempt $attempt"
@@ -107,6 +109,7 @@ jobs:
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
           tag_name: ${{ steps.version.outputs.next_tag }}
+          commitish: ${{ github.sha }}
           generate_release_notes: false
           body: ${{ steps.changelog.outputs.body }}
           draft: false

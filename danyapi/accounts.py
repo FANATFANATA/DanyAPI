@@ -29,6 +29,7 @@ async def _free_account(candidates: Sequence[Any], timeout: float) -> list[tuple
         for waiter in waiters:
             if not waiter.done():
                 waiter.cancel()
+        await asyncio.gather(*waiters, return_exceptions=True)
     return [(acct, waiter.done() and not waiter.cancelled() and waiter.exception() is None) for acct, waiter in zip(candidates, waiters, strict=True)]
 
 
@@ -432,6 +433,13 @@ class AccountPool(Generic[AccountT]):
         acct = healthy[start]
         return acct, None
 
+    def _advance_cursor(self, account: AccountT) -> None:
+        healthy = self.healthy
+        for index, candidate in enumerate(healthy):
+            if candidate is account:
+                self._rr = (index + 1) % len(healthy)
+                return
+
     async def _wait_free(
         self,
         preferred: AccountT | None,
@@ -450,14 +458,14 @@ class AccountPool(Generic[AccountT]):
             if remaining <= 0:
                 raise AccountPoolBusy()
             ready = await _free_account(candidates, remaining)
-            for account, held in ready:
-                if not held:
-                    continue
-                account.sem.release()
-                if session_id is not None:
-                    return account, session_id
-                self._rr = (candidates.index(account) + 1) % len(candidates)
-                return account, None
+            winners = [account for account, held in ready if held]
+            if winners:
+                chosen = winners[0]
+                for extra in winners[1:]:
+                    extra.sem.release()
+                if session_id is None:
+                    self._advance_cursor(chosen)
+                return chosen, session_id
             if time.monotonic() >= deadline:
                 raise AccountPoolBusy()
 

@@ -88,11 +88,22 @@ def test_validate_tool_chain_skips_non_dict_messages():
     assert resp.validate_tool_chain([5, {"role": "user", "content": "hi"}]) is None
 
 
-def test_response_text_format_unwraps_the_nested_schema_form():
+def test_response_text_format_keeps_the_json_schema_discriminator():
     assert resp.response_text_format({"format": {"type": "json_schema", "json_schema": {"name": "n", "schema": {"type": "object"}}}}) == {
-        "name": "n",
-        "schema": {"type": "object"},
+        "type": "json_schema",
+        "json_schema": {"name": "n", "schema": {"type": "object"}},
     }
+    assert resp.response_text_format({"format": {"type": "json_schema", "json_schema": {"name": "n"}}}) != resp.response_text_format(
+        {"format": {"type": "text"}}
+    )
+
+
+def test_response_text_format_does_not_alias_the_request_payload():
+    payload = {"format": {"type": "json_schema", "json_schema": {"name": "n"}}}
+    formatted = resp.response_text_format(payload)
+    assert formatted is not None
+    formatted["json_schema"]["name"] = "changed"
+    assert payload["format"]["json_schema"]["name"] == "n"
 
 
 def test_messages_from_output_encodes_structured_arguments():

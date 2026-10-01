@@ -11,7 +11,8 @@ from typing import Any
 import httpx
 import pytest
 
-from danyapi.api.retry import MAX_RETRIES, RETRY_BACKOFF_MAX_SEC, RETRYABLE_HTTP_STATUSES
+import danyapi.api.retry as retry_module
+from danyapi.api.retry import MAX_RETRIES, RETRY_BACKOFF_JITTER, RETRY_BACKOFF_MAX_SEC, RETRY_BACKOFF_SEC, RETRYABLE_HTTP_STATUSES
 from danyapi.config import settings
 from danyapi.gigachat import client as client_mod
 from danyapi.gigachat import tls
@@ -94,6 +95,10 @@ def _sleep_recorder(monkeypatch: pytest.MonkeyPatch) -> list[float]:
     delays: list[float] = []
     monkeypatch.setattr(client_mod, "asyncio", _AsyncioShim(delays))
     return delays
+
+
+def _lowest_jitter(low: float, high: float) -> float:
+    return low
 
 
 @pytest.fixture(autouse=True)
@@ -399,7 +404,7 @@ async def test_an_already_expired_access_token_is_negatively_cached():
     assert client._token_deferred_until > time.time()
 
 
-async def test_invalidate_token_clears_the_negative_cache_and_allows_a_refresh():
+async def test_invalidate_token_drops_the_cached_token_but_keeps_the_authorization_backoff():
     token_calls: list[int] = []
     calls = {"n": 0}
 
@@ -413,19 +418,22 @@ async def test_invalidate_token_clears_the_negative_cache_and_allows_a_refresh()
 
     with pytest.raises(GigaChatError):
         await client.access_token()
-    assert client._token_deferred_until > time.time()
+    deferred_until = client._token_deferred_until
+    assert deferred_until > time.time()
 
     client.invalidate_token()
 
     assert client._token == ""
     assert client._token_expires_at == 0.0
-    assert client._token_deferred_until == 0.0
-    assert client._token_error == (503, "authorization endpoint unavailable")
-    assert await client.access_token() == "tok2"
-    assert len(token_calls) == 2
+    assert client._token_deferred_until == deferred_until
+    assert client._token_error == (401, "invalid client")
+    with pytest.raises(GigaChatError) as blocked:
+        await client.access_token()
+    assert (blocked.value.code, blocked.value.message) == (401, "invalid client")
+    assert len(token_calls) == 1
 
 
-async def test_a_deferred_401_blocks_the_request_until_the_token_is_invalidated():
+async def test_a_deferred_401_is_not_cleared_by_an_api_401():
     token_calls: list[int] = []
     api_calls: list[int] = []
     calls = {"n": 0}
@@ -454,10 +462,9 @@ async def test_a_deferred_401_blocks_the_request_until_the_token_is_invalidated(
     with pytest.raises(GigaChatError) as exc:
         await client.fetch_models()
 
-    assert (exc.value.code, exc.value.message) == (401, "Unauthorized")
-    assert len(token_calls) == 3
-    assert len(api_calls) == 2
-    assert client._token == "tok3"
+    assert (exc.value.code, exc.value.message) == (401, "invalid client")
+    assert len(token_calls) == 1
+    assert len(api_calls) == 0
 
 
 async def test_a_token_inside_the_expiry_buffer_is_refreshed_and_one_outside_it_is_served_from_cache(monkeypatch):
@@ -522,8 +529,10 @@ async def test_exhausted_retries_surface_the_upstream_error(monkeypatch):
     assert len(token_calls) == 1
 
 
-@pytest.mark.parametrize(("header", "expected"), [("120", RETRY_BACKOFF_MAX_SEC), ("3", 3.0), (None, 1.0)])
+@pytest.mark.parametrize(("header", "expected"), [("120", RETRY_BACKOFF_MAX_SEC), ("3", 3.0), (None, RETRY_BACKOFF_SEC * (1 - RETRY_BACKOFF_JITTER))])
 async def test_retry_after_drives_the_sleep_before_the_retry(monkeypatch, header, expected):
+    monkeypatch.setattr(retry_module, "RETRY_BACKOFF_SEC", RETRY_BACKOFF_SEC)
+    monkeypatch.setattr(retry_module.random, "uniform", _lowest_jitter)
     delays = _sleep_recorder(monkeypatch)
     token_calls: list[int] = []
     api_calls: list[int] = []
@@ -546,17 +555,19 @@ async def test_retry_after_drives_the_sleep_before_the_retry(monkeypatch, header
 @pytest.mark.parametrize(
     ("headers", "expected"),
     [
-        ({}, 1.0),
+        ({}, RETRY_BACKOFF_SEC * (1 - RETRY_BACKOFF_JITTER)),
         ({"Retry-After": "120"}, RETRY_BACKOFF_MAX_SEC),
         ({"Retry-After": "2.5"}, 2.5),
-        ({"Retry-After": "0"}, 1.0),
-        ({"Retry-After": "-1"}, 1.0),
-        ({"Retry-After": "later"}, 1.0),
+        ({"Retry-After": "0"}, RETRY_BACKOFF_SEC * (1 - RETRY_BACKOFF_JITTER)),
+        ({"Retry-After": "-1"}, RETRY_BACKOFF_SEC * (1 - RETRY_BACKOFF_JITTER)),
+        ({"Retry-After": "later"}, RETRY_BACKOFF_SEC * (1 - RETRY_BACKOFF_JITTER)),
         ({"Retry-After": " 3 "}, 3.0),
     ],
 )
-def test_retry_after_seconds_clones_or_falls_back_to_the_backoff(headers, expected):
-    assert client_mod._retry_delay(1) == 1.0
+def test_retry_after_seconds_clones_or_falls_back_to_the_backoff(monkeypatch, headers, expected):
+    monkeypatch.setattr(retry_module, "RETRY_BACKOFF_SEC", RETRY_BACKOFF_SEC)
+    monkeypatch.setattr(retry_module.random, "uniform", _lowest_jitter)
+    assert client_mod._retry_delay(1) == RETRY_BACKOFF_SEC * (1 - RETRY_BACKOFF_JITTER)
     assert client_mod._retry_after_seconds(httpx.Response(429, headers=headers)) == expected
 
 

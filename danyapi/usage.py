@@ -96,6 +96,7 @@ class UsageTracker:
         self._store = store
         self._max_records = max(1, max_records)
         self._lock = threading.Lock()
+        self._persist_lock = threading.Lock()
         self._totals: dict[str, int] = {"requests": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         self._by_model: dict[str, dict[str, int]] = {}
         self._by_provider: dict[str, dict[str, int]] = {}
@@ -174,49 +175,50 @@ class UsageTracker:
         total_tokens = _as_count(total_tokens)
         if total_tokens == 0:
             total_tokens = prompt_tokens + completion_tokens
-        with self._lock:
-            self._totals["requests"] += 1
-            self._totals["prompt_tokens"] += prompt_tokens
-            self._totals["completion_tokens"] += completion_tokens
-            self._totals["total_tokens"] += total_tokens
-            self._add(self._by_model, model or "unknown", prompt_tokens, completion_tokens, total_tokens)
-            self._evict_overflow(self._by_model)
-            self._add(self._by_provider, provider or "unknown", prompt_tokens, completion_tokens, total_tokens)
-            self._evict_overflow(self._by_provider)
-            if user:
-                self._add(self._by_user, user, prompt_tokens, completion_tokens, total_tokens)
-                self._evict_overflow(self._by_user)
-            self._recent.append(
-                {
-                    "ts": time.time(),
-                    "provider": provider,
-                    "model": model,
-                    "prompt_tokens": prompt_tokens,
-                    "completion_tokens": completion_tokens,
-                    "total_tokens": total_tokens,
-                    "user": user,
-                    "session_id": session_id,
-                }
-            )
-            usage_payload: dict[str, Any] | None = None
-            recent_payload: list[dict[str, Any]] | None = None
-            if self._store is not None:
-                now = time.time()
-                if not _loop_active() or now - self._last_usage_persist >= self._USAGE_PERSIST_INTERVAL:
-                    self._last_usage_persist = now
-                    usage_payload = self._snapshot_locked()
-                if now - self._last_recent_persist >= self._RECENT_PERSIST_INTERVAL:
-                    self._last_recent_persist = now
-                    recent_payload = list(self._recent)
-        store = self._store
-        if store is not None and (usage_payload is not None or recent_payload is not None):
-            try:
-                if usage_payload is not None:
-                    store.set("usage", usage_payload)
-                if recent_payload is not None:
-                    store.set("usage_recent", recent_payload)
-            except Exception as exc:
-                log.warning("usage store write failed: %s", exc)
+        with self._persist_lock:
+            with self._lock:
+                self._totals["requests"] += 1
+                self._totals["prompt_tokens"] += prompt_tokens
+                self._totals["completion_tokens"] += completion_tokens
+                self._totals["total_tokens"] += total_tokens
+                self._add(self._by_model, model or "unknown", prompt_tokens, completion_tokens, total_tokens)
+                self._evict_overflow(self._by_model)
+                self._add(self._by_provider, provider or "unknown", prompt_tokens, completion_tokens, total_tokens)
+                self._evict_overflow(self._by_provider)
+                if user:
+                    self._add(self._by_user, user, prompt_tokens, completion_tokens, total_tokens)
+                    self._evict_overflow(self._by_user)
+                self._recent.append(
+                    {
+                        "ts": time.time(),
+                        "provider": provider,
+                        "model": model,
+                        "prompt_tokens": prompt_tokens,
+                        "completion_tokens": completion_tokens,
+                        "total_tokens": total_tokens,
+                        "user": user,
+                        "session_id": session_id,
+                    }
+                )
+                usage_payload: dict[str, Any] | None = None
+                recent_payload: list[dict[str, Any]] | None = None
+                if self._store is not None:
+                    now = time.time()
+                    if not _loop_active() or now - self._last_usage_persist >= self._USAGE_PERSIST_INTERVAL:
+                        self._last_usage_persist = now
+                        usage_payload = self._snapshot_locked()
+                    if now - self._last_recent_persist >= self._RECENT_PERSIST_INTERVAL:
+                        self._last_recent_persist = now
+                        recent_payload = list(self._recent)
+            store = self._store
+            if store is not None and (usage_payload is not None or recent_payload is not None):
+                try:
+                    if usage_payload is not None:
+                        store.set("usage", usage_payload)
+                    if recent_payload is not None:
+                        store.set("usage_recent", recent_payload)
+                except Exception as exc:
+                    log.warning("usage store write failed: %s", exc)
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
@@ -228,29 +230,31 @@ class UsageTracker:
         if self._store is None:
             return
         try:
-            with self._lock:
-                data = self._snapshot_locked()
-                recent = [dict(entry) for entry in self._recent]
-                self._last_recent_persist = time.time()
-                self._last_usage_persist = self._last_recent_persist
-            self._store.set("usage", data)
-            self._store.set("usage_recent", recent)
-            self._store.flush()
+            with self._persist_lock:
+                with self._lock:
+                    data = self._snapshot_locked()
+                    recent = [dict(entry) for entry in self._recent]
+                    self._last_recent_persist = time.time()
+                    self._last_usage_persist = self._last_recent_persist
+                self._store.set("usage", data)
+                self._store.set("usage_recent", recent)
+                self._store.flush()
         except Exception as exc:
             log.warning("usage flush failed: %s", exc)
 
     def reset(self) -> None:
-        with self._lock:
-            self._totals = {"requests": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-            self._by_model.clear()
-            self._by_provider.clear()
-            self._by_user.clear()
-            self._recent.clear()
-            self._last_recent_persist = 0.0
-            self._last_usage_persist = 0.0
-        if self._store is not None:
-            try:
-                self._store.discard("usage")
-                self._store.discard("usage_recent")
-            except Exception as exc:
-                log.warning("usage store clear failed: %s", exc)
+        with self._persist_lock:
+            with self._lock:
+                self._totals = {"requests": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+                self._by_model.clear()
+                self._by_provider.clear()
+                self._by_user.clear()
+                self._recent.clear()
+                self._last_recent_persist = 0.0
+                self._last_usage_persist = 0.0
+            if self._store is not None:
+                try:
+                    self._store.discard("usage")
+                    self._store.discard("usage_recent")
+                except Exception as exc:
+                    log.warning("usage store clear failed: %s", exc)

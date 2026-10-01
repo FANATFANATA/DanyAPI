@@ -3,6 +3,7 @@ import json
 import logging
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 import danyapi.api.retry as retry_mod
@@ -165,11 +166,8 @@ def clean_state():
 
 
 @pytest.fixture(autouse=True)
-def zero_backoff():
-    orig = retry_mod.RETRY_BACKOFF_SEC
-    retry_mod.RETRY_BACKOFF_SEC = 0.0
-    yield
-    retry_mod.RETRY_BACKOFF_SEC = orig
+def zero_backoff(monkeypatch):
+    monkeypatch.setattr(retry_mod, "RETRY_BACKOFF_SEC", 0.0)
 
 
 def _info(model="claude-sonnet-4-5", **kwargs):
@@ -386,10 +384,16 @@ def test_build_chat_request_validates_sampling_params():
     base = {"messages": [{"role": "user", "content": "hi"}]}
     assert ant.build_chat_request({**base, "temperature": 0.0}, "m")["temperature"] == 0.0
     assert ant.build_chat_request({**base, "top_p": 1}, "m")["top_p"] == 1.0
-    assert ant.build_chat_request({**base, "top_k": 5.0}, "m")["top_k"] == 5
-    for field, value in (("temperature", 1.5), ("top_p", -0.1), ("top_p", "0.5"), ("top_k", 0), ("top_k", 5.5), ("top_k", True)):
+    assert "top_k" not in ant.build_chat_request({**base, "top_k": None}, "m")
+    for field, value in (("temperature", 1.5), ("top_p", -0.1), ("top_p", "0.5"), ("top_k", 5), ("top_k", 0), ("top_k", 5.5), ("top_k", True)):
         with pytest.raises(ant.AnthropicInputError):
             ant.build_chat_request({**base, field: value}, "m")
+
+
+def test_build_chat_request_names_top_k_in_the_rejection():
+    with pytest.raises(ant.AnthropicInputError) as excinfo:
+        ant.build_chat_request({"messages": [{"role": "user", "content": "hi"}], "top_k": 5}, "m")
+    assert str(excinfo.value) == "top_k is not supported by the upstream providers, remove it from the request"
 
 
 def test_as_text_is_depth_bounded():
@@ -519,6 +523,24 @@ def test_build_message_error_maps_to_end_turn():
     assert message["stop_sequence"] is None
     assert message["content"] == [{"type": "text", "text": "partial"}]
     assert message["usage"] == {"input_tokens": 0, "output_tokens": 0}
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [{}, {"choices": []}, {"choices": "junk"}, {"choices": ["junk"]}],
+)
+def test_build_message_refuses_a_response_without_choices(payload):
+    with pytest.raises(HTTPException) as excinfo:
+        ant.build_message(_info(), "msg_1", payload)
+    assert excinfo.value.status_code == 502
+    assert excinfo.value.detail == "upstream returned a response without choices"
+
+
+def test_build_message_keeps_the_upstream_message_when_there_are_no_choices():
+    with pytest.raises(HTTPException) as excinfo:
+        ant.build_message(_info(), "msg_1", {"error": {"message": "boom"}})
+    assert excinfo.value.status_code == 502
+    assert excinfo.value.detail == "boom"
 
 
 def test_count_input_tokens_includes_system():
@@ -766,8 +788,10 @@ def test_translate_stream_error_event():
         return [line async for line in stream]
 
     frames = _frames("".join(asyncio.run(run())))
-    assert [event for event, _ in frames] == ["message_start", "error"]
+    assert [event for event, _ in frames] == ["message_start", "error", "message_delta", "message_stop"]
     assert _named(frames, "error")[0]["error"] == {"type": "api_error", "message": "boom"}
+    assert _named(frames, "message_delta")[0]["delta"] == {"stop_reason": "end_turn", "stop_sequence": None}
+    assert _named(frames, "message_delta")[0]["usage"] == {"input_tokens": _info().prompt_tokens, "output_tokens": 0}
 
 
 def test_error_message_does_not_forward_non_dict_error():

@@ -12,6 +12,7 @@ from danyapi.alice.accounts import AliceAccount
 from danyapi.alice.client import AliceClient, AliceError, AliceStream
 from danyapi.api import retry as retry_module
 from danyapi.api.schemas import ChatMessage
+from danyapi.api.sse import STREAM_ERROR_FINISH
 
 
 class _StubClient(AliceClient):
@@ -339,7 +340,7 @@ async def test_stream_reports_the_error_in_band_and_frees_the_lock(monkeypatch, 
     error_payload = json.loads(lines[0][len("data: ") :])
     assert error_payload["error"] == {"message": "Alice error: closed"}
     assert error_payload["session_id"] == "sess"
-    assert error_payload["choices"] == [{"index": 0, "delta": {}, "finish_reason": "stop"}]
+    assert error_payload["choices"] == [{"index": 0, "delta": {}, "finish_reason": STREAM_ERROR_FINISH}]
     assert recorded == []
     assert len(client.prompts) == alice_api.MAX_RETRIES + 1
     assert account.sem.locked() is False

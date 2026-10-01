@@ -54,6 +54,13 @@ def _report_compiler_failure(compiler: str, result: subprocess.CompletedProcess[
     print("The Python and Node fallbacks still solve challenges, just slower.", file=sys.stderr)
 
 
+def _solver_is_current(bin_path: Path, src_path: Path) -> bool:
+    try:
+        return bin_path.is_file() and bin_path.stat().st_mtime >= src_path.stat().st_mtime
+    except OSError:
+        return False
+
+
 def build_solver() -> None:
     src_candidates = [
         ROOT / "pow_solver.c",
@@ -78,6 +85,9 @@ def build_solver() -> None:
     is_win = sys.platform == "win32"
     bin_name = "pow_solver.exe" if is_win else "pow_solver"
     bin_path = src_path.parent / bin_name
+
+    if _solver_is_current(bin_path, src_path):
+        return
 
     compilers = ["gcc", "clang", "cl"] if is_win else ["gcc", "clang", "cc"]
     chosen_compiler: str | None = None

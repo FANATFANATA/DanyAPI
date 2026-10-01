@@ -8,11 +8,11 @@ import math
 import os
 import struct
 import subprocess  # nosec B404
+import threading
 import time
 from contextlib import suppress
 from pathlib import Path
-
-from .config import CREDENTIAL_ENV_NAMES
+from typing import Any
 
 log = logging.getLogger("danyapi.pow")
 
@@ -56,8 +56,37 @@ _PYTHON_BUDGET_CHECK_INTERVAL = 1024
 
 _SOLVER_TIMEOUT_SEC = 60.0
 _SOLVE_TOTAL_BUDGET_SEC = 90.0
+_KILL_WAIT_SEC = 5.0
 
-_SOLVER_ENV_DENYLIST = frozenset({"BYOK", "BYOK_MODE", "DANYAPI_BYOK_MODE"}) | frozenset(CREDENTIAL_ENV_NAMES)
+_CHALLENGE_BYTES = 32
+_MAX_CHALLENGE_CHARS = 256
+_MAX_SALT_CHARS = 96
+
+_SOLVER_ENV_ALLOWLIST = frozenset(
+    {
+        "PATH",
+        "PATHEXT",
+        "SYSTEMROOT",
+        "SYSTEMDRIVE",
+        "WINDIR",
+        "COMSPEC",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+        "HOME",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "USERPROFILE",
+        "APPDATA",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "OS",
+        "NUMBER_OF_PROCESSORS",
+        "PROCESSOR_ARCHITECTURE",
+        "POW_SOLVER_THREADS",
+    }
+)
 
 
 def _parse_number(value):
@@ -239,7 +268,14 @@ def _find_native_solver() -> Path | None:
     return None
 
 
-def solve_python(challenge_hex: str, salt: str, expire_at: int, difficulty: int, timeout: float = _PYTHON_SOLVE_BUDGET_SEC) -> int | None:
+def solve_python(
+    challenge_hex: str,
+    salt: str,
+    expire_at: int,
+    difficulty: int,
+    timeout: float = _PYTHON_SOLVE_BUDGET_SEC,
+    children: SolverChildren | None = None,
+) -> int | None:
     prefix = f"{salt}_{expire_at}_".encode()
     target = bytes.fromhex(challenge_hex)
     limit = max(0, min(int(difficulty), _PYTHON_SOLVE_LIMIT))
@@ -269,7 +305,40 @@ def solve_python(challenge_hex: str, salt: str, expire_at: int, difficulty: int,
 
 
 def _solver_env() -> dict[str, str]:
-    return {key: value for key, value in os.environ.items() if key not in _SOLVER_ENV_DENYLIST}
+    return {key: value for key, value in os.environ.items() if key.upper() in _SOLVER_ENV_ALLOWLIST}
+
+
+class SolverChildren:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._procs: set[subprocess.Popen[str]] = set()
+
+    def add(self, proc: subprocess.Popen[str]) -> None:
+        with self._lock:
+            self._procs.add(proc)
+
+    def discard(self, proc: subprocess.Popen[str]) -> None:
+        with self._lock:
+            self._procs.discard(proc)
+
+    def kill_all(self) -> int:
+        with self._lock:
+            running = list(self._procs)
+            self._procs.clear()
+        for proc in running:
+            _kill(proc)
+        return len(running)
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._procs)
+
+
+def _kill(proc: subprocess.Popen[str]) -> None:
+    with suppress(OSError, ValueError):
+        proc.kill()
+    with suppress(OSError, subprocess.TimeoutExpired, ValueError):
+        proc.wait(timeout=_KILL_WAIT_SEC)
 
 
 def _run_solver(
@@ -279,6 +348,7 @@ def _run_solver(
     expire_at: int,
     difficulty: int,
     timeout: float = _SOLVER_TIMEOUT_SEC,
+    children: SolverChildren | None = None,
 ) -> int | None:
     payload = {
         "challenge": challenge_hex,
@@ -288,27 +358,34 @@ def _run_solver(
     }
     cmd = ["node", str(script)] if script.suffix == ".js" else [str(script)]
     try:
-        proc = subprocess.run(  # nosec B603
+        proc = subprocess.Popen(  # nosec B603
             cmd,
-            input=json.dumps(payload),
-            capture_output=True,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=timeout,
-            check=False,
             env=_solver_env(),
         )
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(f"{script.name} timed out after {timeout:g}s") from exc
     except OSError as exc:
         raise RuntimeError(f"{script.name} is not executable: {exc}") from exc
-    if proc.returncode != 0:
-        raise RuntimeError(f"{script.name} failed: {proc.stderr[:300]}")
+    if children is not None:
+        children.add(proc)
     try:
-        out = json.loads(proc.stdout.strip())
+        stdout, stderr = proc.communicate(json.dumps(payload), timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        _kill(proc)
+        raise RuntimeError(f"{script.name} timed out after {timeout:g}s") from exc
+    finally:
+        if children is not None:
+            children.discard(proc)
+    if proc.returncode != 0:
+        raise RuntimeError(f"{script.name} failed: {stderr[:300]}")
+    try:
+        out = json.loads(stdout.strip())
     except ValueError as exc:
-        raise RuntimeError(f"{script.name} returned malformed output: {proc.stdout[:300]}") from exc
+        raise RuntimeError(f"{script.name} returned malformed output: {stdout[:300]}") from exc
     if not isinstance(out, dict):
-        raise RuntimeError(f"{script.name} returned malformed output: {proc.stdout[:300]}")
+        raise RuntimeError(f"{script.name} returned malformed output: {stdout[:300]}")
     if "error" in out:
         raise RuntimeError(str(out["error"]))
     answer = out.get("answer")
@@ -317,20 +394,40 @@ def _run_solver(
     return answer
 
 
-def solve_native(challenge_hex: str, salt: str, expire_at: int, difficulty: int, timeout: float = _SOLVER_TIMEOUT_SEC) -> int | None:
+def solve_native(
+    challenge_hex: str,
+    salt: str,
+    expire_at: int,
+    difficulty: int,
+    timeout: float = _SOLVER_TIMEOUT_SEC,
+    children: SolverChildren | None = None,
+) -> int | None:
     native = _find_native_solver()
     if native is None:
         raise FileNotFoundError("native pow_solver binary not built")
-    return _run_solver(native, challenge_hex, salt, expire_at, difficulty, timeout)
+    return _run_solver(native, challenge_hex, salt, expire_at, difficulty, timeout, children)
 
 
-def solve_node(challenge_hex: str, salt: str, expire_at: int, difficulty: int, timeout: float = _SOLVER_TIMEOUT_SEC) -> int | None:
+def solve_node(
+    challenge_hex: str,
+    salt: str,
+    expire_at: int,
+    difficulty: int,
+    timeout: float = _SOLVER_TIMEOUT_SEC,
+    children: SolverChildren | None = None,
+) -> int | None:
     if not _NODE_SOLVER.exists():
         raise FileNotFoundError("pow_solver.js not found")
-    return _run_solver(_NODE_SOLVER, challenge_hex, salt, expire_at, difficulty, timeout)
+    return _run_solver(_NODE_SOLVER, challenge_hex, salt, expire_at, difficulty, timeout, children)
 
 
-async def solve_challenge(challenge_hex: str, salt: str, expire_at: int, difficulty: int) -> int | None:
+async def solve_challenge(
+    challenge_hex: str,
+    salt: str,
+    expire_at: int,
+    difficulty: int,
+    children: SolverChildren | None = None,
+) -> int | None:
     deadline = time.monotonic() + _SOLVE_TOTAL_BUDGET_SEC
     for solver in (solve_native, solve_node, solve_python):
         remaining = deadline - time.monotonic()
@@ -339,7 +436,7 @@ async def solve_challenge(challenge_hex: str, salt: str, expire_at: int, difficu
             return None
         budget = min(_PYTHON_SOLVE_BUDGET_SEC, remaining) if solver is solve_python else min(_SOLVER_TIMEOUT_SEC, remaining)
         try:
-            answer = await asyncio.to_thread(solver, challenge_hex, salt, expire_at, difficulty, budget)
+            answer = await asyncio.to_thread(solver, challenge_hex, salt, expire_at, difficulty, budget, children)
         except Exception as exc:
             log.warning("pow solver %s failed (%s), trying next", solver.__name__, exc)
             continue
@@ -353,18 +450,36 @@ def _consume_task_result(task: asyncio.Task) -> None:
         task.exception()
 
 
+def _validated_challenge(challenge_hex: Any, salt: Any) -> tuple[str, str]:
+    if not isinstance(challenge_hex, str) or not isinstance(salt, str):
+        raise RuntimeError("pow challenge and salt must be strings")
+    if len(challenge_hex) > _MAX_CHALLENGE_CHARS:
+        raise RuntimeError(f"pow challenge is longer than {_MAX_CHALLENGE_CHARS} characters")
+    if len(salt) > _MAX_SALT_CHARS:
+        raise RuntimeError(f"pow salt is longer than {_MAX_SALT_CHARS} characters")
+    try:
+        decoded = bytes.fromhex(challenge_hex)
+    except ValueError as exc:
+        raise RuntimeError(f"pow challenge is not valid hex: {exc}") from exc
+    if len(decoded) != _CHALLENGE_BYTES:
+        raise RuntimeError(f"pow challenge decodes to {len(decoded)} bytes, expected {_CHALLENGE_BYTES}")
+    return challenge_hex, salt
+
+
 class PowManager:
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
         self._header: dict | None = None
         self._refill: asyncio.Task | None = None
         self._building: asyncio.Task | None = None
+        self._children = SolverChildren()
 
     async def _build(self, fetch) -> dict:
         challenge = await fetch()
         missing = [k for k in ("challenge", "salt", "algorithm", "signature", "target_path") if not challenge.get(k)]
         if missing:
             raise RuntimeError(f"pow challenge missing fields: {', '.join(missing)}")
+        challenge_hex, salt = _validated_challenge(challenge["challenge"], challenge["salt"])
         expire_at = _parse_number(challenge.get("expire_at"))
         difficulty = _parse_number(challenge.get("difficulty"))
         if expire_at is None or expire_at < 0:
@@ -375,10 +490,11 @@ class PowManager:
             log.warning("pow difficulty %d exceeds the solver limit, clamped to %d", difficulty, _SOLVER_DIFFICULTY_LIMIT)
             difficulty = _SOLVER_DIFFICULTY_LIMIT
         answer = await solve_challenge(
-            challenge["challenge"],
-            challenge["salt"],
+            challenge_hex,
+            salt,
             int(expire_at),
             int(difficulty),
+            self._children,
         )
         if answer is None:
             raise RuntimeError("pow solver returned no answer")
@@ -435,6 +551,9 @@ class PowManager:
             setattr(self, name, None)
             if current is not None and not current.done():
                 current.cancel()
+        killed = self._children.kill_all()
+        if killed:
+            log.warning("killed %d running pow solver process(es)", killed)
 
     async def make_header(self, fetch) -> dict:
         async with self._lock:
@@ -446,6 +565,6 @@ class PowManager:
         if header is not None:
             self._kick_refill(fetch)
             return header
-        header = await self._build(fetch)
+        header = await self._ensure_build(fetch)
         self._kick_refill(fetch)
         return header

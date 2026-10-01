@@ -444,6 +444,65 @@ async def test_attestation_warm_swallows_a_solve_failure(monkeypatch):
         await client.aclose()
 
 
+async def test_a_failed_warm_leaves_no_recorded_script_behind(monkeypatch):
+    solves: list[str] = []
+
+    async def _flaky(script: str, user_agent: str, origin: str = BASE_URL) -> str:
+        solves.append(script)
+        raise attest.AttestationError("solver said no")
+
+    monkeypatch.setattr(attest, "header_for", _flaky)
+    client = _client(_default_router())
+    try:
+        client._start_attestation_warm("script-1")
+        await client._join_attestation_warm()
+
+        assert solves == ["script-1"]
+        assert client._jsa == attest.INITIAL_JSA
+        assert client._jsa_script == ""
+
+        client._start_attestation_warm("script-1")
+        await client._join_attestation_warm()
+
+        assert solves == ["script-1", "script-1"]
+    finally:
+        await client.aclose()
+
+
+async def test_a_successful_warm_records_the_script(monkeypatch):
+    solves = _solve_stub(monkeypatch)
+    client = _client(_default_router())
+    try:
+        client._start_attestation_warm("script-1")
+        await client._join_attestation_warm()
+
+        assert solves == ["script-1"]
+        assert client._jsa_script == "script-1"
+    finally:
+        await client.aclose()
+
+
+async def test_aclose_cancels_a_warm_solve_in_flight(monkeypatch):
+    started = asyncio.Event()
+
+    async def _hanging(script: str, user_agent: str, origin: str = BASE_URL) -> str:
+        started.set()
+        await asyncio.Event().wait()
+        return "never"
+
+    monkeypatch.setattr(attest, "header_for", _hanging)
+    client = _client(_default_router())
+    client._start_attestation_warm("script-1")
+    warm = client._jsa_warm
+    await started.wait()
+
+    await client.aclose()
+
+    assert warm.cancelled() is True
+    assert client._jsa_warm is None
+    assert client._jsa_script == ""
+
+
 async def test_chat_streams_the_first_event_before_the_solver_finishes(monkeypatch):
     release = asyncio.Event()
     order: list[str] = []
@@ -541,8 +600,10 @@ def test_error_for_payload_reads_type_message_and_challenge():
     assert _error_for_payload(500, None).code == 500
     assert _error_for_payload(500, []).message == "upstream returned 500"
     typed = _error_for_payload(500, {"type": "ERR_UPSTREAM", "message": "down"})
-    assert (typed.code, typed.message) == ("ERR_UPSTREAM", "down")
+    assert (typed.code, typed.error_type, typed.message) == (500, "ERR_UPSTREAM", "down")
+    assert typed.is_retryable is True
     assert _error_for_payload(500, {"type": "", "message": ""}).code == 500
+    assert _error_for_payload(500, {"type": "", "message": ""}).error_type == ""
     assert _error_for_payload(418, {"type": "ERR_CHALLENGE", "cd": {"gk": "abc"}}).message == "bot check failed (challenge abc)"
     assert _error_for_payload(418, {"type": "ERR_CHALLENGE", "message": "nope", "cd": {"gk": "abc"}}).message == "nope (challenge abc)"
     assert _error_for_payload(418, {"type": "ERR_CHALLENGE", "cd": {"gk": ""}}).message == "upstream returned 418"
@@ -553,7 +614,7 @@ async def test_fail_reads_the_body_before_building_the_error():
     client = _client(_default_router())
     try:
         typed = await client._fail(httpx.Response(418, json={"type": "ERR_CHALLENGE", "message": "refused"}))
-        assert (typed.code, typed.message) == ("ERR_CHALLENGE", "refused")
+        assert (typed.code, typed.error_type, typed.message) == (418, "ERR_CHALLENGE", "refused")
         assert typed.is_challenge is True
         plain = await client._fail(httpx.Response(500, text="not json"))
         assert (plain.code, plain.message) == (500, "upstream returned 500")

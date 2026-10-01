@@ -311,12 +311,10 @@ def test_as_ratio_and_top_k_validation():
     for bad in ("0.5", True, 1.5, -0.1):
         with pytest.raises(ant.AnthropicInputError):
             ant._as_ratio(bad, "top_p")
-    assert ant._as_top_k(None) is None
-    assert ant._as_top_k(5.0) == 5
-    assert ant._as_top_k(7) == 7
-    for bad in ("5", True, 5.5, 0, -3):
+    assert ant._reject_top_k(None) is None
+    for bad in ("5", True, 5.5, 0, -3, 7):
         with pytest.raises(ant.AnthropicInputError):
-            ant._as_top_k(bad)
+            ant._reject_top_k(bad)
 
 
 def test_build_chat_request_reports_the_message_of_a_bad_sampling_param():
@@ -329,10 +327,7 @@ def test_build_chat_request_reports_the_message_of_a_bad_sampling_param():
     assert str(excinfo.value) == "top_p must be a number"
     with pytest.raises(ant.AnthropicInputError) as excinfo:
         ant.build_chat_request({"messages": messages, "top_k": 5.5}, "m")
-    assert str(excinfo.value) == "top_k must be an integer"
-    with pytest.raises(ant.AnthropicInputError) as excinfo:
-        ant.build_chat_request({"messages": messages, "top_k": 0}, "m")
-    assert str(excinfo.value) == "top_k must be greater than 0"
+    assert str(excinfo.value) == "top_k is not supported by the upstream providers, remove it from the request"
 
 
 def test_build_chat_request_passes_a_session_id_and_omits_a_blank_user_id():

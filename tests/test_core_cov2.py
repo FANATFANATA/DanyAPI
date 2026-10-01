@@ -1,11 +1,16 @@
 import asyncio
+import base64
+import hashlib
 import json
 import logging
+import re
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
+from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 from starlette.requests import Request
 
@@ -16,6 +21,33 @@ from danyapi.api.core import app
 from danyapi.store import JsonStore
 
 assert openai_mod.app is app
+
+_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _dashboard_script_digest() -> str:
+    text = (_ROOT / "web" / "index.html").read_text(encoding="utf-8")
+    script = re.findall(r"<script>(.*?)</script>", text, re.DOTALL)[0]
+    return base64.b64encode(hashlib.sha256(script.encode("utf-8")).digest()).decode()
+
+
+def _html_request(path: str, content_type: str) -> Request:
+    raw = content_type.encode()
+    return Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "scheme": "http",
+            "path": path,
+            "raw_path": path.encode(),
+            "query_string": b"",
+            "root_path": "",
+            "headers": [(b"content-type", raw)],
+            "client": ("203.0.113.7", 1234),
+            "server": ("testserver", 80),
+        }
+    )
+
 
 POOL_ATTRS = state_mod.POOL_ATTRS_BY_PROVIDER
 BYOK_PROVIDERS = state_mod.BYOK_PROVIDERS
@@ -376,6 +408,81 @@ async def test_lifespan_shutdown_closes_the_http_client_and_survives_a_failed_cl
     assert "client close failed for acct#0: close failed" in [record.getMessage() for record in caplog.records]
 
 
+async def test_lifespan_shutdown_finishes_every_cleanup_step_when_it_is_cancelled(monkeypatch, caplog):
+    closed: list[str] = []
+    flushed: list[str] = []
+
+    class _SlowClient:
+        async def aclose(self):
+            closed.append("http_client")
+            await asyncio.sleep(5)
+
+    class _AccountClient:
+        def __init__(self, label):
+            self.label = label
+
+        async def aclose(self):
+            closed.append(self.label)
+
+    class _Account:
+        def __init__(self, label):
+            self.client = _AccountClient(label)
+            self.label = label
+            self.pow = None
+            self.pow_upload = None
+            self.sessions = None
+
+    monkeypatch.setattr(core, "_flush_state_stores", lambda: flushed.append("flushed"))
+    saved = getattr(app.state, "http_client", None)
+    app.state.http_client = _SlowClient()
+    try:
+        task = asyncio.ensure_future(core._run_lifespan_cleanup([_Account("acct#0")]))
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        for _ in range(20):
+            if "acct#0" in closed:
+                break
+            await asyncio.sleep(0)
+    finally:
+        app.state.http_client = saved
+    assert closed == ["http_client", "acct#0"]
+    assert flushed == ["flushed"]
+
+
+async def test_close_everything_logs_every_failure(caplog):
+    class _Client:
+        def __init__(self, label):
+            self.label = label
+
+        async def aclose(self):
+            raise RuntimeError("gone")
+
+    class _Account:
+        def __init__(self, label):
+            self.client = _Client(label)
+            self.label = label
+            self.pow = None
+            self.pow_upload = None
+            self.sessions = None
+
+    class _Http:
+        async def aclose(self):
+            raise RuntimeError("http gone")
+
+    saved = getattr(app.state, "http_client", None)
+    app.state.http_client = _Http()
+    try:
+        with caplog.at_level(logging.WARNING, logger="danyapi.api"):
+            await core._close_everything([_Account("acct#7")])
+    finally:
+        app.state.http_client = saved
+    messages = [record.getMessage() for record in caplog.records]
+    assert "shared http client close failed: http gone" in messages
+    assert "client close failed for acct#7: gone" in messages
+
+
 async def test_lifespan_without_credentials_raises(monkeypatch):
     monkeypatch.setattr(core, "AccountPool", _PoolFactory())
     _ClientPlan().install(monkeypatch)
@@ -507,17 +614,42 @@ async def test_extract_request_body_swallows_a_transport_failure():
     assert await core._extract_request_body(Request(scope, receive=receive)) == {}
 
 
-def test_request_client_ip_prefers_the_first_forwarded_hop():
-    request = _FakeRequest({"x-forwarded-for": " 1.2.3.4 , 10.0.0.1", "x-real-ip": "5.6.7.8"})
+def test_request_client_ip_prefers_the_first_forwarded_hop_behind_a_loopback_proxy():
+    request = _FakeRequest({"x-forwarded-for": " 1.2.3.4 , 10.0.0.1", "x-real-ip": "5.6.7.8"}, "127.0.0.1")
     assert core._request_client_ip(request) == "1.2.3.4"
 
 
 def test_request_client_ip_falls_back_to_x_real_ip():
-    assert core._request_client_ip(_FakeRequest({"x-forwarded-for": "  ", "x-real-ip": " 5.6.7.8 "})) == "5.6.7.8"
+    assert core._request_client_ip(_FakeRequest({"x-forwarded-for": "  ", "x-real-ip": " 5.6.7.8 "}, "127.0.0.1")) == "5.6.7.8"
 
 
 def test_request_client_ip_uses_the_peer_when_no_proxy_headers():
     assert core._request_client_ip(_FakeRequest()) == "10.0.0.5"
+
+
+def test_request_client_ip_never_trusts_a_forwarded_header_from_a_remote_peer():
+    assert core._request_client_ip(_FakeRequest({"x-forwarded-for": "1.2.3.4", "x-real-ip": "5.6.7.8"})) == "10.0.0.5"
+    assert core._request_client_ip(_FakeRequest({"x-forwarded-for": "1.2.3.4"}, "203.0.113.9")) == "203.0.113.9"
+    assert core._request_client_ip(_FakeRequest({"x-forwarded-for": "1.2.3.4"}, None)) == "-"
+
+
+def test_is_loopback_peer_covers_every_shape():
+    assert core._is_loopback_peer("127.0.0.1") is True
+    assert core._is_loopback_peer("127.9.9.9") is True
+    assert core._is_loopback_peer("::1") is True
+    assert core._is_loopback_peer("::ffff:127.0.0.1") is True
+    assert core._is_loopback_peer("LOCALHOST") is True
+    assert core._is_loopback_peer("10.0.0.5") is False
+    assert core._is_loopback_peer("2001:db8::1") is False
+    assert core._is_loopback_peer("testclient") is False
+    assert core._is_loopback_peer("") is False
+
+
+def test_forwarded_client_ip_returns_none_without_a_usable_header():
+    assert core._forwarded_client_ip(_FakeRequest({})) is None
+    assert core._forwarded_client_ip(_FakeRequest({"x-forwarded-for": "   "})) is None
+    assert core._forwarded_client_ip(_FakeRequest({"x-real-ip": "  "})) is None
+    assert core._forwarded_client_ip(_FakeRequest({"x-forwarded-for": "1.2.3.4"})) == "1.2.3.4"
 
 
 def test_log_field_replaces_control_characters_and_caps_the_length():
@@ -884,3 +1016,191 @@ def test_responses_store_shares_the_state_store():
             del app.state.responses_store
         else:
             app.state.responses_store = saved
+
+
+def _chunked_request(chunks, path="/v1/chat/completions"):
+    from starlette.requests import Request
+
+    pending = list(chunks)
+
+    async def receive():
+        if pending:
+            chunk = pending.pop(0)
+            return {"type": "http.request", "body": chunk, "more_body": bool(pending)}
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": path,
+        "headers": [(b"content-type", b"application/json"), (b"transfer-encoding", b"chunked")],
+        "client": ("10.0.0.5", 1234),
+        "server": ("localhost", 8008),
+        "scheme": "http",
+        "query_string": b"",
+        "root_path": "",
+    }
+    return Request(scope, receive=receive)
+
+
+def test_body_limit_for_picks_the_tighter_path_cap():
+    chat = core._body_limit_for("/v1/chat/completions")
+    assert chat.limit == min(core.MAX_CHAT_BODY_BYTES, core.MAX_REQUEST_BODY)
+    assert "max" in chat.detail
+    other = core._body_limit_for("/v1/responses")
+    assert other.limit == core.MAX_REQUEST_BODY
+    assert other.detail == "request body too large"
+
+
+def test_body_limit_for_falls_back_to_the_global_cap_when_the_chat_cap_is_not_tighter(monkeypatch):
+    monkeypatch.setattr(core, "MAX_REQUEST_BODY", 8)
+    state = core._body_limit_for("/v1/chat/completions")
+    assert state.limit == 8
+    assert state.detail == "request body too large"
+
+
+def test_install_body_limit_rejects_an_undeclared_stream_over_the_cap():
+    request = _chunked_request([b"x" * 32, b"y" * 32])
+    state = core._install_body_limit(request)
+    assert state.limit == core.MAX_CHAT_BODY_BYTES
+
+    small = core._install_body_limit(_chunked_request([b"x" * 4]))
+    assert small.limit == core.MAX_CHAT_BODY_BYTES
+    assert small.exceeded is False
+
+
+async def test_body_limit_rejects_a_chunked_body_that_exceeds_the_cap(monkeypatch):
+    monkeypatch.setattr(core, "MAX_CHAT_BODY_BYTES", 32)
+    request = _chunked_request([b"x" * 64, b"y" * 64])
+    state = core._install_body_limit(request)
+    assert state.limit == 32
+    with pytest.raises(HTTPException) as excinfo:
+        await request.body()
+    assert excinfo.value.status_code == 413
+    assert state.exceeded is True
+    assert "max" in excinfo.value.detail
+
+
+async def test_body_limit_lets_an_ordinary_chunked_body_through(monkeypatch):
+    monkeypatch.setattr(core, "MAX_CHAT_BODY_BYTES", 1024)
+    request = _chunked_request([b'{"a"', b":1}"])
+    core._install_body_limit(request)
+    assert await request.body() == b'{"a":1}'
+    assert core._install_body_limit(request).exceeded is False
+
+
+def test_body_limit_is_installed_once_per_scope():
+    request = _chunked_request([b"x"])
+    first = core._install_body_limit(request)
+    second = core._install_body_limit(request)
+    assert first is second
+    assert request.scope[core._BODY_LIMIT_SCOPE_KEY] is first
+
+
+def test_body_limit_state_for_a_request_without_a_scope():
+    class _Bare:
+        _receive = None
+
+    assert core._install_body_limit(_Bare()).limit == core.MAX_REQUEST_BODY
+
+
+def test_unwrap_http_exception_finds_a_wrapped_error():
+    class _Group(Exception):
+        def __init__(self, nested):
+            super().__init__("group")
+            self.exceptions = nested
+
+    inner = HTTPException(413, "too big")
+    assert core._unwrap_http_exception(inner) is inner
+    assert core._unwrap_http_exception(_Group([inner])) is inner
+    assert core._unwrap_http_exception(RuntimeError("x")) is None
+    assert core._unwrap_http_exception(_Group([RuntimeError("x")])) is None
+    assert core._unwrap_http_exception(_Group([])) is None
+    deep = inner
+    for _ in range(10):
+        deep = _Group([deep])
+    assert core._unwrap_http_exception(deep) is None
+
+
+def test_chunked_post_over_the_cap_is_rejected_with_413(caplog, monkeypatch):
+    monkeypatch.setattr(core, "MAX_CHAT_BODY_BYTES", 1024)
+    monkeypatch.setattr(core, "MAX_REQUEST_BODY", 1024 * 1024)
+    app.state.pool = None
+    app.state.qwen_pool = None
+    app.state.qwen_models = []
+    sent = 0
+
+    def _body():
+        nonlocal sent
+        for _ in range(4):
+            sent += 4096
+            yield b"x" * 4096
+
+    with caplog.at_level(logging.WARNING, logger="danyapi.api"):
+        client = TestClient(app)
+        response = client.post("/v1/chat/completions", content=_body(), headers={"content-type": "application/json"})
+        client.close()
+    assert response.status_code == 413
+    assert response.json()["error"]["type"] == "request_too_large"
+    assert response.json()["error"]["message"] == "request body too large, max 0 MB"
+    assert "status=413" in caplog.text
+
+
+def test_the_dashboard_response_carries_a_real_csp_header():
+    client = TestClient(app)
+    response = client.get("/")
+    client.close()
+    policy = response.headers["content-security-policy"]
+    assert response.headers["x-frame-options"] == "DENY"
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert "frame-ancestors 'none'" in policy
+    script_src = policy.split("script-src", 1)[1].split(";", 1)[0]
+    assert "'unsafe-inline'" not in script_src
+    assert "'unsafe-eval'" not in script_src
+    digest = re.search(r"script-src 'sha256-([^']+)'", policy).group(1)
+    assert digest == _dashboard_script_digest()
+    meta = re.search(r"script-src 'sha256-([^']+)'", (_ROOT / "web" / "index.html").read_text(encoding="utf-8")).group(1)
+    assert digest == meta
+
+
+def test_the_docs_response_is_framed_denied_without_the_dashboard_policy():
+    client = TestClient(app)
+    response = client.get("/docs/style.css")
+    client.close()
+    assert response.headers["x-frame-options"] == "DENY"
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert "content-security-policy" not in response.headers
+
+
+def test_security_headers_never_overwrite_what_the_route_set():
+    response = JSONResponse({"ok": True}, headers={"x-frame-options": "SAMEORIGIN", "content-security-policy": "default-src 'none'"})
+    core._apply_security_headers(_html_request("/health", "application/json"), response)
+    assert response.headers["x-frame-options"] == "SAMEORIGIN"
+    assert response.headers["content-security-policy"] == "default-src 'none'"
+    assert response.headers["x-content-type-options"] == "nosniff"
+
+
+def test_chunked_post_stops_reading_the_stream_once_the_cap_is_passed(monkeypatch):
+    monkeypatch.setattr(core, "MAX_CHAT_BODY_BYTES", 1024)
+    monkeypatch.setattr(core, "MAX_REQUEST_BODY", 1024 * 1024)
+    from starlette.requests import Request
+
+    chunks = [b"x" * 512 for _ in range(8)]
+    read = 0
+
+    async def receive():
+        nonlocal read
+        if chunks:
+            read += 1
+            return {"type": "http.request", "body": chunks.pop(0), "more_body": bool(chunks)}
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    request = Request({"type": "http", "method": "POST", "path": "/v1/chat/completions", "headers": []}, receive=receive)
+
+    async def run():
+        core._install_body_limit(request)
+        with pytest.raises(HTTPException):
+            await request.body()
+
+    asyncio.run(run())
+    assert read == 3

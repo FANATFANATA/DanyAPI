@@ -4,7 +4,10 @@ import gc
 import json
 import os
 import shutil
+import subprocess  # nosec B404
+import sys
 import tempfile
+from contextlib import suppress
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -15,7 +18,7 @@ from danyapi.pow import (
     _PYTHON_SOLVE_BUDGET_SEC,
     _SOLVE_TOTAL_BUDGET_SEC,
     _SOLVER_DIFFICULTY_LIMIT,
-    _SOLVER_ENV_DENYLIST,
+    _SOLVER_ENV_ALLOWLIST,
     _SOLVER_TIMEOUT_SEC,
     _find_native_solver,
     _run_solver,
@@ -51,17 +54,11 @@ def test_invalid_expire_at_raises():
         pm = PowManager()
 
         async def fetch_bad():
-            return {
-                "challenge": "x",
-                "salt": "s",
-                "algorithm": "a",
-                "signature": "s",
-                "target_path": "t",
-                "expire_at": None,
-                "difficulty": 5,
-            }
+            challenge = _valid_challenge()
+            challenge["expire_at"] = None
+            return challenge
 
-        with pytest.raises(RuntimeError):
+        with pytest.raises(RuntimeError, match="expire_at"):
             await pm.make_header(fetch_bad)
 
     asyncio.run(run())
@@ -319,31 +316,55 @@ def _proc(stdout="", returncode=0, stderr=""):
     return MagicMock(stdout=stdout, returncode=returncode, stderr=stderr)
 
 
+class _FakeProc:
+    def __init__(self, stdout="", returncode=0, stderr="", side_effect=None):
+        self.returncode = returncode
+        self._stdout = stdout
+        self._stderr = stderr
+        self._side_effect = side_effect
+        self.killed = False
+
+    def communicate(self, payload=None, timeout=None):
+        if self._side_effect is not None:
+            raise self._side_effect
+        return self._stdout, self._stderr
+
+    def kill(self):
+        self.killed = True
+
+    def wait(self, timeout=None):
+        return 0
+
+
+def _popen(stdout="", returncode=0, stderr="", side_effect=None):
+    return MagicMock(return_value=_FakeProc(stdout, returncode, stderr, side_effect))
+
+
 def test_run_solver_ok():
-    with patch("danyapi.pow.subprocess.run", return_value=_proc('{"answer":5}')):
+    with patch("danyapi.pow.subprocess.Popen", _popen('{"answer":5}')):
         assert _run_solver(Path("x"), "c", "s", 1, 10) == 5
 
 
 def test_run_solver_nonzero_raises():
-    with patch("danyapi.pow.subprocess.run", return_value=_proc("", returncode=1, stderr="boom")):
+    with patch("danyapi.pow.subprocess.Popen", _popen("", returncode=1, stderr="boom")):
         with pytest.raises(RuntimeError):
             _run_solver(Path("x"), "c", "s", 1, 10)
 
 
 def test_run_solver_error_payload_raises():
-    with patch("danyapi.pow.subprocess.run", return_value=_proc('{"error":"no answer"}')):
+    with patch("danyapi.pow.subprocess.Popen", _popen('{"error":"no answer"}')):
         with pytest.raises(RuntimeError):
             _run_solver(Path("x"), "c", "s", 1, 10)
 
 
 def test_run_solver_accepts_zero_answer():
-    with patch("danyapi.pow.subprocess.run", return_value=_proc('{"answer":0}')):
+    with patch("danyapi.pow.subprocess.Popen", _popen('{"answer":0}')):
         assert _run_solver(Path("x"), "c", "s", 1, 10) == 0
 
 
 @pytest.mark.parametrize("payload", ['{"answer":true}', '{"answer":"7"}', '{"answer":-1}', '{"answer":1.5}', "{}"])
 def test_run_solver_rejects_invalid_answer(payload):
-    with patch("danyapi.pow.subprocess.run", return_value=_proc(payload)):
+    with patch("danyapi.pow.subprocess.Popen", _popen(payload)):
         with pytest.raises(RuntimeError) as exc:
             _run_solver(Path("x"), "c", "s", 1, 10)
     assert "invalid answer" in str(exc.value)
@@ -351,7 +372,7 @@ def test_run_solver_rejects_invalid_answer(payload):
 
 def test_run_solver_invalid_answer_repr_is_truncated():
     payload = json.dumps({"answer": "x" * 5000})
-    with patch("danyapi.pow.subprocess.run", return_value=_proc(payload)):
+    with patch("danyapi.pow.subprocess.Popen", _popen(payload)):
         with pytest.raises(RuntimeError) as exc:
             _run_solver(Path("x"), "c", "s", 1, 10)
     assert len(str(exc.value)) < 300
@@ -364,23 +385,33 @@ def test_solver_env_drops_secrets(monkeypatch):
     env = _solver_env()
     for name in CREDENTIAL_ENV_NAMES:
         assert name not in env
-    assert env["DANYAPI_HOST"] == "127.0.0.1"
+    assert "DANYAPI_HOST" not in env
     assert os.environ["DEEPSEEK_TOKENS"] == "secret-value"
 
 
-def test_solver_env_denylist_is_the_credential_tuple(monkeypatch):
-    assert set(CREDENTIAL_ENV_NAMES) <= _SOLVER_ENV_DENYLIST
-    for name in ("BYOK", "BYOK_MODE", "DANYAPI_BYOK_MODE", "GIGACHAT_KEYS", "DANYAPI_ADMIN_TOKEN"):
-        assert name in _SOLVER_ENV_DENYLIST
-    for name in _SOLVER_ENV_DENYLIST:
-        monkeypatch.setenv(name, "secret-value")
-    assert _solver_env() == {key: value for key, value in os.environ.items() if key not in _SOLVER_ENV_DENYLIST}
+def test_solver_env_is_built_from_an_allowlist(monkeypatch):
+    monkeypatch.setenv("PATH", os.environ.get("PATH", ""))
+    monkeypatch.setenv("POW_SOLVER_THREADS", "4")
+    monkeypatch.setenv("DANYAPI_SOME_NEW_SECRET", "secret-value")
+    monkeypatch.setenv("BYOK", "1")
+    monkeypatch.setenv("NODE_OPTIONS", "--require evil.js")
+    env = _solver_env()
+    assert env["PATH"] == os.environ["PATH"]
+    assert env["POW_SOLVER_THREADS"] == "4"
+    assert "DANYAPI_SOME_NEW_SECRET" not in env
+    assert "BYOK" not in env
+    assert "NODE_OPTIONS" not in env
+    assert set(env) <= set(_SOLVER_ENV_ALLOWLIST)
+    assert "SYSTEMROOT" in _SOLVER_ENV_ALLOWLIST
+    assert "TEMP" in _SOLVER_ENV_ALLOWLIST
+    assert "TMPDIR" in _SOLVER_ENV_ALLOWLIST
+    assert not set(_SOLVER_ENV_ALLOWLIST) & set(CREDENTIAL_ENV_NAMES)
 
 
 def test_run_solver_passes_scrubbed_env():
-    with patch("danyapi.pow.subprocess.run", return_value=_proc('{"answer":1}')) as run:
+    with patch("danyapi.pow.subprocess.Popen", _popen('{"answer":1}')) as popen:
         assert _run_solver(Path("x"), "c", "s", 1, 10) == 1
-    env = run.call_args.kwargs["env"]
+    env = popen.call_args.kwargs["env"]
     assert "DEEPSEEK_TOKENS" not in env
 
 
@@ -411,7 +442,7 @@ class _FakeClock:
 
 
 def _recording_solver(clock: _FakeClock, seen: list, name: str, cost: float):
-    def solver(challenge_hex, salt, expire_at, difficulty, budget):
+    def solver(challenge_hex, salt, expire_at, difficulty, budget, children=None):
         seen.append((name, clock.now, budget, difficulty))
         clock.now += cost
         return None
@@ -442,7 +473,7 @@ def test_solve_challenge_bounds_the_whole_chain_by_the_total_budget():
     clock = _FakeClock()
     seen: list = []
 
-    def burn_whole_budget(challenge_hex, salt, expire_at, difficulty, budget):
+    def burn_whole_budget(challenge_hex, salt, expire_at, difficulty, budget, children=None):
         seen.append(("solver", clock.now, budget, difficulty))
         clock.now += budget
         return None
@@ -626,6 +657,129 @@ def _valid_challenge():
         "expire_at": 1700000000000,
         "difficulty": 5,
     }
+
+
+def test_simultaneous_requests_share_one_solve():
+    from danyapi.pow import PowManager
+
+    async def run():
+        pm = PowManager()
+        pm._kick_refill = lambda fetch: None
+        fetch = AsyncMock(return_value=_valid_challenge())
+        started = 0
+
+        async def fake_solve(challenge_hex, salt, expire_at, difficulty, children=None):
+            nonlocal started
+            started += 1
+            await asyncio.sleep(0.2)
+            return 42
+
+        with patch("danyapi.pow.solve_challenge", new=fake_solve):
+            headers = await asyncio.gather(*[pm.make_header(fetch) for _ in range(8)])
+        assert len({id(header) for header in headers}) == 1
+        assert started == 1
+        assert fetch.await_count == 1
+        pm.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("challenge_hex", "salt", "message"),
+    [
+        ("S" * 32, "s" * 5000, "salt is longer than"),
+        ("00" * 4096, "salt", "challenge is longer than"),
+        ("zz" * 32, "salt", "not valid hex"),
+        ("00" * 4, "salt", "decodes to 4 bytes"),
+        ("0" * 65, "salt", "not valid hex"),
+        (12345, "salt", "must be strings"),
+        ("00" * 32, ["salt"], "must be strings"),
+    ],
+)
+def test_a_hostile_challenge_is_rejected_before_any_solving(challenge_hex, salt, message):
+    from danyapi.pow import PowManager
+
+    async def run():
+        pm = PowManager()
+        solver = AsyncMock(return_value=42)
+
+        async def fetch():
+            challenge = _valid_challenge()
+            challenge["challenge"] = challenge_hex
+            challenge["salt"] = salt
+            return challenge
+
+        with patch("danyapi.pow.solve_challenge", new=solver):
+            with pytest.raises(RuntimeError, match=message):
+                await pm.make_header(fetch)
+        assert solver.await_count == 0
+        pm.close()
+
+    asyncio.run(run())
+
+
+def test_a_legitimate_challenge_survives_validation():
+    from danyapi.pow import _validated_challenge
+
+    digest = deepseek_hash_v1_hex(b"payload")
+    assert _validated_challenge(digest, "a1b2c3") == (digest, "a1b2c3")
+    assert _validated_challenge("AB" * 32, "s" * 96) == ("AB" * 32, "s" * 96)
+
+
+def test_close_kills_the_running_solver_child():
+    from danyapi.pow import PowManager
+
+    async def run():
+        pm = PowManager()
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])  # nosec B603
+        pm._children.add(proc)
+        assert len(pm._children) == 1
+        pm.close()
+        assert proc.poll() is not None
+        assert len(pm._children) == 0
+
+    asyncio.run(run())
+
+
+def test_close_kills_the_child_the_manager_started():
+    from danyapi.pow import PowManager
+
+    started: list = []
+
+    def slow_native(challenge_hex, salt, expire_at, difficulty, timeout=60.0, children=None):
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])  # nosec B603
+        children.add(proc)
+        started.append(proc)
+        try:
+            proc.wait(timeout=60)
+        finally:
+            children.discard(proc)
+        return None
+
+    async def run():
+        pm = PowManager()
+
+        async def fetch_native():
+            return _valid_challenge()
+
+        with patch("danyapi.pow.solve_native", new=slow_native):
+            task = asyncio.create_task(pm.make_header(fetch_native))
+            for _ in range(200):
+                await asyncio.sleep(0.01)
+                if started:
+                    break
+            assert started
+            pm.close()
+            for _ in range(200):
+                await asyncio.sleep(0.01)
+                if started[0].poll() is not None:
+                    break
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+    asyncio.run(run())
+    assert started[0].poll() is not None
 
 
 def _decode_header(header):

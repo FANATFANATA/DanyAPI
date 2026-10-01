@@ -5,6 +5,7 @@ import logging
 import queue
 import re
 import sys
+import time
 from logging.handlers import QueueHandler, QueueListener, RotatingFileHandler
 from pathlib import Path
 from typing import Any
@@ -37,6 +38,8 @@ DEFAULT_LOG_LEVEL = "INFO"
 DEFAULT_MAX_BYTES = 10 * 1024 * 1024
 DEFAULT_BACKUP_COUNT = 3
 _FILE_QUEUE_MAX = 10000
+_STOP_ATTEMPTS = 128
+_STOP_RETRY_DELAY_SEC = 0.002
 _FALLBACK_LEVEL_NAMES = {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG", "NOTSET"}
 
 
@@ -213,6 +216,27 @@ def _find_handler(root: logging.Logger, name: str) -> logging.Handler | None:
     return None
 
 
+def _stop_listener(listener: Any, attempts: int = _STOP_ATTEMPTS) -> bool:
+    target = getattr(listener, "queue", None)
+    for _ in range(attempts):
+        try:
+            listener.stop()
+            return True
+        except queue.Full:
+            if target is None:
+                return False
+            try:
+                target.get_nowait()
+            except queue.Empty:
+                pass
+            time.sleep(_STOP_RETRY_DELAY_SEC)
+    try:
+        listener.stop()
+    except queue.Full:
+        return False
+    return True
+
+
 def _drop_file_handler(root: logging.Logger) -> None:
     handler = _find_handler(root, FILE_HANDLER_NAME)
     if handler is None:
@@ -223,7 +247,8 @@ def _drop_file_handler(root: logging.Logger) -> None:
     listener = _file_handler_state.get("listener")
     if queue_for_file is not None and listener is not None:
         try:
-            listener.stop()
+            if not _stop_listener(listener):
+                logging.getLogger(__name__).warning("log queue listener did not stop, its queue is stuck")
         except Exception:
             logging.getLogger(__name__).debug("failed to stop the log file listener", exc_info=True)
         _queue_listeners[:] = [item for item in _queue_listeners if item is not listener]
@@ -310,10 +335,12 @@ def shutdown() -> None:
     while _queue_listeners:
         listener = _queue_listeners[-1]
         try:
-            listener.stop()
+            stopped = _stop_listener(listener)
         except Exception as exc:
             logging.getLogger(__name__).warning("log queue listener did not stop: %s", exc)
             break
+        if not stopped:
+            logging.getLogger(__name__).warning("log queue listener did not stop, its queue is stuck")
         _queue_listeners.pop()
     if _DroppingQueueHandler.dropped:
         logging.getLogger(__name__).warning("%d log record(s) were dropped because the file log queue was full", _DroppingQueueHandler.dropped)

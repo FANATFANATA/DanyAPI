@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import threading
@@ -476,6 +477,7 @@ def _responses_chat_request(req: ResponsesRequest, provider_messages: list[dict]
 
 
 _INFLIGHT_RESPONSES: dict[str, dict[str, Any]] = {}
+_INPUT_NON_TERMINAL_STATUSES = frozenset({"queued", "in_progress"})
 INPUT_ITEMS_DEFAULT_LIMIT = 20
 INPUT_ITEMS_MAX_LIMIT = 100
 
@@ -576,13 +578,24 @@ async def create_response(req: ResponsesRequest, request: Request) -> Any:
         if req.stream:
             chat_resp = await provider_call(chat_req)
             conversation_snapshot = conversation
+            completed = False
 
             async def _on_complete(final: dict) -> None:
+                nonlocal completed
+                completed = True
                 if not req.store:
                     return
                 public = _cancelled_public(final) if entry.get("cancel") else final
                 stored_conversation = conversation_snapshot + responses_api.messages_from_output(final.get("output"))
                 await _store_set(store, response_id, {"public": public, "conversation": stored_conversation})
+
+            async def _store_abandoned() -> None:
+                record = store.get(response_id)
+                public = record.get("public") if isinstance(record, dict) else None
+                if not isinstance(public, dict) or public.get("status") not in _INPUT_NON_TERMINAL_STATUSES:
+                    return
+                cancelled = dict(public) | {"status": "cancelled", "incomplete_details": {"reason": "cancelled"}}
+                await _store_set(store, response_id, dict(record) | {"public": cancelled})
 
             async def _guarded() -> AsyncIterator[str]:
                 stream = responses_api.translate_stream(
@@ -603,6 +616,9 @@ async def create_response(req: ResponsesRequest, request: Request) -> Any:
                             await closer()
                         except Exception as exc:
                             _log.debug("responses stream close failed: %s", exc)
+                    if not completed and req.store:
+                        with contextlib.suppress(Exception):
+                            await _store_abandoned()
 
             handed_off = True
             return StreamingResponse(

@@ -6,7 +6,7 @@ import re
 import zlib
 from typing import Any
 
-from .common import _tool_function
+from .common import _tool_function, dumps_arguments
 from .dsml import _strip_dsml
 
 MAX_SCHEMA_FIELD = 2000
@@ -134,7 +134,7 @@ def render_tool_schema(tools: list[Any] | None, tool_choice: Any = None) -> str 
                     params_json = _schema_field(params, escape_markup=True)
             else:
                 params_json = json.dumps(params, ensure_ascii=False, separators=(",", ":"))
-            lines.append(f"   parameters: {_schema_field(params_json, escape_markup=False)}")
+            lines.append(f"   parameters: {_schema_field(params_json, escape_markup=True)}")
             argument_summary = _argument_summary(fn)
             if argument_summary:
                 lines.append(f"   arguments: {argument_summary}")
@@ -248,7 +248,7 @@ def _render_tool_call_mention(call: Any) -> str:
         name = call.get("name") or ""
         args = call.get("arguments") or ""
     if isinstance(args, (dict, list)):
-        args = json.dumps(args, ensure_ascii=False)
+        args = dumps_arguments(args)
     return f"[assistant called {name}({args})]"
 
 

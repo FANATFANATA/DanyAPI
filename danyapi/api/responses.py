@@ -276,7 +276,7 @@ def response_text_format(text: Any) -> dict | None:
         fmt = text.get("format")
         if isinstance(fmt, dict):
             if fmt.get("type") == "json_schema" and isinstance(fmt.get("json_schema"), dict):
-                return dict(fmt["json_schema"])
+                return {"type": "json_schema", "json_schema": dict(fmt["json_schema"])}
             return fmt
         if isinstance(fmt, str):
             return {"type": fmt}
@@ -755,6 +755,7 @@ class _StreamState:
         return sse_event(event_type, payload)
 
     def reasoning_delta(self, text: str) -> Iterator[str]:
+        yield from self.close_message()
         if not self.reasoning_open:
             self.reasoning_open = True
             self.reasoning_id = f"rs_{uuid.uuid4().hex}"
@@ -985,9 +986,14 @@ async def _notify_complete(state: _StreamState, final: dict) -> None:
     callback = state.on_complete
     if not callable(callback):
         return
-    outcome = callback(final)
-    if inspect.isawaitable(outcome):
-        await outcome
+    try:
+        outcome = callback(final)
+        if inspect.isawaitable(outcome):
+            await outcome
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        log.warning("response %s could not be persisted: %s: %s", state.response_id, type(exc).__name__, exc)
 
 
 def _merge_usage(state: _StreamState, usage: Any) -> None:

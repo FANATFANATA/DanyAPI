@@ -8,7 +8,10 @@ import httpx
 import pytest
 from fastapi import HTTPException
 
+from danyapi.api import retry as retry_module
+from danyapi.api.retry import RETRY_BACKOFF_MAX_SEC, RETRY_BACKOFF_SEC
 from danyapi.api.schemas import ChatMessage
+from danyapi.api.sse import STREAM_ERROR_FINISH
 from danyapi.gigachat import api as ga
 from danyapi.gigachat.client import GigaChatError
 
@@ -32,6 +35,10 @@ STREAM_USAGE = {
 CREATED = 1700000000
 HEX = "0123456789abcdef0123456789abcdef"
 CHUNK_ID = f"chatcmpl-{HEX}"
+
+
+def _neutral_jitter(low: float, high: float) -> float:
+    return (low + high) / 2
 
 
 class _FakeResponse(httpx.Response):
@@ -133,7 +140,7 @@ def _chunk_line(delta: dict, finish: str | None) -> str:
 
 
 def _error_line(message: str, session_id: str | None = None) -> str:
-    payload = _chunk({"session_id": session_id, "error": {"message": message}, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]})
+    payload = _chunk({"session_id": session_id, "error": {"message": message}, "choices": [{"index": 0, "delta": {}, "finish_reason": STREAM_ERROR_FINISH}]})
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
@@ -230,13 +237,15 @@ async def test_sleep_backoff_uses_the_shared_retry_delay(monkeypatch):
     async def fake_sleep(delay: float) -> None:
         delays.append(delay)
 
+    monkeypatch.setattr(retry_module, "RETRY_BACKOFF_SEC", RETRY_BACKOFF_SEC)
+    monkeypatch.setattr(retry_module.random, "uniform", _neutral_jitter)
     monkeypatch.setattr(asyncio, "sleep", fake_sleep)
 
     await ga._sleep_backoff(0)
     await ga._sleep_backoff(2)
 
     assert delays == [_retry_delay(1), _retry_delay(3)]
-    assert delays == [1.0, 4.0]
+    assert delays == [RETRY_BACKOFF_SEC, min(RETRY_BACKOFF_MAX_SEC, RETRY_BACKOFF_SEC * 4)]
 
 
 async def test_read_json_turns_a_malformed_body_into_502():
@@ -258,11 +267,34 @@ async def test_safe_json_returns_none_instead_of_raising():
     assert await ga._safe_json(_FakeResponse([b'{"message": "boom"}'])) == {"message": "boom"}
 
 
+def _unread_response(status_code: int, body: bytes) -> httpx.Response:
+    resp = httpx.Response(status_code, headers={"content-type": "application/json"}, stream=httpx.ByteStream(body))
+    assert resp.is_stream_consumed is False
+    return resp
+
+
+async def test_safe_json_reads_an_unconsumed_stream_before_parsing():
+    resp = _unread_response(401, b'{"message": "expired key"}')
+
+    assert await ga._safe_json(resp) == {"message": "expired key"}
+
+
+async def test_safe_json_reports_an_unreadable_stream_as_a_parse_failure():
+    resp = _unread_response(502, b'{"message": "boom"}')
+
+    async def _boom() -> None:
+        raise httpx.ReadError("socket closed")
+
+    resp.aread = _boom  # type: ignore[method-assign]
+
+    assert await ga._safe_json(resp) is None
+
+
 async def test_raise_upstream_uses_the_upstream_message():
     resp = _FakeResponse([b'{"message": "quota exceeded"}'], 429)
 
     with pytest.raises(HTTPException) as exc:
-        await ga._raise_upstream(resp, {"message": "quota exceeded"})
+        await ga._raise_upstream(_Account(_Client([])), resp, {"message": "quota exceeded"})
 
     assert exc.value.status_code == 429
     assert exc.value.detail == "GigaChat error: quota exceeded"
@@ -272,7 +304,7 @@ async def test_raise_upstream_falls_back_to_the_raw_body():
     resp = _FakeResponse([b"upstream exploded"], 400)
 
     with pytest.raises(HTTPException) as exc:
-        await ga._raise_upstream(resp, {"message": 7})
+        await ga._raise_upstream(_Account(_Client([])), resp, {"message": 7})
 
     assert exc.value.status_code == 400
     assert exc.value.detail == "GigaChat error: upstream exploded"
@@ -282,10 +314,88 @@ async def test_raise_upstream_without_a_body_reports_the_status():
     resp = _FakeResponse([], 503)
 
     with pytest.raises(HTTPException) as exc:
-        await ga._raise_upstream(resp, None)
+        await ga._raise_upstream(_Account(_Client([])), resp, None)
 
     assert exc.value.status_code == 502
     assert exc.value.detail == "GigaChat error: upstream returned 503"
+
+
+async def test_raise_upstream_reads_an_unconsumed_stream_and_marks_the_account_broken():
+    account = _Account(_Client([]))
+    resp = _unread_response(403, b'{"message": "key revoked"}')
+
+    with pytest.raises(HTTPException) as exc:
+        await ga._raise_upstream(account, resp, {"message": "key revoked"})
+
+    assert exc.value.status_code == 401
+    assert exc.value.detail == "GigaChat error: key revoked"
+    assert account.broken is True
+
+
+async def test_collect_non_stream_marks_the_account_broken_when_the_client_returns_401():
+    account = _Account(_Client([_unread_response(401, b'{"message": "invalid access token"}')]))
+
+    with pytest.raises(HTTPException) as exc:
+        await ga.collect_non_stream(account, MESSAGES, MODEL)
+
+    assert exc.value.status_code == 401
+    assert exc.value.detail == "GigaChat error: invalid access token"
+    assert account.broken is True
+
+
+async def test_collect_non_stream_marks_the_account_broken_after_the_client_refreshed_the_token():
+    from danyapi.gigachat.client import BASE_URL, GigaChatClient
+
+    key = "9f2c1a4e-0b7d-4c8e-9a1b-2f3c4d5e6f70"
+    calls: list[str] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        if request.url.path.endswith("/api/v2/oauth"):
+            return httpx.Response(200, json={"access_token": "tok" * 12, "expires_at": 4102444800})
+        return httpx.Response(401, json={"message": "invalid access token"})
+
+    client = GigaChatClient(key=key)
+    client.http = httpx.AsyncClient(base_url=BASE_URL, transport=httpx.MockTransport(_handler))
+    account = _Account(client)
+
+    with pytest.raises(HTTPException) as exc:
+        await ga.collect_non_stream(account, MESSAGES, MODEL)
+
+    assert exc.value.status_code == 401
+    assert exc.value.detail == "GigaChat error: invalid access token"
+    assert account.broken is True
+    assert calls.count("/v1/chat/completions") == 2
+
+
+async def test_stream_reports_the_real_upstream_reason_from_an_unconsumed_error_stream():
+    account = _Account(_Client([_unread_response(401, b'{"message": "access token expired"}')]))
+
+    with pytest.raises(HTTPException) as exc:
+        async for _line in ga.stream_openai(account, MESSAGES, MODEL):
+            pass
+
+    assert exc.value.status_code == 401
+    assert exc.value.detail == "GigaChat error: access token expired"
+    assert account.broken is True
+
+
+async def test_stream_reports_an_unreadable_error_body_as_an_upstream_status():
+    account = _Account(_Client([_unread_response(429, b'{"message": "rate limited"}')]))
+    resp = account.client.responses[0]
+
+    async def _boom() -> None:
+        raise httpx.ReadError("socket closed")
+
+    resp.aread = _boom  # type: ignore[method-assign]
+
+    with pytest.raises(HTTPException) as exc:
+        async for _line in ga.stream_openai(account, MESSAGES, MODEL):
+            pass
+
+    assert exc.value.status_code == 429
+    assert exc.value.detail == "GigaChat error: upstream returned 429"
+    assert account.broken is False
 
 
 def test_chunk_carries_the_delta_and_only_adds_usage_when_given():
@@ -788,7 +898,7 @@ async def test_stream_stringifies_a_non_string_error_detail(monkeypatch):
 
     assert _parse(lines)[0]["error"] == {"message": str({"why": "quota"})}
     assert _parse(lines)[0]["session_id"] is None
-    assert _parse(lines)[0]["choices"] == [{"index": 0, "delta": {}, "finish_reason": "stop"}]
+    assert _parse(lines)[0]["choices"] == [{"index": 0, "delta": {}, "finish_reason": STREAM_ERROR_FINISH}]
 
 
 async def test_stream_closes_the_upstream_response_when_the_client_stops_early():

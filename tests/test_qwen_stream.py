@@ -156,6 +156,23 @@ def test_handle_delta_not_dict():
     assert rec.content == ""
 
 
+def test_handle_choice_not_a_dict():
+    rec = QwenStreamReconstructor()
+    rec.handle(SSEEvent(None, {"choices": ["boom"]}))
+    rec.handle(SSEEvent(None, {"choices": [None]}))
+    rec.handle(SSEEvent(None, {"choices": [7]}))
+    assert rec.content == ""
+    assert rec.reasoning == ""
+    assert rec.has_content is False
+
+
+def test_handle_keeps_reading_after_a_choice_that_is_not_a_dict():
+    rec = QwenStreamReconstructor()
+    rec.handle(SSEEvent(None, {"choices": ["boom"]}))
+    rec.handle(SSEEvent(None, {"choices": [{"delta": {"phase": "answer", "content": "Hello"}}]}))
+    assert rec.content == "Hello"
+
+
 def test_handle_unknown_phase():
     rec = QwenStreamReconstructor()
     rec.handle(SSEEvent(None, {"choices": [{"delta": {"phase": "other", "content": "x"}}]}))

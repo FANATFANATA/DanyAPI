@@ -155,3 +155,83 @@ def test_solver_exports_evaluate_script_for_reuse():
     text = SOLVER.read_text(encoding="utf-8")
     assert "evaluateScript, evaluateSource" in text
     assert "require.main === module" in text
+
+
+SANDBOX_PROBE_SCRIPT = r"""
+(() => {
+  const read = (fn) => {
+    try {
+      return fn();
+    } catch (error) {
+      return `${error.name}`;
+    }
+  };
+  return {
+    client_hashes: ["a"],
+    server_hashes: ["b"],
+    meta: {},
+    signals: {
+      process: read(() => typeof process),
+      processEnv: read(() => typeof process.env),
+      require: read(() => typeof require),
+      module: read(() => typeof module),
+      childProcess: read(() => typeof process.getBuiltinModule),
+      windowIsGlobal: typeof window === "object" && window === globalThis,
+    },
+  };
+})()
+"""
+
+
+def test_sandbox_hides_the_node_globals_from_the_evaluated_script(tmp_path):
+    out = _evaluate(tmp_path, SANDBOX_PROBE_SCRIPT)
+    assert out["ok"] is True, out
+    signals = out["result"]["signals"]
+    assert signals["process"] == "undefined"
+    assert signals["processEnv"] == "ReferenceError"
+    assert signals["childProcess"] == "ReferenceError"
+    assert signals["require"] == "undefined"
+    assert signals["module"] == "undefined"
+    assert signals["windowIsGlobal"] is True
+
+
+def test_sandbox_restores_the_node_globals_after_the_evaluated_script(tmp_path):
+    harness = tmp_path / "twice.js"
+    harness.write_text(
+        """
+const fs = require("fs");
+const { evaluateScript } = require(process.argv[2]);
+const probe = fs.readFileSync(process.argv[3], "utf8");
+const ua = process.argv[4];
+evaluateScript(probe, ua)
+  .then((first) =>
+    evaluateScript(probe, ua).then((second) => {
+      process.stdout.write(
+        JSON.stringify({
+          ok: true,
+          restored: typeof process,
+          first: first.signals.process,
+          second: second.signals.process,
+        }),
+      );
+    }),
+  )
+  .catch((e) => process.stdout.write(JSON.stringify({ ok: false, error: String(e && e.message ? e.message : e) })));
+""",
+        encoding="utf-8",
+    )
+    target = tmp_path / "probe.js"
+    target.write_text(SANDBOX_PROBE_SCRIPT, encoding="utf-8")
+    proc = subprocess.run(  # nosec B603
+        [NODE, str(harness), str(SOLVER), str(target), USER_AGENT],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout)
+    assert out["ok"] is True, out
+    assert out["restored"] == "object"
+    assert out["first"] == "undefined"
+    assert out["second"] == "undefined"

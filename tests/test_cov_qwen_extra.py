@@ -110,11 +110,8 @@ class _ImgMsg:
 
 
 @pytest.fixture(autouse=True)
-def zero_backoff():
-    orig = retry_mod.RETRY_BACKOFF_SEC
-    retry_mod.RETRY_BACKOFF_SEC = 0.0
-    yield
-    retry_mod.RETRY_BACKOFF_SEC = orig
+def zero_backoff(monkeypatch):
+    monkeypatch.setattr(retry_mod, "RETRY_BACKOFF_SEC", 0.0)
 
 
 def _args(acct, pool=None, existing_sid="s1", tool_mode=False, tool_schemas=None, **extra):

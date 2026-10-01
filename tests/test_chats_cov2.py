@@ -47,12 +47,14 @@ class _Pool:
         self.accounts = [self.account]
 
 
-def _request(headers=None):
+def _request(headers=None, body=None):
     class _Request:
         def __init__(self):
             self.headers = headers or {}
             self.client = None
             self.url = type("_Url", (), {"path": "/v1/chat/completions"})()
+            if body is not None:
+                self._body = body
 
     return _Request()
 
@@ -124,21 +126,20 @@ def test_validate_chat_handlers_fails_on_a_stale_entry(monkeypatch):
     chats_mod._validate_chat_handlers()
 
 
-def test_check_chat_request_limits_caps_the_declared_body():
-    request = _request({"content-length": str(chats_mod.MAX_CHAT_BODY_BYTES + 1)})
+def test_check_chat_request_limits_caps_the_read_body():
+    over = b"x" * (chats_mod.MAX_CHAT_BODY_BYTES + 1)
+    request = _request(body=over)
     with pytest.raises(HTTPException) as excinfo:
         chats_mod._check_chat_request_limits(_chat(), request)
     assert excinfo.value.status_code == 413
     assert excinfo.value.detail == f"request body too large, max {chats_mod.MAX_CHAT_BODY_BYTES // (1024 * 1024)} MB"
-    chats_mod._check_chat_request_limits(_chat(), _request({"content-length": str(chats_mod.MAX_CHAT_BODY_BYTES)}))
+    chats_mod._check_chat_request_limits(_chat(), _request(body=b"x" * chats_mod.MAX_CHAT_BODY_BYTES))
     chats_mod._check_chat_request_limits(_chat(), _request())
 
 
-def test_check_chat_request_limits_rejects_a_bad_content_length():
-    with pytest.raises(HTTPException) as excinfo:
-        chats_mod._check_chat_request_limits(_chat(), _request({"content-length": "abc"}))
-    assert excinfo.value.status_code == 400
-    assert excinfo.value.detail == "invalid content-length header"
+def test_check_chat_request_limits_ignores_a_forged_declared_length():
+    chats_mod._check_chat_request_limits(_chat(), _request({"content-length": "not-a-number"}))
+    chats_mod._check_chat_request_limits(_chat(), _request({"content-length": str(chats_mod.MAX_CHAT_BODY_BYTES + 1)}))
 
 
 def test_check_chat_request_limits_caps_the_message_count():
@@ -302,6 +303,44 @@ async def test_acquire_and_build_uses_a_cached_context_session_when_no_session_i
     assert context_seq == ("digest",)
 
 
+async def test_acquire_session_account_binds_the_owner_for_every_provider_handler(monkeypatch):
+    handlers = {
+        gigachat_api: chats_mod._chat_completions_gigachat,
+        chats_mod.opencode_api: chats_mod._chat_completions_opencode,
+        alice_api: chats_mod._chat_completions_alice,
+        duckai_api: chats_mod._chat_completions_duckai,
+    }
+    monkeypatch.setattr(chats_mod, "_request_scope", lambda req: "k:caller-a")
+    monkeypatch.setattr(chats_mod, "_byok_mode", lambda: True)
+    for module, handler in handlers.items():
+        name = module.__name__.rsplit(".", 1)[-1]
+        monkeypatch.setattr(module, "stream_openai", _never_stream)
+        monkeypatch.setattr(module, "collect_non_stream", _plain_completion)
+        session_id = f"sid-{name}"
+        await handler(_chat(session_id=session_id), pool=_Pool())
+        assert chats_mod._SESSION_OWNERS[session_id] == "k:caller-a"
+
+
+async def test_acquire_session_account_rejects_a_foreign_caller(monkeypatch):
+    monkeypatch.setattr(chats_mod, "_byok_mode", lambda: True)
+    monkeypatch.setattr(gigachat_api, "collect_non_stream", _plain_completion)
+    monkeypatch.setattr(chats_mod, "_request_scope", lambda req: "k:caller-a")
+    await chats_mod._chat_completions_gigachat(_chat(session_id="shared"), pool=_Pool())
+    monkeypatch.setattr(chats_mod, "_request_scope", lambda req: "k:caller-b")
+    with pytest.raises(HTTPException) as excinfo:
+        await chats_mod._chat_completions_gigachat(_chat(session_id="shared"), pool=_Pool())
+    assert excinfo.value.status_code == 403
+    assert excinfo.value.detail == "session_id belongs to another client"
+
+
+async def _never_stream(**kwargs):
+    yield ""
+
+
+async def _plain_completion(**kwargs):
+    return {"id": "c", "object": "chat.completion", "choices": []}
+
+
 async def test_acquire_and_build_turns_a_prompt_error_into_a_bad_request(monkeypatch):
     def boom(*args, **kwargs):
         raise ValueError("tool schema is broken")
@@ -455,6 +494,38 @@ async def test_translate_completion_stream_rewrites_chunks_and_passes_everything
     assert payload["id"] == "c1"
     assert payload["object"] == "text_completion"
     assert payload["choices"] == [{"index": 0, "text": "hi", "logprobs": None, "finish_reason": None}]
+
+
+async def test_completions_stream_offsets_the_choice_index_per_prompt():
+    async def dispatch(chat_req):
+        return _ChatResponse(
+            [
+                'data: {"id": "c1", "choices": [{"index": 0, "delta": {"content": "a"}}]}\n\n',
+                'data: {"id": "c1", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}\n\n',
+            ]
+        )
+
+    req = CompletionRequest(model="GigaChat-Pro", prompt=["first", "second"])
+    lines = await _drain(chats_mod._completions_stream(req, ["first", "second"], dispatch))
+    indexes = []
+    for line in lines[:-1]:
+        indexes.extend(choice["index"] for choice in json.loads(line[len("data: ") :].strip())["choices"])
+    assert indexes == [0, 0, 1, 1]
+
+
+async def test_completions_stream_offsets_by_the_number_of_upstream_choices():
+    async def dispatch(chat_req):
+        return _ChatResponse(
+            [
+                'data: {"id": "c1", "choices": [{"index": 0, "delta": {"content": "a"}}, {"index": 1, "delta": {"content": "b"}}]}\n\n',
+            ]
+        )
+
+    req = CompletionRequest(model="GigaChat-Pro", prompt=["first", "second"])
+    lines = await _drain(chats_mod._completions_stream(req, ["first", "second"], dispatch))
+    payloads = [json.loads(line[len("data: ") :].strip()) for line in lines[:-1]]
+    assert [choice["index"] for choice in payloads[0]["choices"]] == [0, 1]
+    assert [choice["index"] for choice in payloads[1]["choices"]] == [2, 3]
 
 
 async def test_completions_stream_emits_a_terminating_error_chunk_and_done():

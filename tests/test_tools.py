@@ -1,5 +1,4 @@
 import json
-import math
 from typing import Any
 
 import pytest
@@ -2895,10 +2894,12 @@ def test_jsonfix_keeps_underscored_numbers_numeric():
     assert _loads_lenient('{"n": -1_0}') == {"n": -10}
 
 
-def test_jsonfix_accepts_non_finite_literals():
-    assert math.isnan(_loads_lenient('{"n": NaN}')["n"])
-    assert _loads_lenient('{"n": Infinity}')["n"] == float("inf")
-    assert _loads_lenient('{"n": -Infinity}')["n"] == float("-inf")
+def test_jsonfix_rejects_non_finite_literals():
+    for payload in ('{"n": NaN}', '{"n": Infinity}', '{"n": -Infinity}'):
+        with pytest.raises(ValueError, match="invalid json"):
+            _loads_lenient(payload)
+    assert _loads_lenient('{"n": 1.5}') == {"n": 1.5}
+    assert _loads_lenient('{"n": 1e3}') == {"n": 1000.0}
 
 
 def test_jsonfix_no_op_rewrites_return_the_input_unchanged():

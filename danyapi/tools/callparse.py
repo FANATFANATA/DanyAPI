@@ -74,7 +74,10 @@ def _xml_set_param(params: dict[str, Any], key: str, value: Any) -> None:
         params[key] = value
 
 
-def _xml_value(raw: str, json_type: Any) -> Any:
+_MAX_XML_DEPTH = 200
+
+
+def _xml_value(raw: str, json_type: Any, depth: int = 0) -> Any:
     stripped = raw.strip()
     if stripped.startswith(("{", "[")):
         try:
@@ -83,14 +86,21 @@ def _xml_value(raw: str, json_type: Any) -> Any:
             pass
     if json_type == "string":
         return _unescape_xml(stripped)
-    if _XML_NESTED_RE.search(stripped):
-        nested = _xml_invoke_arguments(stripped, None, False)
+    if depth < _MAX_XML_DEPTH and _XML_NESTED_RE.search(stripped):
+        nested = _xml_invoke_arguments(stripped, None, False, depth + 1)
         if nested is not None:
             return nested
     return _coerce_scalar(_unescape_xml(stripped), json_type)
 
 
-def _xml_invoke_arguments(body: str, param_types: dict[str, Any] | None = None, allow_content: bool = True) -> dict[str, Any] | None:
+def _xml_invoke_arguments(
+    body: str,
+    param_types: dict[str, Any] | None = None,
+    allow_content: bool = True,
+    depth: int = 0,
+) -> dict[str, Any] | None:
+    if depth >= _MAX_XML_DEPTH:
+        return None
     stripped = body.strip()
     if stripped.startswith("{"):
         try:
@@ -100,7 +110,7 @@ def _xml_invoke_arguments(body: str, param_types: dict[str, Any] | None = None, 
     params: dict[str, Any] = {}
     for match in _XML_PARAM_RE.finditer(body):
         key = match.group(2).strip()
-        _xml_set_param(params, key, _xml_value(match.group(3), (param_types or {}).get(key)))
+        _xml_set_param(params, key, _xml_value(match.group(3), (param_types or {}).get(key), depth + 1))
     if params:
         return params
     for _, _, raw_key, _, inner in _scan_xml_pairs(body):
@@ -110,7 +120,7 @@ def _xml_invoke_arguments(body: str, param_types: dict[str, Any] | None = None, 
             continue
         if lowered in _XML_HTML_TAGS and lowered not in _ARGS_ALIASES:
             continue
-        _xml_set_param(params, key, _xml_value(inner, (param_types or {}).get(key)))
+        _xml_set_param(params, key, _xml_value(inner, (param_types or {}).get(key), depth + 1))
     if params:
         if len(params) == 1:
             for key in _ARGS_ALIASES:
@@ -424,6 +434,9 @@ _MAX_JSON_CANDIDATES = 2000
 _JSON_KEY_START = frozenset("_-.'" + "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
 
 
+_MAX_JSON_WALK = 16 * 1024
+
+
 def _iter_json_objects(text: str) -> Iterator[tuple[dict, int, int]]:
     i = 0
     length = len(text)
@@ -445,8 +458,9 @@ def _iter_json_objects(text: str) -> Iterator[tuple[dict, int, int]]:
         in_string = False
         escaped = False
         end = start
+        limit = min(length, start + _MAX_JSON_WALK)
         closed = False
-        while end < length:
+        while end < limit:
             ch = text[end]
             if in_string:
                 if escaped:
@@ -795,13 +809,16 @@ def parse_tool_calls(
     tool_details: dict[str, dict[str, Any]] | None = None,
     fix_mode: str | None = None,
 ) -> tuple[list[ToolCall], str] | None:
-    result = _parse_tool_calls_impl(text, tool_schemas, None)
-    if result is None:
+    try:
+        result = _parse_tool_calls_impl(text, tool_schemas, None)
+        if result is None:
+            return None
+        calls, wrapper = result
+        normalized = [ToolCall(call.id, _normalize_call_name(call.name, tool_schemas), call.arguments) for call in calls]
+        if fix_mode:
+            normalized = fix_tool_calls(normalized, tool_schemas, tool_details, fix_mode)
+    except RecursionError:
         return None
-    calls, wrapper = result
-    normalized = [ToolCall(call.id, _normalize_call_name(call.name, tool_schemas), call.arguments) for call in calls]
-    if fix_mode:
-        normalized = fix_tool_calls(normalized, tool_schemas, tool_details, fix_mode)
     return normalized, wrapper
 
 
@@ -823,7 +840,11 @@ def parse_tool_calls_debug(
         "fixes": [],
         "warnings": [],
     }
-    result = _parse_tool_calls_impl(text, tool_schemas, report, stripped[:_MAX_PARSE_TEXT])
+    try:
+        result = _parse_tool_calls_impl(text, tool_schemas, report, stripped[:_MAX_PARSE_TEXT])
+    except RecursionError:
+        report["parsed"] = False
+        return report
     if result is not None:
         calls, wrapper = result
         normalized = [(call, _normalize_call_name(call.name, tool_schemas)) for call in calls]

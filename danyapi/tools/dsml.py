@@ -18,7 +18,7 @@ _DSML_MARKER = rf"{_DSML_RUN}\s*DSML\s*{_DSML_RUN}"
 _DSML_PIPE_ANGLE = rf"[{_DSML_PIPE}<>]"
 _DSML_PIPE_ANGLE_RUN = rf"{_DSML_PIPE_ANGLE}{{1,{_DSML_RUN_MAX}}}"
 _DSML_BLOCK = re.compile(
-    rf"<{_DSML_PIPE_ANGLE_RUN}\s*[a-zA-Z_][^<>]*\s*{_DSML_PIPE_ANGLE_RUN}>\s*DSML\s*<{_DSML_PIPE_ANGLE_RUN}\s*[a-zA-Z_][^<>]*\s*{_DSML_PIPE_ANGLE_RUN}>",
+    rf"<{_DSML_PIPE_ANGLE_RUN}\s*[a-zA-Z_][^<>]*?{_DSML_PIPE_ANGLE_RUN}>\s*DSML\s*<{_DSML_PIPE_ANGLE_RUN}\s*[a-zA-Z_][^<>]*?{_DSML_PIPE_ANGLE_RUN}>",
     re.IGNORECASE,
 )
 _DSML_WRAP = re.compile(
@@ -537,7 +537,7 @@ _DSML_PIPE_RUN_RE = rf"[{_DSML_PIPE}]{{1,8}}"
 _DSML_TAIL_RUN_RE = rf"\s*[{_DSML_PIPE}]{{0,8}}"
 _DSML_DANGLING = re.compile(
     rf"(?:<[/]?\s*{_DSML_PIPE_RUN_RE}(?:\s*(?:DSM|DSML|DS|D))?{_DSML_TAIL_RUN_RE}"
-    rf"(?:\s*[A-Za-z0-9_.:-]+(?:\s+[^\s<>]*)*)?"
+    rf"(?:\s*[A-Za-z0-9_.:-]+(?:\s+[^\s<>]+)*\s*)?"
     rf"|{_DSML_PIPE_RUN_RE}\s*(?:DSM|DSML|DS|D){_DSML_TAIL_RUN_RE})\Z",
     re.IGNORECASE,
 )

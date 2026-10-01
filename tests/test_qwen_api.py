@@ -115,11 +115,8 @@ class FakeAccount:
 
 
 @pytest.fixture(autouse=True)
-def zero_backoff():
-    orig = retry_mod.RETRY_BACKOFF_SEC
-    retry_mod.RETRY_BACKOFF_SEC = 0.0
-    yield
-    retry_mod.RETRY_BACKOFF_SEC = orig
+def zero_backoff(monkeypatch):
+    monkeypatch.setattr(retry_mod, "RETRY_BACKOFF_SEC", 0.0)
 
 
 def _args(acct, pool=None, existing_sid: str | None = "s1", tool_mode=False, **extra):
@@ -459,6 +456,24 @@ async def test_stream_stream_error_stops_upstream():
     args, _ = acct.client.stop_stream.call_args
     assert args[0] == "c1"
     assert args[1] == "r1"
+
+
+async def test_non_stream_sse_overflow_becomes_a_502():
+    acct = FakeAccount([])
+
+    class OverflowResp(FakeResp):
+        async def aiter_bytes(self):
+            for _ in range(9):
+                yield b"x" * (1024 * 1024)
+
+    acct.client.completion = AsyncMock(return_value=OverflowResp(OK_SSE))
+    acct.client.stop_stream = AsyncMock()
+
+    with pytest.raises(qwen_api.HTTPException) as excinfo:
+        await qwen_api.collect_non_stream(**_args(acct))
+
+    assert excinfo.value.status_code == 502
+    assert "Stream processing failed" in str(excinfo.value.detail)
 
 
 def test_error_status():

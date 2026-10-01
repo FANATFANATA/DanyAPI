@@ -1062,6 +1062,22 @@ def _expected_tokens(body):
     return total
 
 
+async def test_anthropic_messages_rejects_a_response_without_choices(monkeypatch):
+    async def provider_call(chat_req):
+        return {}
+
+    monkeypatch.setattr(openai_mod, "_chat_dispatcher", _dispatcher(provider_call))
+    client = TestClient(app)
+    response = client.post(
+        "/v1/messages",
+        json={"model": "deepseek-v4.1-flash", "max_tokens": 16, "messages": [{"role": "user", "content": "hi"}]},
+    )
+    client.close()
+    assert response.status_code == 502
+    assert response.json()["error"]["type"] == "api_error"
+    assert response.json()["error"]["message"] == "upstream returned a response without choices"
+
+
 def test_anthropic_count_tokens_reports_a_pydantic_failure_as_a_400(monkeypatch):
     from danyapi.api import anthropic as anthropic_api
 
@@ -1075,3 +1091,49 @@ def test_anthropic_count_tokens_reports_a_pydantic_failure_as_a_400(monkeypatch)
     assert response.json()["error"]["type"] == "invalid_request_error"
     assert anthropic_api.DEFAULT_MAX_TOKENS == 4096
     client.close()
+
+
+async def test_create_response_stream_persists_a_terminal_record_when_the_client_leaves(monkeypatch, responses_store):
+    gate = asyncio.Event()
+
+    async def provider_call(chat_req):
+        async def body():
+            yield 'data: {"id": "c1", "choices": [{"index": 0, "delta": {"content": "Hi"}, "finish_reason": "stop"}]}\n\n'
+            await gate.wait()
+
+        return SimpleNamespace(body_iterator=body())
+
+    monkeypatch.setattr(openai_mod, "_chat_dispatcher", _dispatcher(provider_call))
+    request = ResponsesRequest(model="deepseek-v4.1-flash", input="hi", stream=True)
+    response = await openai_mod.create_response(request, _FakeRequest())
+    stream = response.body_iterator
+    first = await stream.__anext__()
+    assert first.startswith("event: response.created")
+    response_id = next(iter(openai_mod._INFLIGHT_RESPONSES))
+    assert responses_store.get(response_id)["public"]["status"] == "in_progress"
+    await stream.aclose()
+    stored = responses_store.get(response_id)["public"]
+    assert stored["status"] == "cancelled"
+    assert stored["incomplete_details"] == {"reason": "cancelled"}
+    assert response_id not in openai_mod._INFLIGHT_RESPONSES
+
+
+async def test_create_response_stream_keeps_the_completed_record_when_the_client_leaves(monkeypatch, responses_store):
+    async def provider_call(chat_req):
+        async def body():
+            yield 'data: {"id": "c1", "choices": [{"index": 0, "delta": {"content": "Hi"}, "finish_reason": "stop"}]}\n\n'
+
+        return SimpleNamespace(body_iterator=body())
+
+    monkeypatch.setattr(openai_mod, "_chat_dispatcher", _dispatcher(provider_call))
+    request = ResponsesRequest(model="deepseek-v4.1-flash", input="hi", stream=True)
+    response = await openai_mod.create_response(request, _FakeRequest())
+    lines = [line async for line in response.body_iterator]
+    assert any(line.startswith("event: response.completed") for line in lines)
+    response_id = next(iter(stored_ids(responses_store)), None)
+    assert response_id is not None
+    assert responses_store.get(response_id)["public"]["status"] == "completed"
+
+
+def stored_ids(store):
+    return list(store._data)

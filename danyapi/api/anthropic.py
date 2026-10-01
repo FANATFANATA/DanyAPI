@@ -9,6 +9,8 @@ from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
+from fastapi import HTTPException
+
 from danyapi.sseutil import parse_sse
 from danyapi.tokens import count_messages_tokens, estimate_tokens
 
@@ -48,6 +50,10 @@ TOOL_CALL_REASONS = {"tool_calls", "function_call"}
 
 
 class AnthropicInputError(ValueError):
+    pass
+
+
+class AnthropicUpstreamError(ValueError):
     pass
 
 
@@ -332,17 +338,10 @@ def _as_ratio(value: Any, field: str) -> float | None:
     return number
 
 
-def _as_top_k(value: Any) -> int | None:
+def _reject_top_k(value: Any) -> None:
     if value is None:
-        return None
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise AnthropicInputError("top_k must be an integer")
-    if isinstance(value, float) and not value.is_integer():
-        raise AnthropicInputError("top_k must be an integer")
-    number = int(value)
-    if number < 1:
-        raise AnthropicInputError("top_k must be greater than 0")
-    return number
+        return
+    raise AnthropicInputError("top_k is not supported by the upstream providers, remove it from the request")
 
 
 def build_chat_request(body: dict[str, Any], model: str, session_id: str | None = None) -> dict[str, Any]:
@@ -367,9 +366,7 @@ def build_chat_request(body: dict[str, Any], model: str, session_id: str | None 
     top_p = _as_ratio(body.get("top_p"), "top_p")
     if top_p is not None:
         payload["top_p"] = top_p
-    top_k = _as_top_k(body.get("top_k"))
-    if top_k is not None:
-        payload["top_k"] = top_k
+    _reject_top_k(body.get("top_k"))
     metadata = body.get("metadata")
     if isinstance(metadata, dict):
         user_id = metadata.get("user_id")
@@ -450,7 +447,11 @@ def _content_text(blocks: list[dict]) -> str:
 
 def build_message(info: RequestInfo, message_id: str, response: dict) -> dict:
     choices = response.get("choices")
-    choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        error = response.get("error") if isinstance(response.get("error"), dict) else None
+        detail = error.get("message") if isinstance(error, dict) and isinstance(error.get("message"), str) else None
+        raise HTTPException(502, detail or "upstream returned a response without choices")
+    choice = choices[0]
     finish = choice.get("finish_reason")
     if isinstance(response.get("error"), dict):
         finish = "error"
@@ -757,6 +758,8 @@ async def translate_stream(
         if error is not None:
             error_type, message = _error_message(error)
             yield sse_event("error", error_body(error_type, message))
+            for line in state.finish("end_turn", None):
+                yield line
             return
         stop_sequence = match_stop_sequence("".join(state.text_parts), info.stop_sequences)
         if finish in TRUNCATED_REASONS:

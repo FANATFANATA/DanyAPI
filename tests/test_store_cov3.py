@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import threading
 from collections.abc import Callable
 from concurrent.futures import Future
 from pathlib import Path
@@ -127,7 +128,7 @@ async def test_a_burst_of_writes_coalesces_into_one_commit(cache_dir, monkeypatc
     store = JsonStore("burst", "default")
     _no_background_flush(monkeypatch)
     commits: list[dict] = []
-    monkeypatch.setattr(store, "_commit", lambda data: commits.append(dict(data)))
+    monkeypatch.setattr(store, "_commit", lambda data, generation=None: commits.append(dict(data)))
 
     for index in range(20):
         store.set(f"k{index}", index)
@@ -152,9 +153,9 @@ async def test_an_update_landing_during_the_debounce_reaches_the_disk(cache_dir,
     commits: list[dict] = []
     real_commit = store._commit
 
-    def commit(data: Any) -> None:
+    def commit(data: Any, generation: int | None = None) -> None:
         commits.append(dict(data))
-        real_commit(data)
+        real_commit(data, generation)
 
     monkeypatch.setattr(store, "_commit", commit)
     clock.on_sleep = lambda: store.set("late", 2)
@@ -173,7 +174,7 @@ async def test_a_background_flush_with_nothing_to_write_clears_the_pending_flag(
     store = JsonStore("nothing", "default")
     _no_background_flush(monkeypatch)
     commits: list[dict] = []
-    monkeypatch.setattr(store, "_commit", lambda data: commits.append(dict(data)))
+    monkeypatch.setattr(store, "_commit", lambda data, generation=None: commits.append(dict(data)))
 
     store.set("a", 1)
     store._dirty = False
@@ -273,3 +274,122 @@ async def test_a_closed_loop_falls_back_to_a_synchronous_write(cache_dir, monkey
 
 def _raise_closed_loop(*args: Any, **kwargs: Any) -> Any:
     raise RuntimeError("Event loop is closed")
+
+
+def test_an_older_snapshot_never_overwrites_a_newer_one_on_disk(cache_dir, monkeypatch):
+    store = JsonStore("ordering", "default")
+    store.set("v", 1)
+    store.flush()
+    real_lock = store_mod._path_write_lock
+    released = threading.Event()
+    armed = threading.Event()
+
+    def hooked(path: Path) -> threading.Lock:
+        lock = real_lock(path)
+        if armed.is_set():
+            armed.clear()
+            released.wait(5)
+        return lock
+
+    monkeypatch.setattr(store_mod, "_path_write_lock", hooked)
+    armed.set()
+    stale = threading.Thread(target=store.set, args=("v", 0))
+    stale.start()
+    store.set("v", 2)
+    store.flush()
+    assert store._path is not None
+    assert json.loads(store._path.read_text(encoding="utf-8")) == {"v": 2}
+    released.set()
+    stale.join(5)
+    assert not stale.is_alive()
+    store.flush()
+    assert json.loads(store._path.read_text(encoding="utf-8")) == {"v": 2}
+
+
+def test_a_short_circuit_retries_after_a_failed_commit(cache_dir, monkeypatch):
+    store = JsonStore("retry", "default")
+    store.set("k", "v")
+    store.flush()
+    assert store._path is not None
+    monkeypatch.setattr(os, "replace", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("disk full")))
+    store.discard("k")
+    store.flush()
+    assert json.loads(store._path.read_text(encoding="utf-8")) == {"k": "v"}
+    assert store._commit_failed is True
+    monkeypatch.undo()
+    store.discard("k")
+    store.flush()
+    assert json.loads(store._path.read_text(encoding="utf-8")) == {}
+    assert store._commit_failed is False
+
+
+def test_a_store_that_is_removed_leaves_no_registry_entry(cache_dir):
+    store = JsonStore("unregistered", "default")
+    store.set("k", "v")
+    store.flush()
+    key = str(store._path)
+    assert key in store_mod._STATES
+    assert key in store_mod._PATH_LOCKS
+    assert key in store_mod._LIVE_STORES
+    store.remove()
+    assert key not in store_mod._STATES
+    assert key not in store_mod._PATH_LOCKS
+    assert key not in store_mod._LIVE_STORES
+    fresh = JsonStore("unregistered", "default")
+    assert fresh._data is not store._data
+    assert len(fresh) == 0
+
+
+def test_registering_a_live_store_prunes_dead_weakrefs(cache_dir):
+    dead_key = "dead-scope.json"
+    store_mod._LIVE_STORES[dead_key] = lambda: None
+    JsonStore("pruned", "default")
+    assert dead_key not in store_mod._LIVE_STORES
+    store_mod._LIVE_STORES.pop(dead_key, None)
+
+
+def test_remove_lets_the_pending_write_finish_first(cache_dir, monkeypatch):
+    monkeypatch.setattr(store_mod, "_FLUSH_DEBOUNCE", 0.2)
+    store = JsonStore("pending", "default")
+    committed: list[dict[str, Any]] = []
+    real_commit = store._commit
+
+    def commit(data: Any, generation: int | None = None) -> None:
+        committed.append(dict(data))
+        real_commit(data, generation)
+
+    monkeypatch.setattr(store, "_commit", commit)
+    store.set("k", "v")
+    store.remove()
+    assert committed == [{"k": "v"}]
+    assert store._path is not None
+    assert not store._path.exists()
+
+
+def test_cache_root_rejects_a_symlink_and_falls_back(tmp_path, monkeypatch, caplog):
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "keep.txt").write_text("important", encoding="utf-8")
+    link = tmp_path / "link"
+    try:
+        link.symlink_to(victim, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks are not available here")
+    monkeypatch.setattr(store_mod.settings, "cache_dir", str(link))
+    with caplog.at_level(logging.WARNING, logger="danyapi.store"):
+        root = store_mod.cache_root()
+    assert root != link
+    assert root.resolve() != victim.resolve()
+    assert root.is_dir()
+    assert any("is not safe to use" in record.getMessage() for record in caplog.records)
+
+
+def test_cache_root_rejects_a_root_owned_by_another_user(tmp_path, monkeypatch, caplog):
+    root = tmp_path / "foreign"
+    root.mkdir()
+    monkeypatch.setattr(store_mod.settings, "cache_dir", str(root))
+    monkeypatch.setattr(store_mod, "_root_rejection", lambda path: "it belongs to uid 12345")
+    with caplog.at_level(logging.WARNING, logger="danyapi.store"):
+        resolved = store_mod.cache_root()
+    assert resolved != root
+    assert any("it belongs to uid 12345" in record.getMessage() for record in caplog.records)

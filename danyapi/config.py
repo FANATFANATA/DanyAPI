@@ -17,6 +17,10 @@ MAX_PORT = 65535
 MAX_CHOICES = 8
 MAX_ALICE_ACCOUNTS = 4
 MAX_DUCKAI_ACCOUNTS = 4
+MIN_TIMEOUT_SEC = 1.0
+MAX_SESSION_CACHE_SIZE = 100000
+MAX_USAGE_RECORDS = 100000
+MAX_RESPONSES_RECORDS = 100000
 
 CREDENTIAL_ENV_NAMES = (
     "DEEPSEEK_TOKENS",
@@ -122,7 +126,7 @@ def _env_float(key: str, default: float, minimum: float = 0.0) -> float:
     return value
 
 
-def _env_positive_float(key: str, default: float) -> float:
+def _env_positive_float(key: str, default: float, minimum: float = 0.0) -> float:
     try:
         value = float(os.environ.get(key, default))
     except (TypeError, ValueError):
@@ -131,6 +135,9 @@ def _env_positive_float(key: str, default: float) -> float:
     if not math.isfinite(value) or value <= 0:
         log.warning("%s=%r must be finite and positive, using %r", key, value, default)
         return default
+    if value < minimum:
+        log.warning("%s=%r is below the minimum %r, clamped", key, value, minimum)
+        return minimum
     return value
 
 
@@ -215,9 +222,9 @@ class Settings:
         self.duckai_enabled = _env_on("DUCKAI_ENABLED", "")
         self.duckai_accounts = _env_int("DUCKAI_ACCOUNTS", 1, 1, MAX_DUCKAI_ACCOUNTS)
         self.byok = _env_first("BYOK", "BYOK_MODE", "DANYAPI_BYOK_MODE").strip().lower() in _TRUE_VALUES
-        self.timeout = _env_positive_float("DANYAPI_TIMEOUT", 60.0)
+        self.timeout = _env_positive_float("DANYAPI_TIMEOUT", 60.0, MIN_TIMEOUT_SEC)
         self.acquire_timeout = _env_float_opt("DANYAPI_ACQUIRE_TIMEOUT")
-        self.session_cache_size = _env_int("DANYAPI_SESSION_CACHE_SIZE", 128, 1)
+        self.session_cache_size = _env_int("DANYAPI_SESSION_CACHE_SIZE", 128, 1, MAX_SESSION_CACHE_SIZE)
         self.session_ttl = _env_float("DANYAPI_SESSION_TTL_SECONDS", 3600.0, minimum=0.0)
         self.log_level = _env_str("DANYAPI_LOG_LEVEL", "INFO") or "INFO"
         self.log_file = _env_str("DANYAPI_LOG_FILE")
@@ -228,10 +235,10 @@ class Settings:
         self.byok_auth_ttl = _env_float("DANYAPI_BYOK_AUTH_TTL_SECONDS", 300.0)
         self.models_refresh_seconds = _env_float("DANYAPI_MODELS_REFRESH_SECONDS", 900.0)
         self.usage_enabled = not _env_off("DANYAPI_USAGE_ENABLED", "1")
-        self.usage_max_records = _env_int("DANYAPI_USAGE_MAX_RECORDS", 1000, 1)
+        self.usage_max_records = _env_int("DANYAPI_USAGE_MAX_RECORDS", 1000, 1, MAX_USAGE_RECORDS)
         self.auto_update = not _env_off("DANYAPI_AUTO_UPDATE", "1")
         self.cors_origins = _env_list("DANYAPI_CORS_ORIGINS")
-        self.responses_max_records = _env_int("DANYAPI_RESPONSES_MAX_RECORDS", 1024, 1)
+        self.responses_max_records = _env_int("DANYAPI_RESPONSES_MAX_RECORDS", 1024, 1, MAX_RESPONSES_RECORDS)
         self.admin_token = _env_str("DANYAPI_ADMIN_TOKEN")
 
 

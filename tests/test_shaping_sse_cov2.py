@@ -227,7 +227,7 @@ async def test_stream_guard_hides_internal_error_and_logs_detail(caplog):
     error_chunk = json.loads(body.split("data: ")[2])
     assert error_chunk["id"] == "chatcmpl-1"
     assert error_chunk["error"] == {"message": INTERNAL_ERROR_MESSAGE}
-    assert error_chunk["choices"] == [{"index": 0, "delta": {}, "finish_reason": "stop"}]
+    assert error_chunk["choices"] == [{"index": 0, "delta": {}, "finish_reason": "error"}]
     assert lines[-1] == "data: [DONE]\n\n"
     assert any("httpx failed" in record.getMessage() for record in caplog.records)
     assert any(record.exc_info for record in caplog.records)
@@ -241,7 +241,7 @@ async def test_stream_guard_surfaces_the_busy_hint():
     lines = await _drain(sse_mod._stream_guard(gen(), "m1"))
     payload = json.loads(lines[0][len("data: ") :])
     assert payload["error"] == {"message": "all accounts are busy, try again later"}
-    assert payload["choices"][0]["finish_reason"] == "stop"
+    assert payload["choices"][0]["finish_reason"] == "error"
     assert lines[-1] == "data: [DONE]\n\n"
 
 
@@ -546,11 +546,40 @@ def test_too_many_files_is_400():
         messages=[],
         files=[SimpleNamespace(name=f"f{index}.txt", content="aGk=", content_type="text/plain") for index in range(attachments_mod.MAX_FILES_PER_REQUEST + 1)],
     )
-    attachments = attachments_mod._collect_attachments(req)
     with pytest.raises(HTTPException) as excinfo:
-        attachments_mod._validate_attachments(attachments)
+        attachments_mod._collect_attachments(req)
     assert excinfo.value.status_code == 400
     assert excinfo.value.detail == "too many files: max 50 per request"
+
+
+def test_too_many_image_parts_is_400_while_collecting():
+    uri = "data:image/png;base64,aGk="
+    parts = [{"type": "image_url", "image_url": {"url": uri}} for _ in range(attachments_mod.MAX_FILES_PER_REQUEST + 1)]
+    req = SimpleNamespace(messages=[SimpleNamespace(content=parts)], files=None)
+    with pytest.raises(HTTPException) as excinfo:
+        attachments_mod._collect_attachments(req)
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail == "too many files: max 50 per request"
+    at_limit = SimpleNamespace(
+        messages=[SimpleNamespace(content=parts[: attachments_mod.MAX_FILES_PER_REQUEST])],
+        files=None,
+    )
+    assert len(attachments_mod._collect_attachments(at_limit)) == attachments_mod.MAX_FILES_PER_REQUEST
+
+
+def test_an_oversized_file_is_rejected_before_it_is_stored():
+    oversized = b64.b64encode(b"x" * (attachments_mod.MAX_FILE_SIZE // 2 + 1)).decode()
+    req = SimpleNamespace(
+        messages=[],
+        files=[
+            SimpleNamespace(name="a.bin", content=oversized, content_type="application/octet-stream"),
+            SimpleNamespace(name="b.bin", content=oversized, content_type="application/octet-stream"),
+        ],
+    )
+    with pytest.raises(HTTPException) as excinfo:
+        attachments_mod._collect_attachments(req)
+    assert excinfo.value.status_code == 413
+    assert excinfo.value.detail == "attachments too large"
 
 
 async def test_upload_deepseek_error_is_mapped_and_marks_the_account(monkeypatch):
@@ -575,3 +604,39 @@ async def test_upload_without_file_id_is_502(monkeypatch):
         await attachments_mod._upload_attachments(account, attachments, "default", False)
     assert excinfo.value.status_code == 502
     assert excinfo.value.detail == "file upload failed for a.bin: no file id"
+
+
+def test_merge_usage_takes_the_only_side_that_has_a_number():
+    assert shaping_mod._merge_usage({}, {"prompt_tokens": 5, "completion_tokens": 7, "total_tokens": 12}) == {
+        "prompt_tokens": 5,
+        "completion_tokens": 7,
+        "total_tokens": 12,
+    }
+    assert shaping_mod._merge_usage({"total_tokens": 4}, {}) == {"total_tokens": 4}
+    assert shaping_mod._merge_usage({}, {"total_tokens": 4}) == {"total_tokens": 4}
+    assert shaping_mod._merge_usage({"prompt_tokens": "x"}, {"prompt_tokens": 3}) == {"prompt_tokens": 3}
+    assert shaping_mod._merge_usage({"prompt_tokens": True}, {"prompt_tokens": 3}) == {"prompt_tokens": 3}
+    assert shaping_mod._merge_usage({"prompt_tokens": 2}, {"prompt_tokens": None}) == {"prompt_tokens": 2}
+
+
+def test_apply_limits_reports_stop_when_the_stop_sequence_truncated_the_text():
+    assert shaping_mod._apply_limits("alpha beta gamma", 1, "gamma") == ("alpha beta ", "stop")
+    assert shaping_mod._apply_limits("alpha beta gamma", None, "gamma") == ("alpha beta ", "stop")
+    assert shaping_mod._apply_limits("alpha beta gamma", 1, None) == ("alpha", "length")
+
+
+@pytest.mark.parametrize(
+    "model, field",
+    [
+        (schemas_mod.ChatCompletionRequest, "max_tokens"),
+        (schemas_mod.ChatCompletionRequest, "max_completion_tokens"),
+        (schemas_mod.CompletionRequest, "max_tokens"),
+        (schemas_mod.ResponsesRequest, "max_output_tokens"),
+    ],
+)
+def test_token_budgets_reject_a_non_positive_value(model, field):
+    assert model(**{field: 1}).model_dump()[field] == 1
+    assert model().model_dump()[field] is None
+    for value in (0, -1, -4096):
+        with pytest.raises(ValidationError):
+            model(**{field: value})

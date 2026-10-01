@@ -218,7 +218,7 @@ class AliceClient:
         self._ws: Any = None
         self._reader: asyncio.Task | None = None
         self._sync = asyncio.Event()
-        self._frames: asyncio.Queue = asyncio.Queue(maxsize=MAX_PENDING_FRAMES)
+        self._exchange: asyncio.Queue | None = None
         self._send_lock = asyncio.Lock()
         self._seq = 1
         self._uuid = new_id()
@@ -244,7 +244,7 @@ class AliceClient:
         if ws is not None:
             with contextlib.suppress(Exception):
                 await ws.close()
-        self._frames = asyncio.Queue(maxsize=MAX_PENDING_FRAMES)
+        self._exchange = None
 
     async def _send(self, message: dict) -> None:
         ws = self._ws
@@ -348,6 +348,23 @@ class AliceClient:
         self._last_request_id = request_id
         return message, request_id
 
+    def _begin_exchange(self) -> asyncio.Queue:
+        queue: asyncio.Queue = asyncio.Queue(maxsize=MAX_PENDING_FRAMES)
+        self._exchange = queue
+        return queue
+
+    def _end_exchange(self) -> None:
+        self._exchange = None
+
+    def _route(self, frame: Any) -> None:
+        queue = self._exchange
+        if queue is None:
+            return
+        try:
+            queue.put_nowait(frame)
+        except asyncio.QueueFull:
+            log.debug("alice dropped a frame, the exchange backlog is full")
+
     async def _read_loop(self) -> None:
         ws = self._ws
         try:
@@ -383,13 +400,13 @@ class AliceClient:
                     continue
                 if namespace == "System" and name == "SynchronizeStateResponse":
                     self._sync.set()
-                await self._frames.put(directive)
+                    continue
+                self._route(directive)
         except asyncio.CancelledError:
             raise
         except BaseException as exc:
             log.debug("alice socket reader stopped: %r", exc)
-            with contextlib.suppress(Exception):
-                await self._frames.put(None)
+            self._route(None)
 
     async def _ensure_connected(self) -> None:
         if self._ws is not None and self._reader is not None and not self._reader.done():
@@ -397,7 +414,7 @@ class AliceClient:
         await self._close()
         self._closed = False
         self._sync = asyncio.Event()
-        self._frames = asyncio.Queue(maxsize=MAX_PENDING_FRAMES)
+        self._exchange = None
         self._seq = 1
         self._uuid = new_id()
         self._last_request_id = None
@@ -488,40 +505,44 @@ class AliceClient:
                 stream.done = True
 
     async def _pump(self, message: dict, stream: AliceStream) -> None:
+        queue = self._begin_exchange()
         deadline = time.monotonic() + self.request_timeout
-        await self._send(message)
-        for index in range(MAX_CONTINUATIONS):
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                log.warning("alice continuation deadline of %.0fs reached after %d steps", self.request_timeout, index)
-                raise AliceError(UPSTREAM_TIMEOUT, "alice did not answer within the request budget", retryable=True)
-            try:
-                directive = await asyncio.wait_for(self._frames.get(), timeout=min(self.frame_timeout, remaining))
-            except asyncio.TimeoutError as exc:
-                raise AliceError(UPSTREAM_TIMEOUT, "alice did not answer in time", retryable=True) from exc
-            if directive is None:
-                raise AliceError(CONNECT_DROPPED, "alice closed the connection", retryable=True)
-            header = directive.get("header") if isinstance(directive.get("header"), dict) else {}
-            name = header.get("name") if isinstance(header.get("name"), str) else ""
-            namespace = header.get("namespace") if isinstance(header.get("namespace"), str) else ""
-            if namespace == "System":
-                if name in ("GoAway", "InvalidAuth"):
-                    raise AliceError(GOAWAY if name == "GoAway" else AUTH_REJECTED, f"alice sent {name}", retryable=True)
-                if name == "EventException":
-                    error = directive.get("payload")
-                    message_text = ""
-                    if isinstance(error, dict) and isinstance(error.get("error"), dict):
-                        message_text = str(error["error"].get("message") or "")
-                    raise AliceError(CONNECT_FATAL, f"alice error: {message_text[:200] or 'unknown'}")
-                continue
-            self._extract(directive, stream)
-            if stream.done:
-                return
-            continuation, _ = self._continuation_message()
-            await asyncio.sleep(CONTINUATION_DELAY)
-            await self._send(continuation)
-        detail = f": {stream.placeholder}" if stream.placeholder else ""
-        raise AliceError(EMPTY_ANSWER, f"alice produced no answer after continuations{detail}", retryable=True)
+        try:
+            await self._send(message)
+            for index in range(MAX_CONTINUATIONS):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    log.warning("alice continuation deadline of %.0fs reached after %d steps", self.request_timeout, index)
+                    raise AliceError(UPSTREAM_TIMEOUT, "alice did not answer within the request budget", retryable=True)
+                try:
+                    directive = await asyncio.wait_for(queue.get(), timeout=min(self.frame_timeout, remaining))
+                except asyncio.TimeoutError as exc:
+                    raise AliceError(UPSTREAM_TIMEOUT, "alice did not answer in time", retryable=True) from exc
+                if directive is None:
+                    raise AliceError(CONNECT_DROPPED, "alice closed the connection", retryable=True)
+                header = directive.get("header") if isinstance(directive.get("header"), dict) else {}
+                name = header.get("name") if isinstance(header.get("name"), str) else ""
+                namespace = header.get("namespace") if isinstance(header.get("namespace"), str) else ""
+                if namespace == "System":
+                    if name in ("GoAway", "InvalidAuth"):
+                        raise AliceError(GOAWAY if name == "GoAway" else AUTH_REJECTED, f"alice sent {name}", retryable=name != "InvalidAuth")
+                    if name == "EventException":
+                        error = directive.get("payload")
+                        message_text = ""
+                        if isinstance(error, dict) and isinstance(error.get("error"), dict):
+                            message_text = str(error["error"].get("message") or "")
+                        raise AliceError(CONNECT_FATAL, f"alice error: {message_text[:200] or 'unknown'}")
+                    continue
+                self._extract(directive, stream)
+                if stream.done:
+                    return
+                continuation, _ = self._continuation_message()
+                await asyncio.sleep(CONTINUATION_DELAY)
+                await self._send(continuation)
+            detail = f": {stream.placeholder}" if stream.placeholder else ""
+            raise AliceError(EMPTY_ANSWER, f"alice produced no answer after continuations{detail}", retryable=True)
+        finally:
+            self._end_exchange()
 
     async def ask(self, prompt: str) -> AliceStream:
         text = trim_prompt(prompt)

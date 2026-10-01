@@ -15,6 +15,13 @@
 const fs = require("fs");
 const vm = require("vm");
 
+const nodeProcess = process;
+const nodeRequire = require;
+const nodeBuffer = Buffer;
+const nodeHrtime = nodeProcess.hrtime;
+
+const SANDBOX_HIDDEN_GLOBALS = ["process"];
+
 const VOID_TAGS = new Set([
   "area", "base", "br", "col", "embed", "hr", "img", "input",
   "link", "meta", "param", "source", "track", "wbr",
@@ -937,13 +944,13 @@ function installGlobals(userAgent) {
   define("addEventListener", () => {});
   define("removeEventListener", () => {});
   define("dispatchEvent", () => false);
-  define("atob", (value) => Buffer.from(String(value), "base64").toString("binary"));
-  define("btoa", (value) => Buffer.from(String(value), "binary").toString("base64"));
-  define("TextEncoder", require("util").TextEncoder);
-  define("TextDecoder", require("util").TextDecoder);
+  define("atob", (value) => nodeBuffer.from(String(value), "base64").toString("binary"));
+  define("btoa", (value) => nodeBuffer.from(String(value), "binary").toString("base64"));
+  define("TextEncoder", nodeRequire("util").TextEncoder);
+  define("TextDecoder", nodeRequire("util").TextDecoder);
   define("structuredClone", (value) => JSON.parse(JSON.stringify(value)));
-  define("performance", { now: () => Number(process.hrtime.bigint() / 1000n) / 1000, timeOrigin: Date.now(), timing: {}, getEntriesByType: () => [], mark() {}, measure() {}, clearMarks() {}, clearMeasures() {}, toJSON: () => ({}) });
-  const nodeCrypto = require("crypto");
+  define("performance", { now: () => Number(nodeHrtime.bigint() / 1000n) / 1000, timeOrigin: Date.now(), timing: {}, getEntriesByType: () => [], mark() {}, measure() {}, clearMarks() {}, clearMeasures() {}, toJSON: () => ({}) });
+  const nodeCrypto = nodeRequire("crypto");
   define("crypto", {
     getRandomValues: (array) => { nodeCrypto.randomFillSync(array); return array; },
     randomUUID: () => nodeCrypto.randomUUID(),
@@ -959,17 +966,37 @@ function installGlobals(userAgent) {
 function readStdin() {
   return new Promise((resolve) => {
     const chunks = [];
-    process.stdin.on("data", (chunk) => chunks.push(chunk));
-    process.stdin.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
-    process.stdin.resume();
+    nodeProcess.stdin.on("data", (chunk) => chunks.push(chunk));
+    nodeProcess.stdin.on("end", () => resolve(nodeBuffer.concat(chunks).toString("utf8")));
+    nodeProcess.stdin.resume();
   });
+}
+
+function hideNodeGlobals() {
+  const saved = [];
+  for (const name of SANDBOX_HIDDEN_GLOBALS) {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, name);
+    if (descriptor === undefined) continue;
+    delete globalThis[name];
+    saved.push([name, descriptor]);
+  }
+  return saved;
+}
+
+function restoreNodeGlobals(saved) {
+  for (const [name, descriptor] of saved) Object.defineProperty(globalThis, name, descriptor);
 }
 
 async function evaluateSource(source, userAgent) {
   installGlobals(userAgent);
   const context = vm.createContext(globalThis, { name: "duckai-jsa" });
   const script = new vm.Script(`(function(){ const __r = (${source}); return typeof __r === "function" ? __r() : __r; })()`, { filename: "jsa.js" });
-  return script.runInContext(context, { timeout: 15000, displayErrors: true });
+  const hidden = hideNodeGlobals();
+  try {
+    return await script.runInContext(context, { timeout: 15000, displayErrors: true });
+  } finally {
+    restoreNodeGlobals(hidden);
+  }
 }
 
 async function evaluateScript(source, userAgent) {
@@ -989,19 +1016,19 @@ async function main() {
   try {
     payload = JSON.parse(input);
   } catch (error) {
-    process.stdout.write(JSON.stringify({ ok: false, error: "malformed input" }));
+    nodeProcess.stdout.write(JSON.stringify({ ok: false, error: "malformed input" }));
     return;
   }
   if (typeof payload.script !== "string" || !payload.script) {
-    process.stdout.write(JSON.stringify({ ok: false, error: "missing script" }));
+    nodeProcess.stdout.write(JSON.stringify({ ok: false, error: "missing script" }));
     return;
   }
   const userAgent = typeof payload.user_agent === "string" && payload.user_agent ? payload.user_agent : "";
   try {
-    process.stdout.write(JSON.stringify({ ok: true, result: await evaluateScript(payload.script, userAgent) }));
+    nodeProcess.stdout.write(JSON.stringify({ ok: true, result: await evaluateScript(payload.script, userAgent) }));
   } catch (error) {
     const message = error && error.message ? String(error.message) : String(error);
-    process.stdout.write(JSON.stringify({ ok: false, error: message.slice(0, 400) }));
+    nodeProcess.stdout.write(JSON.stringify({ ok: false, error: message.slice(0, 400) }));
   }
 }
 

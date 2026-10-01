@@ -81,6 +81,14 @@ REMOTE_IMAGE_SCHEMES = ("http://", "https://")
 def _collect_attachments(req: ChatCompletionRequest, allow_remote: bool = False) -> list[Attachment]:
     attachments: list[Attachment] = []
     raw_total = 0
+
+    def _append(data: bytes, name: str, content_type: str, is_image: bool) -> None:
+        if len(attachments) >= MAX_FILES_PER_REQUEST:
+            raise HTTPException(400, f"too many files: max {MAX_FILES_PER_REQUEST} per request")
+        if len(data) > MAX_FILE_SIZE:
+            raise HTTPException(413, f"file {name} exceeds {MAX_FILE_SIZE // (1024 * 1024)} MB limit")
+        attachments.append(Attachment(data, name, content_type, is_image))
+
     for msg in req.messages:
         if not isinstance(msg.content, list):
             continue
@@ -103,7 +111,7 @@ def _collect_attachments(req: ChatCompletionRequest, allow_remote: bool = False)
                     raise HTTPException(413, "attachments too large")
                 content_type, data = _decode_data_uri(meta, compact)
                 name = _safe_file_name(f"image_{len(attachments)}.{content_type.split('/')[-1] or 'bin'}")
-                attachments.append(Attachment(data, name, content_type, True))
+                _append(data, name, content_type, True)
     for f in req.files or []:
         if not f.name or not f.content:
             raise HTTPException(400, "each file needs name and base64 content")
@@ -116,7 +124,7 @@ def _collect_attachments(req: ChatCompletionRequest, allow_remote: bool = False)
         except ValueError as exc:
             raise HTTPException(400, f"invalid base64 in file {name}") from exc
         content_type = f.content_type or "application/octet-stream"
-        attachments.append(Attachment(data, name, content_type, content_type.startswith("image/")))
+        _append(data, name, content_type, content_type.startswith("image/"))
     return attachments
 
 

@@ -1,4 +1,6 @@
+import asyncio
 import json
+import logging
 
 import pytest
 from fastapi import HTTPException
@@ -523,6 +525,37 @@ def test_stream_state_reasoning_and_message():
     assert any("response.output_item.done" in line for line in lines)
 
 
+def test_stream_state_reasoning_closes_an_open_message_first():
+    state = resp._StreamState(resp.RequestInfo(model="m"), "r", 1)
+    list(state.message_delta("hi"))
+    lines = list(state.reasoning_delta("think"))
+    assert state.message_open is False
+    assert state.reasoning_open is True
+    names = [line.split("\n")[0] for line in lines]
+    assert "event: response.output_item.done" in names
+    assert names.index("event: response.output_item.done") < names.index("event: response.output_item.added")
+
+
+async def test_translate_stream_closes_the_message_before_the_reasoning_item_opens():
+    info = resp.RequestInfo(model="m")
+    stream = _agen(
+        [
+            'data: {"id":"x","choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":null}]}\n\n',
+            'data: {"id":"x","choices":[{"index":0,"delta":{"reasoning_content":"think"},"finish_reason":null}]}\n\n',
+            'data: {"id":"x","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n',
+        ]
+    )
+    lines = "".join(await _collect(resp.translate_stream(stream, info, "r", 1)))
+    events = [block.split("\n")[0] for block in lines.split("event: ")[1:]]
+    added = [position for position, name in enumerate(events) if name == "response.output_item.added"]
+    done = [position for position, name in enumerate(events) if name == "response.output_item.done"]
+    assert len(added) == 2
+    assert len(done) == 2
+    assert done[0] < added[1]
+    final = json.loads(lines.rsplit("event: response.completed\ndata: ", 1)[1])["response"]
+    assert [item["type"] for item in final["output"]] == ["message", "reasoning"]
+
+
 def test_stream_state_tool_delta_non_list():
     state = resp._StreamState(resp.RequestInfo(model="m"), "r", 1)
     assert list(state.tool_delta("x")) == []
@@ -579,6 +612,30 @@ async def test_translate_stream_completed_on_complete():
     lines = "".join(await _collect(resp.translate_stream(stream, info, "r", 1, on_complete=seen.append)))
     assert "response.completed" in lines
     assert seen
+
+
+async def test_translate_stream_still_emits_the_terminal_event_when_persisting_fails(caplog):
+    info = resp.RequestInfo(model="m")
+    stream = _agen(['data: {"id":"x","choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":"stop"}]}\n\n'])
+
+    async def on_complete(_final):
+        raise RuntimeError("the responses store is full")
+
+    with caplog.at_level(logging.WARNING, logger="danyapi.api.responses"):
+        lines = "".join(await _collect(resp.translate_stream(stream, info, "r", 1, on_complete=on_complete)))
+    assert "response.completed" in lines
+    assert "could not be persisted" in caplog.text
+
+
+async def test_translate_stream_propagates_a_cancellation_from_persisting():
+    info = resp.RequestInfo(model="m")
+    stream = _agen(['data: {"id":"x","choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":"stop"}]}\n\n'])
+
+    async def on_complete(_final):
+        raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        await _collect(resp.translate_stream(stream, info, "r", 1, on_complete=on_complete))
 
 
 async def test_translate_stream_tool_calls_and_error():

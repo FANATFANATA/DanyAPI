@@ -18,7 +18,7 @@ from ..accounts import AccountPool, AccountPoolBusy
 from ..qwen import api as qwen_api
 from .attachments import MAX_FILE_SIZE
 from .byok import _byok_pool_for
-from .core import _acquire_account, _validation_summary
+from .core import _validation_summary
 from .schemas import ImageGenerationRequest
 from .shaping import _merge_usage
 from .state import _byok_mode, app
@@ -84,9 +84,28 @@ def _host_is_public(host: str) -> bool:
             address = ipaddress.ip_address(info[4][0])
         except (IndexError, ValueError):
             return False
-        if address.is_private or address.is_loopback or address.is_link_local or address.is_reserved or address.is_multicast or address.is_unspecified:
+        if not address.is_global or address.is_multicast:
             return False
     return True
+
+
+def _peer_is_public(response: httpx.Response) -> bool:
+    stream = (getattr(response, "extensions", None) or {}).get("network_stream")
+    get_extra_info = getattr(stream, "get_extra_info", None)
+    if get_extra_info is None:
+        return True
+    try:
+        peer = get_extra_info("server_addr")
+    except Exception:
+        return True
+    host = peer[0] if isinstance(peer, tuple) and peer else peer
+    if not isinstance(host, str):
+        return True
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return address.is_global and not address.is_multicast
 
 
 async def _check_image_url(url: str) -> None:
@@ -105,6 +124,8 @@ async def _download_image(hc: httpx.AsyncClient, url: str) -> bytes:
     for _ in range(IMAGE_FETCH_REDIRECTS + 1):
         await _check_image_url(current)
         async with hc.stream("GET", current, timeout=IMAGE_FETCH_TIMEOUT_SEC, follow_redirects=False) as resp:
+            if not _peer_is_public(resp):
+                raise ValueError("image host resolved to a non-public address on connect")
             if resp.status_code in REDIRECT_STATUSES:
                 location = resp.headers.get("location")
                 if not location:
@@ -146,13 +167,15 @@ async def _image_generations(req: ImageGenerationRequest, pool: AccountPool | No
     if pool is None:
         raise HTTPException(503, QWEN_UNAVAILABLE_MESSAGE)
 
+    from .chats import _acquire_session_account
+
     dims = _parse_image_size(req.size)
     count = max(1, int(getattr(req, "n", 1) or 1))
     want_b64 = req.response_format == "b64_json"
     if dims is not None and not want_b64:
         raise HTTPException(400, "size requires response_format=b64_json")
 
-    account, existing_sid = await _acquire_account(pool, req.session_id)
+    account, existing_sid = await _acquire_session_account(pool, req)
 
     data: list[dict] = []
     usage = None
@@ -190,7 +213,13 @@ async def _image_generations(req: ImageGenerationRequest, pool: AccountPool | No
             if step_usage:
                 usage = _merge_usage(usage, step_usage)
             if result["image_urls"]:
-                data.extend(await asyncio.gather(*(_fetch_image(url) for url in result["image_urls"])))
+                settled = await asyncio.gather(*(_fetch_image(url) for url in result["image_urls"]), return_exceptions=True)
+                fetched: list[dict] = []
+                for item in settled:
+                    if isinstance(item, BaseException):
+                        raise item
+                    fetched.append(item)
+                data.extend(fetched)
     except AccountPoolBusy:
         raise HTTPException(429, "all accounts are busy, try again later") from None
 

@@ -96,6 +96,36 @@ def test_acquire_timeout_bad_value_warns(caplog):
     assert _texts(caplog) == ["DANYAPI_ACQUIRE_TIMEOUT='later' is not a valid number, ignoring it"]
 
 
+@pytest.mark.parametrize(
+    ("key", "attribute", "maximum"),
+    [
+        ("DANYAPI_USAGE_MAX_RECORDS", "usage_max_records", config_mod.MAX_USAGE_RECORDS),
+        ("DANYAPI_RESPONSES_MAX_RECORDS", "responses_max_records", config_mod.MAX_RESPONSES_RECORDS),
+        ("DANYAPI_SESSION_CACHE_SIZE", "session_cache_size", config_mod.MAX_SESSION_CACHE_SIZE),
+    ],
+)
+def test_record_count_settings_clamp_at_the_maximum(caplog, key, attribute, maximum):
+    assert maximum == 100000
+    with caplog.at_level(logging.WARNING):
+        settings = _settings_for({key: "100000000"})
+    assert getattr(settings, attribute) == maximum
+    assert _texts(caplog) == [f"{key}=100000000 is above the maximum {maximum}, clamped"]
+    assert getattr(_settings_for({key: "10"}), attribute) == 10
+    assert getattr(_settings_for({key: "0"}), attribute) == 1
+    assert getattr(_settings_for({}), attribute) < maximum
+
+
+def test_tiny_timeout_is_clamped_to_the_minimum(caplog):
+    assert config_mod.MIN_TIMEOUT_SEC == 1.0
+    with caplog.at_level(logging.WARNING):
+        settings = _settings_for({"DANYAPI_TIMEOUT": "0.000001"})
+    assert settings.timeout == config_mod.MIN_TIMEOUT_SEC
+    assert _texts(caplog) == ["DANYAPI_TIMEOUT=1e-06 is below the minimum 1.0, clamped"]
+    assert _settings_for({"DANYAPI_TIMEOUT": "0"}).timeout == 60.0
+    assert _settings_for({"DANYAPI_TIMEOUT": "12.5"}).timeout == 12.5
+    assert _settings_for({}).timeout == 60.0
+
+
 def test_split_env_list_escaped_comma():
     assert config_mod._split_env_list("a\\,b") == ["a,b"]
     assert config_mod._split_env_list("one\\,two,three") == ["one,two", "three"]

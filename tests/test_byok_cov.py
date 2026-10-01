@@ -108,6 +108,19 @@ class _RefreshRecorder:
         return []
 
 
+async def _settle_deferred() -> None:
+    for _ in range(4):
+        pending = [task for task in list(byok_mod._deferred_close_tasks) if not task.done()]
+        if not pending:
+            break
+        await asyncio.gather(*pending, return_exceptions=True)
+        await asyncio.sleep(0)
+
+
+def _acct(index: int, client: Any) -> Any:
+    return byok_mod.DeepSeekAccount(index, client, stable_id=byok_mod._byok_stable_id(f"key-{index}"))
+
+
 def _discarding_wait_for(inner: Any) -> Any:
     async def wrapper(awaitable: Any, timeout: float) -> Any:
         close = getattr(awaitable, "close", None)
@@ -557,6 +570,188 @@ async def test_close_busy_client_closes_after_acquiring():
     assert semaphore.releases == 1
 
 
+async def test_close_pool_keeps_the_sessions_and_the_cache_file_of_an_in_use_pool(caplog):
+    semaphore = asyncio.Semaphore(1)
+    await semaphore.acquire()
+    client = _FakeClient()
+    sessions = MagicMock()
+    account = MagicMock()
+    account.label = "acct#9"
+    account.sessions = sessions
+    account.client = client
+    account.sem = semaphore
+    pool = MagicMock()
+    pool.label = "deepseek"
+    pool.accounts = [account]
+    pool.flush = None
+    store = MagicMock()
+    with caplog.at_level(logging.INFO, logger=LOGGER):
+        await byok_mod._close_pool(pool, [store])
+    assert sessions.close_all.call_count == 0
+    assert store.remove.call_count == 0
+    assert client.closed == 0
+    assert "skip session cleanup for busy byok pool" in caplog.text
+    assert "keep the cache file of a busy byok pool" in caplog.text
+    semaphore.release()
+    pending = list(byok_mod._deferred_close_tasks)
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+    assert client.closed == 1
+
+
+def test_pool_is_busy_reports_a_held_semaphore():
+    semaphore = asyncio.Semaphore(1)
+
+    class _Acct:
+        def __init__(self, sem):
+            self.sem = sem
+
+    class _Pool:
+        def __init__(self, accounts):
+            self.accounts = accounts
+
+    assert byok_mod._pool_is_busy(_Pool([_Acct(semaphore)])) is False
+    assert byok_mod._pool_is_busy(_Pool([])) is False
+    assert byok_mod._pool_is_busy(_Pool([_Acct(None)])) is False
+
+
+async def test_live_pool_entries_orders_the_oldest_first(monkeypatch):
+    monkeypatch.setattr(byok_mod, "BYOK_POOL_LIMIT", 8)
+    monkeypatch.setattr(byok_mod, "BYOK_TOTAL_POOL_LIMIT", 8)
+    monkeypatch.setattr(byok_mod, "DeepSeekClient", lambda **_kwargs: _FakeClient())
+    monkeypatch.setattr(byok_mod, "refresh_provider_models", _RefreshRecorder())
+    await byok_mod._byok_pool("deepseek", ["a"])
+    await byok_mod._byok_pool("deepseek", ["b"])
+    entries = byok_mod._live_pool_entries()
+    assert [(provider, cache_key) for _touched, provider, cache_key, _pool in entries] == [
+        ("deepseek", byok_mod._byok_cache_key(["a"])),
+        ("deepseek", byok_mod._byok_cache_key(["b"])),
+    ]
+    await byok_mod._byok_pool("deepseek", ["a"])
+    entries = byok_mod._live_pool_entries()
+    assert next(iter(entries))[1:] == ("deepseek", byok_mod._byok_cache_key(["b"]), entries[0][3])
+    await _settle_deferred()
+
+
+async def test_total_pool_count_never_exceeds_the_global_limit(monkeypatch):
+    monkeypatch.setattr(byok_mod, "BYOK_POOL_LIMIT", 2)
+    monkeypatch.setattr(byok_mod, "BYOK_TOTAL_POOL_LIMIT", 3)
+    monkeypatch.setattr(byok_mod, "refresh_provider_models", _RefreshRecorder())
+
+    async def build(_provider: str, _tokens: list[str], _scope: str | None):
+        return byok_mod.AccountPool([_acct(0, _FakeClient())]), []
+
+    monkeypatch.setattr(byok_mod, "_build_byok_pool", build)
+    for provider in ("deepseek", "qwen", "gigachat", "opencode"):
+        for index in range(4):
+            await byok_mod._byok_pool(provider, [f"{provider}-{index}"])
+            assert byok_mod._live_pool_count() <= 3
+    await _settle_deferred()
+    assert byok_mod._live_pool_count() == 3
+
+
+async def test_byok_pool_refuses_when_every_live_pool_is_in_use(monkeypatch):
+    monkeypatch.setattr(byok_mod, "BYOK_POOL_LIMIT", 1)
+    monkeypatch.setattr(byok_mod, "BYOK_TOTAL_POOL_LIMIT", 1)
+    monkeypatch.setattr(byok_mod, "DeepSeekClient", lambda **_kwargs: _FakeClient())
+    monkeypatch.setattr(byok_mod, "refresh_provider_models", _RefreshRecorder())
+    held: list[asyncio.Semaphore] = []
+
+    async def build(_provider: str, _tokens: list[str], _scope: str | None):
+        account = _acct(0, _FakeClient())
+        await account.sem.acquire()
+        held.append(account.sem)
+        return byok_mod.AccountPool([account]), []
+
+    monkeypatch.setattr(byok_mod, "_build_byok_pool", build)
+    first = await byok_mod._byok_pool("deepseek", ["a"])
+    assert byok_mod._live_pool_count() == 1
+    with pytest.raises(HTTPException) as excinfo:
+        await byok_mod._byok_pool("deepseek", ["b"])
+    assert excinfo.value.status_code == 503
+    assert excinfo.value.detail == byok_mod._POOL_LIMIT_DETAIL
+    assert first.accounts[0].client.closed == 0
+    assert byok_mod._live_pool_count() == 1
+    assert byok_mod._byok_pools_state()["deepseek"][byok_mod._byok_cache_key(["a"])] is first
+    for semaphore in held:
+        semaphore.release()
+    await _settle_deferred()
+    assert first.accounts[0].client.closed == 0
+
+
+async def test_an_in_use_pool_is_never_evicted_by_the_global_sweep(monkeypatch):
+    monkeypatch.setattr(byok_mod, "BYOK_POOL_LIMIT", 1)
+    monkeypatch.setattr(byok_mod, "BYOK_TOTAL_POOL_LIMIT", 1)
+    monkeypatch.setattr(byok_mod, "DeepSeekClient", lambda **_kwargs: _FakeClient())
+    monkeypatch.setattr(byok_mod, "refresh_provider_models", _RefreshRecorder())
+    held: list[asyncio.Semaphore] = []
+
+    async def build(_provider: str, _tokens: list[str], _scope: str | None):
+        account = _acct(0, _FakeClient())
+        await account.sem.acquire()
+        held.append(account.sem)
+        return byok_mod.AccountPool([account]), []
+
+    monkeypatch.setattr(byok_mod, "_build_byok_pool", build)
+    first = await byok_mod._byok_pool("deepseek", ["a"])
+    with pytest.raises(HTTPException):
+        await byok_mod._byok_pool("deepseek", ["b"])
+    assert byok_mod._byok_pools_state()["deepseek"].get(byok_mod._byok_cache_key(["a"])) is first
+    assert first.accounts[0].client.closed == 0
+    for semaphore in held:
+        semaphore.release()
+    await _settle_deferred()
+
+
+async def test_evicting_an_in_use_pool_never_deletes_its_cache_file(monkeypatch):
+    monkeypatch.setattr(byok_mod, "BYOK_POOL_LIMIT", 4)
+    monkeypatch.setattr(byok_mod, "BYOK_TOTAL_POOL_LIMIT", 8)
+    monkeypatch.setattr(byok_mod, "DeepSeekClient", lambda **_kwargs: _FakeClient())
+    monkeypatch.setattr(byok_mod, "refresh_provider_models", _RefreshRecorder())
+    store = MagicMock()
+    held: list[asyncio.Semaphore] = []
+
+    async def build(_provider: str, _tokens: list[str], _scope: str | None):
+        account = _acct(0, _FakeClient())
+        await account.sem.acquire()
+        held.append(account.sem)
+        return byok_mod.AccountPool([account]), [store]
+
+    monkeypatch.setattr(byok_mod, "_build_byok_pool", build)
+    pool = await byok_mod._byok_pool("deepseek", ["a"])
+    cache_key = byok_mod._byok_cache_key(["a"])
+    assert byok_mod._byok_stores_state()["deepseek"][cache_key] == [store]
+    byok_mod._evict_pools(byok_mod._evictable_pool_entries(1, ("other", "key"), reserve=0))
+    await _settle_deferred()
+    assert byok_mod._byok_pools_state()["deepseek"][cache_key] is pool
+    assert store.remove.call_count == 0
+    assert pool.accounts[0].client.closed == 0
+    held[0].release()
+    await byok_mod._close_pool(pool, [store])
+    assert pool.accounts[0].client.closed == 1
+    assert store.remove.call_count == 1
+
+
+async def test_close_pool_later_schedules_the_close():
+    client = _FakeClient()
+    account = _acct(0, client)
+    pool = byok_mod.AccountPool([account])
+    byok_mod._close_pool_later(pool)
+    await _settle_deferred()
+    assert client.closed == 1
+
+
+def test_mark_pool_touched_tolerates_a_pool_that_refuses_attributes():
+    class _Locked:
+        __slots__ = ()
+
+        def __setattr__(self, name, value):
+            raise AttributeError(name)
+
+    byok_mod._mark_pool_touched(_Locked())
+    assert byok_mod._pool_touched(_Locked()) == -1
+
+
 async def test_close_busy_client_gives_up_after_the_timeout(monkeypatch, caplog):
     semaphore = _FakeSemaphore(acquire_now=False)
     client = _FakeClient()
@@ -693,10 +888,6 @@ async def test_build_accounts_closes_everything_on_cancellation(monkeypatch):
     assert clients["second"].closed == 1
 
 
-def _acct(index: int, client: Any) -> Any:
-    return byok_mod.DeepSeekAccount(index, client, stable_id=byok_mod._byok_stable_id(f"key-{index}"))
-
-
 async def test_build_byok_pool_reports_no_valid_deepseek_key(monkeypatch):
     monkeypatch.setattr(byok_mod, "DeepSeekClient", lambda **_kwargs: _FakeClient(ok=False))
     with pytest.raises(HTTPException) as excinfo:
@@ -818,6 +1009,7 @@ async def test_build_byok_pool_gives_the_replacement_the_persisted_stores(monkey
     assert replacement is not first
     assert replacement.resolve_context(("hello", "world")) == "s1"
     assert [account.index for account in replacement.accounts] == [0]
+    await _settle_deferred()
     assert first.accounts[0].client.closed == 1
     assert app.state.byok_pools["deepseek"][cache_key] is replacement
     assert [store._path.name for store in app.state.byok_stores["deepseek"][cache_key]] == [
@@ -916,6 +1108,7 @@ async def test_byok_pool_closes_the_stale_pool_after_the_replacement_is_cached(m
     cache_key = byok_mod._byok_cache_key(["reused"])
     app.state.byok_pools["deepseek"][cache_key] = stale
     fresh = await byok_mod._byok_pool("deepseek", ["reused"])
+    await _settle_deferred()
     assert stale_client.closed == 1
     assert fresh is not stale
     assert app.state.byok_pools["deepseek"][cache_key] is fresh
@@ -934,6 +1127,7 @@ async def test_byok_pool_evicts_the_oldest_key_over_the_limit(monkeypatch):
     first_client = first.accounts[0].client
     app.state.byok_stores["deepseek"][first_key] = [store]
     second = await byok_mod._byok_pool("deepseek", ["second-key"])
+    await _settle_deferred()
     assert first is not second
     assert list(app.state.byok_pools["deepseek"]) == [byok_mod._byok_cache_key(["second-key"])]
     assert first_key not in app.state.byok_stores["deepseek"]

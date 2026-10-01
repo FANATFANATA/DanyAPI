@@ -9,29 +9,32 @@ import danyapi.api.openai as openai_mod
 from danyapi.api.openai import app
 
 
-def test_request_client_ip_forwarded_first():
+def test_request_client_ip_ignores_forwarded_headers_from_a_remote_peer():
     request = _req({"x-forwarded-for": "1.2.3.4, 10.0.0.1"}, "10.0.0.5")
+    assert openai_mod._request_client_ip(request) == "10.0.0.5"
+
+
+def test_request_client_ip_honours_forwarded_headers_from_a_loopback_proxy():
+    request = _req({"x-forwarded-for": " 1.2.3.4 , 10.0.0.1", "x-real-ip": "5.6.7.8"}, "127.0.0.1")
     assert openai_mod._request_client_ip(request) == "1.2.3.4"
+    assert openai_mod._request_client_ip(_req({"x-forwarded-for": "  ", "x-real-ip": " 5.6.7.8 "}, "127.0.0.1")) == "5.6.7.8"
+    assert openai_mod._request_client_ip(_req({"x-real-ip": "5.6.7.8"}, "::1")) == "5.6.7.8"
 
 
-def test_request_client_ip_empty_forwarded_falls_back():
-    request = _req({"x-forwarded-for": "  ", "x-real-ip": "5.6.7.8"}, "10.0.0.5")
-    assert openai_mod._request_client_ip(request) == "5.6.7.8"
+def test_request_client_ip_remote_peer_wins_over_a_forged_real_ip():
+    assert openai_mod._request_client_ip(_req({"x-real-ip": "5.6.7.8"}, "203.0.113.7")) == "203.0.113.7"
 
 
-def test_request_client_ip_real_ip():
-    request = _req({"x-real-ip": "5.6.7.8"}, "10.0.0.5")
-    assert openai_mod._request_client_ip(request) == "5.6.7.8"
-
-
-def test_request_client_ip_client_fallback():
+def test_request_client_ip_uses_the_peer_when_no_proxy_headers():
     request = _req({}, "10.0.0.5")
     assert openai_mod._request_client_ip(request) == "10.0.0.5"
+    assert openai_mod._request_client_ip(_req({}, "127.0.0.1")) == "127.0.0.1"
 
 
 def test_request_client_ip_no_client():
     request = _req({}, None)
     assert openai_mod._request_client_ip(request) == "-"
+    assert openai_mod._request_client_ip(_req({"x-forwarded-for": "1.2.3.4"}, None)) == "-"
 
 
 def test_request_details_all_fields():
@@ -212,13 +215,14 @@ def test_log_requests_success_via_client(caplog):
     app.state.pool = None
     app.state.qwen_pool = None
     with caplog.at_level(logging.INFO, logger="danyapi.api"):
-        client = TestClient(app)
+        client = TestClient(app, client=("198.51.100.7", 1234))
         resp = client.get("/health", headers={"x-forwarded-for": "9.9.9.9"})
         client.close()
     assert resp.status_code == 200
     logged = [r for r in caplog.records if r.name == "danyapi.api" and r.getMessage().startswith("GET /health ")]
     assert logged
-    assert "9.9.9.9" in logged[0].getMessage()
+    assert "198.51.100.7" in logged[0].getMessage()
+    assert "9.9.9.9" not in logged[0].getMessage()
     assert "ok" in logged[0].getMessage()
 
 

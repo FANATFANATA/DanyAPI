@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import ssl
+import stat
 import sys
 import tempfile
 from collections.abc import Iterator
@@ -315,6 +316,71 @@ def test_resolve_ca_rejects_a_missing_override(monkeypatch, tmp_path):
 
     with pytest.raises(RuntimeError, match=f"^{re.escape(f'DANYAPI_GIGACHAT_CA_FILE does not exist: {missing}')}$"):
         tls.resolve_ca()
+
+
+def test_resolve_ca_rejects_an_override_that_is_not_a_ca_bundle(monkeypatch, tmp_path):
+    broken = tmp_path / "broken.pem"
+    broken.write_text("this is not a pem file\n", encoding="ascii")
+    monkeypatch.setenv("DANYAPI_GIGACHAT_CA_FILE", str(broken))
+
+    with pytest.raises(RuntimeError) as excinfo:
+        tls.resolve_ca()
+
+    assert str(excinfo.value).startswith(f"DANYAPI_GIGACHAT_CA_FILE is not a usable CA bundle: {broken}: ")
+    assert isinstance(excinfo.value.__cause__, ssl.SSLError)
+
+
+def test_atomic_write_closes_the_descriptor_when_the_stream_cannot_be_wrapped(monkeypatch, tmp_path):
+    opened: list[int] = []
+
+    def _boom(fd: int, *args: Any, **kwargs: Any) -> Any:
+        opened.append(fd)
+        raise OSError("cannot wrap the descriptor")
+
+    monkeypatch.setattr(tls.os, "fdopen", _boom)
+    target = tmp_path / BUNDLE_NAME
+
+    with pytest.raises(OSError, match=r"^cannot wrap the descriptor$"):
+        tls._write_combined(target, [BUNDLED_ROOT])
+
+    assert len(opened) == 1
+    with pytest.raises(OSError):
+        os.fstat(opened[0])
+    assert not target.exists()
+    assert list(tmp_path.glob(f"{BUNDLE_NAME}.*.tmp")) == []
+
+
+def test_write_combined_creates_the_cache_dir_private(monkeypatch, tmp_path):
+    recorded: list[tuple[str, int]] = []
+    original = tls.os.chmod
+
+    def _chmod(path: Any, mode: int) -> None:
+        recorded.append((str(path), mode))
+        original(path, mode)
+
+    monkeypatch.setattr(tls.os, "chmod", _chmod)
+    target = tmp_path / "cache" / BUNDLE_NAME
+
+    tls._write_combined(target, [BUNDLED_ROOT])
+
+    assert recorded == [(str(tmp_path / "cache"), 0o700)]
+    assert target.read_bytes() == ROOT_ONLY
+    if os.name != "nt":
+        assert stat.S_IMODE((tmp_path / "cache").stat().st_mode) == 0o700
+
+
+def test_write_combined_survives_a_cache_dir_that_cannot_be_restricted(monkeypatch, tmp_path, caplog):
+    def _refuse(path: Any, mode: int) -> None:
+        raise OSError("chmod is not allowed here")
+
+    monkeypatch.setattr(tls.os, "chmod", _refuse)
+    target = tmp_path / "cache" / BUNDLE_NAME
+
+    with caplog.at_level(logging.WARNING, logger="danyapi.gigachat"):
+        tls._write_combined(target, [BUNDLED_ROOT])
+
+    assert target.read_bytes() == ROOT_ONLY
+    assert f"gigachat CA cache dir {tmp_path / 'cache'} could not be restricted to 0700" in caplog.text
 
 
 def test_resolve_ca_ignores_the_override_once_the_cache_is_warm(monkeypatch, tmp_path):

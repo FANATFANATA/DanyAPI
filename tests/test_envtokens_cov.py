@@ -7,6 +7,7 @@ import sys
 import threading
 from collections.abc import MutableMapping
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -532,6 +533,28 @@ def test_env_token_list_validates_every_kept_entry():
     assert excinfo.value.detail == "deepseek_tokens entries must not contain commas, quotes, backslashes, '#' or spaces"
 
 
+def test_env_token_list_bounds_the_posted_list_before_iterating(monkeypatch):
+    calls = 0
+
+    class _Unbounded(list):
+        def __iter__(self):
+            nonlocal calls
+            calls += 1
+            return super().__iter__()
+
+    with pytest.raises(HTTPException) as excinfo:
+        envtokens._env_token_list(_Unbounded(f"t{index}" for index in range(envtokens.MAX_TOKENS_PER_REQUEST + 1)), "deepseek_tokens")
+    assert excinfo.value.status_code == 400
+    assert calls == 0
+
+
+def test_env_token_list_dedupes_a_large_list_without_quadratic_scanning():
+    repeated = ["tok"] * envtokens.MAX_TOKENS_PER_REQUEST
+    assert envtokens._env_token_list(repeated, "deepseek_tokens") == ["tok"]
+    unique = [f"tok{index}" for index in range(envtokens.MAX_TOKENS_PER_REQUEST)]
+    assert len(envtokens._env_token_list(unique, "deepseek_tokens")) == envtokens.MAX_TOKENS_PER_REQUEST
+
+
 def test_env_token_list_caps_at_max_tokens_per_request():
     cap = envtokens.MAX_TOKENS_PER_REQUEST
     assert cap == 64
@@ -701,12 +724,41 @@ def test_known_tokens_drops_empty_entries():
     assert envtokens._known_tokens([], []) == set()
 
 
+async def test_validated_tokens_refuses_when_the_recheck_of_a_broken_account_cannot_run(caplog):
+    broken = SimpleNamespace(broken=True, client=_FakeClient(auth_error=OSError("upstream unreachable")))
+    plan = [("tok", envtokens._PLAN_BROKEN, broken)]
+    with caplog.at_level(logging.WARNING, logger=LOGGER), pytest.raises(HTTPException) as excinfo:
+        await envtokens._validated_tokens(plan, "deepseek", lambda _token: _FakeClient())
+    assert excinfo.value.status_code == 503
+    assert "token auth check could not reach the upstream" in excinfo.value.detail
+    assert "OSError: upstream unreachable" in excinfo.value.detail
+    assert "token auth check failed: OSError: upstream unreachable" in caplog.text
+
+
+async def test_validated_tokens_refuses_when_a_new_token_cannot_be_checked(caplog):
+    plan = [("tok", envtokens._PLAN_NEW, None)]
+    with caplog.at_level(logging.WARNING, logger=LOGGER), pytest.raises(HTTPException) as excinfo:
+        await envtokens._validated_tokens(plan, "deepseek", lambda _token: _FakeClient(auth_error=OSError("no route")))
+    assert excinfo.value.status_code == 503
+    assert "deepseek" in excinfo.value.detail
+
+
+async def test_validated_tokens_keeps_counting_a_genuinely_rejected_new_token():
+    plan = [("tok", envtokens._PLAN_NEW, None)]
+    validated, skipped = await envtokens._validated_tokens(plan, "deepseek", lambda _token: _FakeClient(ok=False))
+    assert validated == []
+    assert skipped == 1
+
+
 async def test_check_token_auth(caplog):
     assert await envtokens._check_token_auth(_FakeClient(ok=True)) is True
+    assert await envtokens._check_token_auth(_FakeClient(ok=False)) is False
     failing = _FakeClient(auth_error=ValueError("boom"))
     with caplog.at_level(logging.WARNING, logger=LOGGER):
-        assert await envtokens._check_token_auth(failing) is False
+        with pytest.raises(envtokens.TokenCheckFailed) as excinfo:
+            await envtokens._check_token_auth(failing)
     assert caplog.records[0].getMessage() == "token auth check failed: ValueError: boom"
+    assert "ValueError: boom" in str(excinfo.value)
 
 
 async def test_close_client_swallows_close_failures(caplog):
@@ -1155,8 +1207,9 @@ async def test_add_tokens_reports_a_rejected_new_token(monkeypatch, _isolated, c
 
 
 def test_module_imports_without_python_dotenv():
-    saved = sys.modules.get("dotenv")
     assert envtokens._dotenv_values is not None
+    saved = sys.modules.get("dotenv")
+    saved_namespace = dict(vars(envtokens))
     try:
         sys.modules["dotenv"] = None
         assert importlib.reload(envtokens)._dotenv_values is None
@@ -1164,4 +1217,7 @@ def test_module_imports_without_python_dotenv():
         if saved is not None:
             sys.modules["dotenv"] = saved
         importlib.reload(envtokens)
+        vars(envtokens).clear()
+        vars(envtokens).update(saved_namespace)
     assert envtokens._dotenv_values is not None
+    assert envtokens.AddTokensRequest is saved_namespace["AddTokensRequest"]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import logging
 import os
@@ -93,7 +94,14 @@ def _atomic_write(target: Path, payload: bytes) -> None:
     handle, name = tempfile.mkstemp(dir=str(target.parent), prefix=target.name + ".", suffix=".tmp")
     temp = Path(name)
     try:
-        with os.fdopen(handle, "wb") as stream:
+        stream = os.fdopen(handle, "wb")
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.close(handle)
+        temp.unlink(missing_ok=True)
+        raise
+    try:
+        with stream:
             stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
@@ -103,9 +111,17 @@ def _atomic_write(target: Path, payload: bytes) -> None:
         raise
 
 
+def _secure_dir(directory: Path) -> None:
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        os.chmod(directory, 0o700)
+    except OSError as exc:
+        log.warning("gigachat CA cache dir %s could not be restricted to 0700: %s", directory, exc)
+
+
 def _write_combined(target: Path, parts: list[Path], expected: bytes | None = None) -> str:
     payload = _combined_payload(parts) if expected is None else expected
-    target.parent.mkdir(parents=True, exist_ok=True)
+    _secure_dir(target.parent)
     _atomic_write(target, payload)
     return str(target)
 
@@ -129,7 +145,10 @@ def resolve_ca() -> ssl.SSLContext:
             if not Path(override).is_file():
                 raise RuntimeError(f"DANYAPI_GIGACHAT_CA_FILE does not exist: {override}")
             log.info("gigachat CA override in use: %s", override)
-            context = ssl.create_default_context(cafile=override)
+            try:
+                context = ssl.create_default_context(cafile=override)
+            except (ssl.SSLError, OSError, ValueError) as exc:
+                raise RuntimeError(f"DANYAPI_GIGACHAT_CA_FILE is not a usable CA bundle: {override}: {exc}") from exc
             _resolved[0] = context
             return context
 

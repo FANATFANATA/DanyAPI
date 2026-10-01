@@ -26,6 +26,11 @@ REAL_SLEEP = asyncio.sleep
 
 OPENAI_FINISH_REASONS = {"stop", "length", "tool_calls", "content_filter", "function_call", "error"}
 
+
+def _neutral_jitter(low: float, high: float) -> float:
+    return (low + high) / 2
+
+
 OK_SSE = (
     'data: {"response.created":{"chat_id":"c1","parent_id":"p0","response_id":"r1","response_index":"0"}} \n'
     "\n"
@@ -148,11 +153,8 @@ class FakeAccount:
 
 
 @pytest.fixture(autouse=True)
-def zero_backoff():
-    original = retry_mod.RETRY_BACKOFF_SEC
-    retry_mod.RETRY_BACKOFF_SEC = 0.0
-    yield
-    retry_mod.RETRY_BACKOFF_SEC = original
+def zero_backoff(monkeypatch):
+    monkeypatch.setattr(retry_mod, "RETRY_BACKOFF_SEC", 0.0)
 
 
 def _args(acct, pool=None, existing_sid: str | None = "s1", tool_mode: bool = False, **extra):
@@ -624,6 +626,7 @@ async def test_obtain_writes_the_serialized_session_to_the_store():
         "model": "qwen3.8-max",
         "accumulated_input_tokens": 0,
         "accumulated_output_tokens": 0,
+        "idle_seconds": 0.0,
     }
     registry.touch_last_message("fresh", "r1")
     assert registry.get("fresh").last_response_id == "r1"
@@ -774,6 +777,7 @@ async def test_collect_response_sleeps_after_releasing_the_account_lock(monkeypa
 
     monkeypatch.setattr(qwen_api.asyncio, "sleep", recorder)
     monkeypatch.setattr(retry_mod, "RETRY_BACKOFF_SEC", 3.0)
+    monkeypatch.setattr(retry_mod.random, "uniform", _neutral_jitter)
     order: list[str] = []
     acct = FakeAccount()
     acct.client.completion = AsyncMock(side_effect=[HTTPException(429, "slow"), FakeResp(OK_SSE)])

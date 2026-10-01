@@ -8,6 +8,7 @@ import pytest
 import danyapi.api.retry as retry_mod
 import danyapi.qwen.api as qwen_api
 from danyapi.api import shaping
+from danyapi.api.retry import RETRY_BACKOFF_JITTER, RETRY_BACKOFF_MAX_SEC, RETRY_BACKOFF_SEC
 from danyapi.qwen.client import QwenError
 from danyapi.qwen.stream import QwenStreamReconstructor
 
@@ -41,6 +42,22 @@ IMG_SSE = (
 )
 
 TOOL_JSON = '{"tool_calls":[{"name":"get_weather","arguments":{"city":"Moscow"}}]}'
+
+RETRIED_ATTEMPTS = (1, 4, 10)
+
+
+def _lowest_jitter(low: float, high: float) -> float:
+    return low
+
+
+def _highest_jitter(low: float, high: float) -> float:
+    return high
+
+
+def _retry_delay_bounds(attempt: int) -> tuple[float, float]:
+    base = min(RETRY_BACKOFF_MAX_SEC, RETRY_BACKOFF_SEC * 2 ** (attempt - 1))
+    return max(0.0, base * (1 - RETRY_BACKOFF_JITTER)), min(RETRY_BACKOFF_MAX_SEC, base * (1 + RETRY_BACKOFF_JITTER))
+
 
 TOOLS = [
     {
@@ -160,11 +177,8 @@ class _ImgMsg:
 
 
 @pytest.fixture(autouse=True)
-def zero_backoff():
-    orig = retry_mod.RETRY_BACKOFF_SEC
-    retry_mod.RETRY_BACKOFF_SEC = 0.0
-    yield
-    retry_mod.RETRY_BACKOFF_SEC = orig
+def zero_backoff(monkeypatch):
+    monkeypatch.setattr(retry_mod, "RETRY_BACKOFF_SEC", 0.0)
 
 
 def _args(acct, pool=None, existing_sid="s1", tool_mode=False, tool_schemas=None, **extra):
@@ -203,14 +217,25 @@ def _rec_with(text, reasoning=None):
     return rec
 
 
-def test_retry_delay_variants():
-    orig = retry_mod.RETRY_BACKOFF_SEC
-    retry_mod.RETRY_BACKOFF_SEC = 1.0
-    try:
-        assert qwen_api._retry_delay(1) == 1.0
-        assert qwen_api._retry_delay(10) == 8.0
-    finally:
-        retry_mod.RETRY_BACKOFF_SEC = orig
+def test_retry_delay_variants(monkeypatch):
+    monkeypatch.setattr(retry_mod, "RETRY_BACKOFF_SEC", RETRY_BACKOFF_SEC)
+
+    for attempt in RETRIED_ATTEMPTS:
+        low, high = _retry_delay_bounds(attempt)
+        assert low <= qwen_api._retry_delay(attempt) <= high
+
+    for attempt in RETRIED_ATTEMPTS:
+        low, high = _retry_delay_bounds(attempt)
+        monkeypatch.setattr(retry_mod.random, "uniform", _lowest_jitter)
+        assert qwen_api._retry_delay(attempt) == low
+        monkeypatch.setattr(retry_mod.random, "uniform", _highest_jitter)
+        assert qwen_api._retry_delay(attempt) == high
+
+    assert qwen_api._retry_delay(1, "2.5") == 2.5
+    assert qwen_api._retry_delay(1, 900) == RETRY_BACKOFF_MAX_SEC
+    assert qwen_api._retry_delay(1, -4) == 0.0
+    monkeypatch.setattr(retry_mod.random, "uniform", _highest_jitter)
+    assert qwen_api._retry_delay(1, "later") == _retry_delay_bounds(1)[1]
 
 
 def test_is_retryable_http_variants():

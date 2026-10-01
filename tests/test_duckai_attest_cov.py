@@ -2,7 +2,9 @@ import base64
 import json
 import logging
 import os
+import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -360,18 +362,34 @@ def test_drain_swallows_a_read_failure_and_keeps_what_it_read() -> None:
     assert stream.reads == 2
 
 
-def test_solver_env_drops_node_injection_vectors(monkeypatch) -> None:
+def test_solver_env_forwards_only_the_allowlist(monkeypatch) -> None:
     monkeypatch.setenv("NODE_OPTIONS", "--require=C:/tmp/evil.js")
     monkeypatch.setenv("NODE_PATH", "C:/tmp/modules")
     monkeypatch.setenv("NODE_REPL_EXTERNAL_MODULE", "C:/tmp/repl.js")
     monkeypatch.setenv("ELECTRON_RUN_AS_NODE", "1")
     monkeypatch.setenv("PATH", "C:/windows")
-    base = attest._base_solver_env()
-    assert {"NODE_OPTIONS", "NODE_PATH", "NODE_REPL_EXTERNAL_MODULE", "ELECTRON_RUN_AS_NODE"} <= set(base)
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "super-secret-value")
+    monkeypatch.setenv("DATABASE_URL", "postgres://user:pass@host/db")
+    monkeypatch.setenv("DANYAPI_SESSION_TTL_SECONDS", "600")
+    monkeypatch.setenv("TEMP", "C:/tmp")
+    monkeypatch.setenv("HOME", "C:/Users/danyapi")
+
     env = attest._solver_env()
-    assert set(env) & attest._SOLVER_ENV_DENYLIST == set()
+
+    assert set(env) <= set(attest.SOLVER_ENV_ALLOWLIST)
+    assert set(env) <= set(attest._base_solver_env())
+    assert "NODE_OPTIONS" not in env
+    assert "NODE_PATH" not in env
+    assert "NODE_REPL_EXTERNAL_MODULE" not in env
+    assert "ELECTRON_RUN_AS_NODE" not in env
+    assert "AWS_SECRET_ACCESS_KEY" not in env
+    assert "DATABASE_URL" not in env
+    assert "DANYAPI_SESSION_TTL_SECONDS" not in env
     assert env["PATH"] == "C:/windows"
-    assert len(env) == len(base) - 4
+    assert env["TEMP"] == "C:/tmp"
+    assert env["HOME"] == "C:/Users/danyapi"
+    for name in ("PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "COMSPEC", "TEMP", "TMP", "TMPDIR", "HOME", "LANG", "LC_ALL"):
+        assert name in attest.SOLVER_ENV_ALLOWLIST
 
 
 def test_run_solver_hands_the_scrubbed_env_to_the_child(monkeypatch) -> None:
@@ -379,6 +397,7 @@ def test_run_solver_hands_the_scrubbed_env_to_the_child(monkeypatch) -> None:
     monkeypatch.setenv("NODE_PATH", "C:/tmp/modules")
     monkeypatch.setenv("NODE_REPL_EXTERNAL_MODULE", "C:/tmp/repl.js")
     monkeypatch.setenv("ELECTRON_RUN_AS_NODE", "1")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "super-secret-value")
     monkeypatch.setenv("PATH", "C:/windows")
     popen = _popen(monkeypatch, _FakeProc(stdout='{"ok":true}\n'))
     returncode, stdout, stderr = attest._run_solver("C:/node.exe", '{"script":"x"}')
@@ -387,7 +406,9 @@ def test_run_solver_hands_the_scrubbed_env_to_the_child(monkeypatch) -> None:
     assert stdout == '{"ok":true}\n'
     assert stderr == ""
     assert args == ["C:/node.exe", str(attest.JSA_SCRIPT)]
-    assert set(kwargs["env"]) & attest._SOLVER_ENV_DENYLIST == set()
+    assert set(kwargs["env"]) <= set(attest.SOLVER_ENV_ALLOWLIST)
+    assert "AWS_SECRET_ACCESS_KEY" not in kwargs["env"]
+    assert "NODE_OPTIONS" not in kwargs["env"]
     assert kwargs["env"]["PATH"] == "C:/windows"
     assert kwargs["stdin"] is subprocess.PIPE
     assert kwargs["stdout"] is subprocess.PIPE
@@ -398,7 +419,7 @@ def test_run_solver_hands_the_scrubbed_env_to_the_child(monkeypatch) -> None:
     assert kwargs["close_fds"] is True
     assert popen.proc.stdin_handle().written == ['{"script":"x"}']
     assert popen.proc.stdin_handle().closed is True
-    assert popen.proc.wait_timeouts == [attest.SOLVER_TIMEOUT_SEC]
+    assert popen.proc.wait_timeouts[0] == pytest.approx(attest.SOLVER_TIMEOUT_SEC, abs=0.5)
     assert popen.proc.stdout.closed is True
     assert popen.proc.stderr.closed is True
 
@@ -423,7 +444,8 @@ def test_run_solver_kills_a_hung_solver_and_reports_the_timeout(monkeypatch) -> 
     assert str(excinfo.value) == f"attestation solver timed out after {attest.SOLVER_TIMEOUT_SEC:g}s"
     assert isinstance(excinfo.value.__cause__, subprocess.TimeoutExpired)
     assert proc.killed is True
-    assert proc.wait_timeouts == [attest.SOLVER_TIMEOUT_SEC, None]
+    assert proc.wait_timeouts[0] == pytest.approx(attest.SOLVER_TIMEOUT_SEC, abs=0.5)
+    assert proc.wait_timeouts[1] is None
     assert proc.stdout.closed is True
 
 
@@ -452,6 +474,35 @@ def test_run_solver_keeps_only_the_bounded_tail_of_a_chatty_solver(monkeypatch) 
     assert stdout.startswith("x")
     assert len(stderr) == 64
     assert attest._solver_result(stdout) == {"ok": True, "result": {"client_hashes": ["a"]}}
+
+
+def test_run_solver_is_bounded_when_the_child_never_reads_the_payload(monkeypatch, tmp_path) -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not available")
+    monkeypatch.setattr(attest, "SOLVER_TIMEOUT_SEC", 2.0)
+    monkeypatch.setattr(attest, "JSA_SCRIPT", tmp_path / "silent.js")
+    (tmp_path / "silent.js").write_text("setTimeout(function () {}, 600000);\n", encoding="utf-8")
+    threads_before = threading.active_count()
+    outcome: list[Any] = []
+    finished = threading.Event()
+
+    def _run() -> None:
+        try:
+            outcome.append(attest._run_solver(node, '{"script":"' + "a" * (900 * 1024) + '"}'))
+        except BaseException as exc:
+            outcome.append(exc)
+        finally:
+            finished.set()
+
+    worker = threading.Thread(target=_run, daemon=True)
+    worker.start()
+    assert finished.wait(30.0) is True
+    worker.join(timeout=5.0)
+    assert worker.is_alive() is False
+    assert isinstance(outcome[0], attest.AttestationError)
+    assert str(outcome[0]) == "attestation solver timed out after 2s"
+    assert threading.active_count() == threads_before
 
 
 def test_solver_result_reads_the_last_line() -> None:

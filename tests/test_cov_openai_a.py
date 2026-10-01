@@ -163,11 +163,8 @@ def clean_state():
 
 
 @pytest.fixture(autouse=True)
-def zero_backoff():
-    orig = retry_mod.RETRY_BACKOFF_SEC
-    retry_mod.RETRY_BACKOFF_SEC = 0.0
-    yield
-    retry_mod.RETRY_BACKOFF_SEC = orig
+def zero_backoff(monkeypatch):
+    monkeypatch.setattr(retry_mod, "RETRY_BACKOFF_SEC", 0.0)
 
 
 @pytest.fixture
@@ -387,7 +384,10 @@ def test_add_tokens_reactivate_check_raises(monkeypatch):
     client = TestClient(app)
     resp = client.post("/v1/tokens", headers=ADMIN_HEADERS, json={"deepseek_tokens": [token]})
     client.close()
-    assert resp.status_code == 400
+    assert resp.status_code == 503
+    assert resp.json()["error"]["type"] == "api_error"
+    assert "token auth check could not reach the upstream" in resp.json()["error"]["message"]
+    assert "RuntimeError: x" in resp.json()["error"]["message"]
 
 
 def test_add_tokens_reactivate_not_valid(monkeypatch):

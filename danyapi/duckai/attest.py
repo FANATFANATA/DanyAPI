@@ -26,13 +26,33 @@ JSA_HEADER = "X-Vqd-Hash-1"
 JSA_SCRIPT = Path(__file__).resolve().parent / "jsa_solver.js"
 
 SOLVER_TIMEOUT_SEC = 20.0
+SOLVER_JOIN_TIMEOUT_SEC = 1.0
 SOLVER_OUTPUT_LIMIT = 1024 * 1024
 SOLVER_ERROR_CHARS = 200
 MAX_SCRIPT_BYTES = 1024 * 1024
 
 INITIAL_JSA = "initial"
 
-_SOLVER_ENV_DENYLIST = frozenset({"NODE_OPTIONS", "NODE_PATH", "NODE_REPL_EXTERNAL_MODULE", "ELECTRON_RUN_AS_NODE"})
+SOLVER_ENV_ALLOWLIST = (
+    "PATH",
+    "PATHEXT",
+    "SYSTEMROOT",
+    "SYSTEMDRIVE",
+    "WINDIR",
+    "COMSPEC",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "HOME",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "USERPROFILE",
+    "APPDATA",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "OS",
+)
 
 _BASE64_RE = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
 
@@ -49,7 +69,8 @@ def _note_remote_script_exposure() -> None:
 
 
 def _solver_env() -> dict[str, str]:
-    return {key: value for key, value in _base_solver_env().items() if key not in _SOLVER_ENV_DENYLIST}
+    source = _base_solver_env()
+    return {name: value for name, value in source.items() if name.upper() in SOLVER_ENV_ALLOWLIST}
 
 
 def _b64encode(raw: bytes) -> str:
@@ -156,7 +177,16 @@ def _drain(stream: IO[str], cap: int, out: list[str]) -> None:
     out.append("".join(parts))
 
 
+def _feed(stream: IO[str], payload: str) -> None:
+    try:
+        stream.write(payload)
+        stream.close()
+    except (OSError, ValueError):
+        pass
+
+
 def _run_solver(node: str, payload: str) -> tuple[int, str, str]:
+    deadline = time.monotonic() + SOLVER_TIMEOUT_SEC
     proc = subprocess.Popen(  # nosec B603
         [node, str(JSA_SCRIPT)],
         stdin=subprocess.PIPE,
@@ -175,15 +205,13 @@ def _run_solver(node: str, payload: str) -> tuple[int, str, str]:
     ]
     for reader in readers:
         reader.start()
+    writer: threading.Thread | None = None
     try:
         if proc.stdin is not None:
-            try:
-                proc.stdin.write(payload)
-                proc.stdin.close()
-            except (OSError, ValueError):
-                pass
+            writer = threading.Thread(target=_feed, args=(proc.stdin, payload), daemon=True)
+            writer.start()
         try:
-            returncode = proc.wait(timeout=SOLVER_TIMEOUT_SEC)
+            returncode = proc.wait(timeout=max(0.0, deadline - time.monotonic()))
         except subprocess.TimeoutExpired as exc:
             raise AttestationError(f"attestation solver timed out after {SOLVER_TIMEOUT_SEC:g}s") from exc
         finally:
@@ -193,8 +221,10 @@ def _run_solver(node: str, payload: str) -> tuple[int, str, str]:
     except OSError as exc:
         raise AttestationError(f"attestation solver is not runnable: {exc}") from exc
     finally:
+        if writer is not None:
+            writer.join(timeout=SOLVER_JOIN_TIMEOUT_SEC)
         for reader in readers:
-            reader.join(timeout=SOLVER_TIMEOUT_SEC)
+            reader.join(timeout=SOLVER_JOIN_TIMEOUT_SEC)
         for handle in (proc.stdout, proc.stderr, proc.stdin):
             if handle is not None:
                 try:

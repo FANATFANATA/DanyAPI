@@ -8,7 +8,7 @@ from typing import Any
 
 import httpx
 
-from ..api.retry import MAX_RETRIES, RETRY_BACKOFF_MAX_SEC, RETRYABLE_HTTP_STATUSES, _retry_delay
+from ..api.retry import MAX_RETRIES, RETRY_BACKOFF_MAX_SEC, RETRYABLE_HTTP_STATUSES, _retry_after_hint, _retry_delay
 
 log = logging.getLogger("danyapi.opencode")
 
@@ -166,16 +166,10 @@ def error_message(payload: Any, status: int) -> tuple[str, str]:
 
 
 def _retry_after_seconds(resp: httpx.Response) -> float:
-    header = resp.headers.get("Retry-After", "").strip()
-    if not header:
+    hinted = _retry_after_hint(resp.headers.get("Retry-After"))
+    if hinted is None or hinted <= 0.0:
         return _retry_delay(1)
-    try:
-        advertised = float(header)
-    except ValueError:
-        return _retry_delay(1)
-    if advertised <= 0.0:
-        return _retry_delay(1)
-    return min(advertised, RETRY_BACKOFF_MAX_SEC)
+    return min(hinted, RETRY_BACKOFF_MAX_SEC)
 
 
 class OpenCodeClient:

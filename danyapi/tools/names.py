@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from difflib import get_close_matches
 from functools import lru_cache
 from typing import Any
 
-from .common import ToolCall, _tool_function
+from .common import ToolCall, _tool_function, dumps_arguments
 from .jsonfix import _coerce_scalar, _loads_lenient
 
 _FUZZY_NAME_CUTOFF = 0.8
@@ -83,22 +84,28 @@ def _alias_rows(seed: tuple[tuple[str, tuple[Any, ...]], ...]) -> tuple[tuple[st
     return tuple(rows)
 
 
-_scope_cache: list[tuple[dict[Any, Any], tuple[Any, ...], tuple[tuple[str, tuple[Any, ...]], ...]]] = []
+def _scope_signature(tool_schemas: dict[Any, Any]) -> tuple[tuple[Any, ...], tuple[tuple[str, tuple[Any, ...]], ...]]:
+    keys = tuple(tool_schemas)
+    seed: list[tuple[str, tuple[Any, ...]]] = []
+    empty: tuple[Any, ...] = ()
+    for known, spec in tool_schemas.items():
+        aliases = spec.get("_aliases") if isinstance(spec, dict) else None
+        seed.append((known, empty) if not aliases else (known, tuple(aliases)))
+    return keys, tuple(seed)
+
+
+_scope_cache: list[tuple[tuple[Any, ...], tuple[tuple[str, tuple[Any, ...]], ...]]] = []
 
 
 def _schema_scope(tool_schemas: dict[str, dict[str, Any]]) -> tuple[tuple[Any, ...], tuple[tuple[str, tuple[Any, ...]], ...]]:
-    entry = None
-    if _scope_cache:
-        entry = _scope_cache[0]
-    if entry is not None and entry[0] is tool_schemas:
-        return entry[1], entry[2]
-    keys = tuple(tool_schemas)
-    seed = tuple((known, tuple((spec if isinstance(spec, dict) else {}).get("_aliases") or ())) for known, spec in tool_schemas.items())
-    if entry is None:
-        _scope_cache.append((tool_schemas, keys, seed))
+    signature = _scope_signature(tool_schemas)
+    if _scope_cache and _scope_cache[0] == signature:
+        return _scope_cache[0]
+    if not _scope_cache:
+        _scope_cache.append(signature)
     else:
-        _scope_cache[0] = (tool_schemas, keys, seed)
-    return keys, seed
+        _scope_cache[0] = signature
+    return signature
 
 
 @lru_cache(maxsize=256)
@@ -159,8 +166,45 @@ def _normalize_call_name(name: str, tool_schemas: dict[str, dict[str, Any]] | No
     return _resolve_alias(name, seed) or _fuzzy_known_name(name, tool_schemas) or name
 
 
-_tool_schema_map_cache: dict[int, tuple[tuple[int, ...], dict[str, dict[str, Any]]]] = {}
+_tool_schema_map_cache: dict[tuple[Any, ...], dict[str, dict[str, Any]]] = {}
 _TOOL_SCHEMA_MAP_CACHE_MAX = 256
+_SIG_DEPTH_MAX = 24
+
+
+def _tools_signature(tools: list[Any]) -> tuple[Any, ...]:
+    return tuple(_tool_signature(tool) for tool in tools)
+
+
+def _tool_signature(tool: Any) -> Any:
+    if not isinstance(tool, dict):
+        return type(tool).__name__
+    fn = _tool_function(tool)
+    if not isinstance(fn, dict):
+        return type(tool).__name__
+    return (
+        _value_signature(fn.get("name")),
+        _value_signature(fn.get("parameters")),
+        _value_signature(fn.get("aliases")),
+    )
+
+
+_SIG_STRING_MAX = 64
+
+
+def _value_signature(value: Any, depth: int = 0) -> Any:
+    if isinstance(value, str):
+        if len(value) <= _SIG_STRING_MAX:
+            return value
+        return (len(value), hashlib.sha256(value.encode("utf-8", "replace")).hexdigest())
+    if depth >= _SIG_DEPTH_MAX:
+        return type(value).__name__
+    if isinstance(value, dict):
+        return tuple(sorted((key, _value_signature(item, depth + 1)) for key, item in value.items()))
+    if isinstance(value, (list, tuple)):
+        return tuple(_value_signature(item, depth + 1) for item in value)
+    if isinstance(value, bool) or value is None or isinstance(value, (int, float)):
+        return value
+    return (type(value).__name__, repr(value))
 
 
 def _resolved_prop_type(spec: Any) -> Any:
@@ -187,11 +231,10 @@ def _schema_params(fn: dict) -> Any:
 def tool_schema_map(tools: list[Any] | None) -> dict[str, dict[str, Any]]:
     if not tools or not isinstance(tools, list):
         return {}
-    key = id(tools)
-    fingerprint = tuple(id(item) for item in tools)
+    key = _tools_signature(tools)
     cached = _tool_schema_map_cache.get(key)
-    if cached is not None and cached[0] == fingerprint:
-        return cached[1]
+    if cached is not None:
+        return cached
     result: dict[str, dict[str, Any]] = {}
     for tool in tools:
         if not isinstance(tool, dict):
@@ -221,7 +264,7 @@ def tool_schema_map(tools: list[Any] | None) -> dict[str, dict[str, Any]]:
         result[name] = prop_types
     while len(_tool_schema_map_cache) >= _TOOL_SCHEMA_MAP_CACHE_MAX:
         _tool_schema_map_cache.pop(next(iter(_tool_schema_map_cache)))
-    _tool_schema_map_cache[key] = (fingerprint, result)
+    _tool_schema_map_cache[key] = result
     return result
 
 
@@ -366,10 +409,10 @@ def _coerce_by_type(value: Any, json_type: Any) -> tuple[Any, bool]:
         if isinstance(value, str):
             return value, False
         if isinstance(value, (dict, list)):
-            return json.dumps(value, ensure_ascii=False), True
+            return dumps_arguments(value), True
         if value is None:
             return "", True
-        return json.dumps(value, ensure_ascii=False), True
+        return dumps_arguments(value), True
     if json_type in ("integer", "number"):
         if isinstance(value, bool):
             return value, False
@@ -458,6 +501,8 @@ def fix_tool_calls(
                 rebuilt[key] = value
                 continue
             if resolved_key in rebuilt:
+                fixes.append({"call_id": call.id, "kind": "drop_duplicate", "param": resolved_key, "from": key})
+                warnings.append({"call_id": call.id, "kind": "duplicate_param", "param": resolved_key, "dropped": key})
                 continue
             if resolved_key != key:
                 fixes.append({"call_id": call.id, "kind": "rename", "from": key, "to": resolved_key, "confidence": how})
@@ -498,7 +543,7 @@ def fix_tool_calls(
             if drop_unknown:
                 for key in unknowns:
                     coerced.pop(key, None)
-            new_arguments = json.dumps(coerced, ensure_ascii=False)
+            new_arguments = dumps_arguments(coerced)
         else:
             new_arguments = call.arguments
         result.append(ToolCall(call.id, call.name, new_arguments))

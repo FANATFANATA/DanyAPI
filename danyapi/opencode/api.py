@@ -61,9 +61,22 @@ async def _send(
             raise HTTPException(502, f"OpenCode Zen transport error: {exc}") from exc
 
 
-def _safe_json(resp: httpx.Response) -> Any:
+async def _body_bytes(resp: httpx.Response) -> bytes:
+    if not resp.is_stream_consumed:
+        try:
+            await resp.aread()
+        except (httpx.HTTPError, OSError, RuntimeError) as exc:
+            log.debug("opencode upstream body could not be read: %s", exc)
+            return b""
     try:
-        return json.loads(resp.content)
+        return resp.content
+    except (httpx.HTTPError, OSError, RuntimeError):
+        return b""
+
+
+async def _safe_json(resp: httpx.Response) -> Any:
+    try:
+        return json.loads(await _body_bytes(resp))
     except ValueError:
         return None
 
@@ -77,10 +90,10 @@ async def _close_quietly(resp: httpx.Response | None) -> None:
         log.debug("opencode response close failed: %s", exc)
 
 
-def _raise_upstream(account: Any, resp: httpx.Response, payload: Any) -> None:
+async def _raise_upstream(account: Any, resp: httpx.Response, payload: Any) -> None:
     error_type, message = error_message(payload, resp.status_code)
     if not isinstance(payload, dict):
-        text = resp.text[:300] if resp.content else ""
+        text = (await _body_bytes(resp)).decode("utf-8", errors="replace")[:300]
         message = text or f"upstream returned {resp.status_code}"
     error = OpenCodeError(resp.status_code, message, error_type)
     if error.is_auth:
@@ -243,9 +256,9 @@ async def collect_non_stream(
             raise HTTPException(_status_for(exc), exc.detail) from exc
         try:
             if resp.status_code >= 400:
-                _raise_upstream(account, resp, _safe_json(resp))
+                await _raise_upstream(account, resp, await _safe_json(resp))
             try:
-                payload = json.loads(resp.content)
+                payload = json.loads(await _body_bytes(resp))
             except ValueError as exc:
                 raise HTTPException(502, "OpenCode Zen returned a malformed response") from exc
         finally:
@@ -302,7 +315,7 @@ async def stream_openai(
                 body["stream_options"] = {"include_usage": True}
             resp = await _send(account, body, model, session_id, request_id)
             if resp.status_code >= 400:
-                _raise_upstream(account, resp, _safe_json(resp))
+                await _raise_upstream(account, resp, await _safe_json(resp))
         except HTTPException as exc:
             await _close_quietly(resp)
             detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)

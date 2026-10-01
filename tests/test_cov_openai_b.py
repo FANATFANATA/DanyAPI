@@ -1018,7 +1018,8 @@ async def test_stream_upload_failure_emits_error_frame():
     joined = "".join(await _collect(gen))
     assert '"error"' in joined
     assert "file upload failed: boom" in joined
-    assert '"finish_reason": "stop"' in joined
+    assert '"finish_reason": "error"' in joined
+    assert '"finish_reason": "stop"' not in joined
     assert '"content": "Hi"' not in joined
     assert joined.rstrip().endswith("data: [DONE]")
     acct.client.completion.assert_not_awaited()

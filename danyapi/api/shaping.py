@@ -31,6 +31,8 @@ def _apply_stop(text: str, stop: Any) -> str:
 
 def _apply_limits(content: str, max_tokens: int | None, stop: Any) -> tuple[str, str]:
     text = _apply_stop(content or "", stop)
+    if text != (content or ""):
+        return text, "stop"
     trimmed = trim_to_tokens(text, max_tokens)
     if trimmed != text:
         return trimmed, "length"
@@ -85,15 +87,25 @@ def _usage_with_details(usage: dict, reasoning_text: str | None = None, reasonin
 USAGE_TOTAL_FIELDS = ("prompt_tokens", "completion_tokens", "total_tokens")
 
 
+def _usage_number(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return int(value)
+
+
 def _merge_usage(previous: dict | None, current: dict) -> dict:
     if previous is None:
         return dict(current)
     merged = dict(previous)
     for field in USAGE_TOTAL_FIELDS:
-        left = merged.get(field)
-        right = current.get(field)
-        if isinstance(left, (int, float)) and isinstance(right, (int, float)):
-            merged[field] = int(left) + int(right)
+        left = _usage_number(merged.get(field))
+        right = _usage_number(current.get(field))
+        if left is not None and right is not None:
+            merged[field] = left + right
+        elif right is not None:
+            merged[field] = right
+        elif left is not None:
+            merged[field] = left
     return merged
 
 

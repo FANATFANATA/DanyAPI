@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import itertools
 import json
 import logging
 import os
@@ -28,7 +29,7 @@ from ..opencode.client import EMPTY_CREDENTIAL, OpenCodeClient
 from ..qwen.accounts import QwenAccount
 from ..qwen.client import QwenClient
 from ..store import JsonStore, cache_root
-from .core import MAX_REQUEST_BODY
+from .core import MAX_REQUEST_BODY, _read_request_body
 from .models import _header_api_key, refresh_provider_models
 from .state import (
     BYOK_PROVIDERS,
@@ -44,6 +45,7 @@ log = logging.getLogger("danyapi.api")
 
 
 BYOK_POOL_LIMIT = 512
+BYOK_TOTAL_POOL_LIMIT = 512
 BYOK_AUTH_LIMIT = 4096
 BYOK_MAX_KEYS = 16
 BYOK_MAX_JSON_BODY = 1024 * 1024
@@ -56,9 +58,13 @@ KEYLESS_POOL_KEY = "__keyless__"
 
 _INVALID_KEY_DETAIL = "api key for {provider} is missing or invalid, check the key and the key format"
 _UNREACHABLE_DETAIL = "{provider} could not be reached, the api key could not be verified, try again"
+_POOL_LIMIT_DETAIL = "too many cached api key sets are live at once, retry in a moment"
 
 _CACHE_MISS = object()
 _KEY_LOCKS: dict[str, asyncio.Lock] = {}
+_POOL_TOUCH_SEQ = itertools.count()
+_POOL_TOUCH_ATTR = "_danyapi_touched"
+_EVICT_LOCK = asyncio.Lock()
 _AUTH_INDETERMINATE: ContextVar[int] = ContextVar("danyapi_byok_auth_indeterminate", default=0)
 _CALLER_ID: ContextVar[str] = ContextVar("danyapi_byok_caller_id", default="")
 
@@ -97,6 +103,86 @@ def _touch_pool_cache(cache: dict[str, Any], cache_key: str) -> None:
         return
     cache.pop(cache_key, None)
     cache[cache_key] = pool
+    _mark_pool_touched(pool)
+
+
+def _mark_pool_touched(pool: Any) -> None:
+    try:
+        setattr(pool, _POOL_TOUCH_ATTR, next(_POOL_TOUCH_SEQ))
+    except (AttributeError, TypeError):
+        pass
+
+
+def _pool_touched(pool: Any) -> int:
+    value = getattr(pool, _POOL_TOUCH_ATTR, None)
+    return value if isinstance(value, int) else -1
+
+
+def _pool_is_busy(pool: Any) -> bool:
+    for acct in getattr(pool, "accounts", None) or []:
+        sem = getattr(acct, "sem", None)
+        if sem is not None and sem.locked():
+            return True
+    return False
+
+
+def _live_pool_entries() -> list[tuple[int, str, str, Any]]:
+    entries: list[tuple[int, str, str, Any]] = []
+    for provider, cache in _byok_pools_state().items():
+        if not isinstance(cache, dict):
+            continue
+        for cache_key, pool in list(cache.items()):
+            if pool is None:
+                continue
+            entries.append((_pool_touched(pool), provider, cache_key, pool))
+    entries.sort(key=lambda entry: entry[0])
+    return entries
+
+
+def _evictable_pool_entries(limit: int, protect: tuple[str, str], reserve: int = 1) -> list[tuple[str, str, Any]]:
+    if limit <= 0:
+        return []
+    entries = _live_pool_entries()
+    excess = len(entries) - limit + reserve
+    if excess <= 0:
+        return []
+    victims: list[tuple[str, str, Any]] = []
+    for _touched, provider, cache_key, pool in entries:
+        if excess <= 0:
+            break
+        if (provider, cache_key) == protect:
+            continue
+        if _pool_is_busy(pool):
+            continue
+        victims.append((provider, cache_key, pool))
+        excess -= 1
+    return victims
+
+
+def _evict_pools(victims: Sequence[tuple[str, str, Any]]) -> None:
+    stores_state = _byok_stores_state()
+    for provider, cache_key, pool in victims:
+        cache = _byok_pools_state().get(provider)
+        if isinstance(cache, dict):
+            if cache.get(cache_key) is not pool:
+                continue
+            cache.pop(cache_key, None)
+        scoped = stores_state.get(provider)
+        created = scoped.pop(cache_key, None) if isinstance(scoped, dict) else None
+        _close_pool_later(pool, created)
+
+
+async def _make_room_for_pool(protect: tuple[str, str]) -> bool:
+    async with _EVICT_LOCK:
+        victims = _evictable_pool_entries(BYOK_TOTAL_POOL_LIMIT, protect)
+        if not victims:
+            return _live_pool_count() < BYOK_TOTAL_POOL_LIMIT
+        _evict_pools(victims)
+    return True
+
+
+def _live_pool_count() -> int:
+    return len(_live_pool_entries())
 
 
 def _auth_indeterminate_count() -> int:
@@ -183,17 +269,12 @@ async def _extract_request_api_key(request: Request) -> str | None:
         return await _api_key_from_form(request)
     if not content_type.startswith("application/json"):
         return None
-    content_length = request.headers.get("content-length")
-    if content_length:
-        try:
-            if int(content_length) > MAX_REQUEST_BODY:
-                raise HTTPException(413, "request body too large")
-        except ValueError:
-            return None
     body = getattr(request, "_body", None)
     if body is None:
         try:
-            body = await request.body()
+            body = await _read_request_body(request, MAX_REQUEST_BODY)
+        except HTTPException:
+            raise
         except Exception:
             return None
     if not body:
@@ -231,18 +312,26 @@ def _close_client_later(client: Any) -> None:
 
 
 async def _close_pool(pool: Any, stores: Sequence[JsonStore] | None = None) -> None:
+    busy = _pool_is_busy(pool)
+
     def _release_stores() -> None:
-        for acct in pool.accounts:
-            try:
-                acct.sessions.close_all()
-            except Exception as exc:
-                log.info("session cleanup failed for byok account %r: %s", getattr(acct, "label", acct), exc)
+        if not busy:
+            for acct in pool.accounts:
+                try:
+                    acct.sessions.close_all()
+                except Exception as exc:
+                    log.info("session cleanup failed for byok account %r: %s", getattr(acct, "label", acct), exc)
+        else:
+            log.info("skip session cleanup for busy byok pool %r", getattr(pool, "label", pool))
         flush = getattr(pool, "flush", None)
         if flush is not None:
             try:
                 flush()
             except Exception as exc:
                 log.info("pool store flush failed: %s", exc)
+        if busy:
+            log.info("keep the cache file of a busy byok pool so in-flight writes are not dropped")
+            return
         for store in stores or ():
             try:
                 store.remove()
@@ -262,6 +351,12 @@ async def _close_pool(pool: Any, stores: Sequence[JsonStore] | None = None) -> N
             await acct.client.aclose()
         except Exception as exc:
             log.info("client close failed for byok account %r: %s", getattr(acct, "label", acct), exc)
+
+
+def _close_pool_later(pool: Any, stores: Sequence[JsonStore] | None = None) -> None:
+    task = asyncio.create_task(_close_pool(pool, stores))
+    _deferred_close_tasks.add(task)
+    task.add_done_callback(_deferred_close_tasks.discard)
 
 
 async def _close_busy_client(account: Any, sem: asyncio.Semaphore) -> None:
@@ -448,26 +543,40 @@ async def _byok_pool(provider: str, tokens: list[str]) -> AccountPool:
     if pool is not None and pool.healthy:
         _touch_pool_cache(cache, cache_key)
         return pool
+    _evict_stale_cache(cache, _byok_stores_state().get(provider), incoming=1)
     async with _key_lock(provider, cache_key):
         pool = cache.get(cache_key)
         if pool is not None and pool.healthy:
             _touch_pool_cache(cache, cache_key)
             return pool
+        if not await _make_room_for_pool((provider, cache_key)):
+            raise HTTPException(503, _POOL_LIMIT_DETAIL)
         stores = _byok_stores_state()
         scoped_stores = stores[provider]
         new_pool, created = await _build_byok_pool(provider, tokens, _byok_scope(cache_key))
         stale_pool = cache.get(cache_key)
-        scoped_stores.pop(cache_key, None)
+        stale_stores = scoped_stores.pop(cache_key, None)
         cache.pop(cache_key, None)
         cache[cache_key] = new_pool
         scoped_stores[cache_key] = created
+        _mark_pool_touched(new_pool)
         if stale_pool is not None and stale_pool is not new_pool:
-            await _close_pool(stale_pool)
-        while len(cache) > BYOK_POOL_LIMIT:
-            oldest_key, oldest_pool = next(iter(cache.items()))
-            cache.pop(oldest_key)
-            await _close_pool(oldest_pool, scoped_stores.pop(oldest_key, None))
+            _close_pool_later(stale_pool, stale_stores)
+        _evict_stale_cache(cache, scoped_stores)
+        _evict_pools(_evictable_pool_entries(BYOK_TOTAL_POOL_LIMIT, (provider, cache_key), reserve=0))
         return new_pool
+
+
+def _evict_stale_cache(cache: dict[str, Any], scoped_stores: dict[str, list[JsonStore]] | None, incoming: int = 0) -> None:
+    while cache and len(cache) + incoming > BYOK_POOL_LIMIT:
+        oldest_key, oldest_pool = next(iter(cache.items()))
+        if oldest_pool is not None and _pool_is_busy(oldest_pool):
+            cache.pop(oldest_key, None)
+            cache[oldest_key] = oldest_pool
+            break
+        cache.pop(oldest_key)
+        created = scoped_stores.pop(oldest_key, None) if scoped_stores is not None else None
+        _close_pool_later(oldest_pool, created)
 
 
 async def _byok_gigachat_accounts(tokens: list[str], log_prefix: str) -> list[GigaChatAccount]:

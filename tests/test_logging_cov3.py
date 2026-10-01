@@ -365,3 +365,67 @@ def test_configure_applies_noisy_logger_levels(logging_state):
     dlog.configure()
     assert logging.getLogger("httpx").level == logging.WARNING
     assert logging.getLogger("httpcore").level == logging.WARNING
+
+
+class _JoinRecorder:
+    def __init__(self) -> None:
+        self.joins = 0
+
+    def join(self, timeout=None) -> None:
+        self.joins += 1
+
+
+def test_stop_listener_makes_room_for_the_sentinel_on_a_full_queue(tmp_path):
+    target = dlog._make_file_handler(str(tmp_path / "drain.log"), 4096, 1)
+    pending: queue.Queue = queue.Queue(maxsize=2)
+    listener = logging.handlers.QueueListener(pending, target)
+    thread = _JoinRecorder()
+    listener._thread = thread
+    pending.put_nowait("first")
+    pending.put_nowait("second")
+    with pytest.raises(queue.Full):
+        listener.stop()
+    assert thread.joins == 0
+    assert dlog._stop_listener(listener) is True
+    assert listener._thread is None
+    assert thread.joins == 1
+    target.close()
+
+
+def test_stop_listener_gives_up_on_a_stuck_queue(tmp_path):
+    target = dlog._make_file_handler(str(tmp_path / "stuck.log"), 4096, 1)
+    pending: queue.Queue = queue.Queue(maxsize=2)
+
+    class _NeverEmpties:
+        def stop(self):
+            raise queue.Full
+
+    pending.put_nowait("first")
+    pending.put_nowait("second")
+    listener = _NeverEmpties()
+    listener.queue = pending
+    assert dlog._stop_listener(listener, attempts=3) is False
+    target.close()
+
+
+def test_drop_file_handler_stops_a_listener_whose_queue_is_saturated(logging_state, tmp_path):
+    target = dlog._make_file_handler(str(tmp_path / "saturated.log"), 4096, 1)
+    pending: queue.Queue = queue.Queue(maxsize=2)
+    listener = logging.handlers.QueueListener(pending, target)
+    thread = _JoinRecorder()
+    listener._thread = thread
+    queue_handler = dlog._DroppingQueueHandler(pending)
+    queue_handler.name = dlog.FILE_HANDLER_NAME
+    root = logging.getLogger()
+    root.addHandler(queue_handler)
+    dlog._file_handler_state["listener"] = listener
+    dlog._queue_listeners.append(listener)
+    pending.put_nowait(logging.LogRecord("x", logging.INFO, "", 0, "first", (), None))
+    pending.put_nowait(logging.LogRecord("x", logging.INFO, "", 0, "second", (), None))
+    assert pending.full()
+    dlog._drop_file_handler(root)
+    assert thread.joins == 1
+    assert listener._thread is None
+    assert dlog._file_handler_state == {}
+    assert dlog._queue_listeners == []
+    assert queue_handler not in root.handlers

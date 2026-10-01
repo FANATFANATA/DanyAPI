@@ -24,6 +24,10 @@ def _delta_json(delta: dict, finish: str | None) -> str:
     return f'{{"index":0,"delta":{_JSON_ENCODE(delta)},"finish_reason":{_JSON_ENCODE(finish)}}}'
 
 
+DONE_SENTINEL = "data: [DONE]\n\n"
+STREAM_ERROR_FINISH = "error"
+
+
 def _stream_error_sse(
     chunk_id: str,
     created: int,
@@ -44,10 +48,10 @@ def _stream_error_sse(
             "model": model,
             "session_id": session_key,
             "error": error,
-            "choices": [{"index": 0, "delta": {}, "finish_reason": choice_finish or "stop"}],
+            "choices": [{"index": 0, "delta": {}, "finish_reason": choice_finish if choice_finish is not None else STREAM_ERROR_FINISH}],
         }
     )
-    return error_chunk, "data: [DONE]\n\n"
+    return error_chunk, DONE_SENTINEL
 
 
 def _chunk_id_from_line(line: str) -> str | None:
@@ -78,17 +82,22 @@ async def _stream_guard(gen, model: str):
     chunk_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
     seen_id: str | None = None
+    terminator_sent = False
     try:
         async for item in gen:
             if seen_id is None:
                 seen_id = _chunk_id_from_line(item)
+            if item == DONE_SENTINEL:
+                terminator_sent = True
             yield item
     except AccountPoolBusy:
-        for line in _stream_error_sse(seen_id or chunk_id, created, model, "all accounts are busy, try again later"):
-            yield line
+        if not terminator_sent:
+            for line in _stream_error_sse(seen_id or chunk_id, created, model, "all accounts are busy, try again later"):
+                yield line
     except Exception as exc:
         log.exception("stream generator failed: %s", exc)
-        for line in _stream_error_sse(seen_id or chunk_id, created, model, INTERNAL_ERROR_MESSAGE):
-            yield line
+        if not terminator_sent:
+            for line in _stream_error_sse(seen_id or chunk_id, created, model, INTERNAL_ERROR_MESSAGE):
+                yield line
     finally:
         await _close_generator(gen)

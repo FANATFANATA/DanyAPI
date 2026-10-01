@@ -166,7 +166,7 @@ class QwenStreamReconstructor:
             self.error = error if isinstance(error, dict) else {"code": "Internal_Server_Error", "details": error}
             return
         choices = data.get("choices")
-        if not isinstance(choices, list) or not choices:
+        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
             return
         delta = choices[0].get("delta")
         if not isinstance(delta, dict):

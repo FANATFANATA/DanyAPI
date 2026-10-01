@@ -11,7 +11,7 @@ from typing import Any
 
 import httpx
 
-from ..api.retry import MAX_RETRIES, RETRY_BACKOFF_MAX_SEC, RETRYABLE_HTTP_STATUSES, _retry_delay
+from ..api.retry import MAX_RETRIES, RETRY_BACKOFF_MAX_SEC, RETRYABLE_HTTP_STATUSES, _retry_after_hint, _retry_delay
 from .tls import resolve_ca
 
 log = logging.getLogger("danyapi.gigachat")
@@ -84,17 +84,10 @@ def _expires_at_seconds(value: Any) -> float:
 
 
 def _retry_after_seconds(resp: httpx.Response) -> float:
-    delay = _retry_delay(1)
-    header = resp.headers.get("Retry-After", "").strip()
-    if not header:
-        return delay
-    try:
-        advertised = float(header)
-    except ValueError:
-        return delay
-    if advertised <= 0.0:
-        return delay
-    return min(advertised, RETRY_BACKOFF_MAX_SEC)
+    hinted = _retry_after_hint(resp.headers.get("Retry-After"))
+    if hinted is None or hinted <= 0.0:
+        return _retry_delay(1)
+    return min(hinted, RETRY_BACKOFF_MAX_SEC)
 
 
 class GigaChatClient:
@@ -143,8 +136,6 @@ class GigaChatClient:
     def invalidate_token(self) -> None:
         self._token = EMPTY_CREDENTIAL
         self._token_expires_at = 0.0
-        self._token_deferred_until = 0.0
-        self._token_error = (503, "authorization endpoint unavailable")
 
     @staticmethod
     def _request_id() -> str:

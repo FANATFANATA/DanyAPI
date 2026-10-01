@@ -1,12 +1,16 @@
 FROM python:3.14.2-slim-bookworm@sha256:e87711ef5c86aaeaa7031718a69db79d334d94c545c709583f651b8185870941
 
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+
 WORKDIR /app
 
-COPY requirements.txt .
 RUN apt-get update \
     && apt-get install -y --no-install-recommends gcc libc6-dev nodejs \
-    && pip install --no-cache-dir -r requirements.txt \
     && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
 COPY danyapi ./danyapi
 COPY web ./web

@@ -512,7 +512,7 @@ async def _collect_response(req: _CollectRequest, lock, lock_timeout) -> QwenStr
                         for event in incremental.finish():
                             rec.handle(event)
                         rec.finalize()
-                    except (httpx.HTTPError, RuntimeError) as exc:
+                    except (httpx.HTTPError, RuntimeError, ValueError) as exc:
                         raise HTTPException(502, f"Stream processing failed: {exc}") from exc
                     finally:
                         if rec.response_id:

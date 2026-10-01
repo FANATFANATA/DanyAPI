@@ -2,6 +2,7 @@ version: 2
 updates:
   - package-ecosystem: "pip"
     directory: "/"
+    target-branch: "dev"
     schedule:
       interval: "daily"
     open-pull-requests-limit: 5
@@ -12,6 +13,7 @@ updates:
 
   - package-ecosystem: "github-actions"
     directory: "/"
+    target-branch: "dev"
     schedule:
       interval: "daily"
     open-pull-requests-limit: 5
@@ -22,6 +24,7 @@ updates:
 
   - package-ecosystem: "docker"
     directory: "/"
+    target-branch: "dev"
     schedule:
       interval: "daily"
     open-pull-requests-limit: 5

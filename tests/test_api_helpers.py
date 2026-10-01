@@ -61,11 +61,8 @@ def clean_state():
 
 
 @pytest.fixture(autouse=True)
-def zero_backoff():
-    orig = retry_mod.RETRY_BACKOFF_SEC
-    retry_mod.RETRY_BACKOFF_SEC = 0.0
-    yield
-    retry_mod.RETRY_BACKOFF_SEC = orig
+def zero_backoff(monkeypatch):
+    monkeypatch.setattr(retry_mod, "RETRY_BACKOFF_SEC", 0.0)
 
 
 @pytest.fixture
@@ -779,9 +776,8 @@ def test_too_many_files():
         messages=[],
         files=[SimpleNamespace(name=f"{i}.txt", content="aGk=", content_type="text/plain") for i in range(openai_mod.MAX_FILES_PER_REQUEST + 1)],
     )
-    atts = openai_mod._collect_attachments(req)
     with pytest.raises(Exception) as excinfo:
-        openai_mod._validate_attachments(atts)
+        openai_mod._collect_attachments(req)
     assert excinfo.value.status_code == 400
 
 
@@ -2641,7 +2637,7 @@ def test_stream_error_sse_keeps_provider_reason_in_error_object():
     first, _done = openai_mod._stream_error_sse("c1", 1, "m", "busy", "s1", "expert_busy_use_default")
     payload = json.loads(first[6:])
     assert payload["error"]["finish_reason"] == "expert_busy_use_default"
-    assert payload["choices"][0]["finish_reason"] == "stop"
+    assert payload["choices"][0]["finish_reason"] == "error"
 
 
 def test_collect_attachments_image_total_cap_413():
@@ -2785,7 +2781,7 @@ def test_build_limited_message_tool_path_reports_length_on_trim():
 def test_stream_error_sse_default_finish_reason_is_valid():
     first, _done = openai_mod._stream_error_sse("c1", 1, "m", "boom")
     payload = json.loads(first[6:])
-    assert payload["choices"][0]["finish_reason"] == "stop"
+    assert payload["choices"][0]["finish_reason"] == "error"
     assert "finish_reason" not in payload["error"]
 
 

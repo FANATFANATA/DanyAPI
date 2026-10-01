@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from danyapi.accounts import AccountPool, AccountPoolBusy, ContextIndex, DeepSeekAccount, account_lock
+from danyapi.accounts import AccountPool, AccountPoolBusy, ContextIndex, DeepSeekAccount, _free_account, account_lock
 from danyapi.deepseek.client import DeepSeekClient
 from danyapi.store import _MAX_AFFINITY, JsonStore
 
@@ -92,6 +92,77 @@ async def test_acquire_times_out_when_busy():
         await pool.acquire(None, max_wait=0.2)
     a0.sem.release()
     a1.sem.release()
+
+
+async def test_wait_free_hands_out_one_account_and_frees_the_others():
+    accounts = [make_acct(i) for i in range(4)]
+    pool = AccountPool(accounts)
+    for acct in accounts:
+        await acct.sem.acquire()
+
+    task = asyncio.create_task(pool.acquire(None, max_wait=5))
+    await asyncio.sleep(0.1)
+    for acct in accounts:
+        acct.sem.release()
+    handed, sid = await asyncio.wait_for(task, timeout=2)
+
+    assert sid is None
+    assert handed.sem.locked()
+    for acct in accounts:
+        if acct is handed:
+            continue
+        assert not acct.sem.locked()
+        assert acct.sem._value == 1
+    nxt, _ = await pool.acquire(None, max_wait=1)
+    assert nxt is not handed
+    handed.sem.release()
+
+
+async def test_wait_free_advances_the_cursor_past_the_handed_account():
+    a0, a1, a2 = make_acct(0), make_acct(1), make_acct(2)
+    pool = AccountPool([a0, a1, a2])
+    for acct in (a0, a1, a2):
+        await acct.sem.acquire()
+
+    task = asyncio.create_task(pool.acquire(None, max_wait=5))
+    await asyncio.sleep(0.1)
+    for acct in (a0, a1, a2):
+        acct.sem.release()
+    handed, _ = await asyncio.wait_for(task, timeout=2)
+
+    assert pool._rr == (handed.index + 1) % 3
+    nxt, _ = await pool.acquire(None, max_wait=1)
+    assert nxt.index == (handed.index + 1) % 3
+    nxt.sem.release()
+    handed.sem.release()
+
+
+async def test_free_account_reports_every_account_that_was_released_together():
+    a0, a1 = make_acct(0), make_acct(1)
+    for acct in (a0, a1):
+        await acct.sem.acquire()
+    task = asyncio.create_task(_free_account([a0, a1], 5))
+    await asyncio.sleep(0.1)
+    a0.sem.release()
+    a1.sem.release()
+    ready = await asyncio.wait_for(task, timeout=2)
+    assert [held for _acct, held in ready] == [True, True]
+    assert a0.sem.locked()
+    assert a1.sem.locked()
+    a0.sem.release()
+    a1.sem.release()
+
+
+async def test_free_account_leaves_no_cancelled_waiter_behind():
+    a0, a1 = make_acct(0), make_acct(1)
+    await a0.sem.acquire()
+    await a1.sem.acquire()
+    ready = await _free_account([a0, a1], 0.05)
+    assert ready == [(a0, False), (a1, False)]
+    a0.sem.release()
+    a1.sem.release()
+    await asyncio.sleep(0)
+    assert a1.sem._value == 1
 
 
 async def test_session_affinity_waits_for_its_account():
@@ -316,10 +387,10 @@ def test_register_ttl_cleanup():
 
 
 def test_register_ttl_cleanup_runs_for_small_pool():
-    pool = AccountPool([make_acct(0)], ttl=0.05)
+    pool = AccountPool([make_acct(0)], ttl=3600.0)
     for i in range(4096):
         pool._by_session[f"s{i}"] = (0, time.monotonic())
-    pool._by_session["stale"] = (0, time.monotonic() - 10)
+    pool._by_session["stale"] = (0, time.monotonic() - 7200)
     pool.register(0, "fresh")
     assert "stale" not in pool._by_session
     assert len(pool._by_session) == 4097

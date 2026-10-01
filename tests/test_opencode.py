@@ -1238,15 +1238,81 @@ def test_delta_from_event_defaults_a_missing_tool_call_index():
     assert delta["tool_calls"][0]["function"]["arguments"] == ""
 
 
-def test_a_non_dict_error_body_is_reported_verbatim():
+async def test_a_non_dict_error_body_is_reported_verbatim():
     from danyapi.opencode.api import _raise_upstream
 
     resp = httpx.Response(502, content=b"upstream exploded", request=httpx.Request("POST", BASE_URL))
     account = _Account()
     with pytest.raises(HTTPException) as excinfo:
-        _raise_upstream(account, resp, None)
+        await _raise_upstream(account, resp, None)
     assert excinfo.value.status_code == 502
     assert "upstream exploded" in excinfo.value.detail
+
+
+async def test_an_unconsumed_error_stream_is_read_before_it_is_parsed():
+    from danyapi.opencode import api as opencode_api
+
+    resp = httpx.Response(
+        402,
+        headers={"content-type": "application/json"},
+        stream=httpx.ByteStream(b'{"error":{"type":"FreeTierError","message":"free tier spent"}}'),
+        request=httpx.Request("POST", BASE_URL),
+    )
+    assert resp.is_stream_consumed is False
+    account = _Account()
+    with pytest.raises(HTTPException) as excinfo:
+        await opencode_api._raise_upstream(account, resp, await opencode_api._safe_json(resp))
+    assert excinfo.value.status_code == 403
+    assert "free tier spent" in excinfo.value.detail
+    assert "content not read" not in excinfo.value.detail
+    assert account.broken is False
+
+
+async def test_an_unreadable_error_stream_keeps_the_upstream_reason():
+    from danyapi.opencode import api as opencode_api
+
+    resp = httpx.Response(401, stream=httpx.ByteStream(b'{"error":{"type":"AuthError"}}'), request=httpx.Request("POST", BASE_URL))
+
+    async def _boom() -> None:
+        raise httpx.ReadError("socket closed")
+
+    resp.aread = _boom  # type: ignore[method-assign]
+    account = _Account()
+    with pytest.raises(HTTPException) as excinfo:
+        await opencode_api._raise_upstream(account, resp, await opencode_api._safe_json(resp))
+    assert excinfo.value.status_code == 401
+    assert excinfo.value.detail == "OpenCode Zen error: upstream returned 401"
+    assert "content not read" not in excinfo.value.detail
+    assert account.broken is True
+
+
+async def test_a_stream_error_marks_the_account_broken_on_an_unconsumed_error_stream():
+    from danyapi.opencode import api as opencode_api
+
+    body = b'{"error":{"type":"AuthError","message":"Invalid API key."}}'
+    account = _Account()
+    account.client = _client(httpx.MockTransport(lambda r: httpx.Response(401, headers={"content-type": "application/json"}, stream=httpx.ByteStream(body))))
+
+    lines = [line async for line in opencode_api.stream_openai(account=account, messages=[_msg(role="user", content="hi")], model="m")]
+
+    assert "Invalid API key." in "".join(lines)
+    assert account.broken is True
+
+
+async def test_stream_openai_reports_the_real_reason_from_an_unconsumed_error_stream():
+    from danyapi.opencode import api as opencode_api
+
+    body = b'{"error":{"type":"FreeTierError","message":"free tier spent"}}'
+    account = _Account()
+    account.client = _client(httpx.MockTransport(lambda r: httpx.Response(402, headers={"content-type": "application/json"}, stream=httpx.ByteStream(body))))
+
+    lines = [line async for line in opencode_api.stream_openai(account=account, messages=[_msg(role="user", content="hi")], model="m")]
+    text = "".join(lines)
+
+    assert "free tier spent" in text
+    assert "content not read" not in text
+    assert text.endswith("data: [DONE]\n\n")
+    assert account.broken is False
 
 
 def test_health_reports_the_provider(_opencode_pool):

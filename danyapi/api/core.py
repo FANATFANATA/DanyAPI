@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import ipaddress
 import json
 import logging
 import posixpath
@@ -38,6 +39,7 @@ from ..qwen.client import QwenClient
 from ..store import JsonStore
 from ..tokens import count_messages_tokens
 from ..usage import init_tracker
+from .attachments import MAX_ATTACHMENT_TOTAL_SIZE
 from .models import _resolve_provider, model_refresh_loop, refresh_models
 from .state import (
     BYOK_PROVIDERS,
@@ -346,24 +348,49 @@ async def lifespan(app: FastAPI):
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await refresh_task
     finally:
-        http_client = getattr(app.state, "http_client", None)
-        if http_client is not None:
-            await http_client.aclose()
         all_accounts: list[Any] = [*accounts, *qwen_accounts, *gigachat_accounts, *opencode_accounts, *alice_accounts, *duckai_accounts]
         for pool_obj in _iter_pools():
             all_accounts.extend(pool_obj.accounts)
-        _close_pow_managers(all_accounts)
+        await _run_lifespan_cleanup(all_accounts)
+
+
+async def _run_lifespan_cleanup(all_accounts: list[Any]) -> None:
+    task = asyncio.ensure_future(_close_everything(all_accounts))
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+        except Exception as exc:
+            log.warning("lifespan cleanup failed: %s", exc)
+            break
+    if cancelled:
+        raise asyncio.CancelledError
+
+
+async def _close_everything(all_accounts: list[Any]) -> None:
+    http_client = getattr(app.state, "http_client", None)
+    if http_client is not None:
+        try:
+            await http_client.aclose()
+        except Exception as exc:
+            log.warning("shared http client close failed: %s", exc)
+    _close_pow_managers(all_accounts)
+    try:
         await asyncio.to_thread(_flush_state_stores)
-        seen: set[int] = set()
-        for acct in all_accounts:
-            client = acct.client
-            if id(client) in seen:
-                continue
-            seen.add(id(client))
-            try:
-                await client.aclose()
-            except Exception as exc:
-                log.warning("client close failed for %s: %s", getattr(acct, "label", acct), exc)
+    except Exception as exc:
+        log.warning("state store flush failed during shutdown: %s", exc)
+    seen: set[int] = set()
+    for acct in all_accounts:
+        client = acct.client
+        if id(client) in seen:
+            continue
+        seen.add(id(client))
+        try:
+            await client.aclose()
+        except Exception as exc:
+            log.warning("client close failed for %s: %s", getattr(acct, "label", acct), exc)
 
 
 def _shared_store(attr: str, name: str, *, maxsize: int = 0) -> JsonStore:
@@ -380,6 +407,66 @@ def _responses_store() -> JsonStore:
 
 MAX_LOGGED_BODY = 256 * 1024
 MAX_REQUEST_BODY = 100 * 1024 * 1024
+MAX_CHAT_BODY_BYTES = 3 * MAX_ATTACHMENT_TOTAL_SIZE
+CHAT_BODY_PATHS = frozenset({"/v1/chat/completions", "/v1/completions"})
+
+_BODY_LIMIT_SCOPE_KEY = "danyapi_body_limit"
+
+
+class _BodyLimit:
+    __slots__ = ("detail", "exceeded", "limit", "seen")
+
+    def __init__(self, limit: int, detail: str) -> None:
+        self.limit = limit
+        self.detail = detail
+        self.seen = 0
+        self.exceeded = False
+
+
+def _body_limit_for(path: str) -> _BodyLimit:
+    if path not in CHAT_BODY_PATHS:
+        return _BodyLimit(MAX_REQUEST_BODY, "request body too large")
+    if MAX_CHAT_BODY_BYTES < MAX_REQUEST_BODY:
+        return _BodyLimit(MAX_CHAT_BODY_BYTES, f"request body too large, max {MAX_CHAT_BODY_BYTES // (1024 * 1024)} MB")
+    return _BodyLimit(min(MAX_CHAT_BODY_BYTES, MAX_REQUEST_BODY), "request body too large")
+
+
+def _install_body_limit(request: Request) -> _BodyLimit:
+    scope = getattr(request, "scope", None)
+    if not isinstance(scope, dict):
+        url = getattr(request, "url", None)
+        return _body_limit_for(getattr(url, "path", "") or "")
+    state = scope.get(_BODY_LIMIT_SCOPE_KEY)
+    if isinstance(state, _BodyLimit):
+        return state
+    state = _body_limit_for(scope.get("path", ""))
+    scope[_BODY_LIMIT_SCOPE_KEY] = state
+    receive = request._receive
+
+    async def _bounded_receive() -> Any:
+        message: Any = await receive()
+        if isinstance(message, dict) and message.get("type") == "http.request":
+            state.seen += len(message.get("body") or b"")
+            if state.seen > state.limit:
+                state.exceeded = True
+                raise HTTPException(413, state.detail)
+        return message
+
+    request._receive = _bounded_receive
+    return state
+
+
+def _unwrap_http_exception(exc: BaseException) -> HTTPException | None:
+    depth = 0
+    while exc is not None and depth < 8:
+        if isinstance(exc, HTTPException):
+            return exc
+        nested: Any = getattr(exc, "exceptions", None)
+        if not isinstance(nested, (list, tuple)) or not nested:
+            return None
+        exc = nested[0]
+        depth += 1
+    return None
 
 
 def _declared_body_length(request: Request) -> int:
@@ -412,6 +499,14 @@ async def _read_request_body(request: Request, limit: int) -> bytes:
     return body
 
 
+async def _read_request_body_detail(request: Request, state: _BodyLimit) -> bytes:
+    try:
+        return await _read_request_body(request, state.limit)
+    except HTTPException:
+        state.exceeded = True
+        raise HTTPException(413, state.detail) from None
+
+
 def _parse_logged_body(body: bytes) -> dict[str, Any]:
     if not body or len(body) > MAX_LOGGED_BODY:
         return {}
@@ -427,24 +522,41 @@ def _parse_logged_body(body: bytes) -> dict[str, Any]:
 async def _extract_request_body(request: Request) -> dict[str, Any]:
     if getattr(request, "method", None) in ("GET", "DELETE", "HEAD", "OPTIONS"):
         return {}
+    state = _install_body_limit(request)
     raw_length = _declared_body_length(request)
-    if raw_length > MAX_REQUEST_BODY:
-        raise HTTPException(413, "request body too large")
+    if raw_length > state.limit:
+        raise HTTPException(413, state.detail)
     if raw_length <= 0 or raw_length > MAX_LOGGED_BODY:
         return {}
     cached = getattr(request, "_body", None)
     if cached:
         return _parse_logged_body(cached)
     try:
-        body = await _read_request_body(request, MAX_REQUEST_BODY)
+        body = await _read_request_body_detail(request, state)
     except HTTPException:
         raise
     except Exception:
         return {}
+    if state.exceeded:
+        raise HTTPException(413, state.detail)
     return _parse_logged_body(body)
 
 
-def _request_client_ip(request: Request) -> str:
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "::ffff:127.0.0.1", "localhost"})
+LOOPBACK_NETWORKS = (ipaddress.ip_network("127.0.0.0/8"), ipaddress.ip_network("::1/128"))
+
+
+def _is_loopback_peer(host: str) -> bool:
+    if host.strip().lower() in LOOPBACK_HOSTS:
+        return True
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return any(address in network for network in LOOPBACK_NETWORKS)
+
+
+def _forwarded_client_ip(request: Request) -> str | None:
     headers = request.headers
     forwarded = headers.get("x-forwarded-for")
     if forwarded:
@@ -452,12 +564,20 @@ def _request_client_ip(request: Request) -> str:
         if first:
             return first
     real_ip = headers.get("x-real-ip")
-    if real_ip:
+    if real_ip and real_ip.strip():
         return real_ip.strip()
+    return None
+
+
+def _request_client_ip(request: Request) -> str:
     client = request.client
-    if client is not None and client.host:
-        return client.host
-    return "-"
+    peer = client.host if client is not None and client.host else ""
+    forwarded = _forwarded_client_ip(request)
+    if forwarded is None or not peer:
+        return peer or "-"
+    if not _is_loopback_peer(peer):
+        return peer
+    return forwarded
 
 
 MAX_LOGGED_FIELD = 120
@@ -493,12 +613,14 @@ def _request_details(request: Request, payload: dict[str, Any], count_tokens: bo
     return " ".join(parts)
 
 
-def _log_request_failure(request: Request, payload: dict[str, Any], duration: float, status: int | None = None, exc: Exception | None = None) -> None:
+def _log_request_failure(request: Request, payload: dict[str, Any], duration: float, status: int | None = None, exc: BaseException | None = None) -> None:
     if not log.isEnabledFor(logging.WARNING):
         return
     details = _request_details(request, payload, count_tokens=log.isEnabledFor(logging.DEBUG))
     details_part = f" {details}" if details else ""
     ip = _request_client_ip(request)
+    if status is None and isinstance(exc, HTTPException):
+        status = exc.status_code
     if status is not None:
         reason = f"status={status}"
     else:
@@ -534,9 +656,10 @@ def _log_request_success(request: Request, payload: dict[str, Any], duration: fl
 async def _log_requests(request: Request, call_next):
     started = time.monotonic()
     payload: dict[str, Any] = {}
+    state = _install_body_limit(request)
     try:
-        if _declared_body_length(request) > MAX_REQUEST_BODY:
-            raise HTTPException(413, "request body too large")
+        if _declared_body_length(request) > state.limit:
+            raise HTTPException(413, state.detail)
         if log.isEnabledFor(logging.INFO) or log.isEnabledFor(logging.WARNING):
             payload = await _extract_request_body(request)
     except HTTPException as exc:
@@ -550,14 +673,17 @@ async def _log_requests(request: Request, call_next):
     try:
         response = await call_next(request)
     except Exception as exc:
-        _log_request_failure(
-            request,
-            payload,
-            (time.monotonic() - started) * 1000,
-            exc=exc,
-        )
+        duration = (time.monotonic() - started) * 1000
+        http_exc = _unwrap_http_exception(exc)
+        if isinstance(http_exc, HTTPException):
+            _log_request_failure(request, payload, duration, exc=http_exc)
+            return await _on_http_exception(request, http_exc)
+        _log_request_failure(request, payload, duration, exc=exc)
         raise
     duration = (time.monotonic() - started) * 1000
+    if state.exceeded:
+        _log_request_failure(request, payload, duration, status=413)
+        return await _on_http_exception(request, HTTPException(413, state.detail))
     if response.status_code >= 400:
         _log_request_failure(
             request,
@@ -772,6 +898,29 @@ def _pool_rate_headers(pool: Any | None) -> dict[str, str]:
 RATE_LIMITED_PATHS = ("/v1/chat/completions", "/v1/completions", "/v1/messages", "/v1/responses")
 QWEN_ONLY_PATH_PREFIXES = ("/v1/images/", "/v1/videos/")
 
+DASHBOARD_CSP = (
+    "default-src 'none'; "
+    "script-src 'sha256-MbrY0+epjB56qoENMJ0F1/TGW+zB753A/o7E9b7Os0A='; "
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+    "font-src 'self' https://fonts.gstatic.com data:; "
+    "img-src 'self' data:; "
+    "connect-src 'self'; "
+    "base-uri 'none'; form-action 'none'; object-src 'none'; frame-ancestors 'none'"
+)
+
+
+def _apply_security_headers(request: Request, response: Response) -> None:
+    headers = response.headers
+    if "x-content-type-options" not in headers:
+        headers["x-content-type-options"] = "nosniff"
+    if "x-frame-options" not in headers:
+        headers["x-frame-options"] = "DENY"
+    if "content-security-policy" in headers:
+        return
+    if request.url.path != "/" or not headers.get("content-type", "").startswith("text/html"):
+        return
+    headers["content-security-policy"] = DASHBOARD_CSP
+
 
 async def _rate_limit_pool(request: Request) -> Any:
     path = request.url.path
@@ -802,6 +951,7 @@ async def _openai_headers(request: Request, call_next):
     if not headers.get("x-ratelimit-limit-requests"):
         for key, value in _pool_rate_headers(pool).items():
             headers[key] = value
+    _apply_security_headers(request, response)
     return response
 
 

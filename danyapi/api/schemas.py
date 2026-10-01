@@ -66,8 +66,8 @@ class ChatCompletionRequest(BaseModel):
     parallel_tool_calls: bool | None = None
     response_format: Any = None
     stream_options: Any = None
-    max_tokens: int | None = None
-    max_completion_tokens: int | None = None
+    max_tokens: int | None = Field(default=None, ge=1)
+    max_completion_tokens: int | None = Field(default=None, ge=1)
     n: int | None = None
     stop: Any = None
     presence_penalty: float | None = None
@@ -87,7 +87,7 @@ class CompletionRequest(BaseModel):
     model: str = Field(default="deepseek-v4.1-flash")
     prompt: Any = ""
     suffix: str | None = None
-    max_tokens: int | None = None
+    max_tokens: int | None = Field(default=None, ge=1)
     temperature: float | None = None
     top_p: float | None = None
     n: int | None = None
@@ -117,7 +117,7 @@ class ResponsesRequest(BaseModel):
     stream: bool = False
     temperature: float | None = None
     top_p: float | None = None
-    max_output_tokens: int | None = None
+    max_output_tokens: int | None = Field(default=None, ge=1)
     tools: list[Any] | None = None
     tool_choice: Any = None
     parallel_tool_calls: bool | None = None

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import re
@@ -262,26 +263,27 @@ def model_efforts(model: str) -> tuple[str, ...]:
 
 
 class DuckAIError(Exception):
-    def __init__(self, code: int | str, message: str) -> None:
+    def __init__(self, code: int | str, message: str, error_type: str = "") -> None:
         super().__init__(f"Duck.ai error {code}: {message}")
         self.code = code
         self.message = message
+        self.error_type = error_type
 
     @property
     def is_auth(self) -> bool:
-        return self.code in AUTH_ERROR_STATUSES
+        return self.code in AUTH_ERROR_STATUSES or self.error_type in AUTH_ERROR_STATUSES
 
     @property
     def is_retryable(self) -> bool:
-        return self.code in RETRYABLE_STATUSES or self.code in RETRYABLE_TYPES
+        return self.code in RETRYABLE_STATUSES or self.error_type in RETRYABLE_STATUSES or self.code in RETRYABLE_TYPES or self.error_type in RETRYABLE_TYPES
 
     @property
     def is_challenge(self) -> bool:
-        return self.code in CHALLENGE_STATUSES or self.code in CHALLENGE_TYPES
+        return self.code in CHALLENGE_STATUSES or self.error_type in CHALLENGE_STATUSES or self.code in CHALLENGE_TYPES or self.error_type in CHALLENGE_TYPES
 
     @property
     def is_entrypoint(self) -> bool:
-        if self.code in ENTRYPOINT_TYPES:
+        if self.code in ENTRYPOINT_TYPES or self.error_type in ENTRYPOINT_TYPES:
             return True
         lowered = (self.message or "").lower()
         return any(marker in lowered for marker in ENTRYPOINT_MARKERS)
@@ -398,11 +400,11 @@ def parse_control(line: str) -> DuckAIEvent | None:
 
 def _error_for_payload(status: int, payload: Any) -> DuckAIError:
     message = ""
-    code: int | str = status
+    error_type = ""
     if isinstance(payload, dict):
         raw_type = payload.get("type")
         if isinstance(raw_type, str) and raw_type:
-            code = raw_type
+            error_type = raw_type
         raw_message = payload.get("message")
         if isinstance(raw_message, str) and raw_message:
             message = raw_message
@@ -411,7 +413,7 @@ def _error_for_payload(status: int, payload: Any) -> DuckAIError:
             override = challenge.get("gk")
             if isinstance(override, str) and override:
                 message = f"{message or 'bot check failed'} (challenge {override})".strip()
-    return DuckAIError(code, message or f"upstream returned {status}")
+    return DuckAIError(status, message or f"upstream returned {status}", error_type)
 
 
 def _reject_oversized_bundle(resp: Any) -> None:
@@ -453,6 +455,12 @@ class DuckAIClient:
         )
 
     async def aclose(self) -> None:
+        warm = self._jsa_warm
+        if warm is not None:
+            self._jsa_warm = None
+            warm.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await warm
         await self.http.aclose()
 
     async def fe_version(self) -> str:
@@ -526,7 +534,6 @@ class DuckAIClient:
         warm = self._jsa_warm
         if warm is not None and not warm.done():
             return
-        self._jsa_script = script_b64
         self._jsa_warm = asyncio.create_task(self._warm_attestation(script_b64))
 
     async def _warm_attestation(self, script_b64: str) -> None:
@@ -534,6 +541,8 @@ class DuckAIClient:
             await self._refresh_attestation(script_b64)
         except attest.AttestationError as exc:
             log.debug("duckai attestation refresh failed: %s", exc)
+            return
+        self._jsa_script = script_b64
 
     async def _join_attestation_warm(self) -> None:
         warm = self._jsa_warm
@@ -659,7 +668,12 @@ class DuckAIClient:
                     continue
                 action = payload.get("action")
                 if action == "error":
-                    raise DuckAIError(payload.get("type") or resp.status_code, str(payload.get("message") or "upstream error"))
+                    raw_type = payload.get("type")
+                    raise DuckAIError(
+                        resp.status_code,
+                        str(payload.get("message") or "upstream error"),
+                        raw_type if isinstance(raw_type, str) else "",
+                    )
                 if action != "success":
                     continue
                 event = parse_event(payload)

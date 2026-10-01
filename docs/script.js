@@ -153,7 +153,8 @@
             q8: "Есть ли учёт использования?",
             a8: "<code>GET /v1/usage</code> возвращает итоги по токенам, разбивку по моделям и пользователям. Отключается через <code>DANYAPI_USAGE_ENABLED=0</code>.",
             cta_title: "Бесплатные модели.",
-            cta_sub: "Ваш API.",
+            cta_title_hi: "Ваш API.",
+            cta_sub: "Установите прямо сейчас, поставьте звезду и подпишитесь на канал.",
             cta_gh: "GitHub",
             cta_tg: "Телеграм-канал",
             footer_creator: "Создатель",
@@ -171,15 +172,101 @@
             lang_ru: "Русский"
         },
         en: {
-            meta_title: "DanyAPI Documentation",
+            nav_features: "Features",
             nav_hosted: "Public",
+            nav_models: "Models",
+            nav_quickstart: "Quick start",
+            nav_faq: "FAQ",
+            hero_badge: "Free · Open source · OpenAI-compatible",
+            hero_h1_b: "Zero cost.",
+            hero_sub: "A free, OpenAI-compatible API that runs the DeepSeek and Qwen web clients, the official GigaChat API, the OpenCode Zen gateway and the unofficial Alice and Duck.ai endpoints server-side from your own provider tokens. No paid keys, no quotas.",
+            hero_cta_start: "Get started",
+            hero_cta_gh: "Star on GitHub",
+            features_eyebrow: "Features",
+            features_title: "Everything the paid APIs have.",
+            features_title_hi: "None of the bills.",
+            features_sub: "A drop-in replacement for the official OpenAI API - swap <code>base_url</code> and your existing client code just works.",
+            f1_t: "OpenAI-compatible",
+            f1_d: "<code>GET /v1/models</code> and <code>POST /v1/chat/completions</code> in the official format. Change <code>base_url</code>, keep your client.",
+            f2_t: "Streaming",
+            f2_d: "Live streaming with <code>data:</code> chunks and <code>data: [DONE]</code>, plus thinking traces as <code>reasoning_content</code>.",
+            f3_t: "Thinking traces",
+            f3_d: "DeepSeek and Qwen reasoning exposed to your app - streamed live, on both providers.",
+            f4_t: "Tool calling",
+            f4_d: "Emulated <code>tools</code>, <code>tool_choice</code> and <code>parallel_tool_calls</code> with <code>finish_reason: \"tool_calls\"</code> responses.",
+            f5_t: "JSON mode",
+            f5_d: "<code>response_format</code> with <code>json_object</code> and <code>json_schema</code> - structured output for your agents.",
+            f7_t: "Web search",
+            f7_d: "Turn on grounded, up-to-date answers with the <code>search</code> flag on DeepSeek models.",
+            f8_t: "File attachments",
+            f8_d: "Images and text files as base64 or data URIs. Vision, OCR and file analysis per model.",
+            models_eyebrow: "Models",
+            models_title: "Six providers.",
+            models_title_hi: "One OpenAI API.",
+            models_sub: "Route by model name - <code>deepseek-*</code>, <code>qwen*</code>, <code>GigaChat*</code>, <code>opencode/*</code>, <code>alice</code> or a Duck.ai model. All optional, all can run together.",
+            models_ds_flash: "thinking · search · files · vision",
+            models_ds_pro: "thinking · search · files · vision",
+            models_ds_note: "Read live from the web client settings, so only the model types the account is granted are listed. Web search via the <code>search</code> flag; reasoning via the <code>-thinking</code> suffix or <code>thinking</code> flag.",
+            models_qw_1: "top model",
+            models_qw_2: "fast",
+            models_qw_3: "fetched live from the account",
+            models_qw_note: "Thinking and search built in. The model list is read from the account and refetched on a timer, so new models appear automatically.",
+            models_gc_lite: "lite · text",
+            models_gc_pro: "tools · vision",
+            models_gc_max: "tools · vision",
+            models_gc_note: "Official GigaChat API with a free freemium quota. Needs a Studio authorization key. The list is read from the account and refetched on a timer. Images work on Pro, Max and Ultra only.",
+            models_oc_gpt: "tools · vision",
+            models_oc_claude: "tools · vision",
+            models_oc_kimi: "tools",
+            models_oc_note_list: "fetched live from the gateway",
+            models_oc_note: "The curated OpenCode gateway at opencode.ai/zen, metered per token. Needs an API key. Some ids collide with Qwen or DeepSeek, prefix those with <code>opencode/</code>. Only the chat completions half of the catalogue is served.",
+            models_al_keyless: "no key needed",
+            models_al_note: "Unofficial, opt-in via <code>ALICE_ENABLED=1</code>, off by default. Yandex has no public API here, so it uses an undocumented internal protocol that can break at any time. Stateless and no incremental text, so history is folded into one prompt.",
+            models_duck_keyless: "no key needed",
+            models_duck_note: "Unofficial, opt-in via <code>DUCKAI_ENABLED=1</code>, off by default. DuckDuckGo has no public API here, so it uses an undocumented internal protocol and a browser fingerprint attestation that can break at any time. Needs Node.js on the host. Refuses datacenter addresses outright, so run it from a residential or mobile line.",
+            qs_eyebrow: "Quick start",
+            qs_need: "All you need is a free DeepSeek or Qwen token, a GigaChat Studio authorization key, or an OpenCode Zen API key - the script does the rest.",
+            qs_title: "Up and running in",
+            qs_title_hi: "under a minute.",
+            qs_sub: "One-command install on Windows, Linux and macOS. No Python setup gymnastics required.",
+            qs_tab_install: "Install",
+            qs_tab_docker: "Docker",
+            qs_pane_install: "PowerShell",
+            qs_pane_install_alt: "Linux / macOS",
+            qs_install_note: "The script clones the repo, installs dependencies, creates <code>.env</code>, live-checks your provider tokens and tells you how to start the server. It even auto-updates itself on each start. Prefer not to dig tokens out of browser storage by hand? Run <code>docs/token_utility.sh</code> (or <code>docs\\token_utility.bat</code> on Windows) and it pulls them out of your browser for you.",
+            qs_docker_note: "Prebuilt image, pushed on every push to prod and dev plus every version tag. The native PoW solver is compiled into the image for maximum speed.",
+            copy: "Copy",
+            faq_eyebrow: "FAQ",
+            faq_title: "Questions?",
+            faq_title_hi: "Answered.",
+            q1: "Is it really free?",
+            a1: "Yes. DanyAPI uses the internal APIs of the free web clients chat.deepseek.com and chat.qwen.ai through accounts made from your own free provider tokens, plus the free tier of the official GigaChat API and the OpenCode Zen gateway. The unofficial Alice and Duck.ai providers need no credentials at all. No billing, no quotas.",
+            q2: "Do my users need an API key?",
+            a2: "When running DanyAPI locally or in private hosting, no API key is required (pass any dummy value). When using the public hosted instance (BYOK mode), provide your DeepSeek or Qwen token as the Bearer token.",
+            q3: "Which providers and models?",
+            a3: "Model lists are not hardcoded: DeepSeek (<code>default</code> and whatever other types the account is granted), Qwen (<code>qwen3.8-max</code>, <code>qwen3.7-plus</code>, ...), GigaChat (<code>GigaChat-2</code>, <code>GigaChat-2-Pro</code> and the rest), OpenCode Zen (<code>opencode/gpt-5.6-sol</code>, <code>opencode/kimi-k3</code>, ...) and Duck.ai (the free tier models) are read from the provider endpoints and refetched on a timer, while Alice (<code>alice</code>, <code>yagpt</code>) serves its own aliases. Route by model name; all of them can run at once.",
+            q7: "Are there rate limits or will my token get banned?",
+            a7: "Requests go through the free web clients at a human-like pace. Add more tokens to the pool for extra parallelism - the project stays within normal usage, but treat free tokens as best-effort.",
+            q8: "Is there usage tracking?",
+            a8: "<code>GET /v1/usage</code> returns token usage totals, per-model and per-user breakdowns. Disable with <code>DANYAPI_USAGE_ENABLED=0</code>.",
+            cta_title: "Free models.",
+            cta_title_hi: "Your API.",
+            cta_sub: "Install it now, or drop a star and follow the channel.",
+            cta_gh: "GitHub",
+            cta_tg: "Telegram channel",
+            footer_creator: "Creator",
+            footer_channel: "Telegram channel",
+            footer_note: "Built with FastAPI &amp; Python · reverse-engineered, not affiliated with DeepSeek, Alibaba, Sber or Yandex",
             hosted_eyebrow: "Public instance",
             hosted_title: "No server?",
             hosted_title_hi: "Use the free one.",
             hosted_sub: "A public, fully free DanyAPI instance is already live in production. No signup, no keys, no setup - just point your client at it.",
             hosted_pane_api: "API base URL",
             hosted_pane_site: "Landing page",
-            hosted_note: "Use any OpenAI-compatible client with your provider token as the API key (BYOK mode). The instance runs on your provider tokens with zero middleman fees."
+            hosted_note: "Use any OpenAI-compatible client with your provider token as the API key (BYOK mode). The instance runs on your provider tokens with zero middleman fees.",
+            meta_title: "DanyAPI Documentation",
+            lang_en: "English",
+            lang_ru: "Russian",
         }
     };
 
@@ -192,6 +279,35 @@
         return browserLang.indexOf("ru") === 0 ? "ru" : "en";
     }
 
+    function escapeText(value) {
+        return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    }
+
+    function leadingText(markup) {
+        var cut = markup.indexOf("<");
+        return cut === -1 ? markup : markup.slice(0, cut);
+    }
+
+    function translateNode(el, t) {
+        var key = el.getAttribute("data-i18n");
+        var original = el.getAttribute("data-i18n-src");
+        if (original === null) {
+            original = el.innerHTML;
+            el.setAttribute("data-i18n-src", original);
+        }
+        var value = t ? t[key] : undefined;
+        if (!/data-i18n/.test(original)) {
+            if (value !== undefined) el.innerHTML = value;
+            return;
+        }
+        var head = value === undefined ? leadingText(original) : value;
+        var cut = original.indexOf("<");
+        var tail = cut === -1 ? "" : original.slice(cut);
+        el.innerHTML = head.indexOf("<") === -1 ? escapeText(head) + tail : head + tail;
+        var nested = el.querySelectorAll("[data-i18n]");
+        for (var i = 0; i < nested.length; i++) translateNode(nested[i], t);
+    }
+
     function applyLang(lang) {
         var t = I18N[lang];
         document.documentElement.lang = lang;
@@ -199,14 +315,13 @@
         var els = document.querySelectorAll("[data-i18n], [data-i18n-aria]");
         for (var i = 0; i < els.length; i++) {
             var el = els[i];
-            if (el.hasAttribute("data-i18n")) {
-                var key = el.getAttribute("data-i18n");
-                if (t && t[key] !== undefined) el.innerHTML = t[key];
-            }
             if (el.hasAttribute("data-i18n-aria")) {
                 var ariaKey = el.getAttribute("data-i18n-aria");
                 if (t && t[ariaKey] !== undefined) el.setAttribute("aria-label", t[ariaKey]);
             }
+            if (!el.hasAttribute("data-i18n")) continue;
+            if (el.parentElement && el.parentElement.closest("[data-i18n]")) continue;
+            translateNode(el, t);
         }
         if (t && t.meta_title) document.title = t.meta_title;
 
@@ -263,6 +378,7 @@
             var chip = document.createElement("span");
             chip.className = "model-chip";
             chip.setAttribute("data-i18n", labelKey);
+            if (I18N.en[labelKey] !== undefined) chip.setAttribute("data-i18n-src", I18N.en[labelKey]);
             chip.textContent = labelText;
             li.appendChild(chip);
             list.appendChild(li);
@@ -280,6 +396,12 @@
         var lists = document.querySelectorAll("[data-model-provider]");
         if (!lists.length) return;
         var t = I18N[currentLang] || I18N.en;
+        var en = I18N.en;
+        function label(key) {
+            if (t && t[key] !== undefined) return t[key];
+            if (en[key] !== undefined) return en[key];
+            return "";
+        }
         fetch("/v1/models")
             .then(function (r) { return r.json(); })
             .then(function (data) {
@@ -289,15 +411,15 @@
                     var models = data.data.filter(function (m) { return m.owned_by === provider; });
                     if (!models.length) return;
                     if (provider === "deepseek" || provider === "duckai") {
-                        renderModelList(list, models, "models_duck_keyless", t.models_duck_keyless);
+                        renderModelList(list, models, "models_duck_keyless", label("models_duck_keyless"));
                     } else if (provider === "alice") {
-                        renderModelList(list, models, "models_al_keyless", t.models_al_keyless);
+                        renderModelList(list, models, "models_al_keyless", label("models_al_keyless"));
                     } else if (provider === "gigachat") {
-                        renderModelList(list, models, "models_gc_pro", t.models_gc_pro);
+                        renderModelList(list, models, "models_gc_pro", label("models_gc_pro"));
                     } else if (provider === "opencode") {
-                        renderModelList(list, models, "models_oc_note_list", t.models_oc_note_list);
+                        renderModelList(list, models, "models_oc_note_list", label("models_oc_note_list"));
                     } else {
-                        renderModelList(list, models, "models_qw_3", t.models_qw_3);
+                        renderModelList(list, models, "models_qw_3", label("models_qw_3"));
                     }
                 });
             })

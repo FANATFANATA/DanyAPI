@@ -13,6 +13,7 @@ from danyapi.duckai.client import (
     USER_AGENT,
     DuckAIClient,
     DuckAIError,
+    _error_for_payload,
     _iter_lines,
     _parse_json,
 )
@@ -113,7 +114,8 @@ async def test_status_raises_on_error_payload(monkeypatch):
     try:
         with pytest.raises(DuckAIError) as excinfo:
             await client.status()
-        assert excinfo.value.code == "ERR_SERVICE_UNAVAILABLE"
+        assert excinfo.value.code == 503
+        assert excinfo.value.error_type == "ERR_SERVICE_UNAVAILABLE"
         assert excinfo.value.message == "down"
         assert excinfo.value.is_retryable is True
     finally:
@@ -290,7 +292,9 @@ async def test_chat_raises_on_error_events(monkeypatch):
     try:
         with pytest.raises(DuckAIError) as excinfo:
             _ = [event async for event in client.chat([{"role": "user", "content": []}])]
-        assert excinfo.value.code == "ERR_UPSTREAM"
+        assert excinfo.value.code == 200
+        assert excinfo.value.error_type == "ERR_UPSTREAM"
+        assert excinfo.value.is_retryable is True
         assert excinfo.value.message == "nope"
     finally:
         await client.aclose()
@@ -411,3 +415,37 @@ def test_duckai_error_flags():
     assert challenge.is_challenge is True
     assert challenge.is_auth is False
     assert challenge.is_retryable is False
+
+
+def test_error_for_payload_keeps_the_http_status_next_to_the_payload_type():
+    error = _error_for_payload(400, {"type": "ERR_INVALID_INPUT", "message": "bad prompt"})
+    assert error.code == 400
+    assert error.error_type == "ERR_INVALID_INPUT"
+    assert error.message == "bad prompt"
+    assert error.is_auth is False
+    assert error.is_challenge is False
+    assert error.is_retryable is False
+
+
+def test_error_for_payload_reports_the_real_client_errors():
+    assert _error_for_payload(404, {"type": "ERR_NOT_FOUND"}).code == 404
+    assert _error_for_payload(422, {"type": "ERR_UNPROCESSABLE"}).code == 422
+    assert _error_for_payload(401, {"type": "ERR_FORBIDDEN"}).is_auth is True
+    assert _error_for_payload(403, {"type": "ERR_DENIED"}).is_auth is True
+    assert _error_for_payload(429, {"type": "ERR_TOO_MANY"}).is_retryable is True
+    assert _error_for_payload(503, {}).is_retryable is True
+    assert _error_for_payload(418, {"type": "ERR_CHALLENGE"}).is_challenge is True
+    assert _error_for_payload(200, {"type": "ERR_BN_LIMIT"}).is_entrypoint is True
+    assert _error_for_payload(500, {"type": 7}).error_type == ""
+
+
+def test_status_for_prefers_the_http_status_over_the_payload_type():
+    from danyapi.duckai import api as duckai_api
+
+    assert duckai_api._status_for(_error_for_payload(400, {"type": "ERR_INVALID_INPUT"})) == 400
+    assert duckai_api._status_for(_error_for_payload(404, {"type": "ERR_NOT_FOUND"})) == 400
+    assert duckai_api._status_for(_error_for_payload(422, {"type": "ERR_UNPROCESSABLE"})) == 400
+    assert duckai_api._status_for(_error_for_payload(401, {"type": "ERR_FORBIDDEN"})) == 401
+    assert duckai_api._status_for(_error_for_payload(418, {"type": "ERR_CHALLENGE"})) == 403
+    assert duckai_api._status_for(_error_for_payload(429, {"type": "ERR_TOO_MANY"})) == 502
+    assert duckai_api._status_for(_error_for_payload(500, {"type": "ERR_INTERNAL"})) == 502

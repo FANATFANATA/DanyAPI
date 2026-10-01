@@ -284,7 +284,7 @@ def quote(value):
     if "\n" in value or "\r" in value:
         raise ValueError("value contains a line break and cannot be written to .env")
     if value != value.strip() or "#" in value or "\\" in value or "'" in value:
-        return "'" + value.replace("'", "\\'") + "'"
+        return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
     return value
 
 
@@ -313,6 +313,9 @@ def _unquote(val):
     return "".join(out), True
 
 
+INLINE_COMMENT_RE = re.compile(r"\s+#.*")
+
+
 def parse_env(path):
     values = {}
     if not path.exists():
@@ -323,9 +326,10 @@ def parse_env(path):
             continue
         key, raw = m.group(1), m.group(2).strip()
         val, quoted = _unquote(raw)
-        if not quoted:
-            val = raw
-        values[key] = val
+        if quoted:
+            values[key] = val
+        else:
+            values[key] = INLINE_COMMENT_RE.sub("", raw).rstrip()
     return values
 
 
@@ -513,7 +517,7 @@ def mask_secrets(raw):
     values = split_tokens(raw)
     if not values:
         return "(empty)"
-    shown = ", ".join(f"{value[:4]}...{value[-2:]}" for value in values[:2])
+    shown = ", ".join(f"{value[:4]}... ({len(value)} chars)" for value in values[:2])
     if len(values) > 2:
         shown += f", +{len(values) - 2} more"
     return f"{shown} ({len(values)} set)"

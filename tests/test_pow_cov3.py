@@ -10,8 +10,16 @@ from danyapi import pow as pow_mod
 from danyapi.pow import _find_native_solver, _native_solver_names, _parse_number, _run_solver, deepseek_hash_v1_hex, solve_python
 
 
-def _proc(stdout="", returncode=0, stderr=""):
-    return MagicMock(stdout=stdout, returncode=returncode, stderr=stderr)
+def _proc(stdout="", returncode=0, stderr="", side_effect=None):
+    proc = MagicMock(stdout=stdout, returncode=returncode, stderr=stderr)
+    proc.communicate = MagicMock(return_value=(stdout, stderr), side_effect=side_effect)
+    proc.kill = MagicMock()
+    proc.wait = MagicMock(return_value=0)
+    return proc
+
+
+def _popen(stdout="", returncode=0, stderr="", side_effect=None):
+    return MagicMock(return_value=_proc(stdout, returncode, stderr, side_effect))
 
 
 def test_parse_number_rejects_booleans():
@@ -87,55 +95,59 @@ def test_solve_python_slow_path_exhausts_every_candidate():
 
 
 def test_run_solver_maps_a_subprocess_timeout():
-    with patch("danyapi.pow.subprocess.run", side_effect=subprocess.TimeoutExpired(cmd=["pow_solver.exe"], timeout=60.0)):
+    timeout = subprocess.TimeoutExpired(cmd=["pow_solver.exe"], timeout=60.0)
+    with patch("danyapi.pow.subprocess.Popen", _popen(side_effect=timeout)) as popen:
         with pytest.raises(RuntimeError) as excinfo:
             _run_solver(Path("pow_solver.exe"), "c", "s", 1, 10, 60.0)
     assert str(excinfo.value) == "pow_solver.exe timed out after 60s"
     assert excinfo.value.__cause__ is not None
+    assert popen.return_value.kill.called
 
 
 def test_run_solver_maps_a_missing_executable():
-    with patch("danyapi.pow.subprocess.run", side_effect=OSError("no such file or directory")):
+    with patch("danyapi.pow.subprocess.Popen", side_effect=OSError("no such file or directory")):
         with pytest.raises(RuntimeError) as excinfo:
             _run_solver(Path("pow_solver.exe"), "c", "s", 1, 10)
     assert str(excinfo.value) == "pow_solver.exe is not executable: no such file or directory"
 
 
 def test_run_solver_rejects_unparsable_output():
-    with patch("danyapi.pow.subprocess.run", return_value=_proc("not json")):
+    with patch("danyapi.pow.subprocess.Popen", _popen("not json")):
         with pytest.raises(RuntimeError) as excinfo:
             _run_solver(Path("pow_solver.exe"), "c", "s", 1, 10)
     assert str(excinfo.value) == "pow_solver.exe returned malformed output: not json"
 
 
 def test_run_solver_rejects_non_object_output():
-    with patch("danyapi.pow.subprocess.run", return_value=_proc("[1, 2]")):
+    with patch("danyapi.pow.subprocess.Popen", _popen("[1, 2]")):
         with pytest.raises(RuntimeError) as excinfo:
             _run_solver(Path("pow_solver.exe"), "c", "s", 1, 10)
     assert str(excinfo.value) == "pow_solver.exe returned malformed output: [1, 2]"
 
 
 def test_run_solver_forwards_the_timeout_and_the_payload():
-    with patch("danyapi.pow.subprocess.run", return_value=_proc('{"answer": 3}')) as run:
+    with patch("danyapi.pow.subprocess.Popen", _popen('{"answer": 3}')) as popen:
         assert _run_solver(Path("pow_solver.exe"), "ab", "salt", 1700000000000, 12, 12.5) == 3
-    assert run.call_args.args[0] == [str(Path("pow_solver.exe"))]
-    assert run.call_args.kwargs["timeout"] == 12.5
-    assert run.call_args.kwargs["check"] is False
-    assert json.loads(run.call_args.kwargs["input"]) == {"challenge": "ab", "salt": "salt", "expire_at": "1700000000000", "difficulty": 12}
+    assert popen.call_args.args[0] == [str(Path("pow_solver.exe"))]
+    proc = popen.return_value
+    assert json.loads(proc.communicate.call_args.args[0]) == {"challenge": "ab", "salt": "salt", "expire_at": "1700000000000", "difficulty": 12}
+    assert proc.communicate.call_args.kwargs["timeout"] == 12.5
 
 
 def test_run_solver_runs_a_javascript_solver_through_node():
     script = Path("pow_solver.js")
-    with patch("danyapi.pow.subprocess.run", return_value=_proc('{"answer": 1}')) as run:
+    with patch("danyapi.pow.subprocess.Popen", _popen('{"answer": 1}')) as popen:
         assert _run_solver(script, "c", "s", 1, 2) == 1
-    assert run.call_args.args[0] == ["node", str(script)]
+    assert popen.call_args.args[0] == ["node", str(script)]
 
 
 def test_run_solver_scrubs_the_environment_it_hands_over(monkeypatch):
     monkeypatch.setenv("DEEPSEEK_TOKENS", "secret")
+    monkeypatch.setenv("PATH", os.environ.get("PATH", ""))
     monkeypatch.setenv("DANYAPI_HOST", "127.0.0.1")
-    with patch("danyapi.pow.subprocess.run", return_value=_proc('{"answer": 1}')) as run:
+    with patch("danyapi.pow.subprocess.Popen", _popen('{"answer": 1}')) as popen:
         _run_solver(Path("pow_solver.exe"), "c", "s", 1, 2)
-    env = run.call_args.kwargs["env"]
+    env = popen.call_args.kwargs["env"]
     assert "DEEPSEEK_TOKENS" not in env
-    assert env["DANYAPI_HOST"] == "127.0.0.1"
+    assert env["PATH"] == os.environ["PATH"]
+    assert "DANYAPI_HOST" not in env

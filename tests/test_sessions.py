@@ -402,6 +402,47 @@ def test_expiry_discards_from_store(sessions_store):
     assert key not in sessions_store
 
 
+def test_restored_sessions_honour_the_persisted_idle_time(sessions_store):
+    reg = SessionRegistry(FakeSessionClient(), maxsize=8, ttl=60.0, store=sessions_store)
+    _, key = asyncio.run(reg.obtain(None))
+    reg.touch_last_message(key, "m1")
+    record = dict(sessions_store.get(key))
+    assert record["idle_seconds"] == pytest.approx(0.0, abs=1.0)
+    record["idle_seconds"] = 3600.0
+    sessions_store.set(key, record)
+    restarted = SessionRegistry(FakeSessionClient(), maxsize=8, ttl=60.0, store=JsonStore("sessions", "default"))
+    assert restarted.get(key) is None
+    assert key not in sessions_store
+
+
+def test_a_restored_session_within_the_ttl_is_still_reused(sessions_store):
+    reg = SessionRegistry(FakeSessionClient(), maxsize=8, ttl=3600.0, store=sessions_store)
+    session, key = asyncio.run(reg.obtain(None))
+    reg.touch_last_message(key, "m1")
+    restarted = SessionRegistry(FakeSessionClient(), maxsize=8, ttl=3600.0, store=JsonStore("sessions", "default"))
+    restored = restarted.get(key)
+    assert restored is not None
+    assert restored.id == session.id
+    assert restored.last_message_id == "m1"
+
+
+def test_a_zero_ttl_keeps_restored_sessions_forever(sessions_store):
+    reg = SessionRegistry(FakeSessionClient(), maxsize=8, ttl=0.0, store=sessions_store)
+    _, key = asyncio.run(reg.obtain(None))
+    record = dict(sessions_store.get(key))
+    record["idle_seconds"] = 10 * 365 * 24 * 3600
+    sessions_store.set(key, record)
+    restarted = SessionRegistry(FakeSessionClient(), maxsize=8, ttl=0.0, store=JsonStore("sessions", "default"))
+    assert restarted.get(key) is not None
+
+
+def test_a_bogus_idle_time_is_ignored(sessions_store):
+    for bogus in ("later", None, -50.0, float("nan")):
+        sessions_store.set("0:s1", {"id": "cs1", "idle_seconds": bogus})
+        reg = SessionRegistry(FakeSessionClient(), maxsize=8, ttl=60.0, store=JsonStore("sessions", "default"), key_prefix="0:")
+        assert reg.get("s1") is not None
+
+
 def test_eviction_discards_from_store(sessions_store):
     reg = SessionRegistry(FakeSessionClient(), maxsize=1, store=sessions_store)
     _, k1 = asyncio.run(reg.obtain(None))
