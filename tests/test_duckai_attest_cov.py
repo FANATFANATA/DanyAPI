@@ -615,7 +615,8 @@ async def test_header_for_warns_once_about_the_remote_script_exposure(monkeypatc
     assert decoded["meta"]["duration"] == "0"
     assert first == second
     assert caplog.messages == [
-        "duckai attestation executes javascript served by the remote duck.ai host in a scrubbed subprocess; it carries no digest to verify against"
+        "duckai attestation executes javascript served by the remote duck.ai host in a subprocess with a scrubbed environment and no node globals "
+        "or network primitives; it carries no digest to verify against"
     ]
     attest._note_remote_script_exposure.cache_clear()
 

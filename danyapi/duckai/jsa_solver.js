@@ -20,7 +20,19 @@ const nodeRequire = require;
 const nodeBuffer = Buffer;
 const nodeHrtime = nodeProcess.hrtime;
 
-const SANDBOX_HIDDEN_GLOBALS = ["process"];
+const SANDBOX_HIDDEN_GLOBALS = [
+  "process",
+  "fetch",
+  "WebSocket",
+  "XMLHttpRequest",
+  "EventSource",
+  "Request",
+  "Response",
+  "Headers",
+  "BroadcastChannel",
+  "MessageChannel",
+  "MessagePort",
+];
 
 const VOID_TAGS = new Set([
   "area", "base", "br", "col", "embed", "hr", "img", "input",

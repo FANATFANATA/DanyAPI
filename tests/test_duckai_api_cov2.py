@@ -20,6 +20,7 @@ from danyapi.duckai.api import (
     ENTRYPOINT_HINT,
     MAX_IMAGE_BYTES,
     MAX_IMAGES_PER_MESSAGE,
+    MAX_IMAGES_PER_REQUEST,
     NO_IMAGE_HINT,
     RETRY_JITTER,
     _detail_for,
@@ -509,6 +510,143 @@ async def test_collect_non_stream_attaches_sources():
     result = await collect_non_stream(account, [ChatMessage(role="user", content="hi")], model=MODEL)
     assert result["choices"][0]["message"]["sources"] == sources
     assert result["choices"][0]["finish_reason"] == "stop"
+
+
+async def test_collect_non_stream_enforces_max_tokens_and_stop():
+    account, _ = _account([[_event(delta="one two three four"), _event(finish="stop")]])
+    result = await collect_non_stream(account, [ChatMessage(role="user", content="hi")], model=MODEL, max_tokens=1)
+    assert result["choices"][0]["message"]["content"] == "one two"
+    assert result["choices"][0]["finish_reason"] == "length"
+    account, _ = _account([[_event(delta="keep DROP"), _event(finish="stop")]])
+    stopped = await collect_non_stream(account, [ChatMessage(role="user", content="hi")], model=MODEL, stop=["DROP"])
+    assert stopped["choices"][0]["message"]["content"] == "keep "
+    assert stopped["choices"][0]["finish_reason"] == "stop"
+
+
+async def test_collect_non_stream_reports_a_limit_as_a_truncated_answer():
+    account, _ = _account([[_event(delta="half"), _event(finish="stop", limit="ERR_OUTPUT_LIMIT")]])
+    result = await collect_non_stream(account, [ChatMessage(role="user", content="hi")], model=MODEL)
+    assert result["choices"][0]["message"]["content"] == "half"
+    assert result["choices"][0]["finish_reason"] == "length"
+
+
+async def test_collect_non_stream_honours_thinking_and_tool_choice():
+    account, client = _account([[_event(delta="ok"), _event(finish="stop")]])
+    await collect_non_stream(account, [ChatMessage(role="user", content="hi")], model=MODEL, thinking=True)
+    assert client.calls[0]["effort"] == "medium"
+    account, client = _account([[_event(delta="ok"), _event(finish="stop")]])
+    await collect_non_stream(account, [ChatMessage(role="user", content="hi")], model=MODEL, thinking=False)
+    assert client.calls[0]["effort"] == "none"
+    tools = [{"type": "function", "function": {"name": "f"}}]
+    account, client = _account([[_event(delta="ok"), _event(finish="stop")]])
+    await collect_non_stream(
+        account,
+        [ChatMessage(role="user", content="hi")],
+        model=MODEL,
+        tools=tools,
+        tool_choice="none",
+    )
+    assert client.calls[0]["can_use_tools"] is False
+
+
+async def test_stream_openai_trims_at_max_tokens_and_reports_a_refusal():
+    account, _ = _account([[_event(delta="one two three"), _event(finish="stop")]])
+    lines = await _drain(stream_openai(account, [ChatMessage(role="user", content="hi")], model=MODEL, max_tokens=1))
+    assert _content(lines) == "one two"
+    assert _finish(lines) == "length"
+    account, _ = _account([[_event(refusal="model_safety"), _event(finish="stop")]])
+    lines = await _drain(stream_openai(account, [ChatMessage(role="user", content="hi")], model=MODEL))
+    assert _finish(lines) == "content_filter"
+
+
+async def test_stream_openai_numbers_parallel_tool_calls():
+    calls = [
+        {"index": 0, "id": "c1", "type": "function", "function": {"name": "a", "arguments": "{}"}},
+        {"index": 0, "id": "c2", "type": "function", "function": {"name": "b", "arguments": "{}"}},
+    ]
+    account, _ = _account([[_event(tool_calls=calls), _event(finish="stop")]])
+    lines = await _drain(stream_openai(account, [ChatMessage(role="user", content="hi")], model=MODEL))
+    emitted = [delta["tool_calls"][0] for delta in _all_deltas(lines) if "tool_calls" in delta]
+    assert [call["index"] for call in emitted] == [0, 1]
+
+
+async def test_stream_openai_rejects_bad_input_in_band():
+    account, client = _account([[_event(delta="unused")]])
+    lines = await _drain(
+        stream_openai(
+            account,
+            [ChatMessage(role="user", content=[{"type": "image_url", "image_url": {"url": "https://x/y.png"}}])],
+            model=MODEL,
+        )
+    )
+    joined = "".join(lines)
+    assert "duckai only accepts inline data URI images" in joined
+    assert client.calls == []
+
+
+async def test_retry_backoff_runs_without_the_account_held():
+    order: list[str] = []
+    seen: list[bool] = []
+    account, _ = _account([[TransportError(503)], [_event(delta="ok"), _event(finish="stop")]])
+
+    async def _instant(attempt: int) -> None:
+        order.append(f"sleep-{attempt}")
+        seen.append(account.sem.locked())
+
+    duckai_api._sleep_backoff = _instant
+    try:
+        result = await collect_non_stream(account, [ChatMessage(role="user", content="hi")], model=MODEL)
+    finally:
+        duckai_api._sleep_backoff = _REAL_SLEEP_BACKOFF
+    assert result["choices"][0]["message"]["content"] == "ok"
+    assert order == ["sleep-0"]
+    assert seen == [False]
+
+
+def test_build_messages_drops_the_tool_catalog_for_tool_choice_none():
+    tools = [{"type": "function", "function": {"name": "f", "description": "does f"}}]
+    built = build_messages([ChatMessage(role="user", content="hi")], tools=tools, tool_choice="none")
+    assert built[0]["content"] == [{"type": "text", "text": "hi"}]
+
+
+def test_build_messages_maps_a_legacy_function_result_to_a_tool_result():
+    built = build_messages(
+        [
+            ChatMessage(role="user", content="weather?"),
+            ChatMessage(role="assistant", content="", tool_calls=[{"id": "c1", "type": "function", "function": {"name": "f", "arguments": "{}"}}]),
+            ChatMessage(role="function", name="f", content="42"),
+        ]
+    )
+    assert [message["role"] for message in built] == ["user", "assistant"]
+    assert built[1]["parts"][-1] == {"type": "tool-result", "toolCallId": "f", "result": "42", "data": None}
+
+
+def test_build_messages_keeps_an_unanswered_tool_result_on_its_own_turn():
+    built = build_messages(
+        [
+            ChatMessage(role="user", content="hi"),
+            ChatMessage(role="assistant", content="thinking out loud"),
+            ChatMessage(role="tool", tool_call_id="other", content="42"),
+        ]
+    )
+    assert [message["role"] for message in built] == ["user", "assistant", "assistant"]
+    assert built[1]["parts"] == [{"type": "text", "text": "thinking out loud"}]
+    assert built[2]["parts"][0]["toolCallId"] == "other"
+
+
+def test_build_messages_keeps_a_trailing_system_turn():
+    built = build_messages([ChatMessage(role="user", content="hi"), ChatMessage(role="system", content="be terse")])
+    assert len(built) == 1
+    assert built[0]["content"][0]["text"].endswith("be terse")
+    assert built[0]["content"][1] == {"type": "text", "text": "hi"}
+
+
+def test_image_limits_are_checked_before_the_payloads_are_decoded():
+    content = [{"type": "image_url", "image_url": {"url": f"data:image/png;base64,{base64.b64encode(bytes(4 * 1024 * 1024)).decode()}"}}]
+    messages = [ChatMessage(role="user", content=content) for _ in range(MAX_IMAGES_PER_REQUEST + 1)]
+    with pytest.raises(HTTPException) as excinfo:
+        build_messages(messages)
+    assert excinfo.value.status_code == 400
 
 
 async def test_collect_non_stream_rejects_a_remote_image():

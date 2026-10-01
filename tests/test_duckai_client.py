@@ -292,7 +292,7 @@ async def test_chat_raises_on_error_events(monkeypatch):
     try:
         with pytest.raises(DuckAIError) as excinfo:
             _ = [event async for event in client.chat([{"role": "user", "content": []}])]
-        assert excinfo.value.code == 200
+        assert excinfo.value.code == 502
         assert excinfo.value.error_type == "ERR_UPSTREAM"
         assert excinfo.value.is_retryable is True
         assert excinfo.value.message == "nope"

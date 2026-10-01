@@ -177,6 +177,11 @@ SANDBOX_PROBE_SCRIPT = r"""
       module: read(() => typeof module),
       childProcess: read(() => typeof process.getBuiltinModule),
       windowIsGlobal: typeof window === "object" && window === globalThis,
+      fetch: read(() => typeof fetch),
+      webSocket: read(() => typeof WebSocket),
+      xhr: read(() => typeof XMLHttpRequest),
+      request: read(() => typeof Request),
+      eventSource: read(() => typeof EventSource),
     },
   };
 })()
@@ -193,6 +198,14 @@ def test_sandbox_hides_the_node_globals_from_the_evaluated_script(tmp_path):
     assert signals["require"] == "undefined"
     assert signals["module"] == "undefined"
     assert signals["windowIsGlobal"] is True
+
+
+def test_sandbox_hides_the_network_primitives_from_the_evaluated_script(tmp_path):
+    out = _evaluate(tmp_path, SANDBOX_PROBE_SCRIPT)
+    assert out["ok"] is True, out
+    signals = out["result"]["signals"]
+    for name in ("fetch", "webSocket", "xhr", "request", "eventSource"):
+        assert signals[name] == "undefined"
 
 
 def test_sandbox_restores_the_node_globals_after_the_evaluated_script(tmp_path):

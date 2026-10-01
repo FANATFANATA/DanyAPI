@@ -1,6 +1,7 @@
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
@@ -119,7 +120,19 @@ async def test_duckai_fetch_models_scrapes_page_and_bundle():
         seen.append(path)
         return MagicMock(text=pages[path], headers={})
 
+    class _Stream:
+        async def __aenter__(self):
+            return httpx.Response(200, text=pages["/dist/duckai-dist/entry.duckai.abc123.js"])
+
+        async def __aexit__(self, *exc_info):
+            return False
+
+    def fake_stream(method, path, headers=None):
+        seen.append(path)
+        return _Stream()
+
     client.http.get = fake_get
+    client.http.stream = fake_stream
     try:
         models = await client.fetch_models()
     finally:

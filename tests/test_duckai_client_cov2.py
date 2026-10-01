@@ -627,14 +627,30 @@ async def test_fetch_models_publishes_the_catalog_atomically():
     release = asyncio.Event()
     seen: list[str] = []
 
+    class _Stream:
+        def __init__(self, open_response) -> None:
+            self._open = open_response
+
+        async def __aenter__(self) -> httpx.Response:
+            return await self._open()
+
+        async def __aexit__(self, *exc_info) -> bool:
+            return False
+
     class FakeHttp:
         async def get(self, path: str, headers=None) -> httpx.Response:
             seen.append(path)
-            if path == "/":
-                return httpx.Response(200, text=PAGE)
+            return httpx.Response(200, text=PAGE)
+
+        def stream(self, method: str, path: str, headers=None) -> _Stream:
+            seen.append(path)
             bundle_ready.set()
-            await release.wait()
-            return httpx.Response(200, text=BUNDLE)
+
+            async def _open() -> httpx.Response:
+                await release.wait()
+                return httpx.Response(200, text=BUNDLE)
+
+            return _Stream(_open)
 
         async def aclose(self) -> None:
             return None

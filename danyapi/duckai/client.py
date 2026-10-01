@@ -21,7 +21,6 @@ BASE_URL = "https://duck.ai"
 API_ROOT = "/duckchat/v1"
 STATUS_PATH = f"{API_ROOT}/status"
 CHAT_PATH = f"{API_ROOT}/chat"
-CAPABILITIES_PATH = f"{API_ROOT}/capabilities"
 
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
 
@@ -31,7 +30,7 @@ FE_VERSION_RE = re.compile(r'data-version-tag="([^"]+)"')
 FE_SHA_RE = re.compile(r'data-version-sha="([^"]+)"')
 
 BROWSER_HEADERS = {
-    "accept-encoding": "gzip, deflate, br, zstd",
+    "accept-encoding": "gzip, deflate, br",
     "sec-ch-ua-mobile": "?0",
     "sec-fetch-dest": "empty",
     "sec-fetch-mode": "cors",
@@ -47,6 +46,15 @@ ENTRYPOINT_TYPES = frozenset({"ERR_BN_LIMIT"})
 ENTRYPOINT_MARKERS = ("unsupported entrypoint",)
 RETRYABLE_STATUSES = frozenset({408, 425, 429, 500, 502, 503, 504})
 RETRYABLE_TYPES = frozenset({"ERR_UPSTREAM", "ERR_SERVICE_UNAVAILABLE", "ERR_SERVICE_OFFLINE", "ERR_NETWORK", "ERR_STREAM_NETWORK"})
+
+STREAM_ERROR_STATUS = {
+    "ERR_INPUT_LIMIT": 400,
+    "ERR_OUTPUT_LIMIT": 400,
+    "ERR_CONVERSATION_LIMIT": 400,
+    "ERR_IMAGE_GENERATION_LIMIT": 400,
+    "ERR_ACCOUNT_LIMIT": 400,
+    "ERR_USER_LIMIT": 400,
+}
 
 STREAM_PING = "[PING]"
 STREAM_CHAT_TITLE = "[CHAT_TITLE:"
@@ -143,8 +151,6 @@ MODEL_CATALOG: tuple[dict, ...] = (
     },
 )
 
-FREE_MODEL_IDS = frozenset({"gpt-5.4-mini", "gpt-5.6-luna", "claude-haiku-4-5"})
-
 DEFAULT_MODEL = "gpt-5.4-mini"
 
 CATALOG_ANCHOR = '{model:"'
@@ -176,7 +182,8 @@ def _catalog_efforts(raw: str | None) -> tuple[str, ...]:
     if not raw:
         return REASONING_EFFORTS
     efforts = tuple(item.strip().strip('"') for item in raw.split(",") if item.strip())
-    return efforts or REASONING_EFFORTS
+    known = tuple(item for item in efforts if item in REASONING_EFFORTS)
+    return known or REASONING_EFFORTS
 
 
 def _offsets(text: str, needle: str) -> list[int]:
@@ -209,18 +216,19 @@ def parse_catalog(bundle: str) -> tuple[dict, ...]:
     anchors = _offsets(text, CATALOG_ANCHOR)
     if not anchors:
         return ()
-    quotes = _offsets(text, '"')
-    terminators = _catalog_terminators(text)
+    region_start = anchors[0]
+    region = text[region_start : anchors[-1] + CATALOG_BODY_LIMIT]
+    terminators = [mark + region_start for mark in _catalog_terminators(region)]
     entries: list[dict] = []
     cursor = 0
     for anchor in anchors:
         if anchor < cursor:
             continue
         id_start = anchor + len(CATALOG_ANCHOR)
-        quote = bisect_left(quotes, id_start)
-        if quote >= len(quotes) or quotes[quote] - id_start > CATALOG_ID_LIMIT:
+        quote = text.find('"', id_start)
+        if quote == -1 or quote - id_start > CATALOG_ID_LIMIT:
             continue
-        body_start = quotes[quote] + 1
+        body_start = quote + 1
         stop = _first_mark(terminators, body_start, body_start + CATALOG_BODY_LIMIT)
         if stop is None:
             continue
@@ -230,7 +238,7 @@ def parse_catalog(bundle: str) -> tuple[dict, ...]:
         available_to = _catalog_field(body, "available_to")
         if not short_name or not available_to or f".{FREE_TIER}" not in available_to:
             continue
-        model_id = text[id_start : quotes[quote]]
+        model_id = text[id_start:quote]
         name = _catalog_field(body, "name") or short_name
         variant = _catalog_field(body, "variant")
         rank = _catalog_field(body, "cost_rank")
@@ -295,7 +303,8 @@ def normalize_effort_in(allowed: tuple[str, ...], effort: str | None) -> str:
         return DEFAULT_REASONING_EFFORT
     if wanted in allowed:
         return wanted
-    return allowed[0] if allowed else DEFAULT_REASONING_EFFORT
+    known = next((item for item in allowed if item in REASONING_EFFORTS), "")
+    return known or DEFAULT_REASONING_EFFORT
 
 
 def normalize_effort(model: str, effort: str | None) -> str:
@@ -381,7 +390,8 @@ def parse_control(line: str) -> DuckAIEvent | None:
         return None
     if stripped.startswith(STREAM_CHAT_TITLE):
         event = DuckAIEvent()
-        event.title = stripped[len(STREAM_CHAT_TITLE) :].rstrip("]").strip()
+        body = stripped[len(STREAM_CHAT_TITLE) :].strip()
+        event.title = body[:-1].strip() if body.endswith("]") else body
         return event
     if stripped == STREAM_DONE or stripped.startswith(f"{STREAM_DONE}["):
         event = DuckAIEvent()
@@ -416,12 +426,20 @@ def _error_for_payload(status: int, payload: Any) -> DuckAIError:
     return DuckAIError(status, message or f"upstream returned {status}", error_type)
 
 
-def _reject_oversized_bundle(resp: Any) -> None:
-    declared = resp.headers.get("content-length")
+def _oversized_bundle() -> DuckAIError:
+    return DuckAIError("catalog", f"duck.ai entry bundle is above the {CATALOG_SCAN_LIMIT} byte scan limit")
+
+
+def _reject_declared_length(headers: Any) -> None:
+    declared = headers.get("content-length")
     if isinstance(declared, str) and declared.isdigit() and int(declared) > CATALOG_SCAN_LIMIT:
-        raise DuckAIError("catalog", f"duck.ai entry bundle is above the {CATALOG_SCAN_LIMIT} byte scan limit")
+        raise _oversized_bundle()
+
+
+def _reject_oversized_bundle(resp: Any) -> None:
+    _reject_declared_length(resp.headers)
     if len(resp.content) > CATALOG_SCAN_LIMIT:
-        raise DuckAIError("catalog", f"duck.ai entry bundle is above the {CATALOG_SCAN_LIMIT} byte scan limit")
+        raise _oversized_bundle()
 
 
 class DuckAIClient:
@@ -456,9 +474,8 @@ class DuckAIClient:
 
     async def aclose(self) -> None:
         warm = self._jsa_warm
+        self._cancel_attestation_warm()
         if warm is not None:
-            self._jsa_warm = None
-            warm.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await warm
         await self.http.aclose()
@@ -483,8 +500,17 @@ class DuckAIClient:
         return self._fe_version
 
     def invalidate_attestation(self) -> None:
+        self._cancel_attestation_warm()
         self._jsa = attest.INITIAL_JSA
         self._jsa_script = ""
+
+    def _cancel_attestation_warm(self) -> None:
+        warm = self._jsa_warm
+        if warm is None:
+            return
+        self._jsa_warm = None
+        if not warm.done():
+            warm.cancel()
 
     def _headers(self, extra: dict[str, str] | None = None) -> dict[str, str]:
         headers = dict(BROWSER_HEADERS)
@@ -526,6 +552,7 @@ class DuckAIClient:
         header = await attest.header_for(script_b64, self.user_agent, BASE_URL)
         async with self._jsa_lock:
             self._jsa = header
+            self._jsa_script = script_b64
         return header
 
     def _start_attestation_warm(self, script_b64: str) -> None:
@@ -541,8 +568,6 @@ class DuckAIClient:
             await self._refresh_attestation(script_b64)
         except attest.AttestationError as exc:
             log.debug("duckai attestation refresh failed: %s", exc)
-            return
-        self._jsa_script = script_b64
 
     async def _join_attestation_warm(self) -> None:
         warm = self._jsa_warm
@@ -585,6 +610,18 @@ class DuckAIClient:
         with self._catalog_lock:
             return self._catalog
 
+    async def _read_bundle(self, path: str) -> str:
+        parts: list[str] = []
+        size = 0
+        async with self.http.stream("GET", path, headers=self._headers({"accept": "*/*"})) as resp:
+            _reject_declared_length(resp.headers)
+            async for chunk in resp.aiter_text():
+                size += len(chunk)
+                if size > CATALOG_SCAN_LIMIT:
+                    raise _oversized_bundle()
+                parts.append(chunk)
+        return "".join(parts)
+
     async def _fetch_catalog(self) -> tuple[dict, ...]:
         known = self._known_catalog()
         try:
@@ -592,9 +629,7 @@ class DuckAIClient:
             script = ENTRY_SCRIPT_RE.search(page.text)
             if not script:
                 raise DuckAIError("catalog", "duck.ai entry bundle is not referenced by the page")
-            bundle = await self.http.get(script.group("path"), headers=self._headers({"accept": "*/*"}))
-            _reject_oversized_bundle(bundle)
-            entries = parse_catalog(bundle.text)
+            entries = parse_catalog(await self._read_bundle(script.group("path")))
             if not entries:
                 raise DuckAIError("catalog", "duck.ai bundle carries no free model entries")
         except (DuckAIError, httpx.HTTPError, OSError, RuntimeError) as exc:
@@ -669,10 +704,11 @@ class DuckAIClient:
                 action = payload.get("action")
                 if action == "error":
                     raw_type = payload.get("type")
+                    error_type = raw_type if isinstance(raw_type, str) else ""
                     raise DuckAIError(
-                        resp.status_code,
+                        STREAM_ERROR_STATUS.get(error_type, 502),
                         str(payload.get("message") or "upstream error"),
-                        raw_type if isinstance(raw_type, str) else "",
+                        error_type,
                     )
                 if action != "success":
                     continue
@@ -686,9 +722,9 @@ class DuckAIClient:
                         fresh.append(source)
                     event.sources = fresh
                 yield event
+            await self._join_attestation_warm()
         finally:
             await resp.aclose()
-        await self._join_attestation_warm()
 
     async def _fail(self, resp: httpx.Response) -> DuckAIError:
         try:

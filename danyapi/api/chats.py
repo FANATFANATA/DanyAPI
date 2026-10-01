@@ -723,10 +723,10 @@ async def _chat_completions_duckai(req: ChatCompletionRequest, pool: AccountPool
         "tools": tools,
         "tool_choice": tool_choice,
         "functions": getattr(req, "functions", None),
-        "function_call": getattr(req, "function_call", None),
         "thinking": req.thinking,
         "search": bool(req.search),
         "stop": getattr(req, "stop", None),
+        "max_tokens": _max_tokens_of(req),
         "user": getattr(req, "user", None),
         "session_id": existing_sid,
     }

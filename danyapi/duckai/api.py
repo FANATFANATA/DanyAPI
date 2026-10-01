@@ -17,11 +17,12 @@ from fastapi import HTTPException
 
 from ..accounts import account_lock
 from ..api.retry import MAX_RETRIES, RETRYABLE_HTTP_STATUSES, _retry_delay
-from ..api.shaping import _apply_stop
+from ..api.shaping import _apply_limits
 from ..api.sse import _sse, _stream_error_sse
 from ..config import settings
 from ..sseutil import StreamStopFilter, split_stop
-from ..tokens import estimate_tokens
+from ..tokens import StreamBudget, estimate_tokens, trim_to_tokens
+from ..tools import _choice_name
 from ..usage import record_usage_dict
 from . import attest
 from .client import (
@@ -123,6 +124,37 @@ def _text_of(content: Any) -> str:
     return str(content)
 
 
+def _image_sizes(content: Any) -> tuple[int, int]:
+    if not isinstance(content, list):
+        return 0, 0
+    count = 0
+    size = 0
+    for item in content:
+        if not isinstance(item, dict) or item.get("type") != "image_url":
+            continue
+        image_url = item.get("image_url")
+        if isinstance(image_url, str):
+            uri = image_url
+        elif isinstance(image_url, dict) and isinstance(image_url.get("url"), str):
+            uri = image_url["url"]
+        else:
+            continue
+        _, separator, payload = uri.partition(",")
+        if uri.startswith("data:") and separator and payload:
+            count += 1
+            size += len(uri)
+    return count, size
+
+
+def _check_image_limits(message_count: int, request_count: int, request_bytes: int) -> None:
+    if message_count > MAX_IMAGES_PER_MESSAGE:
+        raise HTTPException(400, f"duckai accepts at most {MAX_IMAGES_PER_MESSAGE} images per message")
+    if request_count > MAX_IMAGES_PER_REQUEST:
+        raise HTTPException(400, f"duckai accepts at most {MAX_IMAGES_PER_REQUEST} images per request")
+    if request_bytes > MAX_IMAGE_BYTES:
+        raise HTTPException(400, f"duckai accepts at most {MAX_IMAGE_BYTES // (1024 * 1024)} MiB of inline image data per request")
+
+
 def _images_of(content: Any) -> list[tuple[str, str]]:
     images: list[tuple[str, str]] = []
     if not isinstance(content, list):
@@ -193,6 +225,15 @@ def _tool_calls_of(message: Any) -> list[dict]:
     return out
 
 
+def _lead_text(system_chunks: list[str], preamble: str) -> str:
+    lead: list[str] = []
+    if system_chunks:
+        lead.append(SYSTEM_PREFIX + "\n\n".join(system_chunks))
+    if preamble:
+        lead.append(preamble)
+    return "\n\n".join(lead)
+
+
 def _render_tools(specs: list[dict]) -> str:
     if not specs:
         return ""
@@ -208,7 +249,11 @@ def build_messages(
     messages: Any,
     tools: Any = None,
     functions: Any = None,
+    tool_choice: Any = None,
 ) -> list[dict]:
+    if _tools_disabled(tool_choice):
+        tools = None
+        functions = None
     specs = _tool_specs(tools, functions)
     preamble = _render_tools(specs)
     system_chunks: list[str] = []
@@ -221,7 +266,14 @@ def build_messages(
         if not pending_tool_results:
             return
         if out and out[-1]["role"] == "assistant":
-            out[-1]["parts"].extend(pending_tool_results)
+            called = out[-1]["parts"]
+            answered = {part["toolCallId"] for part in called if part["type"] == "tool-call"}
+            named = {part["toolName"] for part in called if part["type"] == "tool-call"}
+            matched = [part for part in pending_tool_results if part["toolCallId"] in answered or part["toolCallId"] in named]
+            orphans = [part for part in pending_tool_results if part not in matched]
+            out[-1]["parts"].extend(matched)
+            if orphans:
+                out.append({"role": "assistant", "content": "", "parts": orphans})
         else:
             out.append({"role": "assistant", "content": "", "parts": list(pending_tool_results)})
         pending_tool_results.clear()
@@ -234,8 +286,8 @@ def build_messages(
             if text:
                 system_chunks.append(text)
             continue
-        if role == "tool":
-            call_id = getattr(message, "tool_call_id", None) or f"call_{uuid.uuid4().hex[:24]}"
+        if role in ("tool", "function"):
+            call_id = getattr(message, "tool_call_id", None) or getattr(message, "name", None) or f"call_{uuid.uuid4().hex[:24]}"
             pending_tool_results.append(
                 {
                     "type": "tool-result",
@@ -258,16 +310,12 @@ def build_messages(
             continue
 
         text = _text_of(content)
+        message_images, message_bytes = _image_sizes(content)
+        if message_images:
+            image_total += message_images
+            image_bytes += message_bytes
+            _check_image_limits(message_images, image_total, image_bytes)
         images = _images_of(content)
-        if images:
-            image_total += len(images)
-            image_bytes += sum(len(uri) for _, uri in images)
-            if image_total > MAX_IMAGES_PER_REQUEST:
-                raise HTTPException(400, f"duckai accepts at most {MAX_IMAGES_PER_REQUEST} images per request")
-            if len(images) > MAX_IMAGES_PER_MESSAGE:
-                raise HTTPException(400, f"duckai accepts at most {MAX_IMAGES_PER_MESSAGE} images per message")
-            if image_bytes > MAX_IMAGE_BYTES:
-                raise HTTPException(400, f"duckai accepts at most {MAX_IMAGE_BYTES // (1024 * 1024)} MiB of inline image data per request")
         flush_assistant_parts()
         parts = []
         if text:
@@ -277,25 +325,21 @@ def build_messages(
         if not parts:
             continue
         if role == "user" and not out and (system_chunks or preamble):
-            lead = []
-            if system_chunks:
-                lead.append(SYSTEM_PREFIX + "\n\n".join(system_chunks))
-            if preamble:
-                lead.append(preamble)
-            parts.insert(0, {"type": "text", "text": "\n\n".join(lead)})
+            parts.insert(0, {"type": "text", "text": _lead_text(system_chunks, preamble)})
             system_chunks = []
             preamble = ""
         out.append({"role": "user", "content": parts})
 
     flush_assistant_parts()
+    trailing = _lead_text(system_chunks, preamble) if (system_chunks or preamble) else ""
+    if trailing:
+        first_user = next((message for message in out if message["role"] == "user"), None)
+        if first_user is not None:
+            first_user["content"].insert(0, {"type": "text", "text": trailing})
+        else:
+            out.append({"role": "user", "content": [{"type": "text", "text": f"{trailing}\n\nHello"}]})
     if not out:
-        lead = []
-        if system_chunks:
-            lead.append(SYSTEM_PREFIX + "\n\n".join(system_chunks))
-        if preamble:
-            lead.append(preamble)
-        fallback = "\n\n".join([*lead, "Hello"]).strip()
-        out.append({"role": "user", "content": [{"type": "text", "text": fallback or "Hello"}]})
+        out.append({"role": "user", "content": [{"type": "text", "text": "Hello"}]})
     return out
 
 
@@ -322,53 +366,97 @@ def _prompt_text(duck_messages: list[dict]) -> str:
     return "\n".join(chunks)
 
 
-async def _open_stream(
-    account: Any, duck_messages: list[dict], model: str, effort: str | None, can_use_tools: bool, can_use_web_search: bool
-) -> AsyncIterator[DuckAIEvent]:
+class _Retry(Exception):
+    pass
+
+
+def _effort_of(thinking: bool | None) -> str | None:
+    if thinking is False:
+        return "none"
+    if thinking is True:
+        return "medium"
+    return None
+
+
+def _tools_disabled(tool_choice: Any) -> bool:
+    return _choice_name(tool_choice) == "none"
+
+
+def _can_use_tools(tools: Any, functions: Any, tool_choice: Any) -> bool:
+    return bool(tools or functions) and not _tools_disabled(tool_choice)
+
+
+def _finish_of(event: DuckAIEvent, finish: str) -> str:
+    if event.limit and finish == "stop":
+        log.warning("duckai answered under a %s limit", event.limit)
+        return "length"
+    return finish
+
+
+async def _stream_events(
+    account: Any,
+    duck_messages: list[dict],
+    model: str,
+    effort: str | None,
+    can_use_tools: bool,
+    can_use_web_search: bool,
+    prelude: tuple[str, ...] = (),
+) -> AsyncIterator[Any]:
     attempt = 0
+    started = False
     while True:
-        delivered = False
-        async with contextlib.aclosing(
-            account.client.chat(
-                duck_messages,
-                model=model,
-                effort=effort,
-                can_use_tools=can_use_tools,
-                can_use_web_search=can_use_web_search,
-            )
-        ) as stream:
+        async with contextlib.AsyncExitStack() as stack:
+            await stack.enter_async_context(account_lock(account.sem, settings.acquire_timeout))
+            if not started:
+                started = True
+                for line in prelude:
+                    yield line
             try:
-                async for event in stream:
-                    delivered = True
+                async for event in _open_stream(account, duck_messages, model, effort, can_use_tools, can_use_web_search, attempt):
                     yield event
                 return
-            except httpx.HTTPError as exc:
-                status = getattr(getattr(exc, "response", None), "status_code", 0) or 0
-                if not delivered and status in RETRYABLE_HTTP_STATUSES and attempt < MAX_RETRIES:
-                    await _sleep_backoff(attempt)
-                    attempt += 1
-                    continue
-                raise HTTPException(502, f"duckai transport error: {exc}") from exc
-            except attest.AttestationError as exc:
+            except _Retry:
+                pass
+        await _sleep_backoff(attempt)
+        attempt += 1
+
+
+async def _open_stream(
+    account: Any, duck_messages: list[dict], model: str, effort: str | None, can_use_tools: bool, can_use_web_search: bool, attempt: int
+) -> AsyncIterator[DuckAIEvent]:
+    delivered = False
+    async with contextlib.aclosing(
+        account.client.chat(
+            duck_messages,
+            model=model,
+            effort=effort,
+            can_use_tools=can_use_tools,
+            can_use_web_search=can_use_web_search,
+        )
+    ) as stream:
+        try:
+            async for event in stream:
+                delivered = True
+                yield event
+        except httpx.HTTPError as exc:
+            status = getattr(getattr(exc, "response", None), "status_code", 0) or 0
+            if not delivered and status in RETRYABLE_HTTP_STATUSES and attempt < MAX_RETRIES:
+                raise _Retry() from exc
+            raise HTTPException(502, f"duckai transport error: {exc}") from exc
+        except attest.AttestationError as exc:
+            account.client.invalidate_attestation()
+            if not delivered and attempt < MAX_RETRIES:
+                raise _Retry() from exc
+            raise HTTPException(502, f"duckai attestation failed: {exc}") from exc
+        except DuckAIError as exc:
+            if exc.is_challenge or exc.is_entrypoint:
                 account.client.invalidate_attestation()
                 if not delivered and attempt < MAX_RETRIES:
-                    await _sleep_backoff(attempt)
-                    attempt += 1
-                    continue
-                raise HTTPException(502, f"duckai attestation failed: {exc}") from exc
-            except DuckAIError as exc:
-                if exc.is_challenge or exc.is_entrypoint:
-                    account.client.invalidate_attestation()
-                    if not delivered and attempt < MAX_RETRIES:
-                        await _sleep_backoff(attempt)
-                        attempt += 1
-                        continue
-                    raise _http_error(exc) from exc
-                if exc.is_retryable and not delivered and attempt < MAX_RETRIES:
-                    await _sleep_backoff(attempt)
-                    attempt += 1
-                    continue
+                    raise _Retry() from exc
                 raise _http_error(exc) from exc
+            if exc.is_retryable and not delivered and attempt < MAX_RETRIES:
+                raise _Retry() from exc
+            raise _http_error(exc) from exc
 
 
 async def _sleep_backoff(attempt: int) -> None:
@@ -381,7 +469,8 @@ async def _sleep_backoff(attempt: int) -> None:
 def _tool_calls_out(event_calls: list[dict], collected: list[dict]) -> list[dict]:
     fresh: list[dict] = []
     for index, call in enumerate(event_calls):
-        fresh.append(call if not index else {**call, "index": index})
+        position = len(collected) + index
+        fresh.append(call if call.get("index") == position else {**call, "index": position})
     collected.extend(fresh)
     return fresh
 
@@ -393,14 +482,14 @@ async def collect_non_stream(
     tools=None,
     tool_choice=None,
     functions=None,
-    function_call=None,
     thinking: bool | None = None,
     search: bool = False,
     stop: Any = None,
+    max_tokens: int | None = None,
     user: str | None = None,
     session_id: str | None = None,
 ) -> dict:
-    duck_messages = build_messages(messages, tools, functions)
+    duck_messages = build_messages(messages, tools, functions, tool_choice)
     prompt = _prompt_text(duck_messages)
     content: list[str] = []
     reasoning: list[str] = []
@@ -409,30 +498,28 @@ async def collect_non_stream(
     refusal = ""
     finish = "stop"
 
-    async with account_lock(account.sem, settings.acquire_timeout):
-        try:
-            async for event in _open_stream(
-                account,
-                duck_messages,
-                model,
-                "none" if thinking is False else None,
-                bool(tools or functions),
-                bool(search),
-            ):
-                if event.delta:
-                    content.append(event.delta)
-                if event.reasoning:
-                    reasoning.append(event.reasoning)
-                _tool_calls_out(event.tool_calls, tool_calls)
-                sources.extend(event.sources)
-                if event.refusal and not refusal:
-                    refusal = event.refusal
-                if event.finish is not None:
-                    finish = event.finish
-        except HTTPException:
-            raise
+    async for event in _stream_events(
+        account,
+        duck_messages,
+        model,
+        _effort_of(thinking),
+        _can_use_tools(tools, functions, tool_choice),
+        bool(search),
+    ):
+        if event.delta:
+            content.append(event.delta)
+        if event.reasoning:
+            reasoning.append(event.reasoning)
+        _tool_calls_out(event.tool_calls, tool_calls)
+        sources.extend(event.sources)
+        if event.refusal and not refusal:
+            refusal = event.refusal
+        if event.finish is not None:
+            finish = _finish_of(event, event.finish)
 
-    text = _apply_stop("".join(content), stop)
+    text, limit_finish = _apply_limits("".join(content), max_tokens, stop)
+    if limit_finish == "length":
+        finish = "length"
     if tool_calls:
         finish = "tool_calls"
     elif refusal and not text:
@@ -478,75 +565,92 @@ async def stream_openai(
     tools=None,
     tool_choice=None,
     functions=None,
-    function_call=None,
     thinking: bool | None = None,
     search: bool = False,
     stop: Any = None,
+    max_tokens: int | None = None,
     include_usage: bool = False,
     user: str | None = None,
     session_id: str | None = None,
 ) -> AsyncIterator[str]:
     chunk_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
-    duck_messages = build_messages(messages, tools, functions)
+    try:
+        duck_messages = build_messages(messages, tools, functions, tool_choice)
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+        for line in _stream_error_sse(chunk_id, created, model, detail, session_id):
+            yield line
+        return
     prompt = _prompt_text(duck_messages)
     content: list[str] = []
     reasoning: list[str] = []
     tool_calls: list[dict] = []
     emitted = False
     finish = "stop"
+    refusal = ""
     stop_markers = split_stop(stop)
     stop_filter = StreamStopFilter(stop_markers) if stop_markers else None
+    budget = StreamBudget(max_tokens, trim_to_tokens)
     stop_hit = False
 
-    async with account_lock(account.sem, settings.acquire_timeout):
-        yield _chunk(chunk_id, created, model, {"role": "assistant"})
-        try:
-            async for event in _open_stream(
-                account,
-                duck_messages,
-                model,
-                "none" if thinking is False else None,
-                bool(tools or functions),
-                bool(search),
-            ):
-                if event.reasoning:
-                    reasoning.append(event.reasoning)
+    try:
+        async for item in _stream_events(
+            account,
+            duck_messages,
+            model,
+            _effort_of(thinking),
+            _can_use_tools(tools, functions, tool_choice),
+            bool(search),
+            prelude=(_chunk(chunk_id, created, model, {"role": "assistant"}),),
+        ):
+            if isinstance(item, str):
+                yield item
+                continue
+            event = item
+            if event.reasoning:
+                reasoning.append(event.reasoning)
+                emitted = True
+                yield _chunk(chunk_id, created, model, {"reasoning_content": event.reasoning})
+            if event.delta:
+                if stop_filter is None:
+                    piece = event.delta
+                elif stop_hit:
+                    piece = ""
+                else:
+                    piece, hit = stop_filter.feed(event.delta)
+                    stop_hit = stop_hit or hit
+                piece = budget.feed(piece)
+                if piece:
+                    content.append(piece)
                     emitted = True
-                    yield _chunk(chunk_id, created, model, {"reasoning_content": event.reasoning})
-                if event.delta:
-                    if stop_filter is None:
-                        piece = event.delta
-                    elif stop_hit:
-                        piece = ""
-                    else:
-                        piece, hit = stop_filter.feed(event.delta)
-                        stop_hit = stop_hit or hit
-                    if piece:
-                        content.append(piece)
-                        emitted = True
-                        yield _chunk(chunk_id, created, model, {"content": piece})
-                for call in _tool_calls_out(event.tool_calls, tool_calls):
-                    emitted = True
-                    yield _chunk(chunk_id, created, model, {"tool_calls": [call]})
-                if event.finish is not None:
-                    finish = event.finish
-        except HTTPException as exc:
-            detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
-            for line in _stream_error_sse(chunk_id, created, model, detail, session_id):
-                yield line
-            return
+                    yield _chunk(chunk_id, created, model, {"content": piece})
+            for call in _tool_calls_out(event.tool_calls, tool_calls):
+                emitted = True
+                yield _chunk(chunk_id, created, model, {"tool_calls": [call]})
+            if event.refusal and not refusal:
+                refusal = event.refusal
+            if event.finish is not None:
+                finish = _finish_of(event, event.finish)
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+        record_usage_dict(PROVIDER, model, _usage_for(prompt, "".join(content), "".join(reasoning)), user=user, session_id=session_id)
+        for line in _stream_error_sse(chunk_id, created, model, detail, session_id):
+            yield line
+        return
 
     if stop_filter is not None and not stop_hit:
-        tail = stop_filter.flush()
+        tail = budget.feed(stop_filter.flush())
         if tail:
             content.append(tail)
             emitted = True
             yield _chunk(chunk_id, created, model, {"content": tail})
-    if stop_hit:
-        finish = "stop"
     if tool_calls:
         finish = "tool_calls"
+    elif budget.done:
+        finish = "length"
+    elif refusal and not content:
+        finish = "content_filter"
     if not emitted:
         yield _chunk(chunk_id, created, model, {"content": ""})
     yield _chunk(chunk_id, created, model, {}, finish)

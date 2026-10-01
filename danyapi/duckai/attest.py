@@ -27,6 +27,7 @@ JSA_SCRIPT = Path(__file__).resolve().parent / "jsa_solver.js"
 
 SOLVER_TIMEOUT_SEC = 20.0
 SOLVER_JOIN_TIMEOUT_SEC = 1.0
+SOLVER_DRAIN_BUDGET_SEC = 5.0
 SOLVER_OUTPUT_LIMIT = 1024 * 1024
 SOLVER_ERROR_CHARS = 200
 MAX_SCRIPT_BYTES = 1024 * 1024
@@ -65,7 +66,10 @@ class AttestationError(Exception):
 
 @lru_cache(maxsize=1)
 def _note_remote_script_exposure() -> None:
-    log.warning("duckai attestation executes javascript served by the remote duck.ai host in a scrubbed subprocess; it carries no digest to verify against")
+    log.warning(
+        "duckai attestation executes javascript served by the remote duck.ai host in a subprocess with a scrubbed environment and no node globals "
+        "or network primitives; it carries no digest to verify against"
+    )
 
 
 def _solver_env() -> dict[str, str]:
@@ -151,6 +155,12 @@ def _node_executable() -> str | None:
     return shutil.which("node")
 
 
+def _join_drain(thread: threading.Thread) -> None:
+    budget = time.monotonic() + SOLVER_DRAIN_BUDGET_SEC
+    while thread.is_alive() and time.monotonic() < budget:
+        thread.join(timeout=SOLVER_JOIN_TIMEOUT_SEC)
+
+
 def _drain(stream: IO[str], cap: int, out: list[str]) -> None:
     parts: list[str] = []
     kept = 0
@@ -224,7 +234,7 @@ def _run_solver(node: str, payload: str) -> tuple[int, str, str]:
         if writer is not None:
             writer.join(timeout=SOLVER_JOIN_TIMEOUT_SEC)
         for reader in readers:
-            reader.join(timeout=SOLVER_JOIN_TIMEOUT_SEC)
+            _join_drain(reader)
         for handle in (proc.stdout, proc.stderr, proc.stdin):
             if handle is not None:
                 try:
