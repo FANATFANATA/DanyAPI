@@ -237,6 +237,10 @@ def _key_lock(provider: str, cache_key: str) -> asyncio.Lock:
 
 
 async def _api_key_from_form(request: Request) -> str | None:
+    cached = getattr(request, "_form", None)
+    if cached is not None:
+        value = cached.get("api_key")
+        return value.strip() if isinstance(value, str) and value.strip() else None
     content_length = request.headers.get("content-length")
     if content_length:
         try:
@@ -245,15 +249,11 @@ async def _api_key_from_form(request: Request) -> str | None:
         except ValueError:
             raise HTTPException(400, "invalid content-length header") from None
     try:
-        cached = getattr(request, "_form", None)
-        if cached is not None:
-            value = cached.get("api_key")
-        else:
-            form = await request.form(max_files=BYOK_FORM_MAX_FILES, max_fields=BYOK_FORM_MAX_FIELDS)
-            try:
-                value = form.get("api_key")
-            finally:
-                await form.close()
+        form = await request.form(max_files=BYOK_FORM_MAX_FILES, max_fields=BYOK_FORM_MAX_FIELDS)
+        try:
+            value = form.get("api_key")
+        finally:
+            await form.close()
     except Exception as exc:
         log.info("byok multipart body could not be parsed: %s", exc)
         raise HTTPException(400, "malformed multipart request body") from exc
@@ -561,7 +561,9 @@ async def _byok_pool(provider: str, tokens: list[str]) -> AccountPool:
         scoped_stores[cache_key] = created
         _mark_pool_touched(new_pool)
         if stale_pool is not None and stale_pool is not new_pool:
-            _close_pool_later(stale_pool, stale_stores)
+            live = {str(store.path) for store in created if store.path is not None}
+            orphans = [store for store in (stale_stores or ()) if str(store.path) not in live]
+            _close_pool_later(stale_pool, orphans)
         _evict_stale_cache(cache, scoped_stores)
         _evict_pools(_evictable_pool_entries(BYOK_TOTAL_POOL_LIMIT, (provider, cache_key), reserve=0))
         return new_pool

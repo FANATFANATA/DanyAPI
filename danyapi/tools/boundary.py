@@ -324,7 +324,7 @@ def tool_call_boundary(
         return hold, False
     if best != -1 and best < _BOUNDARY_CACHE_PREFIX:
         while len(_boundary_cache) >= _BOUNDARY_CACHE_MAX:
-            _boundary_cache.pop(next(iter(_boundary_cache)))
+            _boundary_cache.pop(next(iter(_boundary_cache)), None)
         _boundary_cache[names] = (text[:_BOUNDARY_CACHE_PREFIX], best, complete)
     return best, complete
 

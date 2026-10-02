@@ -1695,8 +1695,8 @@ def test_init_reexports_the_private_surface():
 
 
 def test_init_reexport_count_is_stable():
-    assert len(toolemu.__all__) == 236
-    assert len([name for name in toolemu.__all__ if name.startswith("_")]) == 207
+    assert len(toolemu.__all__) == 246
+    assert len([name for name in toolemu.__all__ if name.startswith("_")]) == 217
 
 
 def test_init_module_is_importable_and_callable():

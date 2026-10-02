@@ -107,15 +107,12 @@ async def test_wait_free_hands_out_one_account_and_frees_the_others():
     handed, sid = await asyncio.wait_for(task, timeout=2)
 
     assert sid is None
-    assert handed.sem.locked()
     for acct in accounts:
-        if acct is handed:
-            continue
         assert not acct.sem.locked()
-        assert acct.sem._value == 1
+    async with account_lock(handed.sem, max_wait=1):
+        assert handed.sem.locked()
     nxt, _ = await pool.acquire(None, max_wait=1)
     assert nxt is not handed
-    handed.sem.release()
 
 
 async def test_wait_free_advances_the_cursor_past_the_handed_account():

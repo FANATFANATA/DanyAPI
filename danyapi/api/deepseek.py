@@ -155,7 +155,11 @@ async def _send_completion(
             if _message_too_frequent_text(text) is not None:
                 raise HTTPException(429, text) from exc
             raise HTTPException(502, text) from exc
+        if not isinstance(payload, dict):
+            raise HTTPException(502, "unexpected non-stream response")
         data = payload.get("data") or {}
+        if not isinstance(data, dict):
+            data = {}
         if data.get("biz_code"):
             code = data["biz_code"]
             detail = f"DeepSeek error {code}: {data.get('biz_msg')}"

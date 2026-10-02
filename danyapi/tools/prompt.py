@@ -88,11 +88,11 @@ def _argument_summary(fn: dict) -> str | None:
             continue
         prop_type = prop.get("type") if isinstance(prop, dict) else (prop if isinstance(prop, str) else None)
         if isinstance(prop_type, str) and prop_type:
-            parts.append(f"{key} ({prop_type}{', required' if key in required_names else ', optional'})")
+            parts.append(_schema_field(f"{key} ({prop_type}{', required' if key in required_names else ', optional'})", escape_markup=True))
         elif key in required_names:
-            parts.append(f"{key} (required)")
+            parts.append(_schema_field(f"{key} (required)", escape_markup=True))
         else:
-            parts.append(key)
+            parts.append(_schema_field(key, escape_markup=True))
     return ", ".join(parts) if parts else None
 
 
@@ -133,11 +133,14 @@ def render_tool_schema(tools: list[Any] | None, tool_choice: Any = None) -> str 
                 except (TypeError, ValueError):
                     params_json = _schema_field(params, escape_markup=True)
             else:
-                params_json = json.dumps(params, ensure_ascii=False, separators=(",", ":"))
+                try:
+                    params_json = json.dumps(params, ensure_ascii=False, separators=(",", ":"))
+                except (TypeError, ValueError):
+                    params_json = _schema_field(params, escape_markup=True)
             lines.append(f"   parameters: {_schema_field(params_json, escape_markup=True)}")
             argument_summary = _argument_summary(fn)
             if argument_summary:
-                lines.append(f"   arguments: {argument_summary}")
+                lines.append(f"   arguments: {_schema_field(argument_summary, escape_markup=True)}")
     if choice in CHOICE_INSTRUCTIONS:
         choice_line = CHOICE_INSTRUCTIONS[choice]
     elif isinstance(choice, str) and choice not in ("auto", "none", "required"):

@@ -309,8 +309,8 @@ def test_generated_data_uri_name_is_sanitised():
     req = SimpleNamespace(messages=[ChatMessage(role="user", content=[{"type": "image_url", "image_url": uri}])], files=[])
     attachments = attachments_mod._collect_attachments(req)
     assert len(attachments) == 1
-    assert attachments[0].name == "image_0.png_Evil"
-    assert attachments[0].content_type == "image/png\nEvil"
+    assert attachments[0].name == "image_0.octet-stream"
+    assert attachments[0].content_type == "application/octet-stream"
     assert attachments[0].data == b"png"
 
 
@@ -318,7 +318,29 @@ def test_generated_data_uri_name_falls_back_when_extension_is_empty():
     uri = "data:image/;base64," + _b64(b"png")
     req = SimpleNamespace(messages=[ChatMessage(role="user", content=[{"type": "image_url", "image_url": uri}])], files=[])
     attachments = attachments_mod._collect_attachments(req)
-    assert attachments[0].name == "image_0.bin"
+    assert attachments[0].name == "image_0.octet-stream"
+    assert attachments[0].content_type == "application/octet-stream"
+
+
+@pytest.mark.parametrize(
+    "meta",
+    [
+        "image/png\r\nX-Injected: 1",
+        "image/png\x00evil",
+        "image",
+        "image/",
+        "/png",
+        "image/png extra",
+        "",
+    ],
+)
+def test_a_data_uri_content_type_cannot_smuggle_a_multipart_header(meta):
+    uri = f"data:{meta};base64," + _b64(b"png")
+    req = SimpleNamespace(messages=[ChatMessage(role="user", content=[{"type": "image_url", "image_url": uri}])], files=[])
+    attachments = attachments_mod._collect_attachments(req)
+    assert attachments[0].content_type == "application/octet-stream"
+    assert "\r" not in attachments[0].content_type
+    assert "\n" not in attachments[0].content_type
 
 
 def test_data_uri_is_parsed_once_per_attachment(monkeypatch):

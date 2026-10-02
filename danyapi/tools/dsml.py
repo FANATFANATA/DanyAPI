@@ -5,6 +5,7 @@ import threading
 from bisect import bisect_left, bisect_right
 from collections.abc import Callable, Iterator
 from functools import lru_cache
+from typing import NamedTuple
 
 from .common import _XML_STRAY_TOOL_CLOSE_RE, _XML_WRAPPER_CLOSE_RE
 from .jsonfix import _extract_calls, _extract_json_object
@@ -39,18 +40,26 @@ def _dsml_present(text: str) -> bool:
     return _DSML_PRESENT.search(text) is not None
 
 
-_DSML_TOOL_CALLS_BLOCK = re.compile(
-    rf"<{_DSML_MARKER}\s*tool_calls\b[^<>]*>(.*?)</{_DSML_MARKER}\s*tool_calls\s*>",
-    re.DOTALL | re.IGNORECASE,
+class _PairedBlock(NamedTuple):
+    start: int
+    end: int
+    body: str
+    head: re.Match[str]
+
+
+_DSML_TOOL_CALLS_OPEN = re.compile(rf"<{_DSML_MARKER}\s*tool_calls\b[^<>]*>", re.IGNORECASE)
+_DSML_TOOL_CALLS_CLOSE = re.compile(rf"</{_DSML_MARKER}\s*tool_calls\s*>", re.IGNORECASE)
+_DSML_INVOKE_OPEN = re.compile(
+    rf"<{_DSML_MARKER}\s*invoke\b[^>]*?\sname\s*=\s*([\"']?)([^\s>\"']+)\1[^>]*>",
+    re.IGNORECASE,
 )
-_DSML_INVOKE = re.compile(
-    rf"<{_DSML_MARKER}\s*invoke\b[^>]*?\sname\s*=\s*([\"']?)([^\s>\"']+)\1[^>]*>(.*?)</{_DSML_MARKER}\s*invoke\s*>",
-    re.DOTALL | re.IGNORECASE,
+_DSML_INVOKE_CLOSE = re.compile(rf"</{_DSML_MARKER}\s*invoke\s*>", re.IGNORECASE)
+_DSML_PARAMETER_OPEN = re.compile(
+    rf"<{_DSML_MARKER}\s*parameter\s+name\s*=\s*([\"']?)([^\"']+)\1[^>]*>",
+    re.IGNORECASE,
 )
-_DSML_PARAMETER = re.compile(
-    rf"<{_DSML_MARKER}\s*parameter\s+name\s*=\s*([\"']?)([^\"']+)\1[^>]*>(.*?)</{_DSML_MARKER}\s*parameter\s*>",
-    re.DOTALL | re.IGNORECASE,
-)
+_DSML_PARAMETER_CLOSE = re.compile(rf"</{_DSML_MARKER}\s*parameter\s*>", re.IGNORECASE)
+_DSML_PAIR_MAX = 64
 _DSML_HIDDEN_NAMES = (
     r"thinking|reasoning|thought|analysis|summary|abbreviation|"
     r"ds_safety|ds_sensitive|ds_core|ds_middle|ds_end|ds_pii|ds_related|"
@@ -74,9 +83,13 @@ _DSML_LAX_TAG = re.compile(
     rf"</?{_DSML_LAX_MARKER}\s*[a-zA-Z_][a-zA-Z0-9_-]*\b[^<>]*>",
     re.IGNORECASE,
 )
-_DSML_LAX_BLOCK = re.compile(
-    rf"<{_DSML_LAX_MARKER}\s*(?:tool_calls|calls)\b[^<>]*>(?P<body>.*?)</{_DSML_LAX_MARKER}\s*(?:tool_calls|calls)\s*>",
-    re.DOTALL | re.IGNORECASE,
+_DSML_LAX_BLOCK_OPEN = re.compile(
+    rf"<{_DSML_LAX_MARKER}\s*(?:tool_calls|calls)\b[^<>]*>",
+    re.IGNORECASE,
+)
+_DSML_LAX_BLOCK_CLOSE = re.compile(
+    rf"</{_DSML_LAX_MARKER}\s*(?:tool_calls|calls)\s*>",
+    re.IGNORECASE,
 )
 _DSML_LAX_OPENANY = re.compile(
     rf"<(?P<sep>{_DSML_LAX_MARKER})\s*(?P<tagname>[a-zA-Z_][a-zA-Z0-9_-]*)\b(?P<attrs>[^>]*)>",
@@ -100,6 +113,44 @@ _DSML_LAX_PARAMETER_END = re.compile(
 )
 _XML_SELFCLOSE = re.compile(r"<([a-zA-Z_][a-zA-Z0-9_-]*)\b([^<>]*?)/>", re.DOTALL | re.IGNORECASE)
 _XML_OPEN_TAG_SCAN = re.compile(r"<\s*([a-zA-Z_][a-zA-Z0-9_-]*)\b([^<>]*)>", re.IGNORECASE)
+
+
+def _iter_paired(
+    text: str,
+    open_re: re.Pattern[str],
+    close_re: re.Pattern[str],
+    limit: int = _DSML_PAIR_MAX,
+) -> Iterator[_PairedBlock]:
+    pos = 0
+    size = len(text)
+    found = 0
+    while pos < size and found < limit:
+        head = open_re.search(text, pos)
+        if head is None:
+            return
+        close = close_re.search(text, head.end())
+        if close is None:
+            pos = head.start() + 1
+            continue
+        found += 1
+        yield _PairedBlock(head.start(), close.end(), text[head.end() : close.start()], head)
+        pos = close.end()
+
+
+def _iter_dsml_tool_call_blocks(text: str) -> Iterator[_PairedBlock]:
+    return _iter_paired(text, _DSML_TOOL_CALLS_OPEN, _DSML_TOOL_CALLS_CLOSE)
+
+
+def _iter_dsml_invocations(text: str) -> Iterator[_PairedBlock]:
+    return _iter_paired(text, _DSML_INVOKE_OPEN, _DSML_INVOKE_CLOSE)
+
+
+def _iter_dsml_parameters(text: str) -> Iterator[_PairedBlock]:
+    return _iter_paired(text, _DSML_PARAMETER_OPEN, _DSML_PARAMETER_CLOSE)
+
+
+def _find_dsml_lax_block(text: str) -> _PairedBlock | None:
+    return next(_iter_paired(text, _DSML_LAX_BLOCK_OPEN, _DSML_LAX_BLOCK_CLOSE, 1), None)
 
 
 @lru_cache(maxsize=256)
@@ -251,7 +302,7 @@ class _IntervalSet:
         i = bisect_right(self.ends, start)
         if i > 0 and start <= self.ends[i - 1]:
             i -= 1
-        if i < len(self.ends) and start <= self.ends[i]:
+        if i < len(self.ends) and self.starts[i] <= end:
             start = min(start, self.starts[i])
             end = max(end, self.ends[i])
             while i + 1 < len(self.ends) and self.starts[i + 1] <= end:

@@ -263,7 +263,7 @@ def tool_schema_map(tools: list[Any] | None) -> dict[str, dict[str, Any]]:
                 prop_types["_aliases"] = cleaned
         result[name] = prop_types
     while len(_tool_schema_map_cache) >= _TOOL_SCHEMA_MAP_CACHE_MAX:
-        _tool_schema_map_cache.pop(next(iter(_tool_schema_map_cache)))
+        _tool_schema_map_cache.pop(next(iter(_tool_schema_map_cache)), None)
     _tool_schema_map_cache[key] = result
     return result
 

@@ -22,6 +22,13 @@ MAX_FILE_NAME_LENGTH = 128
 MAX_ATTACHMENT_CONCURRENCY = 4
 
 _UNSAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
+_CONTENT_TYPE_RE = re.compile(r"^[A-Za-z0-9!#$&^_.+-]{1,96}/[A-Za-z0-9!#$&^_.+-]{1,96}$")
+DEFAULT_CONTENT_TYPE = "application/octet-stream"
+
+
+def _content_type(value: str | None) -> str:
+    candidate = (value or "").split(";", 1)[0].strip()
+    return candidate if _CONTENT_TYPE_RE.match(candidate) else DEFAULT_CONTENT_TYPE
 
 
 def _data_uri_parts(uri: str) -> tuple[str, str]:
@@ -63,7 +70,7 @@ class Attachment:
 
 
 def _decode_data_uri(meta: str, compact: str) -> tuple[str, bytes]:
-    content_type = meta.split(";", 1)[0].strip() or "application/octet-stream"
+    content_type = _content_type(meta)
     try:
         data = base64.b64decode(compact, validate=True)
     except ValueError as exc:
@@ -123,7 +130,7 @@ def _collect_attachments(req: ChatCompletionRequest, allow_remote: bool = False)
             data = base64.b64decode(f.content, validate=True)
         except ValueError as exc:
             raise HTTPException(400, f"invalid base64 in file {name}") from exc
-        content_type = f.content_type or "application/octet-stream"
+        content_type = _content_type(f.content_type)
         _append(data, name, content_type, content_type.startswith("image/"))
     return attachments
 

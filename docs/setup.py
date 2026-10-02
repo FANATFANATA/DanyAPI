@@ -48,11 +48,6 @@ GROUPS = [
         "GigaChat",
         [
             (
-                "GIGACHAT_SCOPE",
-                "GigaChat scope: " + ", ".join(GIGACHAT_SCOPES),
-                "scope",
-            ),
-            (
                 "DANYAPI_GIGACHAT_CA_FILE",
                 "Path to a CA bundle for GigaChat (empty = bundled Russian root CA)",
                 None,
@@ -290,7 +285,7 @@ def quote(value):
         return ""
     if "\n" in value or "\r" in value:
         raise ValueError("value contains a line break and cannot be written to .env")
-    if value != value.strip() or "#" in value or "\\" in value or "'" in value:
+    if value != value.strip() or any(ch in value for ch in "#\\'\""):
         return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
     return value
 
@@ -365,6 +360,8 @@ def update_env(values):
                 lines.append(f"{key}={quote(values[key])}\n")
             else:
                 lines.append(line)
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] += "\n"
         for key, value in values.items():
             if key not in seen:
                 lines.append(f"{key}={quote(value)}\n")
@@ -449,7 +446,7 @@ def check_deepseek_token(token):
         return False, f"unexpected response: {body[:200]}"
 
 
-def _gigachat_token_status(key):
+def _gigachat_token_status(key, scope=None):
     from danyapi.gigachat.client import AUTH_URL, DEFAULT_SCOPE, USER_AGENT
     from danyapi.gigachat.tls import resolve_ca
 
@@ -458,7 +455,7 @@ def _gigachat_token_status(key):
     opener = urllib.request.build_opener(handler)
     req = urllib.request.Request(
         AUTH_URL,
-        data=f"scope={DEFAULT_SCOPE}".encode(),
+        data=f"scope={scope or DEFAULT_SCOPE}".encode(),
         headers={
             "RqUID": str(uuid.uuid4()),
             "Authorization": f"Basic {key}",
@@ -477,8 +474,8 @@ def _gigachat_token_status(key):
         return None, str(exc)
 
 
-def check_gigachat_key(key):
-    status, body = _gigachat_token_status(key)
+def check_gigachat_key(key, scope=None):
+    status, body = _gigachat_token_status(key, scope)
     if status is None:
         return False, f"network error: {body}"
     if status != 200:
@@ -600,14 +597,20 @@ def collect_gigachat(current, defaults):
         current.get("GIGACHAT_KEYS", ""),
         defaults.get("GIGACHAT_KEYS", ""),
     )
-    return {"GIGACHAT_KEYS": keys}
+    scope = read_value(
+        "  GigaChat scope: " + ", ".join(GIGACHAT_SCOPES) + " [" + (current.get("GIGACHAT_SCOPE", "") or defaults.get("GIGACHAT_SCOPE", "")) + "]: ",
+        current.get("GIGACHAT_SCOPE", ""),
+        defaults.get("GIGACHAT_SCOPE", ""),
+    )
+    return {"GIGACHAT_KEYS": keys, "GIGACHAT_SCOPE": scope}
 
 
 def validate_gigachat(creds, defaults):
+    scope = creds.get("GIGACHAT_SCOPE") or load_env().get("GIGACHAT_SCOPE") or defaults.get("GIGACHAT_SCOPE")
     while True:
         ok, detail = True, ""
         for key in split_tokens(creds.get("GIGACHAT_KEYS", "")):
-            ok, detail = check_gigachat_key(key)
+            ok, detail = check_gigachat_key(key, scope)
             if not ok:
                 break
         if ok:
@@ -618,6 +621,7 @@ def validate_gigachat(creds, defaults):
             print("  Keeping GigaChat credentials as entered; the server may fail at startup.")
             return creds
         creds = collect_gigachat(creds, defaults)
+        scope = creds.get("GIGACHAT_SCOPE") or scope
 
 
 def collect_opencode(current, defaults):

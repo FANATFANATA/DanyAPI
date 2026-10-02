@@ -390,7 +390,7 @@ async def test_acquire_and_build_with_session():
     assert "hello" in prompt
     assert tool_mode is False
     assert cached_session is None
-    assert bound == {"s1": "u:alice"}
+    assert bound == {"s1": chats_mod._request_scope(req)}
 
 
 async def test_acquire_and_build_rejects_session_id_of_another_scope():

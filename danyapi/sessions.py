@@ -70,7 +70,6 @@ class SessionRegistry:
         self._key_prefix = key_prefix
         self._session_locks: dict[str, asyncio.Lock] = {}
         self._session_refs: dict[str, int] = {}
-        self._session_locks_guard = asyncio.Lock()
         self._session_locks_guard_sync = threading.RLock()
         self._restore()
 

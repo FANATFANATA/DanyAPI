@@ -426,7 +426,6 @@ def test_build_chat_request_full():
     assert payload["messages"][1] == {"role": "user", "content": "hi"}
     assert payload["max_tokens"] == 32
     assert payload["tool_choice"] == "required"
-    assert payload["stop"] == ["END"]
     assert payload["stream"] is True
     assert payload["user"] == "u1"
     assert payload["tools"][0]["function"]["name"] == "f"

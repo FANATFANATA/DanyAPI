@@ -461,7 +461,7 @@ class AccountPool(Generic[AccountT]):
             winners = [account for account, held in ready if held]
             if winners:
                 chosen = winners[0]
-                for extra in winners[1:]:
+                for extra in winners:
                     extra.sem.release()
                 if session_id is None:
                     self._advance_cursor(chosen)

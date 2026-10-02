@@ -69,6 +69,7 @@ from .byok import (
     _extract_request_api_key,
 )
 from .chats import (
+    MAX_MESSAGES_PER_REQUEST,
     _acquire_and_build,
     _can_reuse_session,
     _chat_completions_alice,
@@ -524,6 +525,7 @@ async def create_response(req: ResponsesRequest, request: Request) -> Any:
 
     store = _responses_store()
     base_conversation: list[dict] = []
+    previous_instructions = ""
     if req.previous_response_id:
         record = store.get(req.previous_response_id)
         if not isinstance(record, dict):
@@ -531,7 +533,12 @@ async def create_response(req: ResponsesRequest, request: Request) -> Any:
         stored = record.get("conversation")
         if isinstance(stored, list):
             base_conversation = stored
+        public = record.get("public")
+        if isinstance(public, dict) and isinstance(public.get("instructions"), str):
+            previous_instructions = public["instructions"]
     conversation = list(base_conversation) + new_input
+    if len(conversation) > MAX_MESSAGES_PER_REQUEST:
+        raise HTTPException(400, f"too many messages: max {MAX_MESSAGES_PER_REQUEST} per request")
     try:
         responses_api.validate_tool_chain(conversation)
     except responses_api.ResponsesInputError as exc:
@@ -539,9 +546,10 @@ async def create_response(req: ResponsesRequest, request: Request) -> Any:
 
     provider_call = await _chat_dispatcher(req.model, request)
 
+    instructions = req.instructions or previous_instructions
     provider_messages: list[dict] = []
-    if req.instructions:
-        provider_messages.append({"role": "system", "content": req.instructions})
+    if instructions:
+        provider_messages.append({"role": "system", "content": instructions})
     provider_messages.extend(conversation)
 
     session_id = None if req.previous_response_id else req.session_id
@@ -549,7 +557,7 @@ async def create_response(req: ResponsesRequest, request: Request) -> Any:
 
     info = responses_api.RequestInfo(
         model=req.model,
-        instructions=req.instructions,
+        instructions=instructions,
         max_output_tokens=req.max_output_tokens,
         temperature=req.temperature,
         top_p=req.top_p,
@@ -704,6 +712,9 @@ async def _anthropic_messages(body: dict, request: Request) -> Any:
         chat_payload = anthropic_api.build_chat_request(body, model)
     except anthropic_api.AnthropicInputError as exc:
         return _anthropic_error(exc)
+    messages = chat_payload.get("messages")
+    if isinstance(messages, list) and len(messages) > MAX_MESSAGES_PER_REQUEST:
+        return _anthropic_error(anthropic_api.AnthropicInputError(f"too many messages: max {MAX_MESSAGES_PER_REQUEST} per request"))
     try:
         chat_req = ChatCompletionRequest(**chat_payload)
     except Exception as exc:

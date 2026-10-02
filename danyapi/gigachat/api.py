@@ -246,19 +246,20 @@ def _delta_from_event(event: dict) -> tuple[dict, str | None]:
     if isinstance(role, str) and role:
         out["role"] = role
     function_call = delta.get("function_call")
-    if isinstance(function_call, dict) and function_call.get("name"):
+    if isinstance(function_call, dict) and (function_call.get("name") or isinstance(function_call.get("arguments"), str)):
+        name = function_call.get("name")
         arguments = function_call.get("arguments")
         call_id = function_call.get("id")
         if not isinstance(call_id, str) or not call_id:
-            call_id = f"call_{uuid.uuid4().hex[:24]}"
+            call_id = f"call_{uuid.uuid4().hex[:24]}" if isinstance(name, str) and name else None
         out["tool_calls"] = [
             {
                 "index": 0,
                 "id": call_id,
                 "type": "function",
                 "function": {
-                    "name": function_call.get("name"),
-                    "arguments": arguments if isinstance(arguments, str) else "{}",
+                    "name": name if isinstance(name, str) else "",
+                    "arguments": arguments if isinstance(arguments, str) else "",
                 },
             }
         ]
@@ -312,6 +313,7 @@ async def stream_openai(
 
         usage_payload: dict | None = None
         emitted = False
+        stop_hit = False
         try:
             if resp.status_code >= 400:
                 await _raise_upstream(account, resp, await _safe_json(resp))
@@ -322,8 +324,10 @@ async def stream_openai(
                 delta, finish = _delta_from_event(event)
                 if delta:
                     if "content" in delta and stop is not None:
-                        delta["content"] = _apply_stop(delta["content"], stop)
-                        if not delta["content"]:
+                        kept = "" if stop_hit else _apply_stop(delta["content"], stop)
+                        stop_hit = stop_hit or kept != delta["content"]
+                        delta["content"] = kept
+                        if not kept:
                             delta.pop("content")
                     if delta:
                         emitted = True

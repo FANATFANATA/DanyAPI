@@ -226,6 +226,25 @@ def _host_is_public(host: str) -> bool:
     return True
 
 
+def _peer_is_public(response: httpx.Response) -> bool:
+    stream = (getattr(response, "extensions", None) or {}).get("network_stream")
+    get_extra_info = getattr(stream, "get_extra_info", None)
+    if get_extra_info is None:
+        return True
+    try:
+        peer = get_extra_info("server_addr")
+    except Exception:
+        return True
+    host = peer[0] if isinstance(peer, tuple) and peer else peer
+    if not isinstance(host, str):
+        return True
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return not (address.is_private or address.is_loopback or address.is_link_local or address.is_reserved or address.is_multicast or address.is_unspecified)
+
+
 async def _fetch_remote_image(client: GigaChatClient, uri: str) -> tuple[str, bytes]:
     host = urlsplit(uri).hostname or ""
     if not host:
@@ -236,6 +255,8 @@ async def _fetch_remote_image(client: GigaChatClient, uri: str) -> tuple[str, by
     payload = bytearray()
     try:
         async with client.http.stream("GET", uri, timeout=REMOTE_TIMEOUT_SEC, follow_redirects=False) as resp:
+            if not _peer_is_public(resp):
+                raise HTTPException(400, f"gigachat image host {host} resolved to a non-public address on connect")
             if resp.status_code >= 400:
                 raise HTTPException(400, f"gigachat could not fetch remote image: upstream returned {resp.status_code}")
             declared = resp.headers.get("content-type", "").split(";")[0].strip().lower()

@@ -392,6 +392,9 @@ async def _validated_tokens(
         if result is not None:
             validated.append(result)
     if unchecked:
+        for _token, _state, acct, client in validated:
+            if acct is None or client is not acct.client:
+                await _close_client(client)
         raise HTTPException(503, f"token auth check could not reach the upstream, retry later: {unchecked[0]}")
     return validated, skipped[0]
 

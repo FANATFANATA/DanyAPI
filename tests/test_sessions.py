@@ -628,7 +628,7 @@ def test_deepseek_stateless_request_resolves_cached_session():
         pool.resolve_context.assert_called_once()
         assert captured["existing_sid"] == "sess-a"
         assert captured["cached_session"] is not None
-        assert captured["context_seq"] == context_sequence(captured["messages"], user="u:alice")
+        assert captured["context_seq"] == context_sequence(captured["messages"], user=chats_mod._request_scope(_chat_req(user="alice")))
     finally:
         chats_mod._collect_non_stream = orig
 
@@ -678,12 +678,12 @@ def test_deepseek_explicit_session_is_bound_to_its_first_scope():
         openai_mod.app.state.pool = pool
         chats_mod._SESSION_OWNERS.clear()
         asyncio.run(openai_mod._chat_completions_deepseek(_chat_req(session_id="explicit-1", user="alice")))
-        assert chats_mod._SESSION_OWNERS["explicit-1"] == "u:alice"
+        assert chats_mod._SESSION_OWNERS["explicit-1"] == chats_mod._request_scope(_chat_req(user="alice"))
         pool.resolve_context.assert_not_called()
         with pytest.raises(Exception) as excinfo:
             asyncio.run(openai_mod._chat_completions_deepseek(_chat_req(session_id="explicit-1", user="bob")))
         assert excinfo.value.status_code == 403
-        assert chats_mod._SESSION_OWNERS["explicit-1"] == "u:alice"
+        assert chats_mod._SESSION_OWNERS["explicit-1"] == chats_mod._request_scope(_chat_req(user="alice"))
         assert captured["existing_sid"] == "explicit-1"
     finally:
         chats_mod._SESSION_OWNERS.pop("explicit-1", None)
@@ -787,7 +787,7 @@ def test_qwen_stateless_request_resolves_cached_session():
         pool.resolve_context.assert_called_once()
         assert captured["existing_sid"] == "sess-q"
         assert captured["cached_session"] is not None
-        assert captured["context_seq"] == context_sequence(captured["messages"], user="u:alice")
+        assert captured["context_seq"] == context_sequence(captured["messages"], user=chats_mod._request_scope(_chat_req(user="alice")))
     finally:
         qwen_api.collect_non_stream = orig
 

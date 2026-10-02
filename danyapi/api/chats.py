@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import time
@@ -401,7 +402,7 @@ def _materialize_tools(req: ChatCompletionRequest) -> tuple[Any, Any]:
 def _request_scope(req: ChatCompletionRequest) -> str | None:
     user = getattr(req, "user", None)
     if isinstance(user, str) and user:
-        return f"u:{user}"
+        return "u:" + hashlib.sha1(user.encode("utf-8", "replace"), usedforsecurity=False).hexdigest()[:16]
     if _byok_mode() and _caller_scope():
         return f"k:{_caller_scope()}"
     return None

@@ -462,8 +462,16 @@ def test_delta_from_event_ignores_frames_without_a_usable_choice(event):
     assert ga._delta_from_event(event) == ({}, None)
 
 
-def test_delta_from_event_ignores_empty_content_role_and_unnamed_function_call():
-    assert ga._delta_from_event({"choices": [{"delta": {"content": "", "role": "", "function_call": {"name": "", "arguments": "{}"}}}]}) == ({}, None)
+def test_delta_from_event_ignores_empty_content_role_and_an_empty_function_call():
+    assert ga._delta_from_event({"choices": [{"delta": {"content": "", "role": "", "function_call": {}}}]}) == ({}, None)
+
+
+def test_delta_from_event_forwards_a_nameless_function_call_continuation():
+    delta, _finish = ga._delta_from_event({"choices": [{"delta": {"function_call": {"arguments": '{"city":'}}}]})
+
+    call = delta["tool_calls"][0]
+    assert call["id"] is None
+    assert call["function"] == {"name": "", "arguments": '{"city":'}
 
 
 def test_delta_from_event_ignores_content_and_role_of_the_wrong_type():
@@ -479,7 +487,7 @@ def test_delta_from_event_normalises_a_function_call():
     assert call["index"] == 0
     assert call["id"].startswith("call_")
     assert call["type"] == "function"
-    assert call["function"] == {"name": "f", "arguments": "{}"}
+    assert call["function"] == {"name": "f", "arguments": ""}
     assert finish == "function_call"
 
 

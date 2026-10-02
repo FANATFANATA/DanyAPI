@@ -331,6 +331,7 @@ async def stream_openai(
 
         usage_payload: dict | None = None
         emitted = False
+        stop_hit = False
         try:
             async for event in _iter_sse(resp):
                 usage_raw = event.get("usage")
@@ -339,8 +340,10 @@ async def stream_openai(
                 delta, finish = _delta_from_event(event)
                 if delta:
                     if "content" in delta and stop is not None:
-                        delta["content"] = _apply_stop(delta["content"], stop)
-                        if not delta["content"]:
+                        kept = "" if stop_hit else _apply_stop(delta["content"], stop)
+                        stop_hit = stop_hit or kept != delta["content"]
+                        delta["content"] = kept
+                        if not kept:
                             delta.pop("content")
                     if delta:
                         emitted = True

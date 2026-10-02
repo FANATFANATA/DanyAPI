@@ -624,11 +624,11 @@ def _log_request_failure(request: Request, payload: dict[str, Any], duration: fl
     if status is not None:
         reason = f"status={status}"
     else:
-        reason = f"error={str(exc) if exc else 'unknown'}"
+        reason = f"error={_log_field(str(exc)) if exc else 'unknown'}"
     log.warning(
         "%s %s %s%s failed: %s (%.0fms)",
         request.method,
-        request.url.path,
+        _log_field(request.url.path),
         ip,
         details_part,
         reason,
@@ -645,7 +645,7 @@ def _log_request_success(request: Request, payload: dict[str, Any], duration: fl
     log.info(
         "%s %s %s%s ok (%.0fms)",
         request.method,
-        request.url.path,
+        _log_field(request.url.path),
         ip,
         details_part,
         duration,

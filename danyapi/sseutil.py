@@ -122,24 +122,32 @@ class IncrementalSSE:
 
 
 class StreamStopFilter:
-    __slots__ = ("_buf", "_hold", "_markers")
+    __slots__ = ("_buf", "_hold", "_markers", "matched")
 
     def __init__(self, markers: list[str]) -> None:
         self._markers = markers
         self._hold = max((len(marker) for marker in markers), default=1) - 1
         self._buf = ""
+        self.matched: str | None = None
+
+    @property
+    def markers(self) -> list[str]:
+        return self._markers
 
     def feed(self, piece: str) -> tuple[str, bool]:
         if not piece:
             return "", False
         text = self._buf + piece
         cut = -1
+        found: str | None = None
         for marker in self._markers:
             pos = text.find(marker)
             if pos != -1 and (cut == -1 or pos < cut):
                 cut = pos
+                found = marker
         if cut != -1:
             self._buf = ""
+            self.matched = found
             return text[:cut], True
         hold = self._hold
         if hold <= 0:
@@ -586,7 +594,9 @@ class MessageReconstructor:
     @property
     def accumulated_tokens(self) -> int:
         value = self.message.get("accumulated_token_usage")
-        return int(value) if isinstance(value, (int, float)) and value > 0 else 0
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 < value < float("inf"):
+            return 0
+        return int(value)
 
     @property
     def usage(self) -> dict:

@@ -153,18 +153,20 @@ def git_update(tag):
     if not resolved:
         print(f"DanyAPI: tag {tag} is not in the fetched history, aborting update.")
         return False
-    if expected is not None:
-        head = subprocess.run(
-            ["git", "rev-parse", "refs/tags/" + tag + "^{commit}"],
-            cwd=str(ROOT),
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        local_sha = head.stdout.strip()
-        if local_sha and local_sha != expected:
-            print(f"DanyAPI: {tag} resolves to {local_sha[:12]} locally but origin says {expected[:12]}, aborting update.")
-            return False
+    if expected is None:
+        print("DanyAPI: could not read the tag from origin, aborting update.")
+        return False
+    head = subprocess.run(
+        ["git", "rev-parse", "refs/tags/" + tag + "^{commit}"],
+        cwd=str(ROOT),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    local_sha = head.stdout.strip()
+    if local_sha and local_sha != expected:
+        print(f"DanyAPI: {tag} resolves to {local_sha[:12]} locally but origin says {expected[:12]}, aborting update.")
+        return False
     if run(["git", "checkout", "-f", tag]) != 0:
         return False
     if run(["git", "reset", "--hard", tag]) != 0:
@@ -268,8 +270,9 @@ def zip_update(tag):
             _remove_staging(staging)
             _remove_staging(old_root)
             return False
-        print(f"DanyAPI: your previous install is kept at {old_dir}")
+        print(f"DanyAPI: your previous install is still in place at {ROOT}")
         _remove_staging(staging)
+        _remove_staging(old_root)
         return True
     try:
         if not _move_retry(tmp_dir_str, root_str):

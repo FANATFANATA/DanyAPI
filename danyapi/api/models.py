@@ -253,7 +253,7 @@ MODEL_FETCHERS: dict[str, Any] = {
 }
 
 
-async def _store_models(provider: str, client: Any) -> list[dict]:
+async def _store_models(provider: str, client: Any, seed_only: bool = False) -> list[dict]:
     fetcher = MODEL_FETCHERS.get(provider)
     if fetcher is None:
         return provider_models(provider)
@@ -268,6 +268,8 @@ async def _store_models(provider: str, client: Any) -> list[dict]:
             kept = provider_models(provider)
             log.warning("%s models fetch returned nothing, keeping %d known models", provider, len(kept))
             return kept
+        if seed_only and provider_models(provider):
+            return provider_models(provider)
         setattr(app.state, MODEL_ATTRS[provider], fetched)
         log.info("%s models refreshed: %d", provider, len(fetched))
         return fetched
@@ -281,13 +283,16 @@ async def refresh_provider_models(provider: str, client: Any) -> list[dict]:
 
 async def refresh_models(api_key: str | None = None, providers: Sequence[str] | None = None) -> dict[str, int]:
     counts: dict[str, int] = {}
+    seed_only = api_key is not None
     for provider in providers or BYOK_PROVIDERS:
         if provider == "alice":
-            counts[provider] = len(await _store_models(provider, None))
+            counts[provider] = len(await _store_models(provider, None, seed_only))
             continue
         client = _pool_client(provider)
         owned = client is not None
         if client is None:
+            if seed_only and provider_models(provider):
+                continue
             try:
                 client = _probe_client(provider, api_key)
             except (RuntimeError, OSError) as exc:
@@ -297,7 +302,7 @@ async def refresh_models(api_key: str | None = None, providers: Sequence[str] | 
             log.info("%s model refresh skipped, no credentials available", provider)
             continue
         try:
-            counts[provider] = len(await _store_models(provider, client))
+            counts[provider] = len(await _store_models(provider, client, seed_only and not owned))
         finally:
             if not owned:
                 await _close_probe_client(client)
@@ -368,7 +373,7 @@ def _model_source() -> list[dict]:
 
 
 def _model_cache_key() -> tuple[tuple[Any, ...], ...]:
-    return tuple((m.get("id"), m.get("name"), m.get("owned_by"), m.get("model_type")) for m in _model_source())
+    return tuple((m.get("id"), m.get("name"), m.get("owned_by"), m.get("model_type"), *(m.get(f) for f in OPTIONAL_MODEL_FIELDS)) for m in _model_source())
 
 
 def _models_state() -> list[dict]:

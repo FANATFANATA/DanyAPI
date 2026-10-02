@@ -24,16 +24,12 @@ from .common import (
     _iter_tool_call_blocks,
 )
 from .dsml import (
-    _DSML_INVOKE,
-    _DSML_LAX_BLOCK,
     _DSML_LAX_NAME_ATTR,
     _DSML_LAX_OPENANY,
     _DSML_LAX_SKIP_TAGS,
     _DSML_LAX_TAG,
     _DSML_LAX_TOOLNAME_TAIL,
     _DSML_NAKED,
-    _DSML_PARAMETER,
-    _DSML_TOOL_CALLS_BLOCK,
     _DSML_XML_NORMALIZE,
     _XML_CLOSE_TAG,
     _XML_GENERIC_TOOL_TAGS,
@@ -44,8 +40,12 @@ from .dsml import (
     _XML_WRAPPER_OPEN,
     _blanked,
     _dsml_present,
+    _find_dsml_lax_block,
     _IntervalSet,
+    _iter_dsml_invocations,
     _iter_dsml_lax_parameters,
+    _iter_dsml_parameters,
+    _iter_dsml_tool_call_blocks,
     _scan_xml_pairs,
     _strip_dsml,
     strip_dsml,
@@ -358,6 +358,8 @@ def _parse_xml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | N
             if consumed.contains(start, end):
                 continue
             merged = _xml_tag_attrs(attrs_text, param_types)
+            if param_types and "name" not in param_types:
+                merged.pop("name", None)
             merged.update(_xml_invoke_arguments(element_body, param_types) or {})
             calls.append(ToolCall.create(tool_name, merged))
             consumed.add(start, end)
@@ -396,6 +398,8 @@ def _parse_xml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | N
         if param_types is None and isinstance(arguments.get("name"), str) and arguments["name"].strip():
             raw_name = arguments.pop("name")
             param_types = _schema_for_name(tool_schemas, raw_name)
+        elif param_types and "name" not in param_types:
+            arguments.pop("name", None)
         elif param_types is None and raw_name.casefold() in _XML_GENERIC_TOOL_TAGS and not arguments:
             continue
         if not arguments and param_types is None:
@@ -615,19 +619,19 @@ def _parse_yaml_calls(text: str) -> list[ToolCall] | None:
 def _parse_dsml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | None = None) -> tuple[list[ToolCall], str] | None:
     if not _dsml_present(text):
         return None
-    blocks = list(_DSML_TOOL_CALLS_BLOCK.finditer(text))
+    blocks = list(_iter_dsml_tool_call_blocks(text))
     if not blocks:
         return None
     calls: list[ToolCall] = []
-    for block_match in blocks:
-        for inv in _DSML_INVOKE.finditer(block_match.group(1)):
-            tool_name = inv.group(2).strip()
-            body = inv.group(3)
+    for block in blocks:
+        for inv in _iter_dsml_invocations(block.body):
+            tool_name = inv.head.group(2).strip()
+            body = inv.body
             params: dict[str, Any] = {}
             param_types = _schema_for_name(tool_schemas, tool_name)
-            for param in _DSML_PARAMETER.finditer(body):
-                key = param.group(2).strip()
-                raw = _DSML_XML_NORMALIZE.sub(r"<\1\2>", param.group(3))
+            for param in _iter_dsml_parameters(body):
+                key = param.head.group(2).strip()
+                raw = _DSML_XML_NORMALIZE.sub(r"<\1\2>", param.body)
                 _xml_set_param(params, key, _xml_value(raw, (param_types or {}).get(key)))
             if not params:
                 normalized = _DSML_XML_NORMALIZE.sub(r"<\1\2>", body)
@@ -639,9 +643,9 @@ def _parse_dsml_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | 
         return None
     outside: list[str] = []
     cursor = 0
-    for block_match in blocks:
-        outside.append(text[cursor : block_match.start()])
-        cursor = block_match.end()
+    for block in blocks:
+        outside.append(text[cursor : block.start])
+        cursor = block.end
     outside.append(text[cursor:])
     wrapper = _strip_dsml(" ".join(outside).strip()).strip()
     return calls, wrapper
@@ -677,8 +681,8 @@ def _infer_tool_name_from_schemas(param_keys: set[str], tool_schemas: dict[str, 
 def _parse_dsml_lax_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]] | None = None) -> tuple[list[ToolCall], str] | None:
     if _DSML_LAX_TAG.search(text) is None:
         return None
-    block_match = _DSML_LAX_BLOCK.search(text)
-    block = block_match.group("body") if block_match is not None else text
+    block_match = _find_dsml_lax_block(text)
+    block = block_match.body if block_match is not None else text
     opens = list(_DSML_LAX_OPENANY.finditer(block))
     invokes = [o for o in opens if o.group("tagname").strip().lower() not in _DSML_LAX_SKIP_TAGS]
     params = list(_iter_dsml_lax_parameters(block))
@@ -713,7 +717,7 @@ def _parse_dsml_lax_tool_calls(text: str, tool_schemas: dict[str, dict[str, Any]
     if not calls:
         return None
     spans: list[tuple[int, int]] = [(o.start(), o.end()) for o in _DSML_LAX_OPENANY.finditer(text)]
-    body_offset = block_match.start("body") if block_match is not None else 0
+    body_offset = block_match.head.end() if block_match is not None else 0
     spans.extend((start + body_offset, end + body_offset) for start, end, _name, _value in params)
     spans.sort()
     wrapper_parts: list[str] = []
@@ -827,6 +831,7 @@ def parse_tool_calls_debug(
     tool_schemas: dict[str, dict[str, Any]] | None = None,
     tool_details: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    text = text[:_MAX_PARSE_TEXT]
     stripped = _strip_fences(_strip_dsml(text))
     report: dict[str, Any] = {
         "text": text,

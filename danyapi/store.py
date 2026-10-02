@@ -135,7 +135,11 @@ def cache_root() -> Path:
         reason = _root_rejection(root)
     if reason is not None:
         log.warning("cannot use cache dir %s: %s", root, reason)
-        return root
+        root = Path(tempfile.mkdtemp(prefix=_user_root_tag() + "-fallback-"))
+        try:
+            os.chmod(root, 0o700)
+        except OSError as exc:
+            log.warning("cannot secure the fallback cache dir %s: %s", root, exc)
     try:
         root.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(root, 0o700)
@@ -189,6 +193,10 @@ class JsonStore:
     def enabled(self) -> bool:
         return self._path is not None and not self._removed
 
+    @property
+    def path(self) -> Path | None:
+        return self._path
+
     def _load(self) -> None:
         if self._path is None:
             return
@@ -226,6 +234,8 @@ class JsonStore:
         tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
         try:
             with _path_write_lock(path):
+                if self._removed:
+                    return
                 if generation is not None and generation < self._committed_generation:
                     return
                 fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -380,11 +390,12 @@ class JsonStore:
             self._dirty = False
             self._pending = False
             self._idle.set()
-        _forget_path_registries(path, self)
         try:
-            path.unlink(missing_ok=True)
+            with _path_write_lock(path):
+                path.unlink(missing_ok=True)
         except OSError as exc:
             log.warning("cache file delete failed for %s: %s", path, exc)
+        _forget_path_registries(path, self)
 
     def items(self) -> list[tuple[str, Any]]:
         with self._lock:

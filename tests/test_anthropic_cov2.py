@@ -686,7 +686,7 @@ async def test_endpoint_count_tokens_passes_stop_sequences_into_request_info():
     without_double_count = ant.count_input_tokens([{"role": "system", "content": system}, {"role": "user", "content": "hi"}], None)
     assert reported == without_double_count
     assert reported < without_double_count + ant.count_input_tokens([{"role": "system", "content": system}], None)
-    assert captured[0].stop == ["END"]
+    assert captured[0].stop is None
     assert (captured[0].messages[0].role, captured[0].messages[0].content) == ("system", system)
     assert [(message.role, message.content) for message in captured[0].messages] == [("system", system), ("user", "hi")]
 

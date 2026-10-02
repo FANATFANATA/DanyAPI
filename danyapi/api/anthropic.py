@@ -11,7 +11,7 @@ from typing import Any
 
 from fastapi import HTTPException
 
-from danyapi.sseutil import parse_sse
+from danyapi.sseutil import StreamStopFilter, parse_sse
 from danyapi.tokens import count_messages_tokens, estimate_tokens
 
 log = logging.getLogger("danyapi.api.anthropic")
@@ -238,13 +238,13 @@ def normalize_messages(messages: Any) -> list[dict]:
         if role not in SUPPORTED_ROLES:
             raise AnthropicInputError(f"unsupported role: {role!r}; anthropic messages accept only user and assistant")
         content, tool_calls, tool_results = _content_blocks(message.get("content"))
-        for result in tool_results:
-            normalized.append(result)
         if tool_calls:
             entry: dict[str, Any] = {"role": "assistant", "content": content}
             entry["tool_calls"] = tool_calls
             normalized.append(entry)
+            normalized.extend(tool_results)
             continue
+        normalized.extend(tool_results)
         if content == "":
             continue
         normalized.append({"role": role, "content": content})
@@ -349,7 +349,6 @@ def build_chat_request(body: dict[str, Any], model: str, session_id: str | None 
     messages = normalize_messages(body.get("messages"))
     tools = convert_tools(body.get("tools"))
     tool_choice = convert_tool_choice(body.get("tool_choice"))
-    stop = convert_stop_sequences(body.get("stop_sequences"))
     prefix = [{"role": "system", "content": system}] if system else []
     payload: dict[str, Any] = {"model": model, "messages": [*prefix, *messages]}
     payload["stream"] = bool(body.get("stream"))
@@ -358,8 +357,6 @@ def build_chat_request(body: dict[str, Any], model: str, session_id: str | None 
         payload["tools"] = tools
     if tool_choice is not None:
         payload["tool_choice"] = tool_choice
-    if stop:
-        payload["stop"] = stop
     temperature = _as_ratio(body.get("temperature"), "temperature")
     if temperature is not None:
         payload["temperature"] = temperature
@@ -441,8 +438,26 @@ def build_content(choice: dict) -> list[dict]:
     return blocks
 
 
-def _content_text(blocks: list[dict]) -> str:
-    return "".join(block["text"] for block in blocks if block.get("type") == "text" and isinstance(block.get("text"), str))
+def cut_at_stop_sequence(blocks: list[dict], stop_sequences: Any) -> tuple[list[dict], str | None]:
+    markers = [item for item in (stop_sequences or ()) if isinstance(item, str) and item]
+    if not markers:
+        return blocks, None
+    remaining: list[dict] = []
+    matched: str | None = None
+    for block in blocks:
+        if matched is not None:
+            continue
+        if block.get("type") == "text" and isinstance(block.get("text"), str):
+            text = block["text"]
+            for marker in markers:
+                position = text.find(marker)
+                if position != -1 and (matched is None or text.find(matched) > position):
+                    matched = marker
+            if matched is not None:
+                remaining.append({**block, "text": text.split(matched, 1)[0]})
+                continue
+        remaining.append(block)
+    return remaining, matched
 
 
 def build_message(info: RequestInfo, message_id: str, response: dict) -> dict:
@@ -455,8 +470,7 @@ def build_message(info: RequestInfo, message_id: str, response: dict) -> dict:
     finish = choice.get("finish_reason")
     if isinstance(response.get("error"), dict):
         finish = "error"
-    content = build_content(choice)
-    stop_sequence = match_stop_sequence(_content_text(content), info.stop_sequences)
+    content, stop_sequence = cut_at_stop_sequence(build_content(choice), info.stop_sequences)
     return {
         "id": message_id,
         "type": "message",
@@ -515,11 +529,16 @@ class _StreamState:
     tool_index: dict[int, int] = field(default_factory=dict)
     tool_calls: dict[int, dict[str, str]] = field(default_factory=dict)
     tool_started: set[int] = field(default_factory=set)
+    tool_open: int | None = None
     next_index: int = 0
     stop_reason: str = "end_turn"
     stop_sequence: str | None = None
     usage: dict = field(default_factory=lambda: {"input_tokens": 0, "output_tokens": 0})
     has_tool_use: bool = False
+
+    def __post_init__(self) -> None:
+        markers = [item for item in (self.info.stop_sequences or ()) if isinstance(item, str) and item]
+        self.stop_filter: StreamStopFilter | None = StreamStopFilter(markers) if markers else None
 
     def emit(self, event_type: str, data: dict) -> str:
         payload = {"type": event_type}
@@ -565,9 +584,18 @@ class _StreamState:
 
     def close_tools(self) -> Iterator[str]:
         for index in sorted(self.tool_index.values()):
-            yield self.emit("content_block_stop", {"index": index})
+            if index in self.tool_started:
+                yield self.emit("content_block_stop", {"index": index})
         self.tool_index.clear()
         self.tool_started.clear()
+        self.tool_open = None
+
+    def close_tool(self) -> Iterator[str]:
+        index = self.tool_open
+        self.tool_open = None
+        if index is not None and index in self.tool_started:
+            self.tool_started.discard(index)
+            yield self.emit("content_block_stop", {"index": index})
 
     def close_for_tool(self) -> Iterator[str]:
         yield from self.close_thinking()
@@ -590,15 +618,35 @@ class _StreamState:
             )
         yield self.emit("content_block_delta", {"index": self.thinking_index, "delta": {"type": "thinking_delta", "thinking": text}})
 
-    def text_delta(self, text: str) -> Iterator[str]:
-        if self.thinking_open:
-            yield from self.close_thinking()
+    def _emit_text(self, piece: str) -> Iterator[str]:
+        if not piece:
+            return
         if not self.text_open:
             self.text_open = True
             self.text_index = self._take_index()
             yield self.emit("content_block_start", {"index": self.text_index, "content_block": {"type": "text", "text": ""}})
-        self.text_parts.append(text)
-        yield self.emit("content_block_delta", {"index": self.text_index, "delta": {"type": "text_delta", "text": text}})
+        self.text_parts.append(piece)
+        yield self.emit("content_block_delta", {"index": self.text_index, "delta": {"type": "text_delta", "text": piece}})
+
+    def text_delta(self, text: str) -> Iterator[str]:
+        if self.thinking_open:
+            yield from self.close_thinking()
+        if self.stop_filter is None:
+            yield from self._emit_text(text)
+            return
+        if self.stop_sequence is not None:
+            return
+        piece, _hit = self.stop_filter.feed(text)
+        if self.stop_filter.matched is not None:
+            self.stop_sequence = self.stop_filter.matched
+        yield from self._emit_text(piece)
+
+    def flush_stop(self) -> Iterator[str]:
+        if self.stop_filter is None:
+            return
+        tail = self.stop_filter.flush()
+        self.stop_filter = None
+        yield from self._emit_text(tail)
 
     def tool_start(self, slot: int, call: dict, name: str) -> tuple[int, bool]:
         identity = self.tool_calls.setdefault(slot, {"id": "", "name": ""})
@@ -724,6 +772,9 @@ async def translate_stream(
                                     name = function.get("name")
                                     index, started = state.tool_start(slot, call, name if isinstance(name, str) else "")
                                     if started:
+                                        for line in state.close_tool():
+                                            yield line
+                                        state.tool_open = index
                                         yield state.emit(
                                             "content_block_start",
                                             {
@@ -753,6 +804,8 @@ async def translate_stream(
                 yield line
             yield sse_event("error", error_body("api_error", "upstream stream failed"))
             raise
+        for line in state.flush_stop():
+            yield line
         for line in state.close_all():
             yield line
         if error is not None:
@@ -761,7 +814,7 @@ async def translate_stream(
             for line in state.finish("end_turn", None):
                 yield line
             return
-        stop_sequence = match_stop_sequence("".join(state.text_parts), info.stop_sequences)
+        stop_sequence = state.stop_sequence or match_stop_sequence("".join(state.text_parts), info.stop_sequences)
         if finish in TRUNCATED_REASONS:
             reason = "max_tokens"
         elif stop_sequence is not None:

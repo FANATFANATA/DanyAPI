@@ -234,7 +234,12 @@ def test_bind_session_owner_evicts_the_oldest_entry_over_the_limit():
 
 
 def test_request_scope_prefers_the_user_then_the_byok_caller(monkeypatch):
-    assert chats_mod._request_scope(_chat(user="alice")) == "u:alice"
+    scope = chats_mod._request_scope(_chat(user="alice"))
+    assert scope is not None
+    assert scope.startswith("u:")
+    assert len(scope) == 18
+    assert scope == chats_mod._request_scope(_chat(user="alice"))
+    assert scope != chats_mod._request_scope(_chat(user="bob"))
     assert chats_mod._request_scope(_chat(user="")) is None
     assert chats_mod._request_scope(_chat()) is None
     monkeypatch.setattr(chats_mod, "_byok_mode", lambda: True)
@@ -242,6 +247,12 @@ def test_request_scope_prefers_the_user_then_the_byok_caller(monkeypatch):
     assert chats_mod._request_scope(_chat()) == "k:caller-1"
     monkeypatch.setattr(chats_mod, "_caller_scope", lambda: "")
     assert chats_mod._request_scope(_chat()) is None
+
+
+def test_request_scope_bounds_an_oversized_user():
+    scope = chats_mod._request_scope(_chat(user="x" * (4 * 1024 * 1024)))
+    assert scope is not None
+    assert len(scope) == 18
 
 
 def test_context_sequence_digest_differs_between_scopes():
@@ -282,8 +293,9 @@ async def test_acquire_and_build_binds_the_session_owner_and_computes_the_digest
     account, existing_sid, context_seq, _prompt, _tool_mode, _cached = await chats_mod._acquire_and_build(
         pool, _chat(user="alice", session_id="sess-1"), tools=None, tool_choice=None
     )
-    assert seen == ["u:alice"]
-    assert bound == [("sess-1", "u:alice")]
+    expected = chats_mod._request_scope(_chat(user="alice"))
+    assert seen == [expected]
+    assert bound == [("sess-1", expected)]
     assert context_seq == ("digest",)
     assert existing_sid == "sess-1"
     assert pool.acquire.await_args.args[0] == "sess-1"
