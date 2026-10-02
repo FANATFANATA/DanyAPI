@@ -54,6 +54,8 @@ ERROR_TYPE_HINTS = {
 
 EMPTY_CREDENTIAL = ""
 
+PUBLIC_KEY = "public"
+
 AUTH_ERROR_TYPES = frozenset({"AuthError"})
 
 MAX_ERROR_CHARS = 300
@@ -179,7 +181,7 @@ class OpenCodeClient:
         timeout: float = 60.0,
         client_id: str = CLIENT_NAME,
     ) -> None:
-        self.key = (key or EMPTY_CREDENTIAL).strip()
+        self.key = PUBLIC_KEY
         self.client_id = client_id or CLIENT_NAME
         self._timeout = timeout
         self._http: httpx.AsyncClient | None = None
@@ -222,7 +224,7 @@ class OpenCodeClient:
             "User-Agent": USER_AGENT,
             "x-opencode-client": self.client_id,
         }
-        if self.key:
+        if self.key and self.key != PUBLIC_KEY:
             headers["Authorization"] = f"Bearer {self.key}"
         if session_id:
             headers["x-opencode-session"] = session_id

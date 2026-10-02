@@ -5,6 +5,7 @@ from typing import Any
 
 from fastapi import FastAPI
 
+from ..config import settings
 from ..store import JsonStore
 
 app = FastAPI(title="DanyAPI")
@@ -43,6 +44,8 @@ def provider_needs_api_key(provider: str) -> bool:
 
 
 def provider_models(provider: str) -> list[dict]:
+    if not settings.provider_enabled(provider):
+        return []
     attr = MODEL_ATTRS.get(provider)
     if attr is None:
         return []
@@ -50,6 +53,8 @@ def provider_models(provider: str) -> list[dict]:
 
 
 def provider_pool(provider: str) -> Any:
+    if not settings.provider_enabled(provider):
+        return None
     attr = POOL_ATTRS_BY_PROVIDER.get(provider)
     if attr is None:
         return None

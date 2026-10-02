@@ -60,8 +60,11 @@ _NON_CREDENTIAL_ENV_NAMES = frozenset(
         "DANYAPI_AUTO_UPDATE",
         "DANYAPI_CORS_ORIGINS",
         "DANYAPI_RESPONSES_MAX_RECORDS",
+        "DANYAPI_DISABLED_PROVIDERS",
     }
 )
+
+PROVIDER_NAMES = ("deepseek", "qwen", "gigachat", "opencode", "alice", "duckai")
 _ENV_NAME_RE = re.compile(r"_env_(?:int|float|positive_float|float_opt|str|list|on|off|first)\(\s*\"([A-Za-z0-9_]+)\"")
 
 
@@ -240,6 +243,21 @@ class Settings:
         self.cors_origins = _env_list("DANYAPI_CORS_ORIGINS")
         self.responses_max_records = _env_int("DANYAPI_RESPONSES_MAX_RECORDS", 1024, 1, MAX_RESPONSES_RECORDS)
         self.admin_token = _env_str("DANYAPI_ADMIN_TOKEN")
+        self.disabled_providers = self._disabled_providers()
+
+    @staticmethod
+    def _disabled_providers() -> frozenset[str]:
+        disabled: set[str] = set()
+        for name in _env_list("DANYAPI_DISABLED_PROVIDERS"):
+            provider = name.strip().lower()
+            if provider in PROVIDER_NAMES:
+                disabled.add(provider)
+            elif provider:
+                log.warning("DANYAPI_DISABLED_PROVIDERS lists unknown provider %r, ignoring it", name)
+        return frozenset(disabled)
+
+    def provider_enabled(self, name: str) -> bool:
+        return name not in self.disabled_providers
 
 
 settings = Settings()

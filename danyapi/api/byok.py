@@ -698,15 +698,15 @@ def _caller_id_for(tokens: list[str]) -> str:
 async def _byok_pool_for(provider: str, request: Request) -> AccountPool:
     if provider not in BYOK_PROVIDERS:
         raise HTTPException(400, f"unknown provider: {provider}")
+    if provider in KEY_OPTIONAL_PROVIDERS:
+        _CALLER_ID.set("")
+        return await _byok_pool(provider, [EMPTY_CREDENTIAL])
     if not provider_needs_api_key(provider):
         _CALLER_ID.set("")
         return await _byok_pool(provider, [])
     token = await _extract_request_api_key(request)
     tokens = [t.strip() for t in (token or "").split(",") if t.strip()]
     if not tokens:
-        if provider in KEY_OPTIONAL_PROVIDERS:
-            _CALLER_ID.set("")
-            return await _byok_pool(provider, [EMPTY_CREDENTIAL])
         raise HTTPException(401, _INVALID_KEY_DETAIL.format(provider=provider))
     if len(tokens) > BYOK_MAX_KEYS:
         raise HTTPException(400, f"too many api keys for {provider}: at most {BYOK_MAX_KEYS} keys per request")

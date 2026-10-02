@@ -258,13 +258,10 @@ async def test_fetcher_hides_models_this_gateway_cannot_serve(monkeypatch):
     monkeypatch.setattr(client_mod, "_CATALOG_CACHE", (None, 0.0))
     client = _client(httpx.MockTransport(_catalog_transport()))
     models = await _fetch_opencode_models(client)
-    assert [m["id"] for m in models] == ["chatty", "freebie"]
-    assert models[0]["name"] == "Chatty"
-    assert models[0]["free"] is False
-    assert models[0]["context_length"] == 4096
-    assert models[1]["free"] is True
-    assert models[1]["supports_vision"] is True
-    assert "supports_vision" not in models[0]
+    assert [m["id"] for m in models] == ["freebie"]
+    assert models[0]["name"] == "Freebie"
+    assert models[0]["free"] is True
+    assert models[0]["supports_vision"] is True
 
 
 @pytest.mark.asyncio
@@ -281,8 +278,8 @@ async def test_fetcher_survives_a_broken_catalog(monkeypatch):
 
     client = _client(httpx.MockTransport(handler))
     models = await _fetch_opencode_models(client)
-    assert [m["id"] for m in models] == ["chatty", "freebie"]
-    assert models[0]["name"] == "chatty"
+    assert [m["id"] for m in models] == ["freebie"]
+    assert models[0]["name"] == "freebie"
     assert "free" not in models[0]
 
 
@@ -366,7 +363,8 @@ async def test_headers_carry_the_opencode_identification():
     client = _client(httpx.MockTransport(handler))
     await client.fetch_models()
     headers = seen[0].headers
-    assert headers["Authorization"] == f"Bearer {KEY}"
+    assert client.key == client_mod.PUBLIC_KEY
+    assert "Authorization" not in headers
     assert headers["User-Agent"] == USER_AGENT
     assert headers["x-opencode-client"] == "danyapi"
     assert "x-opencode-session" not in headers
@@ -374,7 +372,7 @@ async def test_headers_carry_the_opencode_identification():
 
 
 @pytest.mark.asyncio
-async def test_no_authorization_header_without_a_key():
+async def test_authorization_is_never_sent_under_the_hardcoded_public_key():
     seen: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -382,7 +380,7 @@ async def test_no_authorization_header_without_a_key():
         return httpx.Response(200, json=_models())
 
     client = _client(httpx.MockTransport(handler), key="")
-    assert client.key == ""
+    assert client.key == client_mod.PUBLIC_KEY
     await client.fetch_models()
     assert "Authorization" not in seen[0].headers
 
@@ -402,7 +400,7 @@ async def test_chat_sends_session_and_request_headers_and_bare_model():
     assert body["model"] == "kimi-k3"
     assert request.headers["x-opencode-session"] == "ses_1"
     assert request.headers["x-opencode-request"] == "msg_1"
-    assert request.headers["Authorization"] == f"Bearer {KEY}"
+    assert "Authorization" not in request.headers
 
 
 @pytest.mark.asyncio
@@ -1371,7 +1369,7 @@ async def test_byok_falls_back_to_a_keyless_account_when_no_key_is_sent(monkeypa
     pool = await byok_mod._byok_pool_for("opencode", _no_key_request())
     try:
         assert len(pool.accounts) == 1
-        assert pool.accounts[0].client.key == ""
+        assert pool.accounts[0].client.key == client_mod.PUBLIC_KEY
         assert pool.label == "opencode"
     finally:
         await byok_mod._close_pool(pool)
@@ -1393,8 +1391,8 @@ async def test_byok_builds_one_account_per_comma_separated_key(monkeypatch, _fre
     request = _keyed_request("sk-a,sk-b")
     pool = await byok_mod._byok_pool_for("opencode", request)
     try:
-        assert [a.client.key for a in pool.accounts] == ["sk-a", "sk-b"]
-        assert len({a.stable_id for a in pool.accounts}) == 2
+        assert [a.client.key for a in pool.accounts] == [client_mod.PUBLIC_KEY]
+        assert len(pool.accounts) == 1
     finally:
         await byok_mod._close_pool(pool)
 

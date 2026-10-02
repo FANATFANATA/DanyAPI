@@ -113,6 +113,7 @@ Credentials:
 | `DUCKAI_ACCOUNTS` | `1` | Concurrent Duck.ai connections, `1` to `4` |
 | `BYOK` / `BYOK_MODE` / `DANYAPI_BYOK_MODE` | empty | `1` runs in bring-your-own-key mode: DeepSeek, Qwen, GigaChat and OpenCode Zen requests supply their own key, Alice and Duck.ai need none. The first name that is set wins. `GET /health` reports every provider as enabled and reports the per-key pools |
 | `DANYAPI_ADMIN_TOKEN` | empty | Bearer token required by `POST /v1/tokens`, empty keeps that endpoint disabled |
+| `DANYAPI_DISABLED_PROVIDERS` | empty | Comma-separated provider names (`deepseek`, `qwen`, `gigachat`, `opencode`, `alice`, `duckai`) to turn off completely |
 
 Server:
 

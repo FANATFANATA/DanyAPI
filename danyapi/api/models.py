@@ -184,6 +184,9 @@ async def _fetch_opencode_models(client: opencode_zen.OpenCodeClient) -> list[di
         if not isinstance(entry, dict) or not entry.get("id"):
             continue
         model_id = str(entry["id"])
+        if "free" not in model_id.lower():
+            skipped += 1
+            continue
         meta = catalog.get(model_id)
         if isinstance(meta, dict):
             if opencode_zen.model_format(meta) != opencode_zen.CHAT_FORMAT:
@@ -204,10 +207,7 @@ async def _fetch_opencode_models(client: opencode_zen.OpenCodeClient) -> list[di
                 record["supports_vision"] = True
         models.append(record)
     if skipped:
-        log.info("opencode catalog: %d model(s) hidden, they need a request format this gateway does not serve", skipped)
-    free = sum(1 for m in models if m.get("free"))
-    if free:
-        log.info("opencode catalog: %d of %d served models are on the free tier", free, len(models))
+        log.info("opencode catalog: %d model(s) hidden, only models with free in the id are served", skipped)
     return models
 
 
@@ -284,7 +284,7 @@ async def refresh_provider_models(provider: str, client: Any) -> list[dict]:
 async def refresh_models(api_key: str | None = None, providers: Sequence[str] | None = None) -> dict[str, int]:
     counts: dict[str, int] = {}
     seed_only = api_key is not None
-    for provider in providers or BYOK_PROVIDERS:
+    for provider in providers or tuple(name for name in BYOK_PROVIDERS if settings.provider_enabled(name)):
         if provider == "alice":
             counts[provider] = len(await _store_models(provider, None, seed_only))
             continue
@@ -455,24 +455,27 @@ def _is_deepseek_model(lowered: str) -> bool:
 def _resolve_provider(model: str) -> str:
     lowered = model.lower()
     if lowered.startswith(opencode_zen.MODEL_PREFIX):
-        return "opencode"
-    if lowered.startswith("qwen"):
-        return "qwen"
-    if lowered.startswith("gigachat"):
-        return "gigachat"
-    if lowered in ALICE_MODEL_IDS:
-        return "alice"
-    if lowered.startswith("duckai") or lowered in _known_ids("duckai"):
-        return "duckai"
-    if _is_deepseek_model(lowered):
-        return "deepseek"
-    for provider in BYOK_PROVIDERS:
-        if lowered in _known_ids(provider):
-            return provider
-    raise HTTPException(404, f"Unknown model: {model}")
+        provider: str | None = "opencode"
+    elif lowered.startswith("qwen"):
+        provider = "qwen"
+    elif lowered.startswith("gigachat"):
+        provider = "gigachat"
+    elif lowered in ALICE_MODEL_IDS:
+        provider = "alice"
+    elif lowered.startswith("duckai") or lowered in _known_ids("duckai"):
+        provider = "duckai"
+    elif _is_deepseek_model(lowered):
+        provider = "deepseek"
+    else:
+        provider = next((name for name in BYOK_PROVIDERS if lowered in _known_ids(name)), None)
+    if provider is None or not settings.provider_enabled(provider):
+        raise HTTPException(404, f"Unknown model: {model}")
+    return provider
 
 
 def provider_enabled(provider: str) -> bool:
+    if not settings.provider_enabled(provider):
+        return False
     if _byok_mode():
         return True
     return provider_pool(provider) is not None

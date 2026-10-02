@@ -167,25 +167,30 @@ async def lifespan(app: FastAPI):
         app.state.usage = None
     try:
         if not byok_mode:
-            ds_clients = [DeepSeekClient(token=token, timeout=settings.timeout) for token in settings.deepseek_tokens] if settings.deepseek_tokens else []
-            qw_clients = [QwenClient(token=token, timeout=settings.timeout) for token in settings.qwen_tokens] if settings.qwen_tokens else []
+            ds_tokens = settings.deepseek_tokens if settings.provider_enabled("deepseek") else []
+            qw_tokens = settings.qwen_tokens if settings.provider_enabled("qwen") else []
+            ds_clients = [DeepSeekClient(token=token, timeout=settings.timeout) for token in ds_tokens]
+            qw_clients = [QwenClient(token=token, timeout=settings.timeout) for token in qw_tokens]
             gc_clients: list[GigaChatClient] = []
             gc_key_indexes: list[int] = []
-            for key_index, key in enumerate(settings.gigachat_keys):
-                try:
-                    gc_clients.append(GigaChatClient(key=key, scope=settings.gigachat_scope, timeout=settings.timeout))
-                    gc_key_indexes.append(key_index)
-                except (RuntimeError, OSError) as exc:
-                    log.error("gigachat client disabled, CA unusable: %s", exc)
-            oc_clients = [OpenCodeClient(key=key, timeout=settings.timeout) for key in settings.opencode_keys]
-            if not oc_clients and settings.opencode_enabled:
-                oc_clients.append(OpenCodeClient(timeout=settings.timeout))
+            if settings.provider_enabled("gigachat"):
+                for key_index, key in enumerate(settings.gigachat_keys):
+                    try:
+                        gc_clients.append(GigaChatClient(key=key, scope=settings.gigachat_scope, timeout=settings.timeout))
+                        gc_key_indexes.append(key_index)
+                    except (RuntimeError, OSError) as exc:
+                        log.error("gigachat client disabled, CA unusable: %s", exc)
+            oc_clients: list[OpenCodeClient] = []
+            if settings.provider_enabled("opencode"):
+                oc_clients = [OpenCodeClient(key=key, timeout=settings.timeout) for key in settings.opencode_keys]
+                if not oc_clients and settings.opencode_enabled:
+                    oc_clients.append(OpenCodeClient(timeout=settings.timeout))
             alice_clients: list[AliceClient] = []
-            if settings.alice_enabled:
+            if settings.alice_enabled and settings.provider_enabled("alice"):
                 for _ in range(settings.alice_accounts):
                     alice_clients.append(AliceClient(timeout=settings.timeout))
             duckai_clients: list[DuckAIClient] = []
-            if settings.duckai_enabled:
+            if settings.duckai_enabled and settings.provider_enabled("duckai"):
                 for _ in range(settings.duckai_accounts):
                     duckai_clients.append(DuckAIClient(timeout=settings.timeout))
             ds_checks = [client.check_auth() for client in ds_clients]
@@ -219,8 +224,8 @@ async def lifespan(app: FastAPI):
             oc_auth = auth_by_provider["opencode"]
             alice_auth = auth_by_provider["alice"]
             duckai_auth = auth_by_provider["duckai"]
-            if settings.deepseek_tokens:
-                for i, (token, ds_client, ok) in enumerate(zip(settings.deepseek_tokens, ds_clients, ds_auth, strict=True)):
+            if ds_tokens:
+                for i, (token, ds_client, ok) in enumerate(zip(ds_tokens, ds_clients, ds_auth, strict=True)):
                     if not ok:
                         log.warning("deepseek token #%d invalid/expired, skipping", i)
                         await ds_client.aclose()
@@ -236,8 +241,8 @@ async def lifespan(app: FastAPI):
                         )
                     )
                 log.info("deepseek accounts ready: %d", len(accounts))
-            if settings.qwen_tokens:
-                for i, (token, qw_client, ok) in enumerate(zip(settings.qwen_tokens, qw_clients, qw_auth, strict=True)):
+            if qw_tokens:
+                for i, (token, qw_client, ok) in enumerate(zip(qw_tokens, qw_clients, qw_auth, strict=True)):
                     if not ok:
                         log.warning("qwen token #%d invalid/expired, skipping", i)
                         await qw_client.aclose()
