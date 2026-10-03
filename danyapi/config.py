@@ -21,6 +21,9 @@ MIN_TIMEOUT_SEC = 1.0
 MAX_SESSION_CACHE_SIZE = 100000
 MAX_USAGE_RECORDS = 100000
 MAX_RESPONSES_RECORDS = 100000
+MAX_MCP_SERVERS = 16
+MIN_MCP_ITERATIONS = 1
+MAX_MCP_ITERATIONS = 16
 
 CREDENTIAL_ENV_NAMES = (
     "DEEPSEEK_TOKENS",
@@ -63,6 +66,9 @@ _NON_CREDENTIAL_ENV_NAMES = frozenset(
         "DANYAPI_CORS_ORIGINS",
         "DANYAPI_RESPONSES_MAX_RECORDS",
         "DANYAPI_DISABLED_PROVIDERS",
+        "MCP_SERVERS",
+        "DANYAPI_MCP_SEARCH_ENABLED",
+        "DANYAPI_MCP_ITERATIONS",
     }
 )
 
@@ -248,6 +254,9 @@ class Settings:
         self.responses_max_records = _env_int("DANYAPI_RESPONSES_MAX_RECORDS", 1024, 1, MAX_RESPONSES_RECORDS)
         self.admin_token = _env_str("DANYAPI_ADMIN_TOKEN")
         self.disabled_providers = self._disabled_providers()
+        self.mcp_servers = self._mcp_servers()
+        self.mcp_search_enabled = _env_on("DANYAPI_MCP_SEARCH_ENABLED", "")
+        self.mcp_iterations = _env_int("DANYAPI_MCP_ITERATIONS", 8, MIN_MCP_ITERATIONS, MAX_MCP_ITERATIONS)
 
     @staticmethod
     def _disabled_providers() -> frozenset[str]:
@@ -259,6 +268,25 @@ class Settings:
             elif provider:
                 log.warning("DANYAPI_DISABLED_PROVIDERS lists unknown provider %r, ignoring it", name)
         return frozenset(disabled)
+
+    @staticmethod
+    def _mcp_servers() -> list[tuple[str, str]]:
+        servers: list[tuple[str, str]] = []
+        for index, item in enumerate(_env_list("MCP_SERVERS")):
+            name, separator, spec = item.partition("=")
+            if not separator:
+                log.warning("MCP_SERVERS entry %d has no name=command form, ignoring it", index + 1)
+                continue
+            name = name.strip()
+            spec = spec.strip()
+            if not name or not spec:
+                log.warning("MCP_SERVERS entry %d is empty, ignoring it", index + 1)
+                continue
+            if len(servers) >= MAX_MCP_SERVERS:
+                log.warning("MCP_SERVERS lists more than %d servers, the rest are ignored", MAX_MCP_SERVERS)
+                break
+            servers.append((name, spec))
+        return servers
 
     def provider_enabled(self, name: str) -> bool:
         return name not in self.disabled_providers

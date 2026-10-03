@@ -116,6 +116,9 @@ Credentials:
 | `BYOK` / `BYOK_MODE` / `DANYAPI_BYOK_MODE` | empty | `1` runs in bring-your-own-key mode: DeepSeek, Qwen, GigaChat, OpenCode Zen and Mistral requests supply their own key or login, Alice and Duck.ai need none. For Mistral the key is a Le Chat `email:password` pair, several can be sent comma-separated. The first name that is set wins. `GET /health` reports every provider as enabled and reports the per-key pools |
 | `DANYAPI_ADMIN_TOKEN` | empty | Bearer token required by `POST /v1/tokens`, empty keeps that endpoint disabled |
 | `DANYAPI_DISABLED_PROVIDERS` | empty | Comma-separated provider names (`deepseek`, `qwen`, `gigachat`, `opencode`, `alice`, `duckai`, `mistral`) to turn off completely |
+| `MCP_SERVERS` | empty | Comma-separated MCP servers as `name=command` for stdio or `name=url` for streamable HTTP, up to 16. Used for server-side tool execution, see the MCP section |
+| `DANYAPI_MCP_SEARCH_ENABLED` | empty | `1` adds the built-in keyless DuckDuckGo `web_search` tool, see the MCP section |
+| `DANYAPI_MCP_ITERATIONS` | `8` | How many model rounds a server-side MCP chat may take, 1 to 16 |
 
 Server:
 
@@ -223,6 +226,25 @@ The free Le Chat models, currently `mistral-small-latest`, `mistral-medium-lates
 Read this before enabling it. Mistral has no public API for this, so the provider speaks an undocumented internal protocol of a consumer service, and Mistral reshapes it without notice, so the provider can break at any time. Free accounts are rate limited per message count: when the cap is hit the request is reported as `429` with an explanation. It is disabled unless you set `MISTRAL_ENABLED=1` and at least one login, which is your acknowledgement of the above. In BYOK mode the same `email:password` pairs travel in the `Authorization` header instead, one pool per key set.
 
 Differences from the OpenAI API to keep in mind: the endpoint is stateless per request, so the whole conversation is folded into one prompt with XML role tags, and system and developer messages are folded into its head; there is no `n`, `top_p`, penalty, `logprobs` or `top_logprobs` support; file attachments are rejected; the model named in the request is echoed back because Le Chat picks its own serving model; and there is no usage accounting upstream, so token counts are estimated from the text. Tool calls are emulated through prompt injection: tools are described in the prompt and a `<tool-call>` reply is parsed back into `tool_calls`.
+
+## Server-side tools, MCP
+
+The server can execute tool calls itself instead of handing them back to the client. Configure it once and any OpenAI compatible client gets working tools, even against providers with no native tool support, because the server runs the tool-call loop and returns a finished answer.
+
+```bash
+DANYAPI_MCP_SEARCH_ENABLED=1
+MCP_SERVERS=fetch=uvx mcp-server-fetch,github=https://mcp.example.com/mcp
+```
+
+`MCP_SERVERS` entries are `name=command` for stdio servers, where the command is spawned locally, or `name=url` for streamable HTTP servers. Entries are comma-separated, a comma inside the command is escaped as `\,`, and at most 16 servers are loaded. A server that fails to start or exposes no tools is skipped with a warning rather than blocking the server.
+
+`DANYAPI_MCP_SEARCH_ENABLED=1` adds the built-in `web_search` tool, which queries DuckDuckGo's HTML endpoint with no API key and returns titles, URLs and snippets. Set `DANYAPI_MCP_ITERATIONS` to bound the loop, the default of 8 means at most 8 model rounds per request.
+
+Send `"mcp": true` in a `POST /v1/chat/completions` body to run the loop for that request, `"mcp": false` to opt out when tools are configured. With no flag the loop runs whenever tools are configured. Streaming is refused with a 400 for MCP requests, because the answer is only final after the loop ends: send `stream=false`. The configured tools are appended to whatever `tools` the request carries, so client tools keep working and are executed server-side too, and `tool_choice` defaults to `auto`. Token usage is summed across every round and reported in the final response.
+
+A round works like this: the request goes to the provider as usual, tools included; if the answer carries `tool_calls`, the server executes each call against the MCP server that owns the tool, appends the results as `role: tool` messages and asks the provider again; a plain answer ends the loop. A tool that fails or does not exist returns its error text as the tool result, so the model can recover instead of the request failing. When the iteration limit is hit mid-loop the last model message is returned with a note naming the limit.
+
+In BYOK mode the loop works the same: the `"mcp"` flag travels in the request body, the model requests authenticate with the caller's own key from the `Authorization` header, and every iteration draws from that caller's pool. MCP servers themselves are a host resource: they are read from `MCP_SERVERS` in the server's `.env` and executed on the server, a request cannot register its own. Keep that in mind before enabling `MCP_SERVERS` on a public instance, because every caller would be able to trigger host-side tool execution; the built-in `web_search` is the safer one to expose.
 
 ## Models
 

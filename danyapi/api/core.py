@@ -32,6 +32,7 @@ from ..duckai.accounts import DuckAIAccount
 from ..duckai.client import DuckAIClient
 from ..gigachat.accounts import GigaChatAccount
 from ..gigachat.client import GigaChatClient
+from ..mcp import BuiltinSearchServer, McpRegistry, server_from_config
 from ..mistral.accounts import MistralChatAccount
 from ..mistral.client import MistralChatClient
 from ..opencode.accounts import OpenCodeAccount
@@ -369,6 +370,14 @@ async def lifespan(app: FastAPI):
                 "ALICE_ENABLED=1, OPENCODE_ENABLED=1, DUCKAI_ENABLED=1 or MISTRAL_ENABLED=1"
             )
         await refresh_models()
+        mcp_registry = McpRegistry()
+        if settings.mcp_search_enabled:
+            await mcp_registry.add(BuiltinSearchServer())
+        for name, spec in settings.mcp_servers:
+            await mcp_registry.add(server_from_config(name, spec))
+        app.state.mcp_registry = mcp_registry
+        if mcp_registry.enabled():
+            log.info("mcp tool execution ready: %d tool(s)", len(mcp_registry.all_tools()))
         refresh_task = asyncio.create_task(model_refresh_loop())
         try:
             yield
@@ -376,6 +385,7 @@ async def lifespan(app: FastAPI):
             refresh_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await refresh_task
+            await mcp_registry.close()
     finally:
         all_accounts: list[Any] = [*accounts, *qwen_accounts, *gigachat_accounts, *opencode_accounts, *alice_accounts, *duckai_accounts, *mistral_accounts]
         for pool_obj in _iter_pools():
@@ -399,6 +409,10 @@ async def _run_lifespan_cleanup(all_accounts: list[Any]) -> None:
 
 
 async def _close_everything(all_accounts: list[Any]) -> None:
+    mcp_registry = getattr(app.state, "mcp_registry", None)
+    if mcp_registry is not None:
+        with contextlib.suppress(Exception):
+            await mcp_registry.close()
     http_client = getattr(app.state, "http_client", None)
     if http_client is not None:
         try:

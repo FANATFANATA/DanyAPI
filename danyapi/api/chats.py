@@ -25,6 +25,7 @@ from .byok import _byok_caller_id, _byok_pool_for, _extract_request_api_key
 from .core import MAX_CHAT_BODY_BYTES, _acquire_account
 from .deepseek import _collect_non_stream, _stream_openai
 from .images import _b64encode
+from .mcpagent import mcp_enabled, run_mcp_chat
 from .models import _is_reasoning_model, _resolve_model, _resolve_provider
 from .schemas import ChatCompletionRequest, ChatMessage, CompletionRequest
 from .shaping import _bounded_choices, _include_usage
@@ -93,6 +94,9 @@ async def _chat_dispatcher(model: str, request: Request) -> Any:
 
 
 async def _dispatch_chat(req: ChatCompletionRequest, request: Request) -> Any:
+    if mcp_enabled(req):
+        base_dispatch = await _chat_dispatcher(req.model, request)
+        return await run_mcp_chat(req, base_dispatch)
     dispatch = await _chat_dispatcher(req.model, request)
     return await dispatch(req)
 
