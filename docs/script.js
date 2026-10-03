@@ -295,10 +295,21 @@
     }
 
     function markupToNodes(markup) {
-        var parsed = new DOMParser().parseFromString(markup, "text/html");
         var nodes = [];
-        var children = parsed.body.childNodes;
-        for (var i = 0; i < children.length; i++) nodes.push(document.importNode(children[i], true));
+        var rest = markup;
+        var open = rest.indexOf("<code>");
+        while (open !== -1) {
+            if (open > 0) nodes.push(document.createTextNode(rest.slice(0, open)));
+            rest = rest.slice(open + 6);
+            var close = rest.indexOf("</code>");
+            var inner = close === -1 ? rest : rest.slice(0, close);
+            var code = document.createElement("code");
+            code.textContent = inner;
+            nodes.push(code);
+            rest = close === -1 ? "" : rest.slice(close + 7);
+            open = rest.indexOf("<code>");
+        }
+        if (rest) nodes.push(document.createTextNode(rest));
         return nodes;
     }
 
