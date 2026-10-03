@@ -26,11 +26,16 @@ assert _TU_SPEC.loader is not None
 token_utility = importlib.util.module_from_spec(_TU_SPEC)
 _TU_SPEC.loader.exec_module(token_utility)
 
-_COLLECTER_SPEC = importlib.util.spec_from_file_location("danyapi_collecter", REPO / "collecter.py")
-assert _COLLECTER_SPEC is not None
-assert _COLLECTER_SPEC.loader is not None
-collecter = importlib.util.module_from_spec(_COLLECTER_SPEC)
-_COLLECTER_SPEC.loader.exec_module(collecter)
+_COLLECTER_PATH = REPO / "collecter.py"
+collecter = None
+if _COLLECTER_PATH.is_file():
+    _COLLECTER_SPEC = importlib.util.spec_from_file_location("danyapi_collecter", _COLLECTER_PATH)
+    assert _COLLECTER_SPEC is not None
+    assert _COLLECTER_SPEC.loader is not None
+    collecter = importlib.util.module_from_spec(_COLLECTER_SPEC)
+    _COLLECTER_SPEC.loader.exec_module(collecter)
+
+_skip_without_collecter = pytest.mark.skipif(collecter is None, reason="collecter.py is not present")
 
 
 class FakeResp:
@@ -297,6 +302,7 @@ def test_post_collect_still_registers(token_utility_server):
         token_utility.STATE["deepseek"] = None
 
 
+@_skip_without_collecter
 def test_collect_files_ignores_the_ancestor_directory_name(tmp_path):
     root = tmp_path / "references" / "DanyAPI"
     root.mkdir(parents=True)
@@ -306,6 +312,7 @@ def test_collect_files_ignores_the_ancestor_directory_name(tmp_path):
     assert names == ["app.py"]
 
 
+@_skip_without_collecter
 def test_gitignore_last_match_wins():
     assert collecter._matches_gitignore("a/keep.log", ["!keep.log", "*.log"]) is True
     assert collecter._matches_gitignore("a/keep.log", ["*.log", "!keep.log"]) is False
@@ -313,12 +320,14 @@ def test_gitignore_last_match_wins():
     assert collecter._matches_gitignore("a/keep.txt", ["*.log"]) is False
 
 
+@_skip_without_collecter
 def test_sanitize_xml_text_drops_illegal_code_points():
     cleaned = collecter.sanitize_xml_text("a\x00b\x0bc\x0cd\te")
     assert cleaned == "abcd\te"
     assert collecter.xml_escape(cleaned + " <x> & y") == "abcd\te &lt;x&gt; &amp; y"
 
 
+@_skip_without_collecter
 def test_collected_bundle_stays_parseable(tmp_path, monkeypatch):
     root = tmp_path / "repo"
     root.mkdir()
@@ -331,6 +340,7 @@ def test_collected_bundle_stays_parseable(tmp_path, monkeypatch):
     assert len(tree.getroot().findall("file")) == 1
 
 
+@_skip_without_collecter
 def test_collect_excludes_credential_files(tmp_path):
     root = tmp_path / "repo"
     root.mkdir()

@@ -213,7 +213,7 @@ def check_dashboard_csp() -> list[str]:
     except OSError as exc:
         return [f"{path}: cannot read ({exc})"]
     problems: list[str] = []
-    scripts = re.findall(r"<script>(.*?)</script>", text, re.DOTALL)
+    scripts = re.findall(r"<script>(.*?)</script\s*>", text, re.DOTALL | re.IGNORECASE)
     if not scripts:
         return [f"{path}: no inline script found, the dashboard hash guard has nothing to check"]
     meta = re.search(r"script-src ([^;\"]+)", text)
@@ -540,7 +540,10 @@ def main() -> int:
                 result = future.result()
                 collected[futures[future]] = result
                 print_step(result, use_color, lock)
-        results = [collected[index] for index in range(len(steps))]
+        results = [collected[index] for index in range(len(steps)) if index in collected]
+        missing = [index for index in range(len(steps)) if index not in collected]
+        if missing:
+            raise RuntimeError(f"no results collected for steps at indexes {missing}")
     wall_time = time.monotonic() - run_started
     print()
     print("======== SUMMARY ========")

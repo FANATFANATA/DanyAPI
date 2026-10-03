@@ -27,7 +27,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 
 def _dashboard_script_digest() -> str:
     text = (_ROOT / "web" / "index.html").read_text(encoding="utf-8")
-    script = re.findall(r"<script>(.*?)</script>", text, re.DOTALL)[0]
+    script = re.findall(r"<script>(.*?)</script\s*>", text, re.DOTALL | re.IGNORECASE)[0]
     return base64.b64encode(hashlib.sha256(script.encode("utf-8")).digest()).decode()
 
 

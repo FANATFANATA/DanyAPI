@@ -30,6 +30,8 @@ MAX_SSE_LINE_CHARS = 1024 * 1024
 
 SIGNIN_MARKER = "an account is now required"
 
+_EMPTY_CSRF = ""
+
 MODEL_CATALOG: tuple[dict, ...] = (
     {"id": "mistral-small-latest", "name": "Mistral Small 3.2", "owned_by": "mistral", "model_type": "chat"},
     {"id": "mistral-medium-latest", "name": "Mistral Medium 3.1", "owned_by": "mistral", "model_type": "chat"},
@@ -280,7 +282,7 @@ class MistralChatClient:
                 "method": "password",
                 "identifier": self._login_email,
                 "password": self._login_password,
-                "csrf_token": "",
+                "csrf_token": _EMPTY_CSRF,
             },
             headers={"Accept": "application/json", "Content-Type": "application/json"},
         )

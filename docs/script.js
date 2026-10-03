@@ -287,27 +287,44 @@
         return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
     }
 
-    function leadingText(markup) {
-        var cut = markup.indexOf("<");
-        return cut === -1 ? markup : markup.slice(0, cut);
-    }
+    var TEMPLATES = new WeakMap();
 
     function translateNode(el, t) {
         var key = el.getAttribute("data-i18n");
-        var original = el.getAttribute("data-i18n-src");
-        if (original === null) {
-            original = el.innerHTML;
-            el.setAttribute("data-i18n-src", original);
+        var template = TEMPLATES.get(el);
+        if (!template) {
+            template = el.cloneNode(true);
+            template.removeAttribute("data-i18n");
+            TEMPLATES.set(el, template);
+            el.setAttribute("data-i18n-src", "cached");
         }
         var value = t ? t[key] : undefined;
-        if (!/data-i18n/.test(original)) {
-            if (value !== undefined) el.innerHTML = value;
+        if (!template.querySelector("[data-i18n]")) {
+            if (value === undefined) {
+                el.innerHTML = template.innerHTML;
+                return;
+            }
+            el.innerHTML = value;
             return;
         }
-        var head = value === undefined ? leadingText(original) : value;
-        var cut = original.indexOf("<");
-        var tail = cut === -1 ? "" : original.slice(cut);
-        el.innerHTML = head.indexOf("<") === -1 ? escapeText(head) + tail : head + tail;
+        var parts = [];
+        var child = template.firstChild;
+        while (child && child.nodeType !== 1) {
+            parts.push(child.textContent);
+            child = child.nextSibling;
+        }
+        var head = value === undefined ? parts.join("") : value;
+        var hasMarkup = head.indexOf("<") !== -1;
+        while (el.firstChild) el.removeChild(el.firstChild);
+        if (hasMarkup && value !== undefined) {
+            el.innerHTML = head;
+        } else {
+            el.appendChild(document.createTextNode(hasMarkup ? escapeText(head) : head));
+        }
+        while (child) {
+            el.appendChild(child.cloneNode(true));
+            child = child.nextSibling;
+        }
         var nested = el.querySelectorAll("[data-i18n]");
         for (var i = 0; i < nested.length; i++) translateNode(nested[i], t);
     }

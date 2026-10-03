@@ -215,8 +215,8 @@ def _load_byok_salt() -> bytes:
 _BYOK_SALT = _load_byok_salt()
 
 
-def _byok_stable_id(token: str) -> str:
-    return hmac.new(_BYOK_SALT, token.encode("utf-8"), hashlib.sha256).hexdigest()[:16]
+def _byok_stable_id(api_key: str) -> str:
+    return hmac.new(_BYOK_SALT, api_key.encode("utf-8"), hashlib.sha256).hexdigest()[:16]
 
 
 def _byok_scope(cache_key: str) -> str | None:
