@@ -294,16 +294,10 @@
         for (var i = 0; i < nodes.length; i++) el.appendChild(nodes[i]);
     }
 
-    function markupToNodes(markup, doc) {
-        var holder = doc.createElement(el_tag(el));
-        holder.innerHTML = markup;
-        var nodes = [];
-        while (holder.firstChild) nodes.push(holder.removeChild(holder.firstChild));
-        return nodes;
-    }
-
-    function el_tag(el) {
-        return el.tagName || "span";
+    function markupToNodes(markup) {
+        var template = document.createElement("template");
+        template.innerHTML = markup;
+        return Array.prototype.slice.call(template.content.childNodes);
     }
 
     function translateNode(el, t) {
@@ -324,7 +318,7 @@
             if (value.indexOf("<") === -1) {
                 setNodeChildren(el, [document.createTextNode(value)]);
             } else {
-                setNodeChildren(el, markupToNodes(value, document));
+                setNodeChildren(el, markupToNodes(value));
             }
             return;
         }
@@ -337,7 +331,7 @@
         var head = value === undefined ? parts.join("") : value;
         var hasMarkup = head.indexOf("<") !== -1;
         if (hasMarkup && value !== undefined) {
-            setNodeChildren(el, markupToNodes(head, document));
+            setNodeChildren(el, markupToNodes(head));
         } else {
             setNodeChildren(el, [document.createTextNode(hasMarkup ? escapeText(head) : head)]);
         }
