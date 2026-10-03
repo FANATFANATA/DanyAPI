@@ -1021,9 +1021,16 @@ async def test_build_byok_pool_gives_the_replacement_the_persisted_stores(monkey
 
 async def test_byok_pool_rejects_an_unknown_provider():
     with pytest.raises(HTTPException) as excinfo:
-        await byok_mod._byok_pool("mistral", [])
+        await byok_mod._byok_pool("no-such-provider", [])
     assert excinfo.value.status_code == 400
-    assert excinfo.value.detail == "unknown provider: mistral"
+    assert excinfo.value.detail == "unknown provider: no-such-provider"
+
+
+async def test_byok_pool_rejects_mistral_keys():
+    with pytest.raises(HTTPException) as excinfo:
+        await byok_mod._byok_pool("mistral", ["some-key"])
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail == "provider mistral does not accept a caller supplied api key"
 
 
 async def test_byok_pool_rejects_more_keys_than_the_limit():
@@ -1393,9 +1400,17 @@ async def test_byok_pool_for_rejects_more_keys_than_the_limit():
 async def test_byok_pool_for_rejects_an_unknown_provider():
     request = _make_request(headers={"Authorization": "Bearer k"})
     with pytest.raises(HTTPException) as excinfo:
+        await byok_mod._byok_pool_for("no-such-provider", request)
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail == "unknown provider: no-such-provider"
+
+
+async def test_byok_pool_for_rejects_mistral_keys():
+    request = _make_request(headers={"Authorization": "Bearer k"})
+    with pytest.raises(HTTPException) as excinfo:
         await byok_mod._byok_pool_for("mistral", request)
     assert excinfo.value.status_code == 400
-    assert excinfo.value.detail == "unknown provider: mistral"
+    assert excinfo.value.detail == "mistral does not accept a caller supplied api key, configure MISTRAL_LOGINS instead"
 
 
 async def test_byok_pool_for_sets_the_caller_id(monkeypatch):

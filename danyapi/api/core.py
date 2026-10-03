@@ -32,6 +32,8 @@ from ..duckai.accounts import DuckAIAccount
 from ..duckai.client import DuckAIClient
 from ..gigachat.accounts import GigaChatAccount
 from ..gigachat.client import GigaChatClient
+from ..mistral.accounts import MistralChatAccount
+from ..mistral.client import MistralChatClient
 from ..opencode.accounts import OpenCodeAccount
 from ..opencode.client import OpenCodeClient
 from ..qwen.accounts import QwenAccount
@@ -138,6 +140,7 @@ async def lifespan(app: FastAPI):
     opencode_accounts: list[OpenCodeAccount] = []
     alice_accounts: list[AliceAccount] = []
     duckai_accounts: list[DuckAIAccount] = []
+    mistral_accounts: list[MistralChatAccount] = []
     byok_mode = settings.byok
     app.state.byok = byok_mode
     app.state.byok_pools = _blank_byok_state()
@@ -193,12 +196,17 @@ async def lifespan(app: FastAPI):
             if settings.duckai_enabled and settings.provider_enabled("duckai"):
                 for _ in range(settings.duckai_accounts):
                     duckai_clients.append(DuckAIClient(timeout=settings.timeout))
+            mistral_clients: list[MistralChatClient] = []
+            if settings.mistral_enabled and settings.provider_enabled("mistral") and settings.mistral_logins:
+                for login in settings.mistral_logins:
+                    mistral_clients.append(MistralChatClient(timeout=settings.timeout, login=login))
             ds_checks = [client.check_auth() for client in ds_clients]
             qw_checks = [client.check_auth() for client in qw_clients]
             gc_checks = [client.check_auth() for client in gc_clients]
             oc_checks = [client.check_auth() for client in oc_clients]
             alice_checks = [client.check_auth() for client in alice_clients]
             duckai_checks = [client.check_auth() for client in duckai_clients]
+            mistral_checks = [client.check_auth() for client in mistral_clients]
             groups = (
                 ("deepseek", ds_checks),
                 ("qwen", qw_checks),
@@ -206,6 +214,7 @@ async def lifespan(app: FastAPI):
                 ("opencode", oc_checks),
                 ("alice", alice_checks),
                 ("duckai", duckai_checks),
+                ("mistral", mistral_checks),
             )
             pending = [check for _name, checks in groups for check in checks]
             auth_by_provider: dict[str, list[bool]] = {name: [] for name, _checks in groups}
@@ -224,6 +233,7 @@ async def lifespan(app: FastAPI):
             oc_auth = auth_by_provider["opencode"]
             alice_auth = auth_by_provider["alice"]
             duckai_auth = auth_by_provider["duckai"]
+            mistral_auth = auth_by_provider["mistral"]
             if ds_tokens:
                 for i, (token, ds_client, ok) in enumerate(zip(ds_tokens, ds_clients, ds_auth, strict=True)):
                     if not ok:
@@ -295,6 +305,14 @@ async def lifespan(app: FastAPI):
                 duckai_accounts.append(DuckAIAccount(len(duckai_accounts), duckai_client, stable_id="duckai"))
             if duckai_clients:
                 log.info("duckai accounts ready: %d", len(duckai_accounts))
+            for i, (mistral_client, ok) in enumerate(zip(mistral_clients, mistral_auth, strict=False)):
+                if not ok:
+                    log.warning("mistral le chat unreachable on account #%d, skipping it", i)
+                    await mistral_client.aclose()
+                    continue
+                mistral_accounts.append(MistralChatAccount(len(mistral_accounts), mistral_client, stable_id="mistral"))
+            if mistral_clients:
+                log.info("mistral accounts ready: %d", len(mistral_accounts))
         if accounts:
             app.state.pool = AccountPool(
                 accounts,
@@ -332,6 +350,10 @@ async def lifespan(app: FastAPI):
             app.state.duckai_pool = AccountPool(duckai_accounts, label="duckai")
         else:
             app.state.duckai_pool = None
+        if mistral_accounts:
+            app.state.mistral_pool = AccountPool(mistral_accounts, label="mistral")
+        else:
+            app.state.mistral_pool = None
         if (
             not accounts
             and not qwen_accounts
@@ -339,10 +361,12 @@ async def lifespan(app: FastAPI):
             and not opencode_accounts
             and not alice_accounts
             and not duckai_accounts
+            and not mistral_accounts
             and not byok_mode
         ):
             raise RuntimeError(
-                "no valid credentials: set DEEPSEEK_TOKENS, QWEN_TOKENS, GIGACHAT_KEYS, OPENCODE_KEYS, ALICE_ENABLED=1, OPENCODE_ENABLED=1 or DUCKAI_ENABLED=1"
+                "no valid credentials: set DEEPSEEK_TOKENS, QWEN_TOKENS, GIGACHAT_KEYS, OPENCODE_KEYS, "
+                "ALICE_ENABLED=1, OPENCODE_ENABLED=1, DUCKAI_ENABLED=1 or MISTRAL_ENABLED=1"
             )
         await refresh_models()
         refresh_task = asyncio.create_task(model_refresh_loop())
@@ -353,7 +377,7 @@ async def lifespan(app: FastAPI):
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await refresh_task
     finally:
-        all_accounts: list[Any] = [*accounts, *qwen_accounts, *gigachat_accounts, *opencode_accounts, *alice_accounts, *duckai_accounts]
+        all_accounts: list[Any] = [*accounts, *qwen_accounts, *gigachat_accounts, *opencode_accounts, *alice_accounts, *duckai_accounts, *mistral_accounts]
         for pool_obj in _iter_pools():
             all_accounts.extend(pool_obj.accounts)
         await _run_lifespan_cleanup(all_accounts)

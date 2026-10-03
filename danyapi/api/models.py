@@ -16,6 +16,8 @@ from ..deepseek.client import DeepSeekClient
 from ..duckai.client import DuckAIClient
 from ..duckai.client import catalog_models as duckai_catalog_models
 from ..gigachat.client import GigaChatClient
+from ..mistral.client import MistralChatClient
+from ..mistral.client import catalog_models as mistral_catalog_models
 from ..opencode import client as opencode_zen
 from ..qwen.client import QwenClient
 from .state import BYOK_PROVIDERS, MODEL_ATTRS, _byok_mode, app, provider_models, provider_pool
@@ -54,6 +56,7 @@ _MODEL_CACHE: dict[str, Any] = {
     "opencode_ids": None,
     "alice_ids": None,
     "duckai_ids": None,
+    "mistral_ids": None,
 }
 
 _REFRESH_LOCKS: dict[str, asyncio.Lock] = {provider: asyncio.Lock() for provider in BYOK_PROVIDERS}
@@ -81,6 +84,8 @@ def _probe_client(provider: str, api_key: str | None) -> Any:
         return QwenClient(token=api_key or None, timeout=settings.timeout)
     if provider == "duckai":
         return DuckAIClient(timeout=settings.timeout)
+    if provider == "mistral":
+        return MistralChatClient(timeout=settings.timeout)
     if provider == "gigachat" and api_key:
         return GigaChatClient(key=api_key, scope=settings.gigachat_scope, timeout=settings.timeout)
     if provider == "opencode":
@@ -243,6 +248,23 @@ async def _fetch_duckai_models(client: DuckAIClient) -> list[dict]:
     return models
 
 
+async def _fetch_mistral_models(client: MistralChatClient) -> list[dict]:
+    raw = await client.fetch_models()
+    models: list[dict] = []
+    for entry in raw:
+        if not isinstance(entry, dict) or not entry.get("id"):
+            continue
+        models.append(
+            {
+                "id": entry["id"],
+                "name": entry.get("name") or entry["id"],
+                "owned_by": "mistral",
+                "model_type": entry.get("model_type", "chat"),
+            }
+        )
+    return models
+
+
 MODEL_FETCHERS: dict[str, Any] = {
     "deepseek": _fetch_deepseek_models,
     "qwen": _fetch_qwen_models,
@@ -250,6 +272,7 @@ MODEL_FETCHERS: dict[str, Any] = {
     "opencode": _fetch_opencode_models,
     "alice": _fetch_alice_models,
     "duckai": _fetch_duckai_models,
+    "mistral": _fetch_mistral_models,
 }
 
 
@@ -439,6 +462,8 @@ def _known_ids(provider: str) -> set[str]:
     ids = _cached_ids(f"{provider}_ids")
     if provider == "duckai":
         ids = ids | {str(entry.get("id", "")).lower() for entry in duckai_catalog_models() if entry.get("id")}
+    elif provider == "mistral":
+        ids = ids | {str(entry.get("id", "")).lower() for entry in mistral_catalog_models() if entry.get("id")}
     elif provider == "alice":
         ids = ids | {alias.lower() for alias in ALICE_MODEL_IDS}
     return ids
@@ -464,6 +489,8 @@ def _resolve_provider(model: str) -> str:
         provider = "alice"
     elif lowered.startswith("duckai") or lowered in _known_ids("duckai"):
         provider = "duckai"
+    elif lowered.startswith(("mistral", "magistral", "codestral", "pixtral")) or lowered in _known_ids("mistral"):
+        provider = "mistral"
     elif _is_deepseek_model(lowered):
         provider = "deepseek"
     else:

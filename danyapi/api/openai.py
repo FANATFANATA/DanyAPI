@@ -29,6 +29,7 @@ from ..gigachat.accounts import GigaChatAccount
 from ..gigachat.client import GigaChatClient, GigaChatError
 from ..gigachat.messages import build_messages, normalize_usage, request_body
 from ..gigachat.tls import resolve_ca
+from ..mistral import api as mistral_api
 from ..opencode import api as opencode_api
 from ..opencode.accounts import OpenCodeAccount
 from ..opencode.client import OpenCodeClient, OpenCodeError
@@ -76,6 +77,7 @@ from .chats import (
     _chat_completions_deepseek,
     _chat_completions_duckai,
     _chat_completions_gigachat,
+    _chat_completions_mistral,
     _chat_completions_opencode,
     _chat_completions_qwen,
     _chat_dispatcher,
@@ -1008,6 +1010,7 @@ __all__ = [
     "_chat_completions_deepseek",
     "_chat_completions_duckai",
     "_chat_completions_gigachat",
+    "_chat_completions_mistral",
     "_chat_completions_opencode",
     "_chat_completions_qwen",
     "_chunk_id_from_line",
@@ -1158,6 +1161,7 @@ __all__ = [
     "image_variations",
     "lifespan",
     "list_models",
+    "mistral_api",
     "model_refresh_loop",
     "moderations_not_supported",
     "normalize_usage",

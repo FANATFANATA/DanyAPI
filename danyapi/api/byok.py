@@ -698,6 +698,8 @@ def _caller_id_for(tokens: list[str]) -> str:
 async def _byok_pool_for(provider: str, request: Request) -> AccountPool:
     if provider not in BYOK_PROVIDERS:
         raise HTTPException(400, f"unknown provider: {provider}")
+    if provider == "mistral":
+        raise HTTPException(400, "mistral does not accept a caller supplied api key, configure MISTRAL_LOGINS instead")
     if provider in KEY_OPTIONAL_PROVIDERS:
         _CALLER_ID.set("")
         return await _byok_pool(provider, [EMPTY_CREDENTIAL])

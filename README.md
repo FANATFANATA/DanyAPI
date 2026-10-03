@@ -111,9 +111,11 @@ Credentials:
 | `ALICE_ACCOUNTS` | `1` | Concurrent Alice connections, `1` to `4` |
 | `DUCKAI_ENABLED` | empty | `1` enables the unofficial Duck.ai provider, see the warning below |
 | `DUCKAI_ACCOUNTS` | `1` | Concurrent Duck.ai connections, `1` to `4` |
-| `BYOK` / `BYOK_MODE` / `DANYAPI_BYOK_MODE` | empty | `1` runs in bring-your-own-key mode: DeepSeek, Qwen, GigaChat and OpenCode Zen requests supply their own key, Alice and Duck.ai need none. The first name that is set wins. `GET /health` reports every provider as enabled and reports the per-key pools |
+| `MISTRAL_ENABLED` | empty | `1` enables the unofficial Mistral Le Chat provider, see the warning below |
+| `MISTRAL_LOGINS` | empty | Comma-separated Le Chat accounts as `email:password`, one client per login |
+| `BYOK` / `BYOK_MODE` / `DANYAPI_BYOK_MODE` | empty | `1` runs in bring-your-own-key mode: DeepSeek, Qwen, GigaChat and OpenCode Zen requests supply their own key, Alice and Duck.ai need none. Mistral is served from its server-side logins when they are set. The first name that is set wins. `GET /health` reports every provider as enabled and reports the per-key pools |
 | `DANYAPI_ADMIN_TOKEN` | empty | Bearer token required by `POST /v1/tokens`, empty keeps that endpoint disabled |
-| `DANYAPI_DISABLED_PROVIDERS` | empty | Comma-separated provider names (`deepseek`, `qwen`, `gigachat`, `opencode`, `alice`, `duckai`) to turn off completely |
+| `DANYAPI_DISABLED_PROVIDERS` | empty | Comma-separated provider names (`deepseek`, `qwen`, `gigachat`, `opencode`, `alice`, `duckai`, `mistral`) to turn off completely |
 
 Server:
 
@@ -214,6 +216,14 @@ Now the part worth planning around. After a few dozen automated requests in a ro
 
 Differences from the OpenAI API to keep in mind: there is no `system` role, so system and developer messages are folded into the first user turn; `reasoningEffort` is clamped to what the chosen model supports, which is read from the same live table as the model list; there is no `n`, `seed`, penalty or `response_format` support; images must be inline data URIs, at most three per message and ten per request, and file attachments are rejected; and there is no usage accounting upstream, so token counts are estimated from the text. Tool calls are native, and web search and image generation are switched off because the free tier does not grant them.
 
+## Mistral Le Chat, unofficial
+
+The free Le Chat models, currently `mistral-small-latest`, `mistral-medium-latest`, `mistral-large-latest`, `magistral-medium-latest`, `codestral-latest` and `mistral-ocr-latest`, route to Le Chat at `https://chat.mistral.ai/api/chat`, the same surface the Android app speaks. Le Chat no longer answers anonymous sessions, so the provider logs in with an account: set `MISTRAL_LOGINS` to `email:password` pairs and the client negotiates an Ory session token on startup, refreshes it with a fresh login when it expires, and always creates chats incognito so they never land in the account history.
+
+Read this before enabling it. Mistral has no public API for this, so the provider speaks an undocumented internal protocol of a consumer service, and Mistral reshapes it without notice, so the provider can break at any time. Free accounts are rate limited per message count: when the cap is hit the request is reported as `429` with an explanation. It is disabled unless you set `MISTRAL_ENABLED=1` and at least one login, which is your acknowledgement of the above.
+
+Differences from the OpenAI API to keep in mind: the endpoint is stateless per request, so the whole conversation is folded into one prompt with XML role tags, and system and developer messages are folded into its head; there is no `n`, `top_p`, penalty, `logprobs` or `top_logprobs` support; file attachments are rejected; the model named in the request is echoed back because Le Chat picks its own serving model; and there is no usage accounting upstream, so token counts are estimated from the text. Tool calls are emulated through prompt injection: tools are described in the prompt and a `<tool-call>` reply is parsed back into `tool_calls`.
+
 ## Models
 
 Model lists are not hardcoded. Every provider is asked where it runs and the answer is what `GET /v1/models` serves:
@@ -226,6 +236,7 @@ Model lists are not hardcoded. Every provider is asked where it runs and the ans
 | OpenCode Zen | the models.dev mirror at `models.opencode.ai`, for format, cost and context | API key, `space-bunny-free` answers without one |
 | Duck.ai | the model table in the Duck.ai web bundle, filtered to the free tier | none |
 | Alice | the provider's own aliases, upstream serves no catalog | none |
+| Mistral Le Chat | the provider's own catalog, upstream serves no model list to anonymous sessions | none |
 
 The lists are fetched at startup and refetched every `DANYAPI_MODELS_REFRESH_SECONDS`, and a fetch that fails or comes back empty keeps the last good list rather than emptying `GET /v1/models`. Send `?refresh=1` to `GET /v1/models`, or pass a key in `Authorization` or `x-api-key`, to force a refetch right now and, for GigaChat, to read the list your own key is granted.
 

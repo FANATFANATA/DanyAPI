@@ -259,6 +259,21 @@
                 </ul>
                 <p class="model-note" data-i18n="models_duck_note">Unofficial, opt-in via <code>DUCKAI_ENABLED=1</code>, off by default. DuckDuckGo has no public API here, so it uses an undocumented internal protocol and a browser fingerprint attestation that can break at any time. Needs Node.js on the host. Refuses datacenter addresses outright, so run it from a residential or mobile line.</p>
             </article>
+
+            <article class="model-card reveal model-mistral">
+                <div class="model-head">
+                    <span class="model-logo-tile model-logo-tile-mistral"><span class="model-logo-letter">M</span></span>
+                    <div>
+                        <h3>Mistral Le Chat</h3>
+                    </div>
+                </div>
+                <ul class="model-list" data-model-provider="mistral">
+                    <li><code>mistral-small-latest</code></li>
+                    <li><code>mistral-medium-latest</code></li>
+                    <li><code>mistral-large-latest</code>, <code>magistral-medium-latest</code>, <code>codestral-latest</code>, <code>mistral-ocr-latest</code></li>
+                </ul>
+                <p class="model-note" data-i18n="models_mistral_note">Unofficial, opt-in via <code>MISTRAL_ENABLED=1</code> plus <code>MISTRAL_LOGINS</code> with <code>email:password</code> pairs, off by default. Mistral has no public API here, so the provider speaks the Le Chat mobile flow with an account session. Free accounts are rate limited per message count. Can break at any time.</p>
+            </article>
         </div>
     </section>
 

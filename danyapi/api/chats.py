@@ -17,6 +17,7 @@ from ..accounts import AccountPool, AccountPoolBusy
 from ..alice import api as alice_api
 from ..duckai import api as duckai_api
 from ..gigachat import api as gigachat_api
+from ..mistral import api as mistral_api
 from ..opencode import api as opencode_api
 from ..qwen import api as qwen_api
 from .attachments import _collect_attachments, _validate_attachments
@@ -39,6 +40,7 @@ CHAT_HANDLERS = {
     "opencode": "_chat_completions_opencode",
     "alice": "_chat_completions_alice",
     "duckai": "_chat_completions_duckai",
+    "mistral": "_chat_completions_mistral",
 }
 
 MAX_COMPLETION_PROMPTS = 8
@@ -49,6 +51,7 @@ GIGACHAT_UNSUPPORTED_PARAMS = ("n", "presence_penalty", "frequency_penalty", "lo
 OPENCODE_UNSUPPORTED_PARAMS = ("n", "logprobs", "top_logprobs")
 ALICE_UNSUPPORTED_PARAMS = ("n", "top_p", "presence_penalty", "frequency_penalty", "logit_bias", "logprobs", "top_logprobs")
 DUCKAI_UNSUPPORTED_PARAMS = ("n", "top_p", "presence_penalty", "frequency_penalty", "logit_bias")
+MISTRAL_UNSUPPORTED_PARAMS = ("n", "top_p", "presence_penalty", "frequency_penalty", "logit_bias", "logprobs", "top_logprobs")
 
 _SESSION_OWNERS: OrderedDict[str, str] = OrderedDict()
 MAX_SESSION_OWNERS = 4096
@@ -743,6 +746,43 @@ async def _chat_completions_duckai(req: ChatCompletionRequest, pool: AccountPool
 
     try:
         return await duckai_api.collect_non_stream(**common)
+    except AccountPoolBusy:
+        raise HTTPException(429, "all accounts are busy, try again later") from None
+
+
+async def _chat_completions_mistral(req: ChatCompletionRequest, pool: AccountPool | None = None) -> Any:
+    if pool is None:
+        pool = getattr(app.state, "mistral_pool", None)
+    if pool is None:
+        raise HTTPException(503, "mistral provider is not configured (set MISTRAL_ENABLED=1 to enable)")
+
+    if getattr(req, "files", None):
+        raise HTTPException(400, "mistral does not support file attachments, send images inline instead")
+    _reject_unsupported_params(req, "mistral", MISTRAL_UNSUPPORTED_PARAMS)
+    account, existing_sid = await _acquire_session_account(pool, req)
+
+    tools, tool_choice = _materialize_tools(req)
+    common = {
+        "account": account,
+        "messages": req.messages,
+        "model": req.model,
+        "tools": tools,
+        "tool_choice": tool_choice,
+        "functions": getattr(req, "functions", None),
+        "stop": getattr(req, "stop", None),
+        "max_tokens": _max_tokens_of(req),
+        "user": getattr(req, "user", None),
+        "session_id": existing_sid,
+    }
+    if req.stream:
+        return StreamingResponse(
+            _stream_guard(mistral_api.stream_openai(include_usage=_include_usage(req), **common), req.model),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    try:
+        return await mistral_api.collect_non_stream(**common)
     except AccountPoolBusy:
         raise HTTPException(429, "all accounts are busy, try again later") from None
 

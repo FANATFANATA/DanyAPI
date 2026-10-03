@@ -417,6 +417,7 @@ def test_health_detail_reports_byok_mode():
         "opencode": True,
         "alice": False,
         "duckai": False,
+        "mistral": True,
     }
 
 
