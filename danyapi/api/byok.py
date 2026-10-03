@@ -24,6 +24,8 @@ from ..duckai.accounts import DuckAIAccount
 from ..duckai.client import DuckAIClient
 from ..gigachat.accounts import GigaChatAccount
 from ..gigachat.client import GigaChatClient
+from ..mistral.accounts import MistralChatAccount
+from ..mistral.client import MistralChatClient
 from ..opencode.accounts import OpenCodeAccount
 from ..opencode.client import EMPTY_CREDENTIAL, OpenCodeClient
 from ..qwen.accounts import QwenAccount
@@ -523,7 +525,27 @@ async def _build_byok_pool(provider: str, tokens: list[str], scope: str | None) 
         pool = AccountPool(accounts, label="opencode")
         await refresh_provider_models("opencode", accounts[0].client)
         return pool, created
+    if provider == "mistral":
+        accounts = await _byok_mistral_accounts(tokens, "byok")
+        if not accounts:
+            raise _no_valid_key(provider, _auth_indeterminate_count() - before)
+        pool = AccountPool(accounts, label="mistral")
+        await refresh_provider_models("mistral", accounts[0].client)
+        return pool, created
     raise HTTPException(400, f"provider {provider} does not accept a caller supplied api key")
+
+
+async def _byok_mistral_accounts(tokens: list[str], log_prefix: str) -> list[MistralChatAccount]:
+    log.debug("%s mistral login set received with %d login(s)", log_prefix, len(tokens))
+    for token in tokens:
+        if ":" not in token or not token.partition(":")[0].strip() or not token.partition(":")[2]:
+            raise HTTPException(400, "mistral api key must be an email:password pair")
+    return await _build_accounts(
+        "mistral",
+        tokens,
+        lambda login: MistralChatClient(timeout=settings.timeout, login=login),
+        lambda index, client, login: MistralChatAccount(index, client, stable_id=_byok_stable_id(login)),
+    )
 
 
 async def _byok_pool(provider: str, tokens: list[str]) -> AccountPool:
@@ -698,8 +720,6 @@ def _caller_id_for(tokens: list[str]) -> str:
 async def _byok_pool_for(provider: str, request: Request) -> AccountPool:
     if provider not in BYOK_PROVIDERS:
         raise HTTPException(400, f"unknown provider: {provider}")
-    if provider == "mistral":
-        raise HTTPException(400, "mistral does not accept a caller supplied api key, configure MISTRAL_LOGINS instead")
     if provider in KEY_OPTIONAL_PROVIDERS:
         _CALLER_ID.set("")
         return await _byok_pool(provider, [EMPTY_CREDENTIAL])

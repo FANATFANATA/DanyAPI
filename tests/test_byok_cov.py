@@ -933,9 +933,43 @@ async def test_build_byok_pool_reports_no_valid_qwen_key(monkeypatch):
 
 async def test_build_byok_pool_rejects_an_unknown_provider():
     with pytest.raises(HTTPException) as excinfo:
-        await byok_mod._build_byok_pool("mistral", ["key"], None)
+        await byok_mod._build_byok_pool("no-such-provider", ["key"], None)
     assert excinfo.value.status_code == 400
-    assert excinfo.value.detail == "provider mistral does not accept a caller supplied api key"
+    assert excinfo.value.detail == "provider no-such-provider does not accept a caller supplied api key"
+
+
+async def test_build_byok_pool_builds_mistral_accounts(monkeypatch):
+    clients = [_FakeClient(ok=True), _FakeClient(ok=True)]
+
+    class _Mistral:
+        def __init__(self, **_kwargs: Any) -> None:
+            self.inner = clients.pop(0)
+
+        async def check_auth(self) -> bool:
+            return await self.inner.check_auth()
+
+        async def aclose(self) -> None:
+            await self.inner.aclose()
+
+    monkeypatch.setattr(byok_mod, "MistralChatClient", _Mistral)
+    monkeypatch.setattr(byok_mod, "refresh_provider_models", _RefreshRecorder())
+    pool, created = await byok_mod._build_byok_pool("mistral", ["a@b.c:pw1", "d@e.f:pw2"], None)
+    assert created == []
+    assert pool.label == "mistral"
+    assert len(pool.accounts) == 2
+    assert [acct.stable_id for acct in pool.accounts] == [
+        byok_mod._byok_stable_id("a@b.c:pw1"),
+        byok_mod._byok_stable_id("d@e.f:pw2"),
+    ]
+
+
+async def test_build_byok_pool_reports_no_valid_mistral_key(monkeypatch):
+    monkeypatch.setattr(byok_mod, "MistralChatClient", lambda **_kwargs: _FakeClient(ok=False))
+    monkeypatch.setattr(byok_mod, "refresh_provider_models", _RefreshRecorder())
+    with pytest.raises(HTTPException) as excinfo:
+        await byok_mod._build_byok_pool("mistral", ["a@b.c:bad"], None)
+    assert excinfo.value.status_code == 401
+    assert excinfo.value.detail == byok_mod._INVALID_KEY_DETAIL.format(provider="mistral")
 
 
 async def test_build_byok_pool_builds_gigachat_accounts(monkeypatch, caplog):
@@ -1026,11 +1060,11 @@ async def test_byok_pool_rejects_an_unknown_provider():
     assert excinfo.value.detail == "unknown provider: no-such-provider"
 
 
-async def test_byok_pool_rejects_mistral_keys():
+async def test_byok_pool_rejects_malformed_mistral_logins():
     with pytest.raises(HTTPException) as excinfo:
         await byok_mod._byok_pool("mistral", ["some-key"])
     assert excinfo.value.status_code == 400
-    assert excinfo.value.detail == "provider mistral does not accept a caller supplied api key"
+    assert excinfo.value.detail == "mistral api key must be an email:password pair"
 
 
 async def test_byok_pool_rejects_more_keys_than_the_limit():
@@ -1405,12 +1439,11 @@ async def test_byok_pool_for_rejects_an_unknown_provider():
     assert excinfo.value.detail == "unknown provider: no-such-provider"
 
 
-async def test_byok_pool_for_rejects_mistral_keys():
-    request = _make_request(headers={"Authorization": "Bearer k"})
+async def test_byok_pool_for_requires_a_mistral_login():
     with pytest.raises(HTTPException) as excinfo:
-        await byok_mod._byok_pool_for("mistral", request)
-    assert excinfo.value.status_code == 400
-    assert excinfo.value.detail == "mistral does not accept a caller supplied api key, configure MISTRAL_LOGINS instead"
+        await byok_mod._byok_pool_for("mistral", _make_request(headers={}))
+    assert excinfo.value.status_code == 401
+    assert excinfo.value.detail == byok_mod._INVALID_KEY_DETAIL.format(provider="mistral")
 
 
 async def test_byok_pool_for_sets_the_caller_id(monkeypatch):

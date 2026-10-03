@@ -188,7 +188,7 @@ def parse_line(line: str, state: dict) -> MistralEvent | None:
 def _split_login(raw: str) -> tuple[str, str]:
     email, separator, password = raw.partition(":")
     if not separator or not email.strip() or not password:
-        raise ValueError("MISTRAL_LOGIN must be email:password")
+        return "", ""
     return email.strip(), password
 
 
