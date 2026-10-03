@@ -58,8 +58,12 @@ def test_build_solver_compiles_when_the_binary_is_older(tmp_path, monkeypatch, c
     _age(source, 0)
     monkeypatch.setattr(app_mod, "ROOT", tmp_path)
     monkeypatch.setattr(app_mod.shutil, "which", lambda name: f"C:/fake/{name}")
-    result = MagicMock(returncode=0, stdout="", stderr="")
-    run = MagicMock(return_value=result)
+
+    def fake_run(cmd, **kwargs):
+        binary.write_bytes(b"stub")
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    run = MagicMock(side_effect=fake_run)
     monkeypatch.setattr(app_mod.subprocess, "run", run)
     assert app_mod.build_solver() is None
     assert run.call_count == 1
@@ -73,7 +77,12 @@ def test_build_solver_compiles_when_there_is_no_binary(tmp_path, monkeypatch):
     binary.unlink()
     monkeypatch.setattr(app_mod, "ROOT", tmp_path)
     monkeypatch.setattr(app_mod.shutil, "which", lambda name: f"C:/fake/{name}")
-    run = MagicMock(return_value=MagicMock(returncode=0, stdout="", stderr=""))
+
+    def fake_run(cmd, **kwargs):
+        binary.write_bytes(b"stub")
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    run = MagicMock(side_effect=fake_run)
     monkeypatch.setattr(app_mod.subprocess, "run", run)
     assert app_mod.build_solver() is None
     assert run.call_count == 1

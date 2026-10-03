@@ -211,6 +211,7 @@ def test_the_gigachat_scope_is_asked_next_to_the_credentials():
     assert any(value == "GIGACHAT_SCOPE" for value in constants)
 
 
+@pytest.mark.skipif(not (REPO / "collecter.py").is_file(), reason="collecter.py is not present")
 def test_the_collecter_total_size_survives_a_file_that_vanished(tmp_path, monkeypatch):
     module = _load("collecter_probe", REPO / "collecter.py")
     gone = tmp_path / "gone.py"
