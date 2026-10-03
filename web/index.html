@@ -379,7 +379,7 @@ body::before {
         <div id="usage-stats" class="usage-loading">Loading...</div>
     </div>
 
-    <div class="usage-section">
+    <div class="usage-section" id="provider-section">
         <h2 class="usage-title">Providers</h2>
         <div id="provider-stats" class="usage-loading">Loading...</div>
     </div>
@@ -500,6 +500,12 @@ body::before {
     var modelsEl = document.getElementById("model-list");
 
     function renderProviders(data) {
+        var section = document.getElementById("provider-section");
+        if (data.byok) {
+            section.style.display = "none";
+            return;
+        }
+        section.style.display = "block";
         var rows = [];
         for (var i = 0; i < PROVIDERS.length; i++) {
             var name = PROVIDERS[i];
