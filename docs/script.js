@@ -295,9 +295,11 @@
     }
 
     function markupToNodes(markup) {
-        var template = document.createElement("template");
-        template.innerHTML = markup;
-        return Array.prototype.slice.call(template.content.childNodes);
+        var parsed = new DOMParser().parseFromString(markup, "text/html");
+        var nodes = [];
+        var children = parsed.body.childNodes;
+        for (var i = 0; i < children.length; i++) nodes.push(document.importNode(children[i], true));
+        return nodes;
     }
 
     function translateNode(el, t) {
