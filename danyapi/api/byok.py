@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
 import hmac
 import itertools
@@ -216,7 +217,8 @@ _BYOK_SALT = _load_byok_salt()
 
 
 def _byok_stable_id(api_key: str) -> str:
-    return hmac.new(_BYOK_SALT, api_key.encode("utf-8"), hashlib.sha256).hexdigest()[:16]
+    digest = functools.partial(hashlib.sha256, usedforsecurity=False)
+    return hmac.new(_BYOK_SALT, api_key.encode("utf-8"), digest).hexdigest()[:16]
 
 
 def _byok_scope(cache_key: str) -> str | None:

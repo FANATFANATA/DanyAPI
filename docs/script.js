@@ -289,6 +289,23 @@
 
     var TEMPLATES = new WeakMap();
 
+    function setNodeChildren(el, nodes) {
+        while (el.firstChild) el.removeChild(el.firstChild);
+        for (var i = 0; i < nodes.length; i++) el.appendChild(nodes[i]);
+    }
+
+    function markupToNodes(markup, doc) {
+        var holder = doc.createElement(el_tag(el));
+        holder.innerHTML = markup;
+        var nodes = [];
+        while (holder.firstChild) nodes.push(holder.removeChild(holder.firstChild));
+        return nodes;
+    }
+
+    function el_tag(el) {
+        return el.tagName || "span";
+    }
+
     function translateNode(el, t) {
         var key = el.getAttribute("data-i18n");
         var template = TEMPLATES.get(el);
@@ -301,10 +318,14 @@
         var value = t ? t[key] : undefined;
         if (!template.querySelector("[data-i18n]")) {
             if (value === undefined) {
-                el.innerHTML = template.innerHTML;
+                el.replaceWith(template.cloneNode(true));
                 return;
             }
-            el.innerHTML = value;
+            if (value.indexOf("<") === -1) {
+                setNodeChildren(el, [document.createTextNode(value)]);
+            } else {
+                setNodeChildren(el, markupToNodes(value, document));
+            }
             return;
         }
         var parts = [];
@@ -315,11 +336,10 @@
         }
         var head = value === undefined ? parts.join("") : value;
         var hasMarkup = head.indexOf("<") !== -1;
-        while (el.firstChild) el.removeChild(el.firstChild);
         if (hasMarkup && value !== undefined) {
-            el.innerHTML = head;
+            setNodeChildren(el, markupToNodes(head, document));
         } else {
-            el.appendChild(document.createTextNode(hasMarkup ? escapeText(head) : head));
+            setNodeChildren(el, [document.createTextNode(hasMarkup ? escapeText(head) : head)]);
         }
         while (child) {
             el.appendChild(child.cloneNode(true));
